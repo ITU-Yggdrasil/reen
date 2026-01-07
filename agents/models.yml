@@ -1,0 +1,22 @@
+gpt:
+  api-key: {{env:OPENAI_API_KEY}}
+  models:
+    - gpt-4o-mini
+    - gpt-4o
+    - gpt-4o-2024-08-06
+    - gpt-4o-2024-08-06
+
+ollama:
+  api-key: {{env:OLLAMA_API_KEY}}
+  models:
+    - qwen2.5:3b
+    - qwen2.5:7b
+    - qwen2.5:14b
+    - qwen2.5:32b
+    - qwen2.5:64b
+    - llama3.1:8b
+    - llama3.1:1b
+    - llama3.1:70b
+    - llama3.1:13b
+    - llama3.1:3b
+    - llama3.1:3b

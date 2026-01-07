@@ -1,0 +1,15 @@
+create_specifications_data:
+  model: qwen2.5:7b
+  parallel: false
+create_specifications_context:
+  model: qwen2.5:7b
+  parallel: false
+create_specifications_main:
+  model: qwen2.5:7b
+  parallel: false
+create_implementation:
+  model: gpt-5
+  parallel: true
+create_test:
+  model: qwen2.5:7b
+  parallel: false

@@ -1,0 +1,6 @@
+target/
+.reen/
+.venv/
+.env
+.DS_Store
+*.lock
