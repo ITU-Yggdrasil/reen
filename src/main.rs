@@ -33,11 +33,41 @@ enum Commands {
 
     #[command(about = "Test the project using cargo test")]
     Test,
+
+    #[command(subcommand, about = "Clear cache entries or generated artifacts")]
+    Clear(ClearCommands),
+}
+
+#[derive(Subcommand)]
+enum ClearCommands {
+    #[command(subcommand, about = "Clear cached build-tracker entries for a stage")]
+    Cache(ClearTargets),
+
+    #[command(about = "Remove generated specification artifacts", alias = "specifications")]
+    Specification,
+
+    #[command(about = "Remove generated implementation artifacts", alias = "implementations")]
+    Implementation,
+
+    #[command(about = "Remove generated test artifacts", alias = "test")]
+    Tests,
+}
+
+#[derive(Subcommand)]
+enum ClearTargets {
+    #[command(about = "Clear specification cache entries", alias = "specifications")]
+    Specification,
+
+    #[command(about = "Clear implementation cache entries", alias = "implementations")]
+    Implementation,
+
+    #[command(about = "Clear test cache entries", alias = "test")]
+    Tests,
 }
 
 #[derive(Subcommand)]
 enum CreateCommands {
-    #[command(about = "Create specifications from draft files")]
+    #[command(about = "Create specifications from draft files", alias = "specifications")]
     Specification {
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
@@ -49,7 +79,7 @@ enum CreateCommands {
         names: Vec<String>,
     },
 
-    #[command(about = "Create tests from context files")]
+    #[command(about = "Create tests from context files", alias = "test")]
     Tests {
         #[arg(help = "Optional list of context names (without .md extension)")]
         names: Vec<String>,
@@ -87,6 +117,30 @@ async fn main() -> Result<()> {
         }
         Commands::Test => {
             cli::test(&config).await?;
+        }
+        Commands::Clear(clear_cmd) => {
+            match clear_cmd {
+                ClearCommands::Cache(target) => match target {
+                    ClearTargets::Specification => {
+                        cli::clear_cache("specification", &config).await?;
+                    }
+                    ClearTargets::Implementation => {
+                        cli::clear_cache("implementation", &config).await?;
+                    }
+                    ClearTargets::Tests => {
+                        cli::clear_cache("tests", &config).await?;
+                    }
+                },
+                ClearCommands::Specification => {
+                    cli::clear_artifacts("specification", &config).await?;
+                }
+                ClearCommands::Implementation => {
+                    cli::clear_artifacts("implementation", &config).await?;
+                }
+                ClearCommands::Tests => {
+                    cli::clear_artifacts("tests", &config).await?;
+                }
+            }
         }
     }
 

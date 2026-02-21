@@ -77,6 +77,45 @@ reen create implementation
 reen create implementation app file_cache
 ```
 
+### MCP Context Retrieval (Automatic)
+
+`reen` now starts an internal MCP server subprocess automatically for agent-driven commands.
+The server communicates over stdio and indexes:
+- `drafts/**/*.md`
+- `specifications/**/*.md`
+
+Dependency lookups are triggered from explicit dependency lines in artifacts:
+
+```md
+Depends on: account, ledger, currency
+```
+
+Each dependency name must match an artifact filename stem exactly. If lookup fails, execution is blocked and the error includes fuzzy suggestions.
+
+All MCP queries and responses are logged to:
+
+```bash
+logs/mcp.log
+```
+
+For details, see [docs/MCP_SERVER.md](docs/MCP_SERVER.md).
+
+### Test MCP Lookup Directly
+
+Use the `mcp` command to query the MCP server manually:
+
+```bash
+# Query draft artifacts by filename stem
+reen mcp draft '["app","account"]'
+
+# Query specification artifacts by filename stem
+reen mcp specification '["money_transfer"]'
+```
+
+Arguments:
+- `type`: `draft` or `specification`
+- `names`: JSON array of artifact names (filename stems, exact match)
+
 ### Create Tests
 
 Generate tests from specifications:

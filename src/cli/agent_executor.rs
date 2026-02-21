@@ -46,6 +46,13 @@ impl AgentExecutor {
         })
     }
 
+    /// Whether this agent is configured to run in parallel.
+    pub fn can_run_parallel(&self) -> Result<bool> {
+        self.model_registry
+            .can_run_parallel(&self.agent_name)
+            .map_err(|e| anyhow::anyhow!("Failed to read model registry: {}", e))
+    }
+
     /// Executes the agent with additional context (for conversational interactions)
     pub async fn execute_with_context(
         &self,
@@ -56,22 +63,24 @@ impl AgentExecutor {
             println!("Executing agent: {}", self.agent_name);
         }
 
+        let enriched_context = additional_context;
+
         // Prepare input based on agent type
         let agent_input = match self.agent_name.as_str() {
             "create_specifications" | "create_specifications_context" | "create_specifications_data" | "create_specifications_main" => AgentInput {
                 draft_content: Some(input.to_string()),
                 context_content: None,
-                additional: additional_context,
+                additional: enriched_context,
             },
             "create_implementation" | "create_test" => AgentInput {
                 draft_content: None,
                 context_content: Some(input.to_string()),
-                additional: additional_context,
+                additional: enriched_context,
             },
             _ => AgentInput {
                 draft_content: Some(input.to_string()),
                 context_content: None,
-                additional: additional_context,
+                additional: enriched_context,
             },
         };
 
@@ -110,9 +119,13 @@ impl AgentExecutor {
             && (output.contains("clarification") || output.contains("answer") || output.contains("question"))
     }
 
-    /// Handles the full conversational loop with question/answer cycles
-    pub async fn execute_with_conversation(&self, input: &str, context_name: &str) -> Result<String> {
-        let mut context: HashMap<String, serde_json::Value> = HashMap::new();
+    /// Handles the full conversational loop with question/answer cycles and caller-provided seed context
+    pub async fn execute_with_conversation_with_seed(
+        &self,
+        input: &str,
+        context_name: &str,
+        mut context: HashMap<String, serde_json::Value>,
+    ) -> Result<String> {
         let mut conversation_round = 0;
 
         loop {
@@ -188,10 +201,6 @@ impl AgentExecutor {
         Ok(questions_file)
     }
 
-    /// Gets a reference to the model registry
-    pub fn model_registry(&self) -> &FileAgentModelRegistry {
-        &self.model_registry
-    }
 }
 
 fn validate_agent_exists(agent_name: &str) -> Result<()> {

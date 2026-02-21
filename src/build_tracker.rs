@@ -220,6 +220,13 @@ impl BuildTracker {
 
         lines.join("\n")
     }
+
+    /// Clear all cache entries for a specific stage.
+    /// Returns number of entries removed.
+    pub fn clear_stage(&mut self, stage: Stage) -> usize {
+        let stage_key = format!("{:?}", stage);
+        self.tracks.remove(&stage_key).map(|m| m.len()).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

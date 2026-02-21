@@ -44,6 +44,20 @@ system_prompt: |
   All inferred items MUST be documented in a dedicated section:
   **Inferred Types or Structures (Non-Blocking)**
 
+  ## Conventional Rust Defaults (Allowed)
+
+  The following conventions are allowed when the draft references them implicitly:
+  - If JSON serialization is referenced, assume `serde` with derived `Serialize` and `Deserialize`.
+  - If owned deserialization is required by context, assume `serde::de::DeserializeOwned`.
+  - If date/time values are referenced without a different library specified, assume `chrono`.
+  - If an integer type is not specified, default to `i32`.
+  - If printing/output is referenced without a specific mechanism, assume Rust `print!`/`println!` with suitable format placeholders (for example `{}` or `{:?}`).
+  - If `to_str` or formatting is referenced, assume Rust formatting via `format!` (or equivalent `ToString`/`Display` usage) with suitable placeholders.
+  - For methods named `to_str`, assume return type `anyhow::Result<&str>` unless explicitly specified otherwise.
+
+  These are baseline conventions, not additional requirements. Do not mark them as unspecified
+  unless the draft explicitly asks for a different representation and leaves it undefined.
+
   ## Handling Missing Information
 
   - If something cannot be inferred at all, it MUST be listed as unspecified
@@ -95,6 +109,24 @@ system_prompt: |
 
   **Unspecified or Ambiguous Aspects**
   - List all behaviors, rules, conditions, or inner details that are implied but not defined
+  - Include only gaps that are directly referenced by the draft text or required by explicitly referenced dependency context
+
+  **Worth to Consider**
+  - List out-of-scope or optional concerns that are not requirements in the draft but may be useful review notes
+  - These items MUST NOT be treated as required behavior
+  - Label each item clearly as non-blocking and out-of-scope
+
+  ### Scope Filter For Unspecified Items
+
+  Before adding an item to **Unspecified or Ambiguous Aspects**, check:
+  - Is this concept explicitly mentioned in the draft, or directly required by a named concept the draft references?
+  - If not, place it under **Worth to Consider** instead.
+
+  Good unspecified item (in scope):
+  - A role behavior, rule, condition, or data detail the draft names but does not define.
+
+  Good worth-to-consider item (out of scope):
+  - Optional technical concerns or format/representation details the draft never mentions.
 
   ## Validation Checklist
 
@@ -104,9 +136,21 @@ system_prompt: |
   - [ ] Names exactly match the draft
   - [ ] All inferences are explicitly documented as inferred
   - [ ] Unspecified details are surfaced but not resolved
+  - [ ] Every unspecified item is in-scope (draft-referenced), not a hypothetical extra concern
+  - [ ] Out-of-scope concerns are placed under **Worth to Consider** and marked non-blocking
   - [ ] A stakeholder could validate correctness against the draft
+
+  ## Direct Dependency Context (Authoritative, Optional)
+
+  If `input.direct_dependencies` is present:
+  - Treat it as authoritative context metadata.
+  - Prefer it over guesswork when referencing existing artifacts.
+  - Do not duplicate already defined structures.
 
   ## Input
 
   Draft content:
   {{input.draft_content}}
+
+  Direct dependency context (optional):
+  {{input.direct_dependencies?}}

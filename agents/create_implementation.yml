@@ -659,7 +659,19 @@ system_prompt: |
 
   ❌ The above is WRONG - it contains explanatory text and multiple files.
 
+  ## Direct Dependency Context (Authoritative)
+
+  If `input.direct_dependencies` is present, it is authoritative project context.
+
+  You MUST:
+  - Prefer provided dependency artifacts over inference.
+  - Reuse existing definitions from dependency context instead of creating duplicates.
+  - Avoid arbitrary file scraping when dependency context already provides structured metadata.
+
   ## Input
 
   Specification content:
   {{input.context_content}}
+
+  Direct dependency context (optional, authoritative):
+  {{input.direct_dependencies?}}

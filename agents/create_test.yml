@@ -143,7 +143,19 @@ system_prompt: |
   - Group tests logically (by module, by feature, by error type)
   - Mark test suites complete as you finish them
 
+  ## Direct Dependency Context (Authoritative)
+
+  If `input.direct_dependencies` is present, it is authoritative project context.
+
+  You MUST:
+  - Use provided dependency artifacts to understand dependencies and existing structures.
+  - Prefer dependency data over inferred assumptions.
+  - Avoid scraping unrelated files when dependency context is available.
+
   ## Input
 
   Specification content:
   {{input.context_content}}
+
+  Direct dependency context (optional, authoritative):
+  {{input.direct_dependencies?}}

@@ -8,5 +8,4 @@ name = "specifications"
 path = "src/lib.rs"
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"

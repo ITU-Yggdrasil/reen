@@ -2,13 +2,17 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::process::Command;
-use regex;
+use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 mod agent_executor;
+mod dependency_graph;
 mod progress;
 mod project_structure;
 
 use agent_executor::AgentExecutor;
+use dependency_graph::{build_execution_plan, ExecutionNode};
 use progress::ProgressIndicator;
 use project_structure::{analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files};
 use reen::build_tracker::{BuildTracker, Stage};
@@ -30,149 +34,155 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
         return Ok(());
     }
 
+    let execution_levels = build_execution_plan(draft_files, DRAFTS_DIR, None)?;
+
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
 
-    println!("Creating specifications for {} draft(s)", draft_files.len());
+    let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
+    println!("Creating specifications for {} draft(s)", total_count);
 
-    let mut progress = ProgressIndicator::new(draft_files.len());
+    let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
+    let mut executors: HashMap<String, Arc<AgentExecutor>> = HashMap::new();
 
-    // Group files by agent type and collect files that need processing
-    use std::collections::HashMap;
-    let mut files_by_agent: HashMap<&str, Vec<(PathBuf, String, PathBuf)>> = HashMap::new();
-
-    for draft_file in draft_files {
-        let draft_name = draft_file.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-            .context("Invalid draft filename")?;
-
-        // Determine output path preserving folder structure
-        let output_path = determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
-
-        // Check if update is needed
-        let needs_update = tracker.needs_update(Stage::Specification, &draft_name, &draft_file, &output_path)?;
-
-        if !needs_update {
-            if config.verbose {
-                println!("⊚ Skipping {} (up to date)", draft_name);
-            }
-            continue;
-        }
-
-        // Determine which agent to use based on file path
-        let agent_name = determine_specification_agent(&draft_file, DRAFTS_DIR);
-        files_by_agent.entry(agent_name)
-            .or_insert_with(Vec::new)
-            .push((draft_file, draft_name, output_path));
-    }
-
-    // Process files grouped by agent type
-    for (agent_name, files_to_process) in files_by_agent {
-        if files_to_process.is_empty() {
-            continue;
-        }
-
+    for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
         if config.verbose {
-            println!("Using agent '{}' for {} file(s)", agent_name, files_to_process.len());
+            println!("Processing dependency level {} ({} item(s))", level_idx, level_nodes.len());
         }
 
-        let executor = AgentExecutor::new(agent_name, config)?;
-        let can_parallel = executor.model_registry()
-            .can_run_parallel(agent_name)
-            .unwrap_or(false);
-
-        if can_parallel && config.verbose {
-            println!("Parallel execution enabled for {}", agent_name);
+        let mut nodes_by_agent: HashMap<String, Vec<ExecutionNode>> = HashMap::new();
+        for node in level_nodes {
+            let agent = determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
+            nodes_by_agent.entry(agent).or_default().push(node);
         }
 
-    if can_parallel && !files_to_process.is_empty() {
-        // Process files in parallel
-        use tokio::task;
-        use std::sync::Arc;
-        
-        let executor_arc = Arc::new(executor);
-        let config_clone = *config;
-        
-        let tasks: Vec<_> = files_to_process.into_iter().map(|(draft_file, draft_name, output_path)| {
-            let executor = executor_arc.clone();
-            let config = config_clone;
-            let draft_file_clone = draft_file.clone();
-            let draft_name_clone = draft_name.clone();
-            let output_path_clone = output_path.clone();
-            
-            task::spawn(async move {
+        for (agent_name, nodes) in nodes_by_agent {
+            if !executors.contains_key(&agent_name) {
+                executors.insert(agent_name.clone(), Arc::new(AgentExecutor::new(&agent_name, config)?));
+            }
+            let executor = executors
+                .get(&agent_name)
+                .cloned()
+                .context("missing specification executor")?;
+            let can_parallel = executor.can_run_parallel().unwrap_or(false);
+
+            if can_parallel {
                 if config.verbose {
-                    println!("Processing draft: {}", draft_name_clone);
+                    println!("Parallel execution enabled for {}", agent_name);
                 }
-
-                let result = process_specification(&*executor, &draft_file_clone, &draft_name_clone, &config).await;
-                
-                match result {
-                    Ok(_) => {
-                        if config.verbose {
-                            println!("✓ Successfully created specification for {}", draft_name_clone);
-                        }
-                        Ok::<(String, PathBuf, PathBuf, bool), anyhow::Error>((draft_name_clone, draft_file_clone, output_path_clone, true))
-                    }
-                    Err(e) => {
-                        eprintln!("✗ Failed to create specification for {}: {}", draft_name_clone, e);
-                        Ok::<(String, PathBuf, PathBuf, bool), anyhow::Error>((draft_name_clone, draft_file_clone, output_path_clone, false))
-                    }
-                }
-            })
-        }).collect();
-        
-        // Wait for all tasks to complete and update progress/tracker
-        for task in tasks {
-            match task.await {
-                Ok(Ok((draft_name, draft_file, output_path, success))) => {
+                let mut tasks = Vec::new();
+                for node in nodes {
+                    let draft_file = node.input_path.clone();
+                    let draft_name = node.name.clone();
+                    let output_path =
+                        determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
                     progress.start_item(&draft_name);
-                    if success {
-                        tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
+
+                    let needs_update = tracker.needs_update(
+                        Stage::Specification,
+                        &draft_name,
+                        &draft_file,
+                        &output_path,
+                    )?;
+                    if !needs_update {
+                        if config.verbose {
+                            println!("⊚ Skipping {} (up to date)", draft_name);
+                        }
                         progress.complete_item(&draft_name, true);
-                        updated_count += 1;
-                    } else {
-                        progress.complete_item(&draft_name, false);
+                        continue;
+                    }
+
+                    let dependency_context = match build_dependency_context(&node) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            progress.complete_item(&draft_name, false);
+                            eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+                            continue;
+                        }
+                    };
+
+                    let cfg = *config;
+                    let executor_clone = executor.clone();
+                    tasks.push(tokio::task::spawn(async move {
+                        let result = process_specification(
+                            &executor_clone,
+                            &draft_file,
+                            &draft_name,
+                            &cfg,
+                            dependency_context,
+                        )
+                        .await;
+                        (draft_name, draft_file, output_path, result)
+                    }));
+                }
+
+                for task in tasks {
+                    let (draft_name, draft_file, output_path, result) = task.await?;
+                    match result {
+                        Ok(_) => {
+                            tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
+                            updated_count += 1;
+                            progress.complete_item(&draft_name, true);
+                            if config.verbose {
+                                println!("✓ Successfully created specification for {}", draft_name);
+                            }
+                        }
+                        Err(e) => {
+                            progress.complete_item(&draft_name, false);
+                            eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+                        }
                     }
                 }
-                Ok(Err(e)) => {
-                    eprintln!("Error processing file: {}", e);
-                }
-                Err(e) => {
-                    eprintln!("Task join error: {}", e);
-                }
-            }
-        }
-    } else {
-        // Process files sequentially
-        for (draft_file, draft_name, output_path) in files_to_process {
-            progress.start_item(&draft_name);
+            } else {
+                for node in nodes {
+                    let draft_file = node.input_path.clone();
+                    let draft_name = node.name.clone();
+                    let output_path =
+                        determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
-            if config.verbose {
-                println!("Processing draft: {}", draft_name);
-            }
-
-            match process_specification(&executor, &draft_file, &draft_name, config).await {
-                Ok(_) => {
-                    // Record successful generation
-                    tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
-                    updated_count += 1;
-
-                    progress.complete_item(&draft_name, true);
-                    if config.verbose {
-                        println!("✓ Successfully created specification for {}", draft_name);
+                    progress.start_item(&draft_name);
+                    let needs_update = tracker.needs_update(
+                        Stage::Specification,
+                        &draft_name,
+                        &draft_file,
+                        &output_path,
+                    )?;
+                    if !needs_update {
+                        if config.verbose {
+                            println!("⊚ Skipping {} (up to date)", draft_name);
+                        }
+                        progress.complete_item(&draft_name, true);
+                        continue;
                     }
-                }
-                Err(e) => {
-                    progress.complete_item(&draft_name, false);
-                    eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+
+                    let dependency_context = build_dependency_context(&node)?;
+                    match process_specification(
+                        &executor,
+                        &draft_file,
+                        &draft_name,
+                        config,
+                        dependency_context,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
+                            updated_count += 1;
+                            progress.complete_item(&draft_name, true);
+                            if config.verbose {
+                                println!("✓ Successfully created specification for {}", draft_name);
+                            }
+                        }
+                        Err(e) => {
+                            progress.complete_item(&draft_name, false);
+                            eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+                        }
+                    }
                 }
             }
         }
     }
-    } // End of for loop processing each agent's files
 
     // Save tracker
     tracker.save()?;
@@ -191,6 +201,7 @@ async fn process_specification(
     draft_file: &Path,
     draft_name: &str,
     config: &Config,
+    additional_context: HashMap<String, serde_json::Value>,
 ) -> Result<()> {
     let draft_content = fs::read_to_string(draft_file)
         .context("Failed to read draft file")?;
@@ -202,7 +213,7 @@ async fn process_specification(
 
     // Use conversational execution to handle questions
     let spec_content = executor
-        .execute_with_conversation(&draft_content, draft_name)
+        .execute_with_conversation_with_seed(&draft_content, draft_name, additional_context)
         .await?;
 
     // Determine output path preserving folder structure
@@ -249,7 +260,13 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    println!("Creating implementation for {} context(s)", context_files.len());
+    let execution_levels = build_execution_plan(
+        context_files,
+        SPECIFICATIONS_DIR,
+        Some(DRAFTS_DIR),
+    )?;
+    let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
+    println!("Creating implementation for {} context(s)", total_count);
 
     // Step 1: Generate project structure (Cargo.toml, lib.rs, mod.rs files)
     if config.verbose {
@@ -276,131 +293,118 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
     }
 
     // Step 2: Generate individual implementation files
-    let executor = AgentExecutor::new("create_implementation", config)?;
-    let can_parallel = executor.model_registry()
-        .can_run_parallel("create_implementation")
-        .unwrap_or(false);
+    let executor = Arc::new(AgentExecutor::new("create_implementation", config)?);
+    let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
-    if can_parallel && config.verbose {
-        println!("Parallel execution enabled for create_implementation");
-    }
-
-    let mut progress = ProgressIndicator::new(context_files.len());
+    let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
     let mut had_unspecified = false;
-
-    // Collect files that need processing
-    let mut files_to_process = Vec::new();
-    for context_file in context_files {
-        let context_name = context_file.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-            .context("Invalid context filename")?;
-
-        // Determine output path preserving folder structure
-        let output_path = determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
-
-        // Check if update is needed
-        let needs_update = tracker.needs_update(Stage::Implementation, &context_name, &context_file, &output_path)?;
-
-        if !needs_update {
-            if config.verbose {
-                println!("⊚ Skipping {} (up to date)", context_name);
-            }
-            continue;
+    for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
+        if config.verbose {
+            println!("Processing dependency level {} ({} item(s))", level_idx, level_nodes.len());
         }
 
-        files_to_process.push((context_file, context_name, output_path));
-    }
-
-    if can_parallel && !files_to_process.is_empty() {
-        // Process files in parallel
-        use tokio::task;
-        use std::sync::Arc;
-        
-        let executor_arc = Arc::new(executor);
-        let config_clone = *config;
-        
-        let tasks: Vec<_> = files_to_process.into_iter().map(|(context_file, context_name, output_path)| {
-            let executor = executor_arc.clone();
-            let config = config_clone;
-            let context_file_clone = context_file.clone();
-            let context_name_clone = context_name.clone();
-            let output_path_clone = output_path.clone();
-            
-            task::spawn(async move {
-                if config.verbose {
-                    println!("Processing context: {}", context_name_clone);
-                }
-
-                let result = process_implementation(&*executor, &context_file_clone, &context_name_clone, &config).await;
-                
-                match result {
-                    Ok(_) => {
-                        if config.verbose {
-                            println!("✓ Successfully created implementation for {}", context_name_clone);
-                        }
-                        Ok::<(String, PathBuf, PathBuf, bool, bool), anyhow::Error>((context_name_clone, context_file_clone, output_path_clone, true, false))
-                    }
-                    Err(e) => {
-                        eprintln!("✗ Failed to create implementation for {}: {}", context_name_clone, e);
-                        let is_unspecified = e.to_string().contains("unfinished specification");
-                        Ok::<(String, PathBuf, PathBuf, bool, bool), anyhow::Error>((context_name_clone, context_file_clone, output_path_clone, false, is_unspecified))
-                    }
-                }
-            })
-        }).collect();
-        
-        // Wait for all tasks to complete and update progress/tracker
-        for task in tasks {
-            match task.await {
-                Ok(Ok((context_name, context_file, output_path, success, unspecified))) => {
-                    progress.start_item(&context_name);
-                    if unspecified {
-                        had_unspecified = true;
-                    }
-                    if success {
-                        tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
-                        progress.complete_item(&context_name, true);
-                        updated_count += 1;
-                    } else {
-                        progress.complete_item(&context_name, false);
-                    }
-                }
-                Ok(Err(e)) => {
-                    eprintln!("Error processing file: {}", e);
-                }
-                Err(e) => {
-                    eprintln!("Task join error: {}", e);
-                }
-            }
-        }
-    } else {
-        // Process files sequentially
-        for (context_file, context_name, output_path) in files_to_process {
+        let mut runnable = Vec::new();
+        for node in level_nodes {
+            let context_file = node.input_path.clone();
+            let context_name = node.name.clone();
+            let output_path = determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
             progress.start_item(&context_name);
 
-            if config.verbose {
-                println!("Processing context: {}", context_name);
+            if has_unfinished_specification(&context_file, &context_name, "implementation")? {
+                had_unspecified = true;
+                progress.complete_item(&context_name, false);
+                continue;
             }
 
-            match process_implementation(&executor, &context_file, &context_name, config).await {
-                Ok(_) => {
-                    // Record successful generation
-                    tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
-                    updated_count += 1;
+            let needs_update = tracker.needs_update(
+                Stage::Implementation,
+                &context_name,
+                &context_file,
+                &output_path,
+            )?;
 
-                    progress.complete_item(&context_name, true);
-                    if config.verbose {
-                        println!("✓ Successfully created implementation for {}", context_name);
+            if !needs_update {
+                if config.verbose {
+                    println!("⊚ Skipping {} (up to date)", context_name);
+                }
+                progress.complete_item(&context_name, true);
+                continue;
+            }
+
+            let dependency_context = build_dependency_context(&node)?;
+            runnable.push((context_file, context_name, output_path, dependency_context));
+        }
+
+        if can_parallel {
+            if config.verbose {
+                println!("Parallel execution enabled for create_implementation");
+            }
+            let cfg = *config;
+            let mut tasks = Vec::new();
+            for (context_file, context_name, output_path, dependency_context) in runnable {
+                let executor_clone = executor.clone();
+                tasks.push(tokio::task::spawn(async move {
+                    let result = process_implementation(
+                        &executor_clone,
+                        &context_file,
+                        &context_name,
+                        &cfg,
+                        dependency_context,
+                    )
+                    .await;
+                    (context_name, context_file, output_path, result)
+                }));
+            }
+            for task in tasks {
+                let (context_name, context_file, output_path, result) = task.await?;
+                match result {
+                    Ok(_) => {
+                        tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
+                        updated_count += 1;
+                        progress.complete_item(&context_name, true);
+                        if config.verbose {
+                            println!("✓ Successfully created implementation for {}", context_name);
+                        }
+                    }
+                    Err(e) => {
+                        if e.to_string().contains("unfinished specification") {
+                            had_unspecified = true;
+                        }
+                        progress.complete_item(&context_name, false);
+                        eprintln!("✗ Failed to create implementation for {}: {}", context_name, e);
                     }
                 }
-                Err(e) => {
-                    if e.to_string().contains("unfinished specification") {
-                        had_unspecified = true;
+            }
+        } else {
+            for (context_file, context_name, output_path, dependency_context) in runnable {
+                if config.verbose {
+                    println!("Processing context: {}", context_name);
+                }
+                match process_implementation(
+                    &executor,
+                    &context_file,
+                    &context_name,
+                    config,
+                    dependency_context,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
+                        updated_count += 1;
+                        progress.complete_item(&context_name, true);
+                        if config.verbose {
+                            println!("✓ Successfully created implementation for {}", context_name);
+                        }
                     }
-                    progress.complete_item(&context_name, false);
-                    eprintln!("✗ Failed to create implementation for {}: {}", context_name, e);
+                    Err(e) => {
+                        if e.to_string().contains("unfinished specification") {
+                            had_unspecified = true;
+                        }
+                        progress.complete_item(&context_name, false);
+                        eprintln!("✗ Failed to create implementation for {}: {}", context_name, e);
+                    }
                 }
             }
         }
@@ -411,7 +415,7 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
 
     progress.finish();
 
-    if updated_count == 0 && config.verbose {
+    if updated_count == 0 && config.verbose && !had_unspecified {
         println!("All implementations are up to date");
     }
 
@@ -427,20 +431,14 @@ async fn process_implementation(
     context_file: &Path,
     context_name: &str,
     config: &Config,
+    additional_context: HashMap<String, serde_json::Value>,
 ) -> Result<()> {
-    let context_content = fs::read_to_string(context_file)
-        .context("Failed to read context file")?;
-
-    // If the specification contains an "Unspecified or Ambiguous Aspects" section,
-    // mark as unfinished and skip detailed reporting (reported during specification step).
-    if let Some(unspecified) = extract_unspecified_or_ambiguous_section(&context_content) {
-        let _ = unspecified; // avoid unused variable warning in case of cfgs
-        eprintln!("error[spec:unfinished]:");
-        // Print file path in red on its own line
-        eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
-        eprintln!("  Specification has Unspecified or Ambiguous Aspects; skipping implementation for '{}'.", context_name);
+    if has_unfinished_specification(context_file, context_name, "implementation")? {
         anyhow::bail!("unfinished specification");
     }
+
+    let context_content = fs::read_to_string(context_file)
+        .context("Failed to read context file")?;
 
     if config.dry_run {
         println!("[DRY RUN] Would create implementation for: {}", context_name);
@@ -449,7 +447,7 @@ async fn process_implementation(
 
     // Use conversational execution to handle questions
     let impl_result = executor
-        .execute_with_conversation(&context_content, context_name)
+        .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
         .await?;
 
     // Extract code from the agent output and write to file
@@ -518,27 +516,76 @@ fn extract_code_from_output(output: &str, _context_name: &str) -> String {
 /// Extracts the content of the "Unspecified or Ambiguous Aspects" section from markdown content.
 /// Returns None if the section is not present.
 fn extract_unspecified_or_ambiguous_section(content: &str) -> Option<String> {
-    use regex::Regex;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut start_idx: Option<usize> = None;
 
-    // Match a markdown header for the section, level 1-6, allowing up to 3 leading spaces
-    let header_re = Regex::new(r"(?m)^\s{0,3}#{1,6}\s+Unspecified or Ambiguous Aspects\s*$").ok()?;
-    let start = header_re.find(content)?.end();
-
-    // Find the next header to delimit the section
-    let rest = &content[start..];
-    let next_header_re = Regex::new(r"(?m)^\s{0,3}#{1,6}\s+").ok()?;
-    let section = if let Some(m) = next_header_re.find(rest) {
-        &rest[..m.start()]
-    } else {
-        rest
-    };
-
-    let trimmed = section.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        let is_markdown_header = trimmed
+            .strip_prefix('#')
+            .map(|s| s.trim())
+            .map(|s| s.eq_ignore_ascii_case("Unspecified or Ambiguous Aspects"))
+            .unwrap_or(false);
+        let is_plain_header = trimmed.eq_ignore_ascii_case("Unspecified or Ambiguous Aspects");
+        if is_markdown_header || is_plain_header {
+            start_idx = Some(i + 1);
+            break;
+        }
     }
+
+    let start = start_idx?;
+    let mut section_lines = Vec::new();
+    for line in lines.iter().skip(start) {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || is_numbered_section_heading(trimmed) {
+            break;
+        }
+        section_lines.push(*line);
+    }
+
+    let section = section_lines.join("\n").trim().to_string();
+    if section.is_empty() { None } else { Some(section) }
+}
+
+fn is_numbered_section_heading(line: &str) -> bool {
+    let mut parts = line.splitn(2, '.');
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(n), Some(rest)) if n.chars().all(|c| c.is_ascii_digit()) && !rest.trim().is_empty()
+    )
+}
+
+fn extract_bullets(section: &str) -> Vec<String> {
+    section
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| {
+            l.starts_with("- ")
+                || l.starts_with("* ")
+                || (l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && l.contains('.'))
+        })
+        .map(|l| l.to_string())
+        .collect()
+}
+
+fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &str) -> Result<bool> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read context file: {}", path.display()))?;
+    if let Some(unspecified) = extract_unspecified_or_ambiguous_section(&content) {
+        eprintln!("error[spec:unfinished]:");
+        eprintln!("\u{001b}[31m{}\u{001b}[0m", path.display());
+        eprintln!(
+            "  Specification has Unspecified or Ambiguous Aspects; skipping {} for '{}'.",
+            stage_name, context_name
+        );
+        eprintln!();
+        for bullet in extract_bullets(&unspecified) {
+            eprintln!("  {}", bullet);
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 pub async fn create_tests(names: Vec<String>, config: &Config) -> Result<()> {
@@ -549,107 +596,109 @@ pub async fn create_tests(names: Vec<String>, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    println!("Creating tests for {} context(s)", context_files.len());
+    let execution_levels = build_execution_plan(
+        context_files,
+        SPECIFICATIONS_DIR,
+        Some(DRAFTS_DIR),
+    )?;
+    let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
+    println!("Creating tests for {} context(s)", total_count);
 
-    let executor = AgentExecutor::new("create_test", config)?;
-    let can_parallel = executor.model_registry()
-        .can_run_parallel("create_test")
-        .unwrap_or(false);
+    let executor = Arc::new(AgentExecutor::new("create_test", config)?);
+    let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
-    if can_parallel && config.verbose {
-        println!("Parallel execution enabled for create_test");
-    }
+    let mut progress = ProgressIndicator::new(total_count);
+    let mut had_unspecified = false;
+    for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
+        if config.verbose {
+            println!("Processing dependency level {} ({} item(s))", level_idx, level_nodes.len());
+        }
 
-    let mut progress = ProgressIndicator::new(context_files.len());
+        let mut runnable = Vec::new();
+        for node in level_nodes {
+            let context_file = node.input_path.clone();
+            let context_name = node.name.clone();
+            let dependency_context = build_dependency_context(&node)?;
+            progress.start_item(&context_name);
+            runnable.push((context_file, context_name, dependency_context));
+        }
 
-    // Collect files that need processing
-    let mut files_to_process = Vec::new();
-    for context_file in context_files {
-        let context_name = context_file.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-            .context("Invalid context filename")?;
-
-        files_to_process.push((context_file, context_name));
-    }
-
-    if can_parallel && !files_to_process.is_empty() {
-        // Process files in parallel
-        use tokio::task;
-        use std::sync::Arc;
-        
-        let executor_arc = Arc::new(executor);
-        let config_clone = *config;
-        
-        let tasks: Vec<_> = files_to_process.into_iter().map(|(context_file, context_name)| {
-            let executor = executor_arc.clone();
-            let config = config_clone;
-            let context_file_clone = context_file.clone();
-            let context_name_clone = context_name.clone();
-            
-            task::spawn(async move {
-                if config.verbose {
-                    println!("Processing context: {}", context_name_clone);
-                }
-
-                let result = process_tests(&*executor, &context_file_clone, &context_name_clone, &config).await;
-                
+        if can_parallel {
+            if config.verbose {
+                println!("Parallel execution enabled for create_test");
+            }
+            let cfg = *config;
+            let mut tasks = Vec::new();
+            for (context_file, context_name, dependency_context) in runnable {
+                let executor_clone = executor.clone();
+                tasks.push(tokio::task::spawn(async move {
+                    let result = process_tests(
+                        &executor_clone,
+                        &context_file,
+                        &context_name,
+                        &cfg,
+                        dependency_context,
+                    )
+                    .await;
+                    (context_name, result)
+                }));
+            }
+            for task in tasks {
+                let (context_name, result) = task.await?;
                 match result {
                     Ok(_) => {
+                        progress.complete_item(&context_name, true);
                         if config.verbose {
-                            println!("✓ Successfully created tests for {}", context_name_clone);
+                            println!("✓ Successfully created tests for {}", context_name);
                         }
-                        Ok::<(String, bool), anyhow::Error>((context_name_clone, true))
                     }
                     Err(e) => {
-                        eprintln!("✗ Failed to create tests for {}: {}", context_name_clone, e);
-                        Ok::<(String, bool), anyhow::Error>((context_name_clone, false))
+                        if e.to_string().contains("unfinished specification") {
+                            had_unspecified = true;
+                        }
+                        progress.complete_item(&context_name, false);
+                        eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
                     }
                 }
-            })
-        }).collect();
-        
-        // Wait for all tasks to complete and update progress
-        for task in tasks {
-            match task.await {
-                Ok(Ok((context_name, success))) => {
-                    progress.start_item(&context_name);
-                    progress.complete_item(&context_name, success);
-                }
-                Ok(Err(e)) => {
-                    eprintln!("Error processing file: {}", e);
-                }
-                Err(e) => {
-                    eprintln!("Task join error: {}", e);
-                }
             }
-        }
-    } else {
-        // Process files sequentially
-        for (context_file, context_name) in files_to_process {
-            progress.start_item(&context_name);
-
-            if config.verbose {
-                println!("Processing context: {}", context_name);
-            }
-
-            match process_tests(&executor, &context_file, &context_name, config).await {
-                Ok(_) => {
-                    progress.complete_item(&context_name, true);
-                    if config.verbose {
-                        println!("✓ Successfully created tests for {}", context_name);
+        } else {
+            for (context_file, context_name, dependency_context) in runnable {
+                if config.verbose {
+                    println!("Processing context: {}", context_name);
+                }
+                match process_tests(
+                    &executor,
+                    &context_file,
+                    &context_name,
+                    config,
+                    dependency_context,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        progress.complete_item(&context_name, true);
+                        if config.verbose {
+                            println!("✓ Successfully created tests for {}", context_name);
+                        }
                     }
-                }
-                Err(e) => {
-                    progress.complete_item(&context_name, false);
-                    eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
+                    Err(e) => {
+                        if e.to_string().contains("unfinished specification") {
+                            had_unspecified = true;
+                        }
+                        progress.complete_item(&context_name, false);
+                        eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
+                    }
                 }
             }
         }
     }
 
     progress.finish();
-    Ok(())
+    if had_unspecified {
+        anyhow::bail!("Unfinished specifications were detected. Aborting.");
+    } else {
+        Ok(())
+    }
 }
 
 async fn process_tests(
@@ -657,7 +706,12 @@ async fn process_tests(
     context_file: &Path,
     context_name: &str,
     config: &Config,
+    additional_context: HashMap<String, serde_json::Value>,
 ) -> Result<()> {
+    if has_unfinished_specification(context_file, context_name, "tests")? {
+        anyhow::bail!("unfinished specification");
+    }
+
     let context_content = fs::read_to_string(context_file)
         .context("Failed to read context file")?;
 
@@ -668,7 +722,7 @@ async fn process_tests(
 
     // Use conversational execution to handle questions
     let test_result = executor
-        .execute_with_conversation(&context_content, context_name)
+        .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
         .await?;
 
     if config.verbose {
@@ -676,6 +730,16 @@ async fn process_tests(
     }
 
     Ok(())
+}
+
+fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serde_json::Value>> {
+    let mut context = HashMap::new();
+    let dependencies = node.resolve_direct_dependencies()?;
+    let value = json!(dependencies);
+    context.insert("direct_dependencies".to_string(), value.clone());
+    // Backward compatibility with agent prompts that still reference mcp_context
+    context.insert("mcp_context".to_string(), value);
+    Ok(context)
 }
 
 pub async fn compile(config: &Config) -> Result<()> {
@@ -769,6 +833,147 @@ pub async fn test(config: &Config) -> Result<()> {
     } else {
         anyhow::bail!("Tests failed");
     }
+}
+
+pub async fn clear_cache(target: &str, config: &Config) -> Result<()> {
+    let stage = match target {
+        "specification" | "specifications" => Stage::Specification,
+        "implementation" | "implementations" => Stage::Implementation,
+        "test" | "tests" => Stage::Tests,
+        other => anyhow::bail!(
+            "Unsupported cache target '{}'. Expected specification(s), implementation(s), or test(s).",
+            other
+        ),
+    };
+
+    if config.dry_run {
+        println!("[DRY RUN] Would clear cache entries for {:?}", stage);
+        return Ok(());
+    }
+
+    let mut tracker = BuildTracker::load()?;
+    let removed = tracker.clear_stage(stage);
+    tracker.save()?;
+    println!("✓ Cleared {} cache entries for {:?}", removed, stage);
+    Ok(())
+}
+
+pub async fn clear_artifacts(target: &str, config: &Config) -> Result<()> {
+    match target {
+        "specification" | "specifications" => clear_specification_artifacts(config),
+        "implementation" | "implementations" => clear_implementation_artifacts(config),
+        "test" | "tests" => clear_test_artifacts(config),
+        other => anyhow::bail!(
+            "Unsupported clear target '{}'. Expected specification(s), implementation(s), or test(s).",
+            other
+        ),
+    }
+}
+
+fn clear_specification_artifacts(config: &Config) -> Result<()> {
+    let specs_dir = PathBuf::from(SPECIFICATIONS_DIR);
+    if !specs_dir.exists() {
+        println!("No specification artifacts found");
+        return Ok(());
+    }
+
+    if config.dry_run {
+        println!("[DRY RUN] Would remove {}", specs_dir.display());
+        return Ok(());
+    }
+
+    fs::remove_dir_all(&specs_dir)
+        .with_context(|| format!("Failed to remove {}", specs_dir.display()))?;
+    println!("✓ Removed specification artifacts at {}", specs_dir.display());
+    Ok(())
+}
+
+fn clear_implementation_artifacts(config: &Config) -> Result<()> {
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, Vec::new(), "md")?;
+    if spec_files.is_empty() {
+        println!("No implementation artifacts found");
+        return Ok(());
+    }
+    let mut removed = 0usize;
+
+    for spec_file in spec_files {
+        let output_path = determine_implementation_output_path(&spec_file, SPECIFICATIONS_DIR)?;
+        if output_path.exists() {
+            if config.dry_run {
+                println!("[DRY RUN] Would remove {}", output_path.display());
+            } else {
+                fs::remove_file(&output_path)
+                    .with_context(|| format!("Failed to remove {}", output_path.display()))?;
+                removed += 1;
+            }
+        }
+    }
+
+    if config.dry_run {
+        if removed == 0 {
+            println!("[DRY RUN] No implementation artifacts would be removed");
+        }
+    } else {
+        remove_dir_if_empty(Path::new("src/data"))?;
+        remove_dir_if_empty(Path::new("src/contexts"))?;
+        println!("✓ Removed {} implementation artifact file(s)", removed);
+    }
+    Ok(())
+}
+
+fn clear_test_artifacts(config: &Config) -> Result<()> {
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, Vec::new(), "md")?;
+    if spec_files.is_empty() {
+        println!("No test artifacts found");
+        return Ok(());
+    }
+    let mut candidates = Vec::new();
+
+    for spec_file in spec_files {
+        let Some(stem) = spec_file.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        candidates.push(PathBuf::from("tests").join(format!("{}.rs", stem)));
+        candidates.push(PathBuf::from("tests").join(format!("{}_test.rs", stem)));
+        candidates.push(PathBuf::from("tests/generated").join(format!("{}.rs", stem)));
+        candidates.push(PathBuf::from("tests/generated").join(format!("{}_test.rs", stem)));
+    }
+
+    let mut removed = 0usize;
+    for file in candidates {
+        if file.exists() {
+            if config.dry_run {
+                println!("[DRY RUN] Would remove {}", file.display());
+            } else {
+                fs::remove_file(&file)
+                    .with_context(|| format!("Failed to remove {}", file.display()))?;
+                removed += 1;
+            }
+        }
+    }
+
+    if config.dry_run {
+        if removed == 0 {
+            println!("[DRY RUN] No test artifacts would be removed");
+        }
+    } else {
+        remove_dir_if_empty(Path::new("tests/generated"))?;
+        println!("✓ Removed {} test artifact file(s)", removed);
+    }
+    Ok(())
+}
+
+fn remove_dir_if_empty(path: &Path) -> Result<()> {
+    if !path.exists() || !path.is_dir() {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(path)
+        .with_context(|| format!("Failed to inspect {}", path.display()))?;
+    if entries.next().is_none() {
+        fs::remove_dir(path)
+            .with_context(|| format!("Failed to remove empty directory {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Resolves input files in a structured order:

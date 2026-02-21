@@ -22,36 +22,17 @@ THe money transfer is a context where two accounts play the roles of sink and so
 ### source:
 
 - **withdraw**
-  - **Parameters**: `amount: f64, currency: &str, ledger: &Ledger`
   - **Returns**: `Result<LedgerEntry, String>`
   - **Purpose**: Creates a ledger entry for the withdrawal from the source account
-  - **Implementation**:
-    - Validates the currency string and converts it to Currency enum (returns error if invalid)
-    - Creates a LedgerEntry using `LedgerEntry::source()` with:
-      - source = source account_id
-      - sink = "unsettled"
-      - amount = -amount (negative for withdrawal)
-      - currency = converted Currency enum
-      - timestamp = Utc::now()
-    - Returns the created LedgerEntry
-  - **Validation**: If the account has a currency, the currency should match. The invariants related to the source account should be checked and enforced in this method.
+    
 
 ### sink
 
 - **deposit**
   - **Parameters**: `entry: LedgerEntry, ledger: &Ledger`
   - **Returns**: `Result<LedgerEntry, String>`
-  - **Purpose**: Receives an unsettled transaction and settles it by creating a new entry with the sink account ID
-  - **Implementation**:
-    - Validates that the entry has source="unsettled" (returns error "Transaction is already settled" if not)
-    - Creates a new LedgerEntry with:
-      - source = "unsettled"
-      - sink = sink account_id
-      - amount = entry.amount (positive for deposit)
-      - currency = entry.currency
-      - timestamp = entry.timestamp or Utc::now()
-    - Returns the settled LedgerEntry
-  - **Validation**: The check that the currency matches the currency of the destination should be validated in this method.
+  - **Purpose**: Receives the ledger entry with the sink set to None and settles the transaction (by means of the ledger entry method)
+  
 
 ## Functionality
 
@@ -65,3 +46,8 @@ THe money transfer is a context where two accounts play the roles of sink and so
     5. If deposit succeeds, add the returned entry to the ledger: `ledger = ledger.add_entry(deposit_entry)`
     6. Return `Ok(ledger)` with the updated ledger containing both entries
   - **Purpose**: Executes the transfer by calling withdraw and deposit and then adding both ledger entries to the main ledger. The business rules/invariants should be delegated to the role methods. This should be a clear implementation of the business logic/use case.
+  - **Business rules**: If the transfer can't be complete due to violation of business rules a proper error should be returned. Business rules include:
+    - All business rules that apply to an account including
+      - monthly transfer limits for the source account that is the amount must be less than or equal to remaining_monthly_limit
+    - that the transferred amount can't exceed the present balance of the source account
+    - that the sink and source must have the same currency, this should be check when trying to construct the money trasfer context
