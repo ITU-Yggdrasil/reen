@@ -203,6 +203,10 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
         }
     }
 
+    if !config.dry_run {
+        validate_generated_rust_layout(Path::new("."))?;
+    }
+
     // Save tracker
     tracker.save()?;
 
@@ -371,7 +375,8 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
     }
 
     let spec_dir = PathBuf::from(SPECIFICATIONS_DIR);
-    let project_info = analyze_specifications(&spec_dir)
+    let drafts_dir = PathBuf::from(DRAFTS_DIR);
+    let project_info = analyze_specifications(&spec_dir, Some(&drafts_dir))
         .context("Failed to analyze specifications")?;
 
     let output_dir = PathBuf::from(".");
@@ -438,7 +443,10 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
                 continue;
             }
 
-            let dependency_context = build_dependency_context(&node)?;
+            let mut dependency_context = build_dependency_context(&node)?;
+            if let Some(target_type_name) = infer_target_type_name(&context_file)? {
+                dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
+            }
             runnable.push((context_file, context_name, output_path, dependency_context));
         }
 
@@ -516,6 +524,10 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
                 }
             }
         }
+    }
+
+    if !config.dry_run {
+        validate_generated_rust_layout(Path::new("."))?;
     }
 
     // Save tracker
@@ -1438,6 +1450,209 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
     }
 }
 
+fn infer_target_type_name(spec_file: &Path) -> Result<Option<String>> {
+    let rel = match spec_file.strip_prefix(Path::new(SPECIFICATIONS_DIR)) {
+        Ok(r) => r.to_path_buf(),
+        Err(_) => return Ok(spec_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(to_pascal_case_title)),
+    };
+
+    let draft_path = PathBuf::from(DRAFTS_DIR).join(&rel);
+    if draft_path.exists() {
+        let content = fs::read_to_string(&draft_path)
+            .with_context(|| format!("Failed to read draft file: {}", draft_path.display()))?;
+        if let Some(name) = extract_markdown_title_type(&content) {
+            return Ok(Some(name));
+        }
+    }
+
+    let spec_content = fs::read_to_string(spec_file)
+        .with_context(|| format!("Failed to read specification file: {}", spec_file.display()))?;
+    if let Some(name) = extract_markdown_title_type(&spec_content) {
+        return Ok(Some(name));
+    }
+
+    Ok(spec_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(to_pascal_case_title))
+}
+
+fn extract_markdown_title_type(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# ") {
+            let title = trimmed.trim_start_matches('#').trim();
+            if !title.is_empty() {
+                return to_pascal_case_title(title);
+            }
+        }
+    }
+    None
+}
+
+fn to_pascal_case_title(s: &str) -> Option<String> {
+    let mut out = String::new();
+    for raw in s.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if raw.is_empty() {
+            continue;
+        }
+        let has_lower = raw.chars().any(|c| c.is_ascii_lowercase());
+        let has_upper = raw.chars().any(|c| c.is_ascii_uppercase());
+        let token = if has_lower && has_upper {
+            let mut ch = raw.chars();
+            match ch.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        } else {
+            let lower = raw.to_ascii_lowercase();
+            let mut ch = lower.chars();
+            match ch.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + ch.as_str(),
+                None => String::new(),
+            }
+        };
+        out.push_str(&token);
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn validate_generated_rust_layout(project_root: &Path) -> Result<()> {
+    let src_dir = project_root.join("src");
+    if !src_dir.exists() {
+        return Ok(());
+    }
+
+    let mut issues = Vec::new();
+    let mut needs_base64 = false;
+    let mut needs_sha2 = false;
+
+    for module_dir in [src_dir.join("data"), src_dir.join("contexts")] {
+        let mod_rs = module_dir.join("mod.rs");
+        if mod_rs.exists() {
+            validate_mod_exports(&mod_rs, &mut issues)?;
+        }
+    }
+
+    let rust_files = collect_rust_files(&src_dir)?;
+    for file in rust_files {
+        let content = fs::read_to_string(&file)
+            .with_context(|| format!("Failed to read generated source: {}", file.display()))?;
+
+        if content.contains("crate::types::") {
+            issues.push(format!(
+                "{} uses `crate::types::...`; project structure uses `crate::data`/`crate::contexts`.",
+                file.display()
+            ));
+        }
+
+        if content.contains("base64::") {
+            needs_base64 = true;
+        }
+        if content.contains("sha2::") {
+            needs_sha2 = true;
+        }
+    }
+
+    let cargo_toml = project_root.join("Cargo.toml");
+    if cargo_toml.exists() {
+        let cargo_content = fs::read_to_string(&cargo_toml)
+            .with_context(|| format!("Failed to read {}", cargo_toml.display()))?;
+        if needs_base64 && !cargo_content.contains("\nbase64") {
+            issues.push("Cargo.toml is missing dependency `base64` while generated code references it.".to_string());
+        }
+        if needs_sha2 && !cargo_content.contains("\nsha2") {
+            issues.push("Cargo.toml is missing dependency `sha2` while generated code references it.".to_string());
+        }
+    }
+
+    if issues.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = String::from("Generated implementation layout validation failed:\n");
+    for issue in issues {
+        msg.push_str(&format!("  - {}\n", issue));
+    }
+    anyhow::bail!(msg.trim_end().to_string())
+}
+
+fn validate_mod_exports(mod_file: &Path, issues: &mut Vec<String>) -> Result<()> {
+    let content = fs::read_to_string(mod_file)
+        .with_context(|| format!("Failed to read {}", mod_file.display()))?;
+    let Some(parent) = mod_file.parent() else {
+        return Ok(());
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !(trimmed.starts_with("pub use ") && trimmed.ends_with(';')) {
+            continue;
+        }
+        let path = trimmed
+            .trim_start_matches("pub use ")
+            .trim_end_matches(';')
+            .trim();
+        let Some((module_name, type_name)) = path.split_once("::") else {
+            continue;
+        };
+
+        let module_file = parent.join(format!("{}.rs", module_name));
+        if !module_file.exists() {
+            issues.push(format!(
+                "{} exports `{}` but module file {} does not exist.",
+                mod_file.display(),
+                path,
+                module_file.display()
+            ));
+            continue;
+        }
+
+        let module_content = fs::read_to_string(&module_file)
+            .with_context(|| format!("Failed to read {}", module_file.display()))?;
+        let candidates = [
+            format!("pub struct {}", type_name),
+            format!("pub enum {}", type_name),
+            format!("pub type {}", type_name),
+            format!("pub trait {}", type_name),
+        ];
+        if !candidates.iter().any(|needle| module_content.contains(needle)) {
+            issues.push(format!(
+                "{} exports `{}` but {} does not declare a matching public type.",
+                mod_file.display(),
+                path,
+                module_file.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    if !root.exists() {
+        return Ok(files);
+    }
+
+    for entry in fs::read_dir(root)
+        .with_context(|| format!("Failed to read {}", root.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(collect_rust_files(&path)?);
+        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+
+    Ok(files)
+}
+
 /// Determines the implementation output path preserving folder structure
 /// 
 /// Maps:
@@ -1503,10 +1718,10 @@ fn determine_implementation_output_path(
         .context("Invalid context filename")?;
     
     // Special case: app.md → main.rs
-    let output_filename = if file_stem == "app" {
+    let output_filename = if file_stem.eq_ignore_ascii_case("app") {
         "main.rs"
     } else {
-        &format!("{}.rs", file_stem)
+        &format!("{}.rs", file_stem.to_ascii_lowercase())
     };
     
     let output_path = output_dir.join(output_filename);

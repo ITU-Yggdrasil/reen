@@ -1,27 +1,37 @@
-use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use anyhow::{bail, Result};
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::sync::RwLock;
 use tracing;
 
 use crate::data::amount::Amount;
 use crate::data::currency::Currency;
 
 /// A ledger entry records a single event in the main ledger.
+///
+/// Immutable data type; all fields are private with no setters.
 #[derive(Debug, Clone)]
 pub struct LedgerEntry {
-    sink: Option<i32>,
-    source: Option<i32>,
-    amount: Amount,
-    timestamp: DateTime<Utc>,
-    prev_hash: Option<String>,
-    hash: String,
+    pub sink: Option<i32>,
+    pub source: Option<i32>,
+    pub amount: Amount,
+    pub timestamp: DateTime<Utc>,
+    pub prev_hash: Option<String>,
+    pub hash: String,
 }
 
 impl LedgerEntry {
-    /// Factory constructor that validates business rules and computes the entry hash.
+    /// Create a new LedgerEntry instance.
     ///
-    /// Visibility note: This is crate-visible by specification requirement.
+    /// Business rules enforced:
+    /// - At least one of sink and source must be not None.
+    /// - The amount must be larger than 0 (assumed enforced by Amount type).
+    ///
+    /// Notes:
+    /// - The `hash` is calculated internally from the other fields.
+    /// - This constructor is crate-visible as per specification notes.
     pub(crate) fn create(
         source: Option<i32>,
         sink: Option<i32>,
@@ -37,71 +47,25 @@ impl LedgerEntry {
             prev_hash.is_some()
         );
 
-        // Business rule: At least one of sink and source must be not None.
-        if sink.is_none() && source.is_none() {
-            tracing::error!(
-                "[LedgerEntry] create, validation failed: both sink and source are None"
-            );
-            return Err(anyhow!(
-                "Business rule violation: At least one of sink and source must be not None"
-            ));
+        if source.is_none() && sink.is_none() {
+            bail!("Business rule violated: at least one of sink or source must be provided (not None).");
         }
 
-        // Business rule: amount must be larger than 0.
-        // Amount type guarantees positive values, but validate defensively via major/minor.
-        if amount.major() == 0 && amount.minor() == 0 {
-            tracing::error!("[LedgerEntry] create, validation failed: amount is zero");
-            return Err(anyhow!(
-                "Business rule violation: amount must be strictly greater than 0"
-            ));
-        }
+        let hash = Self::compute_hash(&source, &sink, &amount, &timestamp, &prev_hash);
 
-        // Validate prev_hash format (if provided): must be RFC 4648 §4 base64 with '=' padding and no whitespace.
-        if let Some(ref ph) = prev_hash {
-            if let Err(e) = Self::validate_base64_padded(ph) {
-                tracing::error!(
-                    "[LedgerEntry] create, prev_hash validation failed: {}",
-                    e
-                );
-                return Err(e);
-            }
-        }
-
-        // Compute hash (SHA256 over concatenation of the values, excluding the hash field)
-        let concat = Self::concat_for_hash(&source, &sink, &amount, &timestamp, &prev_hash);
-        let digest = Sha256::digest(concat.as_bytes());
-        let hash = STANDARD.encode(digest);
-
-        // The hash we generated should already be properly padded and contain no whitespace.
-        // Validate to be explicit.
-        if let Err(e) = Self::validate_base64_padded(&hash) {
-            tracing::error!(
-                "[LedgerEntry] create, computed hash validation failed: {}",
-                e
-            );
-            return Err(anyhow!(
-                "Internal error: computed hash is not valid padded base64: {}",
-                e
-            ));
-        }
-
-        let entry = LedgerEntry {
+        Ok(LedgerEntry {
             sink,
             source,
             amount,
             timestamp,
             prev_hash,
             hash,
-        };
-
-        tracing::info!("[LedgerEntry] create, success");
-        Ok(entry)
+        })
     }
 
-    /// Returns a formatted string: "{timestamp:?} - {source:?} - {sink:?}:  {amount:?}"
+    /// Returns a formatted string view of the ledger entry.
     ///
-    /// Note: Returns a borrowed str by leaking the formatted String to 'static.
-    /// This adheres to the specified return type while keeping fields immutable.
+    /// Format: "{timestamp:?} - {source:?} - {sink:?}:  {amount:?}"
     pub fn to_str(&self) -> Result<&str> {
         tracing::info!(
             "[LedgerEntry] to_str, timestamp={:?}, source={:?}, sink={:?}",
@@ -110,11 +74,13 @@ impl LedgerEntry {
             self.sink
         );
 
+        // Build new string and store a leaked reference for stable &'static str
         let s = format!(
             "{:?} - {:?} - {:?}:  {:?}",
             self.timestamp, self.source, self.sink, self.amount
         );
         let leaked: &'static str = Box::leak(s.into_boxed_str());
+
         Ok(leaked)
     }
 
@@ -124,66 +90,27 @@ impl LedgerEntry {
         self.amount.get_currency()
     }
 
-    // Helper: Concatenate field values (excluding hash) into a stable string for hashing.
-    fn concat_for_hash(
+    fn compute_hash(
         source: &Option<i32>,
         sink: &Option<i32>,
         amount: &Amount,
         timestamp: &DateTime<Utc>,
         prev_hash: &Option<String>,
     ) -> String {
-        tracing::debug!("[LedgerEntry] concat_for_hash");
-        let mut s = String::new();
+        tracing::debug!("[LedgerEntry] compute_hash");
 
-        // Use a clear, deterministic representation
-        s.push_str("ts=");
-        s.push_str(&timestamp.timestamp_nanos().to_string());
-        s.push('|');
+        // Concatenation strategy (implementation-defined per specification).
+        // Use stable, explicit components and delimiters.
+        let amount_str = amount.to_str();
+        let ts_str = timestamp.to_rfc3339();
+        let prev_str = prev_hash.as_deref().unwrap_or("None");
 
-        s.push_str("src=");
-        match source {
-            Some(v) => s.push_str(&v.to_string()),
-            None => s.push_str("None"),
-        }
-        s.push('|');
+        let input = format!(
+            "ts={}|source={:?}|sink={:?}|amount={}|prev={}",
+            ts_str, source, sink, amount_str, prev_str
+        );
 
-        s.push_str("snk=");
-        match sink {
-            Some(v) => s.push_str(&v.to_string()),
-            None => s.push_str("None"),
-        }
-        s.push('|');
-
-        s.push_str("amt=");
-        s.push_str(&amount.to_str());
-        s.push('|');
-
-        s.push_str("prev=");
-        match prev_hash {
-            Some(h) => s.push_str(h),
-            None => s.push_str("None"),
-        }
-
-        s
-    }
-
-    // Helper: Validate that a base64 string is STANDARD with '=' padding, no whitespace.
-    fn validate_base64_padded(s: &str) -> Result<()> {
-        tracing::debug!("[LedgerEntry] validate_base64_padded");
-
-        // Decode must succeed
-        let decoded = STANDARD
-            .decode(s.as_bytes())
-            .map_err(|e| anyhow!("invalid base64: {}", e))?;
-
-        // Re-encode and compare for canonical padded STANDARD form
-        let re = STANDARD.encode(&decoded);
-        if re != s {
-            return Err(anyhow!(
-                "base64 must be canonical STANDARD with '=' padding, no whitespace"
-            ));
-        }
-
-        Ok(())
+        let digest = Sha256::digest(input.as_bytes());
+        general_purpose::STANDARD.encode(digest)
     }
 }

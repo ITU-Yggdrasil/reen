@@ -5,4 +5,4 @@ mod money_transfer;
 
 // Re-export public items
 pub use account::Account;
-pub use money_transfer::Moneytransfer;
+pub use money_transfer::MoneyTransfer;

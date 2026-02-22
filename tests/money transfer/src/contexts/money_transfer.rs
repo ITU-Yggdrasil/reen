@@ -1,12 +1,12 @@
-use anyhow::{bail, Result};
+use anyhow::{anyhow, Result};
 use tracing;
 
 use crate::contexts::Account;
-use crate::types::{Amount, Ledger, LedgerEntry};
+use crate::data::{Amount, Ledger, LedgerEntry};
 
-#[cfg(feature = "money_transfer")]
+
 pub struct MoneyTransfer {
-    // Role Players
+    // Role players
     source: Account,
     sink: Account,
 
@@ -15,63 +15,45 @@ pub struct MoneyTransfer {
     ledger: Ledger,
 }
 
-#[cfg(feature = "money_transfer")]
+
 impl MoneyTransfer {
-    /// Constructs a new MoneyTransfer context.
-    /// Business rules:
-    /// - The currency of the amount must match the currency of the source.
     pub fn new(sink_account_id: i32, source_account_id: i32, amount: Amount, ledger: Ledger) -> Result<Self> {
         tracing::info!(
-            "[MoneyTransfer] new, sink={}, source={}, amount={}",
+            "[MoneyTransfer] new, sink_account_id={}, source_account_id={}, amount={}",
             sink_account_id,
             source_account_id,
             amount.to_str()
         );
 
-        // Construct accounts
-        let source = Account::new(source_account_id, ledger.clone()).map_err(|e| {
+        // Construct accounts from provided ids and ledger
+        let source = Account::new(source_account_id, &ledger)?;
+        let sink = Account::new(sink_account_id, &ledger)?;
+
+        // Business rule: The currency of the amount must match the currency of the source.
+        let source_currency = source
+            .currency()
+            .ok_or_else(|| anyhow!("source account has no defined currency"))?;
+        let amount_currency = amount.get_currency();
+        if source_currency != amount_currency {
             tracing::error!(
-                "[MoneyTransfer] new, failed to construct source account, source_id={}, error={}",
-                source_account_id,
-                e
+                "[MoneyTransfer] new, currency_mismatch, source_currency={:?}, amount_currency={:?}",
+                source_currency,
+                amount_currency
             );
-            e
-        })?;
+            return Err(anyhow!(
+                "currency mismatch between source account and transfer amount"
+            ));
+        }
 
-        let sink = Account::new(sink_account_id, ledger.clone()).map_err(|e| {
+        // Business rule: The transferred amount can't exceed the present balance of the source account.
+        let source_balance = source.balance();
+        if !Self::amount_leq(&amount, &source_balance) {
             tracing::error!(
-                "[MoneyTransfer] new, failed to construct sink account, sink_id={}, error={}",
-                sink_account_id,
-                e
+                "[MoneyTransfer] new, insufficient_funds, amount={}, balance={}",
+                amount.to_str(),
+                source_balance.to_str()
             );
-            e
-        })?;
-
-        // Validate business rule: currency of amount must match currency of source
-        let source_currency = source.currency().ok_or_else(|| {
-            let msg = "source account has undefined currency";
-            tracing::error!("[MoneyTransfer] new, {}", msg);
-            anyhow::anyhow!(msg)
-        })?;
-        let source_currency_code = source_currency.to_str();
-
-        // Extract currency code from Amount via its string representation "{major}.{minor} CODE"
-        let amount_currency_code = match amount.to_str().rsplit_once(' ') {
-            Some((_, code)) => code.to_string(),
-            None => {
-                let msg = "failed to parse currency from amount";
-                tracing::error!("[MoneyTransfer] new, {}", msg);
-                bail!(msg)
-            }
-        };
-
-        if source_currency_code != amount_currency_code {
-            let msg = format!(
-                "currency mismatch: source={}, amount={}",
-                source_currency_code, amount_currency_code
-            );
-            tracing::error!("[MoneyTransfer] new, {}", msg);
-            bail!(msg);
+            return Err(anyhow!("insufficient funds on source account"));
         }
 
         Ok(Self {
@@ -82,113 +64,93 @@ impl MoneyTransfer {
         })
     }
 
-    /// Executes the transfer: withdraws from source, deposits to sink, and adds the entry to the ledger.
-    pub fn Transfer(&self) -> Result<Ledger> {
+    pub fn transfer(&self) -> Result<Ledger> {
         tracing::info!(
-            "[MoneyTransfer] transfer, source={}, sink={}, amount={}",
+            "[MoneyTransfer] transfer, source_account_id={}, sink_account_id={}, amount={}",
             self.source.account_id(),
             self.sink.account_id(),
             self.amount.to_str()
         );
 
-        let entry = self.withdraw()?;
-        let settled = self.deposit(entry)?;
-        let new_ledger = self.ledger.add_entry(settled).map_err(|e| {
-            tracing::error!(
-                "[MoneyTransfer] transfer, failed to add entry to ledger, error={}",
+        // 1. Call source.withdraw
+        let withdrawal_entry = self.withdraw()?;
+
+        // 2. Call sink.deposit with result of withdraw
+        let settled_entry = self.deposit(withdrawal_entry)?;
+
+        // 3. Add the returned entry to the ledger
+        let updated_ledger = self
+            .ledger
+            .add_entry(settled_entry)
+            .map_err(|e| {
+                tracing::error!("[MoneyTransfer] transfer, add_entry_failed, error={}", e);
                 e
-            );
-            e
-        })?;
+            })?;
 
-        tracing::info!(
-            "[MoneyTransfer] transfer, completed, source={}, sink={}, amount={}",
-            self.source.account_id(),
-            self.sink.account_id(),
-            self.amount.to_str()
-        );
-
-        Ok(new_ledger)
+        // 4. Return resulting ledger
+        tracing::info!("[MoneyTransfer] transfer, completed_successfully");
+        Ok(updated_ledger)
     }
 
-    // Role Methods (private)
-
+    // Role method: source.withdraw
     fn withdraw(&self) -> Result<LedgerEntry> {
         tracing::debug!(
-            "[MoneyTransfer] source withdraw, source={}, amount={}",
+            "[MoneyTransfer] source withdraw, source_account_id={}, amount={}",
             self.source.account_id(),
             self.amount.to_str()
         );
 
-        // Business rule: The transferred amount can't exceed the present balance of the source account.
+        // Enforce business rule here as well for role method boundary
         let balance = self.source.balance();
-        if !Self::amount_lte(&self.amount, &balance) {
-            let msg = format!(
-                "insufficient funds: requested {}, available {}",
+        if !Self::amount_leq(&self.amount, &balance) {
+            tracing::error!(
+                "[MoneyTransfer] source withdraw, insufficient_funds, amount={}, balance={}",
                 self.amount.to_str(),
                 balance.to_str()
             );
-            tracing::warn!("[MoneyTransfer] source withdraw, {}", msg);
-            bail!(msg);
+            return Err(anyhow!("insufficient funds on source account"));
         }
 
-        // Create withdrawal entry (sink None, source Some)
+        // Create a withdrawal entry (sink None, source Some(id))
         let entry = self
             .ledger
             .create_entry(Some(self.source.account_id()), self.amount.clone())
             .map_err(|e| {
                 tracing::error!(
-                    "[MoneyTransfer] source withdraw, failed to create ledger entry, error={}",
+                    "[MoneyTransfer] source withdraw, create_entry_failed, error={}",
                     e
                 );
                 e
             })?;
 
-        tracing::debug!(
-            "[MoneyTransfer] source withdraw, entry created, source={}, amount={}",
-            self.source.account_id(),
-            self.amount.to_str()
-        );
-
+        tracing::debug!("[MoneyTransfer] source withdraw, entry_created");
         Ok(entry)
     }
 
+    // Role method: sink.deposit
     fn deposit(&self, entry: LedgerEntry) -> Result<LedgerEntry> {
         tracing::debug!(
-            "[MoneyTransfer] sink deposit, sink={}, amount={}",
-            self.sink.account_id(),
-            self.amount.to_str()
+            "[MoneyTransfer] sink deposit, sink_account_id={}",
+            self.sink.account_id()
         );
 
-        let settled = self.ledger.settle(&entry, self.sink.account_id()).map_err(|e| {
-            tracing::error!(
-                "[MoneyTransfer] sink deposit, failed to settle ledger entry, error={}",
+        // Settle the previously created withdrawal entry by setting sink to sink account id
+        let settled = self
+            .ledger
+            .settle(&entry, self.sink.account_id())
+            .map_err(|e| {
+                tracing::error!("[MoneyTransfer] sink deposit, settle_failed, error={}", e);
                 e
-            );
-            e
-        })?;
+            })?;
 
-        tracing::debug!(
-            "[MoneyTransfer] sink deposit, entry settled, sink={}, amount={}",
-            self.sink.account_id(),
-            self.amount.to_str()
-        );
-
+        tracing::debug!("[MoneyTransfer] sink deposit, entry_settled");
         Ok(settled)
     }
 
-    // Helpers (private, internal-only)
-
-    fn amount_lte(a: &Amount, b: &Amount) -> bool {
-        let (a_major, a_minor) = (a.major(), a.minor());
-        let (b_major, b_minor) = (b.major(), b.minor());
-
-        if a_major < b_major {
-            true
-        } else if a_major > b_major {
-            false
-        } else {
-            a_minor <= b_minor
-        }
+    // Helper: compare two Amounts without exposing internal representation
+    fn amount_leq(left: &Amount, right: &Amount) -> bool {
+        let (lmj, lmn) = (left.major(), left.minor());
+        let (rmj, rmn) = (right.major(), right.minor());
+        lmj < rmj || (lmj == rmj && lmn <= rmn)
     }
 }

@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Currency represents the set of active ISO 4217 currency codes as an enum.
+/// Serialization and deserialization use serde's auto-implementation with the variant
+/// names as their serialized forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Currency {
     AED,
     AFN,
@@ -184,6 +187,7 @@ pub enum Currency {
 }
 
 impl Currency {
+    /// Returns the three-letter ISO 4217 code for this currency variant.
     pub fn to_str(&self) -> &'static str {
         tracing::info!("[Currency] to_str");
         match self {

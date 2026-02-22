@@ -8,8 +8,8 @@
 ## Functionality
 
 - **balance**:
-The balance of an account is a calculated property. It's the sum of all transactions on the ledger where the account id is the sink minus the sum of all transactions on the ledger where the account id is the source. 
-- **currency**:
+The balance of an account is a calculated property. It's the sum of all transactions on the ledger where the account id is the sink minus the sum of all transactions on the ledger where the account id is the source. THe result is an amount object
+- **get_currency**:
 All ledger entries for an account must be in the same currency. This is either None or the currency of previous ledger entries where the account is source or sink, which would all have the same currency due to this constraint.
 - **account_id**: The id of the account
 - **transactions** returns all ledger entries related to the account, sorted by transactions date, descending

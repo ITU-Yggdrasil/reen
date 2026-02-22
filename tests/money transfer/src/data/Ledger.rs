@@ -1,18 +1,17 @@
-use std::rc::Rc;
-
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use tracing;
 
-use crate::types::amount::Amount;
-use crate::types::ledgerentry::LedgerEntry;
+use crate::data::amount::Amount;
+use crate::data::ledgerentry::LedgerEntry;
 
 /// The Ledger is an immutable chain of ledger entries.
-/// The `head` is the current entry; `tail` represents all previous entries.
+/// Each new entry produces a new Ledger with the new head and the previous ledger as tail.
 #[derive(Debug, Clone)]
 pub struct Ledger {
     head: LedgerEntry,
-    tail: Option<Rc<Ledger>>,
+    // Immutable reference-equivalent to the previous ledger state
+    tail: Option<Box<Ledger>>,
 }
 
 impl Ledger {
@@ -23,32 +22,23 @@ impl Ledger {
     }
 
     /// Returns all ledger entries where the account is either sink or source,
-    /// sorted ascending by the entries’ timestamps.
+    /// sorted ascending by the entries' timestamps.
     pub fn get_entries_for(&self, account: i32) -> Vec<LedgerEntry> {
         tracing::info!("[Ledger] get_entries_for, account={}", account);
+        let mut all_entries = Vec::new();
+        self.collect_entries(&mut all_entries);
 
-        let mut matches: Vec<LedgerEntry> = Vec::new();
+        let mut filtered: Vec<LedgerEntry> = all_entries
+            .into_iter()
+            .filter(|e| e.sink == Some(account) || e.source == Some(account))
+            .collect();
 
-        let mut current: Option<&Ledger> = Some(self);
-        while let Some(ledger) = current {
-            let entry = &ledger.head;
-
-            let is_sink = entry.sink().map(|s| s == account).unwrap_or(false);
-            let is_source = entry.source().map(|s| s == account).unwrap_or(false);
-
-            if is_sink || is_source {
-                matches.push(entry.clone());
-            }
-
-            current = ledger.tail.as_ref().map(|rc| rc.as_ref());
-        }
-
-        matches.sort_by_key(|e| e.timestamp().clone());
-        matches
+        filtered.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        filtered
     }
 
-    /// Commits an entry to the ledger and returns a new Ledger whose tail is the
-    /// previous ledger and whose head is the committed entry.
+    /// Commits an entry to the ledger and returns a new Ledger whose tail is the previous ledger
+    /// and whose head is the committed entry.
     ///
     /// Constraints:
     /// - At least one of sink and source must be not None
@@ -56,65 +46,56 @@ impl Ledger {
     pub fn add_entry(&self, entry: LedgerEntry) -> Result<Ledger> {
         tracing::info!("[Ledger] add_entry");
 
-        let has_party = entry.sink().is_some() || entry.source().is_some();
-        if !has_party {
-            let msg = "add_entry validation failed: at least one of sink and source must be not None";
-            tracing::error!("[Ledger] add_entry, error=\"{}\"", msg);
+        // Validate at least one of sink/source present
+        if entry.sink.is_none() && entry.source.is_none() {
+            let msg = "add_entry constraint violated: at least one of sink and source must be not None";
+            tracing::error!("[Ledger] add_entry, error={}", msg);
             return Err(anyhow!(msg));
         }
 
-        let current_head_hash = self.head.hash();
-        let prev_ok = match entry.prev_hash() {
-            Some(prev) => prev == current_head_hash,
-            None => false,
-        };
-        if !prev_ok {
-            let msg = "add_entry validation failed: entry.prev_hash must equal current head hash";
-            tracing::error!("[Ledger] add_entry, error=\"{}\"", msg);
-            return Err(anyhow!(msg));
+        // Validate hash chain linkage
+        match &entry.prev_hash {
+            Some(prev_hash) if *prev_hash == self.head.hash => {
+                // OK
+            }
+            _ => {
+                let msg = "add_entry constraint violated: head.hash does not match entry.prev_hash";
+                tracing::error!("[Ledger] add_entry, error={}", msg);
+                return Err(anyhow!(msg));
+            }
         }
 
         let new_ledger = Ledger {
             head: entry,
-            tail: Some(Rc::new(self.clone())),
+            tail: Some(Box::new(self.clone())),
         };
 
-        tracing::debug!("[Ledger] add_entry, committed");
         Ok(new_ledger)
     }
 
     /// Creates a new entry based on the input entry, setting sink to the provided account id;
     /// the timestamp of the new entry is equal to the timestamp of the original entry.
     ///
-    /// Valid only for an unsettled entry (i.e., one where sink is None)
-    pub fn settle(&self, entry: &LedgerEntry, sink_account_id: i32) -> Result<LedgerEntry> {
-        tracing::info!(
-            "[Ledger] settle, sink_account_id={}, input_prev_hash_present={}",
-            sink_account_id,
-            entry.prev_hash().is_some()
-        );
+    /// Valid only for an unsettled entry (i.e., one where sink is None).
+    pub fn settle(&self, entry: LedgerEntry, sink_account_id: i32) -> Result<LedgerEntry> {
+        tracing::info!("[Ledger] settle, sink_account_id={}", sink_account_id);
 
-        if entry.sink().is_some() {
-            let msg = "settle validation failed: entry is already settled (sink is Some)";
-            tracing::error!("[Ledger] settle, error=\"{}\"", msg);
+        if entry.sink.is_some() {
+            let msg = "settle is only valid for an unsettled entry (sink must be None)";
+            tracing::error!("[Ledger] settle, error={}", msg);
             return Err(anyhow!(msg));
         }
 
         let sink = Some(sink_account_id);
-        let source = entry.source();
-        let amount: Amount = entry.amount().clone();
-        let timestamp: DateTime<Utc> = entry.timestamp().clone();
-        let prev_hash = Some(self.head.hash().clone());
+        let source = entry.source;
+        let amount: Amount = entry.amount.clone();
+        // Timestamp must equal the original entry's timestamp
+        let timestamp: DateTime<Utc> = entry.timestamp;
+        // Ensure chain linkage to current head
+        let prev_hash = Some(self.head.hash.clone());
 
-        tracing::debug!(
-            "[Ledger] settle, constructing entry, source={:?}, sink={:?}, timestamp={:?}",
-            source,
-            sink,
-            timestamp
-        );
-
+        // Create the settled entry
         let settled = LedgerEntry::create(sink, source, amount, timestamp, prev_hash)?;
-        tracing::debug!("[Ledger] settle, created settled entry");
         Ok(settled)
     }
 
@@ -125,52 +106,33 @@ impl Ledger {
     /// - sink is always None for the constructed entry
     /// - timestamp is utc.now
     /// - prev_hash must be set to the hash of the current head entry on the ledger
-    /// - At least one of sink and source must be not None (implied business rule)
+    /// - The entry’s own hash is computed by the entry itself
     pub fn create_entry(&self, source: Option<i32>, amount: Amount) -> Result<LedgerEntry> {
-        tracing::info!(
-            "[Ledger] create_entry, source={:?}, amount_minor={}, amount_currency={:?}",
-            source,
-            amount.minor(),
-            amount.currency()
-        );
-
-        // Enforce that the constructed entry is valid per business rules:
-        // since sink is always None, source must be Some(...)
-        if source.is_none() {
-            let msg = "create_entry validation failed: source must be Some when sink is None";
-            tracing::error!("[Ledger] create_entry, error=\"{}\"", msg);
-            return Err(anyhow!(msg));
-        }
+        tracing::info!("[Ledger] create_entry, source={:?}", source);
 
         if let Some(src) = source {
             let existing = self.get_entries_for(src);
             if existing.is_empty() {
-                let msg = "create_entry validation failed: at least one entry for the source account must exist on the ledger";
-                tracing::error!("[Ledger] create_entry, error=\"{}\"", msg);
+                let msg = "create_entry constraint violated: source account has no prior entries on this ledger";
+                tracing::error!("[Ledger] create_entry, error={}", msg);
                 return Err(anyhow!(msg));
             }
-            // Use the value again
-            let source = Some(src);
+        }
 
-            let sink = None;
-            let timestamp = Utc::now();
-            let prev_hash = Some(self.head.hash().clone());
+        let sink: Option<i32> = None;
+        let timestamp = Utc::now();
+        let prev_hash = Some(self.head.hash.clone());
 
-            tracing::debug!(
-                "[Ledger] create_entry, constructing entry, source={:?}, sink={:?}, timestamp={:?}",
-                source,
-                sink,
-                timestamp
-            );
+        let entry = LedgerEntry::create(sink, source, amount, timestamp, prev_hash)?;
+        Ok(entry)
+    }
 
-            let entry = LedgerEntry::create(sink, source, amount, timestamp, prev_hash)?;
-            tracing::debug!("[Ledger] create_entry, entry created");
-            Ok(entry)
-        } else {
-            // Unreachable due to early return; kept for completeness
-            let msg = "create_entry validation failed: unreachable None source branch";
-            tracing::error!("[Ledger] create_entry, error=\"{}\"", msg);
-            Err(anyhow!(msg))
+    // Private helper to collect all entries from head to tail recursively.
+    fn collect_entries(&self, acc: &mut Vec<LedgerEntry>) {
+        tracing::debug!("[Ledger] collect_entries");
+        acc.push(self.head.clone());
+        if let Some(ref tail) = self.tail {
+            tail.collect_entries(acc);
         }
     }
 }

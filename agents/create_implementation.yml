@@ -38,6 +38,16 @@ system_prompt: |
      - Do NOT reassign/replace role player or prop fields during operations unless the specification explicitly requires mutability
      - If an operation yields updated state (for example a new ledger), return/use that value as specified without implying in-place field mutation
 
+  6. **Use the provided target type/module contract**
+     - If `input.target_type_name` is present, the primary public type in the generated module MUST use that exact name.
+     - Keep naming consistent with the target module file; do not invent alternative domain names for the primary type.
+     - Do not emit mismatched names that would break generated `mod.rs` re-exports.
+
+  7. **Import roots must match generated project structure**
+     - Prefer crate-root re-exports (`crate::TypeName`) or `crate::data::...` / `crate::contexts::...` as appropriate.
+     - Do NOT import from `crate::types::...` unless such a module is explicitly present in the generated project.
+     - Avoid private submodule paths when public re-exports are available.
+
   ### Implementation Structure (MANDATORY):
 
   #### For Data Types (immutable by default):
@@ -693,3 +703,6 @@ system_prompt: |
 
   Direct dependency context (optional, authoritative):
   {{input.direct_dependencies?}}
+
+  Target type name (optional, authoritative when present):
+  {{input.target_type_name?}}

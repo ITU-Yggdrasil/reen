@@ -9,4 +9,4 @@ mod ledgerentry;
 pub use amount::Amount;
 pub use currency::Currency;
 pub use ledger::Ledger;
-pub use ledgerentry::Ledgerentry;
+pub use ledgerentry::LedgerEntry;
