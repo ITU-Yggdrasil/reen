@@ -37,6 +37,13 @@ system_prompt: |
   Turing-complete ecosystem. Language-specific details can be useful notes, but
   they MUST NEVER be treated as blocking ambiguities.
 
+  ## Context Immutability Rule (Mandatory)
+
+  When application drafts reference contexts:
+  - Assume context Role Players and Props are immutable fields after context construction.
+  - Do NOT raise blocking ambiguities about whether those fields are updated/reassigned unless the draft explicitly requires mutability.
+  - Returning updated values from context operations does not imply mutating context fields in place.
+
   ## Conventional Rust Defaults (Allowed, Non-Blocking)
 
   The following conventions are allowed when the draft references them implicitly:

@@ -1,7 +1,7 @@
 1. Description
-The ledger is the core append-only record of transactions for the banking system. Each transaction is represented by a LedgerEntry. The ledger is immutable: adding a new ledger entry does not modify an existing ledger object; it yields a new ledger object whose tail points to the prior ledger object. Entries already recorded on a ledger are preserved.
+The Ledger is the core, immutable record of transactions. Each transaction is represented as a LedgerEntry. Committing a new LedgerEntry produces a new Ledger object, preserving all prior entries via an internal chain. The current entry is the head; the remainder of the chain is referenced via tail, which represents all previous ledger entries.
 
-2. Type Kind (Struct / Enum / NewType / Unspecified)
+2. Type Kind (Struct)
 Struct
 
 3. Mutability (Immutable / Mutable)
@@ -9,82 +9,78 @@ Immutable
 
 4. Properties (only those explicitly mentioned)
 - head: a LedgerEntry
-- tail: an immutable reference to a ledger object representing all previous ledger entries, or None if head is the first ever entry
+- tail: an immutable reference to a Ledger object representing all previous ledger entries, or None if head is the first-ever entry
 
 5. Functionalities (only those explicitly named)
 - get_entries_for
-  - Input: account number (i32)
-  - Output: all ledger entries where the provided account is either sink or source, sorted ascending by the timestamps of the entries
-  - Notes: Duplicate timestamps “can't happen” (so sorting is well-defined without ties)
+  - Input: an account number (i32)
+  - Output: all ledger entries where the account is either sink or source, sorted ascending by the entries’ timestamps
+  - Note: Duplicate timestamps for ledger entries for the same account cannot happen
 
 - add_entry
-  - Input: an entry (LedgerEntry)
-  - Behavior: Commits the entry to the main ledger by producing a new ledger whose head is the provided entry and whose internal tail is the prior ledger. This operation is comparable to committing an atomic transaction in a database.
-  - Output: a new ledger (the original ledger remains unchanged)
+  - Behavior: Commits an entry to the ledger and returns a new Ledger whose tail is the previous ledger and whose head is the committed entry
+  - Constraints:
+    - At least one of sink and source must be not None
+    - The hash of the current head entry must match the prev_hash of the entry being added
+  - Semantics note: Adding the entry is comparable to committing an atomic transaction in a database (conceptual only)
 
 - new
-  - Input: an entry (LedgerEntry)
-  - Behavior: Constructs a new ledger with tail = None and head = the provided entry
-  - Output: a new ledger
+  - Input: an entry
+  - Behavior: Creates a new ledger with None as tail and the provided entry as head
 
 - settle
-  - Valid only for an unsettled entry (an entry whose sink is None)
-  - Input: an unsettled LedgerEntry and a provided account id
-  - Behavior: Creates a new entry based on the input entry, setting:
-    - sink to the provided account id
-    - prev_hash_sink accordingly; if a previous ledger entry for the sink is not present on the ledger, prev_hash_sink is set to None
+  - Validity: Only valid for an unsettled entry (i.e., one where sink is None)
+  - Behavior: Creates a new entry based on the input entry, setting sink to the provided account id; the timestamp of the new entry is equal to the timestamp of the original entry
   - Output: anyhow::Result<LedgerEntry>
 
 - create_entry
-  - Input: a source (including None) and an amount
-  - Behavior: Constructs a new ledger entry and returns it. The following must hold:
-    - The prev_hash_source must match the hash of the previous ledger entry for the source account; if source is None then prev_hash_source should also be None.
+  - Inputs: a source (including None), and an amount
+  - Behavior: Constructs a new ledger entry and returns it
+  - Constraints:
+    - If source is not None, at least one entry for that account must exist on the ledger
+    - sink is always None for the constructed entry
+    - timestamp is utc.now
+    - prev_hash must be set to the hash of the current head entry on the ledger
+    - The hash is not provided; it is calculated by the entry itself
   - Output: anyhow::Result<LedgerEntry>
 
 6. Constraints & Rules (only those explicitly stated or directly implied)
-- The ledger is immutable. Adding a new ledger entry produces a new ledger object. Existing entries are kept.
-- The tail of a ledger is None when the head is the first ever entry; otherwise, tail is an immutable reference to the previous ledger object.
-- get_entries_for returns entries where the given account is either sink or source, ordered ascending by entry timestamp; duplicate timestamps “can't happen” for the purpose of this ordering.
-- settle is only valid when the provided entry’s sink is None. It must set prev_hash_sink to None if no previous ledger entry exists for the sink account on the ledger.
-- create_entry must ensure prev_hash_source matches the hash of the immediately preceding ledger entry for the source account; if source is None, prev_hash_source must be None.
+- Ledger immutability: Adding a new entry produces a new Ledger object; prior entries are preserved
+- Chain structure:
+  - head is the current ledger entry
+  - tail is an immutable reference to a Ledger representing all prior entries, or None if there are none
+- get_entries_for sorting: Results are sorted ascending by timestamp; duplicate timestamps for entries concerning the same account cannot occur
+- add_entry validation:
+  - At least one of sink and source must be not None
+  - The hash of the current head entry must match the prev_hash of the entry being added
+- create_entry requirements:
+  - If source is not None, at least one entry for that account must already exist on the ledger
+  - sink is None
+  - timestamp is utc.now
+  - prev_hash equals the current head entry’s hash
+  - The entry’s own hash is computed by the entry and not provided as input
+- settle requirements:
+  - Only valid if the input entry’s sink is None
+  - The new entry’s sink is set to the provided account id
+  - The new entry’s timestamp equals the original entry’s timestamp
 
 Inferred Types or Structures (Non-Blocking)
 - Property: tail
-  - Inference: Optional wrapper around a reference-like handle to a Ledger (None or a reference)
+  - Inference: Optional reference to Ledger (e.g., Option<&Ledger> or equivalent)
   - Basis: “an immutable reference to a ledger object … or None if head is the first ever entry”
 
-- Method: get_entries_for return value
-  - Inference: List/sequence of LedgerEntry
-  - Basis: “returns all ledger entries”
+- Function: get_entries_for return
+  - Inference: List-like collection of LedgerEntry
+  - Basis: “returns all ledger entries … sorted ascending”
 
-- Method: settle parameter “provided account id”
-  - Inference: i32
-  - Basis: LedgerEntry.sink is Option<i32>; account numbers elsewhere are i32
-
-- Method: create_entry parameter “source (including None)”
-  - Inference: Option<i32> for source
-  - Basis: “including None” and LedgerEntry.source is Option<i32>
-
-Blocking Ambiguities
-- create_entry field completion
-  - The method’s inputs specify only source (including None) and amount. LedgerEntry requires additional fields (at least sink, timestamp, prev_hash_sink, hash). The specification does not state:
-    - What value sink should take (e.g., must it be None, making the entry “unsettled”?)
-    - How timestamp is determined
-    - How prev_hash_sink is determined (if any)
-    - How hash is computed timing-wise relative to timestamp selection
-  - Impact: Implementers cannot construct a valid LedgerEntry without assumptions about these values.
-
-- settle timestamp handling
-  - The method “creates a new entry based on the input/argument,” but does not specify how the timestamp of the new entry is determined (copied from the input entry vs. newly assigned).
-  - Impact: This affects ordering by timestamp and the determination of “most recent transaction,” which in turn affects prev_hash* semantics.
-
-- “main ledger” scope/identity
-  - add_entry refers to committing to “the main ledger,” but the specification does not define how the main ledger is identified or updated in the broader system (e.g., how the returned new ledger becomes “the main” one).
-  - Impact: Externally observable system behavior (which ledger is authoritative) is unclear without additional context.
+- Function: create_entry input “source (including None)”
+  - Inference: Optional source account identifier (e.g., Option<i32>)
+  - Basis: Explicit mention of “including None” for source
 
 Implementation Choices Left Open
-- Non-blocking: Concrete collection type for the sequence returned by get_entries_for (e.g., vector, list)
-- Non-blocking: Mechanism for representing an “immutable reference” to the previous ledger (pointer, handle, persistent structure)
-- Non-blocking: Internal storage and traversal strategy for finding “previous ledger entry” for an account (e.g., scan via tail chain vs. indexes)
-- Non-blocking: Error typing/details inside anyhow::Result (error variants/messages are not specified)
-- Non-blocking: How the system tracks or updates which ledger instance is the “main ledger” after add_entry (outside the Ledger type’s own behavior)
+- Non-blocking: Exact collection type used for “all ledger entries” (e.g., vector, list, iterator)
+- Non-blocking: Exact representation of the immutable reference for tail (language- and runtime-specific)
+- Non-blocking: Signature details (parameter names, ownership/borrowing, error variants) so long as the described behavior and constraints are met
+- Non-blocking: Concrete time source and library for utc.now, provided it yields a UTC timestamp consistent with the stated behavior
+- Non-blocking: Internal traversal and storage mechanics of the ledger chain (beyond head/tail semantics)
+- Non-blocking: Sorting implementation details given that timestamps are unique per account as stated (no tie-breaking required)

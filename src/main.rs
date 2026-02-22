@@ -22,6 +22,9 @@ enum Commands {
     #[command(subcommand)]
     Create(CreateCommands),
 
+    #[command(subcommand)]
+    Check(CheckCommands),
+
     #[command(about = "Compile the generated project using cargo build")]
     Compile,
 
@@ -110,6 +113,15 @@ enum CreateCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum CheckCommands {
+    #[command(about = "Check generated specifications for existence and blocking ambiguities", alias = "specifications")]
+    Specification {
+        #[arg(help = "Optional list of draft names (without .md extension)")]
+        names: Vec<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -130,6 +142,13 @@ async fn main() -> Result<()> {
                 }
                 CreateCommands::Tests { names } => {
                     cli::create_tests(names, &config).await?;
+                }
+            }
+        }
+        Commands::Check(check_cmd) => {
+            match check_cmd {
+                CheckCommands::Specification { names } => {
+                    cli::check_specification(names, &config).await?;
                 }
             }
         }

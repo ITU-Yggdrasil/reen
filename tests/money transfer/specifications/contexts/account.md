@@ -2,54 +2,67 @@
 
 ## Props
 - account_id
-  - The id of the account.
-  - The value is a positive integer.
+  - A positive integer identifying the account.
 - Ledger
-  - The main ledger of the system used for all calculations and retrievals described below.
+  - The main ledger of the system associated with the account.
 
 ## Functionality
 
 - balance
-  - Definition: A calculated property.
-  - Computation: sum of amounts of all transactions on the Ledger where the account_id is the sink, minus the sum of amounts of all transactions on the Ledger where the account_id is the source.
+  - The balance of an account is a calculated property.
+  - Definition: sum of the amounts of all transactions on the Ledger where the account_id is the sink minus the sum of the amounts of all transactions on the Ledger where the account_id is the source.
 
 - currency
-  - Constraint: All ledger entries for an account must be in the same currency.
-  - Value: Either None or the currency of previous ledger entries where the account is source or sink (which are all the same due to the above constraint).
+  - All ledger entries for an account must be in the same currency.
+  - The value is either None or the currency of previous ledger entries where the account is source or sink, which would all have the same currency due to this constraint.
 
 - account_id
   - Returns the id of the account.
 
 - transactions
-  - Returns all ledger entries related to the account (entries where the account_id is either sink or source).
-  - Sorting: By transactions date, descending.
+  - Returns all ledger entries related to the account (entries where the account_id is sink or source), sorted by transactions date, descending.
 
 - new
   - Accepts an account id and the Ledger.
-  - If at least one ledger entry for the account exists on the Ledger, a result of an account object is returned.
-  - If no ledger entry for the account exists on the Ledger, an Error is returned.
+  - At least one entry for the account must exist on the Ledger; if not, an Error is returned.
+  - If at least one ledger entry exists, a result of an account object is returned.
 
 ## Business rules
 - currency
   - The currency of an account is immutable. Once it is defined (by the first ledger entry), it can't be changed.
 
+## References to Direct Dependencies (contextual, non-normative)
+- Ledger
+  - Provides get_entries_for(account number) returning entries where the account is either sink or source, sorted ascending by timestamps.
+- LedgerEntry
+  - Contains sink, source, amount, and timestamp, among other fields.
+- Currency
+  - The currency type is an enum of active ISO 4217 currency codes.
+
 Inferred Types or Structures (Non-Blocking)
-- currency (Functionality → currency)
-  - Inference: Optional value (None or a currency value), i.e., an option-like type holding a currency value when defined.
-  - Basis: The draft explicitly states “This is either None or the currency of previous ledger entries...”
-- transactions (Functionality → transactions)
-  - Inference: A sequence/list of LedgerEntry items.
-  - Basis: The draft says it “returns all ledger entries related to the account,” which conventionally implies a collection of LedgerEntry values.
-- transactions sorting key (Functionality → transactions)
-  - Inference: “transactions date” corresponds to the timestamp field of ledger entries.
-  - Basis: In the direct dependency context, LedgerEntry exposes a timestamp. No other “date” field is defined.
+- Location: Props.account_id
+  - Inference: account_id is of type i32 and must be positive.
+  - Basis: Ledger.get_entries_for is “provided an account number (i32)”; the draft states “the id of the account is a positive integer.”
+
+- Location: Functionality.currency
+  - Inference: Return type is Option<Currency> (either None or some currency).
+  - Basis: The draft states “This is either None or the currency of previous ledger entries,” and direct dependency defines a Currency enum.
+
+- Location: Functionality.transactions
+  - Inference: Returns a sequence/list of LedgerEntry values sorted by timestamp descending.
+  - Basis: The draft says “returns all ledger entries related to the account, sorted by transactions date, descending.” LedgerEntry defines a timestamp; Ledger defines entries and their sort order (ascending) for get_entries_for, implying timestamp is the sortable “transactions date.”
+
+- Location: Functionality.balance
+  - Inference: The balance is expressed in the same amount type as LedgerEntry.amount.
+  - Basis: The balance is defined as sums of “amount” values from ledger entries; LedgerEntry.amount is the only defined amount type.
+
+- Location: Functionality.new
+  - Inference: Returns a Result-like value (Ok with an account object, or Error).
+  - Basis: The draft states “If at least one ledger entry exist a result of an account object is returned” and “if not an Error is returned,” matching a conventional Result pattern used elsewhere in the direct dependencies.
 
 Implementation Choices Left Open (Non-Blocking)
-- Exact integer width for account_id
-  - The draft specifies “positive integer” while the direct dependency Ledger.get_entries_for uses i32. Implementations may choose a concrete integer type compatible with Ledger.
-- Error/result mechanics of new
-  - The draft states that an Error is returned when no entries exist and that otherwise a result of an account object is returned, without fixing a concrete error or result type.
-- Balance numeric accumulation details
-  - The draft defines balance as a difference of sums over amounts but does not fix the concrete numeric/amount type or precision; implementations should use the same semantics as the underlying amount type used by LedgerEntry.
-- Retrieval mechanism for transactions
-  - The draft requires that transactions be all ledger entries related to the account and sorted descending by transactions date; the mechanism (e.g., using Ledger.get_entries_for and re-sorting) is left to the implementation.
+- How Account holds Ledger (owning vs referencing, copying vs sharing) is not specified.
+- Exact error/result type and error payload for new (e.g., error kind/message) are not specified.
+- Concrete collection type returned by transactions (e.g., list/array/iterator) is not specified.
+- Exact numeric/precision semantics for amount arithmetic are not specified here (the amount type is referenced from LedgerEntry).
+- Mechanism for sorting (stability, tie-breaking) is implementation-defined; Ledger states duplicate timestamps for the same account cannot happen.

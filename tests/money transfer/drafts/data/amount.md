@@ -14,3 +14,4 @@ A data type representing an amount of a currency.
 - **major** returns the amount / 100 (intger division) as an u64
 - **minor** returns the amount modulo 100 as a u16
 - **to_str** format: "{major}.{minor} {currency.to_str()}" minor should be zero padded if less that 10
+- **get_currency** returns the currency

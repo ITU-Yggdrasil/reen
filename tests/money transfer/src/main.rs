@@ -1,74 +1,17 @@
 use std::process;
 
-mod contexts;
-mod types;
-
-use contexts::{Account, MoneyTransfer};
-use types::{Currency, Ledger, LedgerEntry};
-
 fn main() {
-    if let Err(err) = run() {
-        if !err.is_empty() {
-            eprintln!("{}", err);
-        }
-        process::exit(42);
-    }
-    process::exit(0);
-}
+    let msg = "ERROR: Cannot implement specification as written.
 
-fn run() -> Result<(), String> {
-    // Initial state setup
-    let account1_id: i64 = 123456;
-    let account2_id: i64 = 654321;
+Problem: The application must create initial ledger entries, but the public API from dependencies does not provide a way to construct the first LedgerEntry or an initial Ledger without an existing head entry. Ledger::create_entry requires a current head entry to supply prev_hash, and LedgerEntry::create is specified as pub(crate), making it inaccessible to the application binary. Ledger::new requires an already-created entry.
 
-    // Interpret "1000" as 1000 whole currency units (DKK), convert to minor units (1/100)
-    let initial_amount_minor = 1000_i64
-        .checked_mul(100)
-        .ok_or_else(|| "Amount overflow when converting to minor units".to_string())?;
+Required:
+- Provide a public factory to create the first (genesis) entry or an empty Ledger, or
+- Make LedgerEntry::create public, or
+- Provide a Ledger::bootstrap or Ledger::create_genesis_entry function, or
+- Provide another documented path for constructing the initial ledger entries from the application.
 
-    let initial_entry_1 = LedgerEntry::new(
-        None,                           // source: None signifies a cash deposit
-        Some(account1_id),              // sink: account 123456
-        initial_amount_minor,           // amount in minor units
-        Currency::DKK,
-    )?;
-
-    // Create a new ledger with the first initial entry
-    let mut ledger = Ledger::new(initial_entry_1);
-
-    // Add the second initial entry for account 654321
-    let initial_entry_2 = LedgerEntry::new(
-        None,                           // source: None signifies a cash deposit
-        Some(account2_id),              // sink: account 654321
-        initial_amount_minor,           // amount in minor units
-        Currency::DKK,
-    )?;
-    ledger = ledger.add_entry(initial_entry_2);
-
-    // Construct accounts bound to the current main ledger
-    let source_account = Account::new(account1_id.to_string(), ledger.clone());
-    let sink_account = Account::new(account2_id.to_string(), ledger.clone());
-
-    // Execute money transfer: 250 DKK from 123456 to 654321
-    let transfer = MoneyTransfer::new(source_account, sink_account, 250.0_f64, Currency::DKK, ledger)?;
-    let updated_ledger = transfer.execute()?;
-
-    // After completing the transfer, print the account transactions for each account
-    print_account_transactions(&updated_ledger, account1_id)?;
-    print_account_transactions(&updated_ledger, account2_id)?;
-
-    Ok(())
-}
-
-fn print_account_transactions(ledger: &Ledger, account_id: i64) -> Result<(), String> {
-    // Expect get_entries_for to return entries where this account is either sink or source,
-    // sorted by commit timestamp (ascending or defined by implementation).
-    let entries = ledger.get_entries_for(account_id);
-
-    for (entry, date) in entries {
-        // Each line: {date} - { entry.print() }
-        println!("{} - {}", date, entry.print());
-    }
-
-    Ok(())
+Once clarified, the application can initialize the two accounts, perform the transfer, and print transactions as specified.";
+    eprintln!("{}", msg);
+    process::exit(42);
 }

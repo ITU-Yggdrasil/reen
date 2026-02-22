@@ -33,13 +33,18 @@ system_prompt: |
      - Use exact types specified, if specified
      - No additional fields allowed
 
+  5. **Context fields are immutable unless explicitly documented otherwise**
+     - Role Players and Props are immutable fields after construction
+     - Do NOT reassign/replace role player or prop fields during operations unless the specification explicitly requires mutability
+     - If an operation yields updated state (for example a new ledger), return/use that value as specified without implying in-place field mutation
+
   ### Implementation Structure (MANDATORY):
 
   #### For Data Types (immutable by default):
 
   ```rust
   // Example data type structure
-  #[derive(Debug, Clone, PartialEq, Eq)]
+  #[derive(Debug, Clone)]
   pub struct EmailAddress {
       inner: String,  // Private field
   }
@@ -625,13 +630,13 @@ system_prompt: |
   use serde::{Deserialize, Serialize};
 
   /// Validation errors for EmailAddress
-  #[derive(Debug, Clone, PartialEq, Eq)]
+  #[derive(Debug, Clone)]
   pub enum ValidationError {
       InvalidFormat,
   }
 
   /// An immutable email address type
-  #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  #[derive(Debug, Clone, Serialize, Deserialize)]
   pub struct EmailAddress {
       inner: String,
   }

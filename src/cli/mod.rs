@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::fs;
 use std::process::Command;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 mod agent_executor;
@@ -44,6 +44,7 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
+    let mut updated_in_run: HashSet<String> = HashSet::new();
     let mut executors: HashMap<String, Arc<AgentExecutor>> = HashMap::new();
 
     for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
@@ -75,16 +76,24 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
                 for node in nodes {
                     let draft_file = node.input_path.clone();
                     let draft_name = node.name.clone();
+                    let dependency_invalidated = node
+                        .direct_dependency_names()
+                        .iter()
+                        .any(|dep_name| updated_in_run.contains(dep_name));
                     let output_path =
                         determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
                     progress.start_item(&draft_name);
 
-                    let needs_update = tracker.needs_update(
-                        Stage::Specification,
-                        &draft_name,
-                        &draft_file,
-                        &output_path,
-                    )?;
+                    let needs_update = if dependency_invalidated {
+                        true
+                    } else {
+                        tracker.needs_update(
+                            Stage::Specification,
+                            &draft_name,
+                            &draft_file,
+                            &output_path,
+                        )?
+                    };
                     if !needs_update {
                         if config.verbose {
                             println!("⊚ Skipping {} (up to date)", draft_name);
@@ -123,6 +132,7 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
                         Ok(_) => {
                             tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
                             updated_count += 1;
+                            updated_in_run.insert(draft_name.clone());
                             progress.complete_item(&draft_name, true);
                             if config.verbose {
                                 println!("✓ Successfully created specification for {}", draft_name);
@@ -138,16 +148,24 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
                 for node in nodes {
                     let draft_file = node.input_path.clone();
                     let draft_name = node.name.clone();
+                    let dependency_invalidated = node
+                        .direct_dependency_names()
+                        .iter()
+                        .any(|dep_name| updated_in_run.contains(dep_name));
                     let output_path =
                         determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
                     progress.start_item(&draft_name);
-                    let needs_update = tracker.needs_update(
-                        Stage::Specification,
-                        &draft_name,
-                        &draft_file,
-                        &output_path,
-                    )?;
+                    let needs_update = if dependency_invalidated {
+                        true
+                    } else {
+                        tracker.needs_update(
+                            Stage::Specification,
+                            &draft_name,
+                            &draft_file,
+                            &output_path,
+                        )?
+                    };
                     if !needs_update {
                         if config.verbose {
                             println!("⊚ Skipping {} (up to date)", draft_name);
@@ -169,6 +187,7 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
                         Ok(_) => {
                             tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
                             updated_count += 1;
+                            updated_in_run.insert(draft_name.clone());
                             progress.complete_item(&draft_name, true);
                             if config.verbose {
                                 println!("✓ Successfully created specification for {}", draft_name);
@@ -193,6 +212,71 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
         println!("All specifications are up to date");
     }
 
+    Ok(())
+}
+
+pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result<()> {
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md")?;
+    if draft_files.is_empty() {
+        println!("No draft files found to process");
+        return Ok(());
+    }
+
+    let tracker = BuildTracker::load()?;
+    let mut issues = 0usize;
+    println!("Checking specifications for {} draft(s)", draft_files.len());
+
+    for draft_file in draft_files {
+        let draft_name = draft_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .context("Invalid draft filename")?;
+        let spec_path =
+            determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+
+        if !spec_path.exists() {
+            issues += 1;
+            eprintln!("error[spec:missing]:");
+            eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
+            eprintln!("  Missing specification artifact for '{}'.", draft_name);
+            eprintln!("  Expected at: {}", spec_path.display());
+            if tracker.has_track(Stage::Specification, &draft_name) {
+                eprintln!(
+                    "  note: Build tracker contains a cache entry for '{}'; artifact may have been removed after generation.",
+                    draft_name
+                );
+            }
+            eprintln!();
+            continue;
+        }
+
+        let spec_content = fs::read_to_string(&spec_path)
+            .with_context(|| format!("Failed to read specification file: {}", spec_path.display()))?;
+        if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
+            let actionable = extract_actionable_blocking_bullets(&blocking);
+            if !actionable.is_empty() {
+                issues += 1;
+                eprintln!("error[spec:blocking]:");
+                eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
+                eprintln!(
+                    "  Blocking Ambiguities detected in specification for '{}'.",
+                    draft_name
+                );
+                eprintln!();
+                for bullet in actionable {
+                    eprintln!("  {}", bullet);
+                }
+                eprintln!();
+            }
+        }
+    }
+
+    if issues > 0 {
+        anyhow::bail!("Specification check failed with {} issue(s).", issues);
+    }
+
+    println!("✓ Specifications check passed");
     Ok(())
 }
 
@@ -311,6 +395,7 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
+    let mut updated_in_run: HashSet<String> = HashSet::new();
     let mut had_unspecified = false;
     for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
         if config.verbose {
@@ -321,6 +406,10 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
         for node in level_nodes {
             let context_file = node.input_path.clone();
             let context_name = node.name.clone();
+            let dependency_invalidated = node
+                .direct_dependency_names()
+                .iter()
+                .any(|dep_name| updated_in_run.contains(dep_name));
             let output_path = determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
             progress.start_item(&context_name);
 
@@ -330,12 +419,16 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
                 continue;
             }
 
-            let needs_update = tracker.needs_update(
-                Stage::Implementation,
-                &context_name,
-                &context_file,
-                &output_path,
-            )?;
+            let needs_update = if dependency_invalidated {
+                true
+            } else {
+                tracker.needs_update(
+                    Stage::Implementation,
+                    &context_name,
+                    &context_file,
+                    &output_path,
+                )?
+            };
 
             if !needs_update {
                 if config.verbose {
@@ -375,6 +468,7 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
                     Ok(_) => {
                         tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
                         updated_count += 1;
+                        updated_in_run.insert(context_name.clone());
                         progress.complete_item(&context_name, true);
                         if config.verbose {
                             println!("✓ Successfully created implementation for {}", context_name);
@@ -406,6 +500,7 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
                     Ok(_) => {
                         tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
                         updated_count += 1;
+                        updated_in_run.insert(context_name.clone());
                         progress.complete_item(&context_name, true);
                         if config.verbose {
                             println!("✓ Successfully created implementation for {}", context_name);

@@ -10,7 +10,6 @@
 /// The test is marked as ignored because it requires API keys and takes longer to run.
 
 use std::process::Command;
-use std::path::Path;
 use std::fs;
 
 #[test]

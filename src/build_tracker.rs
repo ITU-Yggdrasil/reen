@@ -249,6 +249,15 @@ impl BuildTracker {
 
         removed
     }
+
+    /// Returns true if the tracker has an entry for a given stage/name.
+    pub fn has_track(&self, stage: Stage, name: &str) -> bool {
+        let stage_key = format!("{:?}", stage);
+        self.tracks
+            .get(&stage_key)
+            .and_then(|m| m.get(name))
+            .is_some()
+    }
 }
 
 #[cfg(test)]

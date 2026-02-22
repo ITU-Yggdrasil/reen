@@ -194,7 +194,7 @@ create_implementation:
     #[test]
     fn test_parse_empty_registry() {
         let yaml = "";
-        let result = parse_registry(yaml);
+        let result = parse_registry(yaml, "default", false); 
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }

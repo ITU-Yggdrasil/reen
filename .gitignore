@@ -4,3 +4,5 @@ target/
 .env
 .DS_Store
 *.lock
+tests/**/specifications/
+tests/**/src/

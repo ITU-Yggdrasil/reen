@@ -30,6 +30,10 @@ pub struct ExecutionNode {
 }
 
 impl ExecutionNode {
+    pub fn direct_dependency_names(&self) -> Vec<String> {
+        self.direct_dependencies.iter().map(|d| d.name.clone()).collect()
+    }
+
     pub fn resolve_direct_dependencies(&self) -> Result<Vec<DependencyArtifact>> {
         let mut resolved = Vec::new();
         let mut seen = HashSet::new();
