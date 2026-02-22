@@ -10,7 +10,7 @@ Reen is a meta-development tool that uses AI agents to transform draft documents
 2. **Specifications** → Implementation (via `create_implementation` agent)
 3. **Specifications** → Tests (via `create_test` agent)
 
-**Key Features:**
+**Key Features**
 - 🚀 **Incremental builds** - Only regenerates changed files
 - 📦 **Smart caching** - Tracks file hashes to skip unnecessary work
 - 🔗 **Dependency tracking** - Automatically detects when upstream files change

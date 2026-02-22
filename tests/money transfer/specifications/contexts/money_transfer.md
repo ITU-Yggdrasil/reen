@@ -1,77 +1,75 @@
 # Money transfer
 
 ## Description
-The money transfer is a context where two accounts play the roles of sink and source. An amount is transferred from the source to the sink.
+The Money transfer is a context where two accounts play the roles of sink and source. An amount will be transferred from the source to the sink.
 
 ## Role Players
 - source: the account that serves as the source of the funds to be transferred
-  - Must have an account_id: String field
+  - Must have an account_id field
 - sink: the account that serves as the destination for the funds to be transferred
-  - Must have an account_id: String field
+  - Must have an account_id field
 
 ## Props
-- amount: the amount to be transferred (f64, positive)
-- currency: The currency to be transferred (Currency enum, not String)
+- amount: the amount to be transferred between the accounts
 - ledger: the main ledger of the system (Ledger type)
 
 ## Role Methods
 
 ### source
 - withdraw
-  - Returns: Result<LedgerEntry, String>
-  - Purpose: Creates a ledger entry for the withdrawal from the source account
+  - Creates a ledger entry for the source account with the amount specified by the amount prop.
+  - Returns: anyhow::Result<LedgerEntry>
 
 ### sink
 - deposit
-  - Parameters: entry: LedgerEntry, ledger: &Ledger
-  - Returns: Result<LedgerEntry, String>
-  - Purpose: Receives the ledger entry with the sink set to None and settles the transaction (by means of the ledger entry method)
+  - Uses the ledger to settle the ledger entry created by the withdrawal operation. That way, a ledger entry representing the complete transfer is created.
+  - Returns: anyhow::Result<LedgerEntry>
 
 ## Functionality
 
+- new
+  - Receives the account id for sink and source (and constructs the corresponding account objects). The amount to transfer and the ledger are also passed. If no relevant business rules are violated, Money Transfer context is returned; otherwise, an error is returned.
+
 - Transfer
-  - Execute: MoneyTransfer::execute(self) -> Result<Ledger, String>
+  - Executes the transfer by calling withdraw and deposit and then adding the resulting ledger entry to the main ledger.
   - Workflow:
-    1. Call source.withdraw(amount, currency_str, &ledger) which returns Result<LedgerEntry, String>
-    2. If withdraw succeeds, add the returned entry to the ledger: ledger = ledger.add_entry(withdraw_entry)
-    3. Create an unsettled entry for the deposit (or construct it based on the withdraw entry)
-    4. Call sink.deposit(unsettled_entry, &ledger) which returns Result<LedgerEntry, String>
-    5. If deposit succeeds, add the returned entry to the ledger: ledger = ledger.add_entry(deposit_entry)
-    6. Return Ok(ledger) with the updated ledger containing both entries
-  - Purpose: Executes the transfer by calling withdraw and deposit and then adding both ledger entries to the main ledger. The business rules/invariants should be delegated to the role methods. This should be a clear implementation of the business logic/use case.
-  - Business rules: If the transfer can't be complete due to violation of business rules a proper error should be returned. Business rules include:
-    - All business rules that apply to an account including
-      - monthly transfer limits for the source account that is the amount must be less than or equal to remaining_monthly_limit
-    - that the transferred amount can't exceed the present balance of the source account
-    - that the sink and source must have the same currency, this should be check when trying to construct the money trasfer context
+    1. Call source.withdraw.
+    2. If withdraw succeeds, call sink.deposit.
+    3. If deposit succeeds, add the returned entry to the ledger.
+    4. If adding the ledger entry to the ledger succeeds, result the newly created ledger.
+  - Business rules: If the transfer cannot be completed due to violation of business rules, a proper error should be returned. Business rules include:
+    - All business rules that apply to an account.
+    - That the transferred amount cannot exceed the present balance of the source account.
 
-Inferred Types or Structures (Non-Blocking)
-- Location: Role Methods > sink > deposit; Functionality > Transfer > Workflow step 3
-  - Inference: unsettled entry refers to a LedgerEntry with sink set to None
-  - Basis: The deposit method states it receives a ledger entry “with the sink set to None” and “settles the transaction,” which aligns with the Ledger Entry settle description where unsettled means sink is None.
-- Location: Mentions of None for sink/source in relation to LedgerEntry
-  - Inference: None denotes the absence of a value in an Option-like type for sink/source
-  - Basis: Conventional meaning of None and the referenced Ledger Entry properties (sink: Option<integer>, sourc:e Option<integer>) in the direct dependency context
+## Inferred Types or Structures (Non-Blocking)
+- Location: Props.amount
+  - Inference: amount is the data type named amount (as defined in the referenced dependency), not a plain numeric.
+  - Basis: The draft references a data type called amount in the direct dependencies; Money transfer uses “amount” as a named prop consistently.
 
-Unspecified or Ambiguous Aspects
-- source.withdraw parameters
-  - The Role Methods section specifies only the return type and purpose. The Workflow calls source.withdraw(amount, currency_str, &ledger). The definitive parameter list and types for withdraw are not specified in Role Methods.
-- currency type mismatch in withdraw call
-  - Props.currency is “Currency enum, not String,” while the Workflow calls source.withdraw with currency_str. The expected type for the currency argument in withdraw is ambiguous.
-- account_id type mismatch
-  - Role Players require account_id: String for source and sink. The direct dependency context “Account” states account_id is a positive integer. The authoritative type to use within this context is ambiguous.
-- Construction of unsettled_entry (Workflow step 3)
-  - It states “Create an unsettled entry for the deposit (or construct it based on the withdraw entry).” The exact construction method, required fields, and whether it must be derived from withdraw_entry or created independently are not specified.
-- Withdraw output structure regarding sink/source
-  - The deposit method expects an entry “with the sink set to None,” but it is not specified whether source.withdraw returns such an entry or whether additional transformation is needed before deposit.
-- Amount representation mismatch
-  - Props.amount is f64 (positive). The direct dependency context for Ledger Entry specifies amount is an integer representing 1/100 of the currency unit. Conversion or mapping between f64 and the integer minor unit for LedgerEntry is not specified.
-- Error handling and ledger state on failure paths
-  - The Workflow describes successful paths for adding entries and returning Ok(ledger). It does not specify:
-    - What is returned if source.withdraw fails.
-    - What is returned if sink.deposit fails.
-    - Whether the ledger should reflect only the withdraw entry if deposit fails, or any compensating action is expected. The resulting ledger state on failure is not defined.
-- Timing of the “same currency” check
-  - It is stated that “the sink and source must have the same currency, this should be check when trying to construct the money trasfer context.” The mechanism, inputs, and exact point of this construction-time check are not defined within this context.
-- Delegation of business rules to role methods
-  - It is stated that business rules/invariants “should be delegated to the role methods,” but which specific rules are enforced by source.withdraw versus sink.deposit is not specified.
+- Location: Role Methods → source.withdraw result
+  - Inference: The LedgerEntry created by withdraw is an “unsettled” entry with sink == None.
+  - Basis: sink.deposit is described as using the ledger to “settle the ledger entry created by the withdrawal operation,” which matches the Ledger.settle behavior that requires an entry where sink is None.
+
+- Location: Functionality → Transfer return value
+  - Inference: Transfer returns a newly created Ledger (i.e., the result of adding the ledger entry to the ledger), wrapped in a success result.
+  - Basis: Workflow step 4 states “result the newly created ledger” after adding the entry; Ledger.add_entry returns a new ledger.
+
+- Location: Role Players → source.account_id and sink.account_id
+  - Inference: account_id is an integer (i32).
+  - Basis: The Ledger dependency uses i32 for account numbers (get_entries_for), and the Account dependency describes account_id as a positive integer. The conventional integer default in the dependencies is i32.
+
+## Blocking Ambiguities
+- Functionality → Transfer return type
+  - The exact return type is not explicitly specified. The workflow implies returning the newly created ledger, but the signature and error type are not defined. This affects the externally observable behavior of the Transfer function.
+
+- Role Methods → sink.deposit inputs
+  - It is not specified how sink.deposit receives or identifies “the ledger entry created by the withdrawal operation.” Whether it is passed as an argument, retrieved from state, or otherwise obtained is not defined, which affects the externally observable method contract.
+
+- Functionality → new return type
+  - The exact return type for new is not specified (e.g., whether it returns a result type and what the success value is named/typed), beyond stating that either “Money Transfer context is returned” or “an error is returned.” This affects the externally observable behavior of new.
+
+## Implementation Choices Left Open (Non-Blocking)
+- Internal representation of the Money transfer context object.
+- How the created ledger (from adding the entry) is made available beyond the function return (if any).
+- Error value structure and message formatting, provided that errors are returned when business rules are violated (the draft does not mandate a specific error taxonomy or format).
+- Concrete mechanics for passing or referencing the withdrawal-created ledger entry into sink.deposit, as long as the behavior matches the described workflow and externally observable outcomes.

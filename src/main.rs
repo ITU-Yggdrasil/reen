@@ -41,28 +41,52 @@ enum Commands {
 #[derive(Subcommand)]
 enum ClearCommands {
     #[command(subcommand, about = "Clear cached build-tracker entries for a stage")]
-    Cache(ClearTargets),
+    Cache(ClearCacheTargets),
 
-    #[command(about = "Remove generated specification artifacts", alias = "specifications")]
-    Specification,
-
-    #[command(about = "Remove generated implementation artifacts", alias = "implementations")]
-    Implementation,
-
-    #[command(about = "Remove generated test artifacts", alias = "test")]
-    Tests,
+    #[command(subcommand, about = "Remove generated artifacts", alias = "artifact")]
+    Artefact(ClearArtifactTargets),
 }
 
 #[derive(Subcommand)]
-enum ClearTargets {
+enum ClearCacheTargets {
     #[command(about = "Clear specification cache entries", alias = "specifications")]
-    Specification,
+    Specification {
+        #[arg(help = "Optional list of names to clear (without .md extension)")]
+        names: Vec<String>,
+    },
 
     #[command(about = "Clear implementation cache entries", alias = "implementations")]
-    Implementation,
+    Implementation {
+        #[arg(help = "Optional list of names to clear (without .md extension)")]
+        names: Vec<String>,
+    },
 
     #[command(about = "Clear test cache entries", alias = "test")]
-    Tests,
+    Tests {
+        #[arg(help = "Optional list of names to clear (without .md extension)")]
+        names: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClearArtifactTargets {
+    #[command(about = "Clear specification artifacts", alias = "specifications")]
+    Specification {
+        #[arg(help = "Optional list of names to clear (without .md extension)")]
+        names: Vec<String>,
+    },
+
+    #[command(about = "Clear implementation artifacts", alias = "implementations")]
+    Implementation {
+        #[arg(help = "Optional list of names to clear (without .md extension)")]
+        names: Vec<String>,
+    },
+
+    #[command(about = "Clear test artifacts", alias = "test")]
+    Tests {
+        #[arg(help = "Optional list of names to clear (without .md extension)")]
+        names: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -121,25 +145,27 @@ async fn main() -> Result<()> {
         Commands::Clear(clear_cmd) => {
             match clear_cmd {
                 ClearCommands::Cache(target) => match target {
-                    ClearTargets::Specification => {
-                        cli::clear_cache("specification", &config).await?;
+                    ClearCacheTargets::Specification { names } => {
+                        cli::clear_cache("specification", names, &config).await?;
                     }
-                    ClearTargets::Implementation => {
-                        cli::clear_cache("implementation", &config).await?;
+                    ClearCacheTargets::Implementation { names } => {
+                        cli::clear_cache("implementation", names, &config).await?;
                     }
-                    ClearTargets::Tests => {
-                        cli::clear_cache("tests", &config).await?;
+                    ClearCacheTargets::Tests { names } => {
+                        cli::clear_cache("tests", names, &config).await?;
                     }
                 },
-                ClearCommands::Specification => {
-                    cli::clear_artifacts("specification", &config).await?;
-                }
-                ClearCommands::Implementation => {
-                    cli::clear_artifacts("implementation", &config).await?;
-                }
-                ClearCommands::Tests => {
-                    cli::clear_artifacts("tests", &config).await?;
-                }
+                ClearCommands::Artefact(target) => match target {
+                    ClearArtifactTargets::Specification { names } => {
+                        cli::clear_artifacts("specification", names, &config).await?;
+                    }
+                    ClearArtifactTargets::Implementation { names } => {
+                        cli::clear_artifacts("implementation", names, &config).await?;
+                    }
+                    ClearArtifactTargets::Tests { names } => {
+                        cli::clear_artifacts("tests", names, &config).await?;
+                    }
+                },
             }
         }
     }

@@ -219,17 +219,26 @@ async fn process_specification(
     // Determine output path preserving folder structure
     let output_path = determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
-    // Report Unspecified or Ambiguous Aspects immediately if present in generated spec
-    if let Some(unspecified) = extract_unspecified_or_ambiguous_section(&spec_content) {
-        eprintln!("error[spec:unspecified]:");
-        // Print file path in red on its own line
-        eprintln!("\u{001b}[31m{}\u{001b}[0m", output_path.display());
-        eprintln!("  Unspecified or Ambiguous Aspects detected in generated specification for '{}'.", draft_name);
-        eprintln!();
-        for line in unspecified.lines() {
-            eprintln!("  {}", line);
+    let mut has_blocking_ambiguities = false;
+
+    // Report Blocking Ambiguities immediately if present in generated spec
+    if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
+        let actionable = extract_actionable_blocking_bullets(&blocking);
+        if !actionable.is_empty() {
+            has_blocking_ambiguities = true;
+            eprintln!("error[spec:blocking]:");
+            // Print source input path (draft) so IDEs can navigate to where fixes are needed.
+            eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
+            eprintln!(
+                "  Blocking Ambiguities detected in generated specification for '{}'.",
+                draft_name
+            );
+            eprintln!();
+            for bullet in actionable {
+                eprintln!("  {}", bullet);
+            }
+            eprintln!();
         }
-        eprintln!();
     }
     
     // Ensure the output directory exists
@@ -240,6 +249,10 @@ async fn process_specification(
     
     fs::write(&output_path, spec_content)
         .context("Failed to write specification file")?;
+
+    if has_blocking_ambiguities {
+        anyhow::bail!("generated specification contains blocking ambiguities");
+    }
 
     Ok(())
 }
@@ -513,9 +526,8 @@ fn extract_code_from_output(output: &str, _context_name: &str) -> String {
     trimmed.to_string()
 }
 
-/// Extracts the content of the "Unspecified or Ambiguous Aspects" section from markdown content.
-/// Returns None if the section is not present.
-fn extract_unspecified_or_ambiguous_section(content: &str) -> Option<String> {
+/// Extracts the content of a markdown/plain section by exact title.
+fn extract_section(content: &str, section_title: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut start_idx: Option<usize> = None;
 
@@ -524,9 +536,9 @@ fn extract_unspecified_or_ambiguous_section(content: &str) -> Option<String> {
         let is_markdown_header = trimmed
             .strip_prefix('#')
             .map(|s| s.trim())
-            .map(|s| s.eq_ignore_ascii_case("Unspecified or Ambiguous Aspects"))
+            .map(|s| s.eq_ignore_ascii_case(section_title))
             .unwrap_or(false);
-        let is_plain_header = trimmed.eq_ignore_ascii_case("Unspecified or Ambiguous Aspects");
+        let is_plain_header = trimmed.eq_ignore_ascii_case(section_title);
         if is_markdown_header || is_plain_header {
             start_idx = Some(i + 1);
             break;
@@ -537,7 +549,10 @@ fn extract_unspecified_or_ambiguous_section(content: &str) -> Option<String> {
     let mut section_lines = Vec::new();
     for line in lines.iter().skip(start) {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') || is_numbered_section_heading(trimmed) {
+        if trimmed.starts_with('#')
+            || is_numbered_section_heading(trimmed)
+            || (is_known_section_title(trimmed) && !trimmed.eq_ignore_ascii_case(section_title))
+        {
             break;
         }
         section_lines.push(*line);
@@ -545,6 +560,33 @@ fn extract_unspecified_or_ambiguous_section(content: &str) -> Option<String> {
 
     let section = section_lines.join("\n").trim().to_string();
     if section.is_empty() { None } else { Some(section) }
+}
+
+fn is_known_section_title(line: &str) -> bool {
+    const TITLES: &[&str] = &[
+        "Description",
+        "Type Kind (Struct / Enum / NewType / Unspecified)",
+        "Type Kind (Struct / Enum / NewType / **Unspecified**)",
+        "Mutability (Immutable / Mutable)",
+        "Properties",
+        "Functionalities",
+        "Constraints & Rules",
+        "Inferred Types or Structures",
+        "Inferred Types or Structures (Non-Blocking)",
+        "Blocking Ambiguities",
+        "Implementation Choices Left Open",
+        "Implementation Choices Left Open (Non-Blocking)",
+        "Resolved From Dependencies",
+        "Worth to Consider",
+        "Unspecified or Ambiguous Aspects",
+    ];
+    TITLES.iter().any(|t| line.eq_ignore_ascii_case(t))
+}
+
+/// Extracts the content of the "Blocking Ambiguities" section from markdown content.
+/// Returns None if the section is not present.
+fn extract_blocking_ambiguities_section(content: &str) -> Option<String> {
+    extract_section(content, "Blocking Ambiguities")
 }
 
 fn is_numbered_section_heading(line: &str) -> bool {
@@ -555,32 +597,122 @@ fn is_numbered_section_heading(line: &str) -> bool {
     )
 }
 
-fn extract_bullets(section: &str) -> Vec<String> {
-    section
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty())
-        .filter(|l| {
-            l.starts_with("- ")
-                || l.starts_with("* ")
-                || (l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) && l.contains('.'))
-        })
-        .map(|l| l.to_string())
+fn extract_bullets_with_indent(section: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for line in section.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+        let trimmed = line.trim_start();
+        let is_bullet = trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || (trimmed
+                .chars()
+                .next()
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false)
+                && trimmed.contains('.'));
+        if !is_bullet {
+            continue;
+        }
+        out.push((indent, trimmed.to_string()));
+    }
+    out
+}
+
+fn is_language_or_paradigm_specific_detail(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    let markers = [
+        "&str",
+        "string vs",
+        "result<",
+        "anyhow",
+        "serde",
+        "chrono",
+        "derive",
+        "macro",
+        "trait",
+        "ownership",
+        "borrowing",
+        "parameter names",
+        "parameter passing",
+        "signature",
+        "placeholder",
+        "debug-format",
+        "debug format",
+        "crate",
+        "library",
+        "vec",
+        "hashmap",
+        "btreemap",
+        "u64",
+        "u32",
+        "u16",
+        "u8",
+        "i64",
+        "i32",
+        "i16",
+        "i8",
+        "usize",
+        "isize",
+        "operator overloading",
+    ];
+    markers.iter().any(|m| t.contains(m))
+}
+
+fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
+    let bullets = extract_bullets_with_indent(section);
+    if bullets.is_empty() {
+        return Vec::new();
+    }
+
+    let mut actionable = vec![false; bullets.len()];
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); bullets.len()];
+
+    for i in 0..bullets.len() {
+        actionable[i] = !is_language_or_paradigm_specific_detail(&bullets[i].1);
+        let parent_indent = bullets[i].0;
+        let mut j = i + 1;
+        while j < bullets.len() && bullets[j].0 > parent_indent {
+            children[i].push(j);
+            j += 1;
+        }
+    }
+
+    // A heading line ending with ":" should only be actionable if at least one child is actionable.
+    for i in 0..bullets.len() {
+        let text = bullets[i].1.as_str();
+        if text.ends_with(':') && !children[i].is_empty() {
+            actionable[i] = children[i].iter().any(|idx| actionable[*idx]);
+        }
+    }
+
+    bullets
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| actionable[*i])
+        .map(|(_, (_, text))| text)
         .collect()
 }
 
 fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &str) -> Result<bool> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read context file: {}", path.display()))?;
-    if let Some(unspecified) = extract_unspecified_or_ambiguous_section(&content) {
-        eprintln!("error[spec:unfinished]:");
+    if let Some(blocking) = extract_blocking_ambiguities_section(&content) {
+        let actionable = extract_actionable_blocking_bullets(&blocking);
+        if actionable.is_empty() {
+            return Ok(false);
+        }
+
+        eprintln!("error[spec:blocking]:");
         eprintln!("\u{001b}[31m{}\u{001b}[0m", path.display());
         eprintln!(
-            "  Specification has Unspecified or Ambiguous Aspects; skipping {} for '{}'.",
+            "  Specification has Blocking Ambiguities; skipping {} for '{}'.",
             stage_name, context_name
         );
         eprintln!();
-        for bullet in extract_bullets(&unspecified) {
+        for bullet in actionable {
             eprintln!("  {}", bullet);
         }
         return Ok(true);
@@ -835,7 +967,7 @@ pub async fn test(config: &Config) -> Result<()> {
     }
 }
 
-pub async fn clear_cache(target: &str, config: &Config) -> Result<()> {
+pub async fn clear_cache(target: &str, names: Vec<String>, config: &Config) -> Result<()> {
     let stage = match target {
         "specification" | "specifications" => Stage::Specification,
         "implementation" | "implementations" => Stage::Implementation,
@@ -847,22 +979,43 @@ pub async fn clear_cache(target: &str, config: &Config) -> Result<()> {
     };
 
     if config.dry_run {
-        println!("[DRY RUN] Would clear cache entries for {:?}", stage);
+        if names.is_empty() {
+            println!("[DRY RUN] Would clear cache entries for {:?}", stage);
+        } else {
+            println!(
+                "[DRY RUN] Would clear cache entries for {:?}: {}",
+                stage,
+                names.join(", ")
+            );
+        }
         return Ok(());
     }
 
     let mut tracker = BuildTracker::load()?;
-    let removed = tracker.clear_stage(stage);
+    let removed = if names.is_empty() {
+        tracker.clear_stage(stage)
+    } else {
+        tracker.clear_stage_names(stage, &names)
+    };
     tracker.save()?;
-    println!("✓ Cleared {} cache entries for {:?}", removed, stage);
+    if names.is_empty() {
+        println!("✓ Cleared {} cache entries for {:?}", removed, stage);
+    } else {
+        println!(
+            "✓ Cleared {} cache entries for {:?}: {}",
+            removed,
+            stage,
+            names.join(", ")
+        );
+    }
     Ok(())
 }
 
-pub async fn clear_artifacts(target: &str, config: &Config) -> Result<()> {
+pub async fn clear_artifacts(target: &str, names: Vec<String>, config: &Config) -> Result<()> {
     match target {
-        "specification" | "specifications" => clear_specification_artifacts(config),
-        "implementation" | "implementations" => clear_implementation_artifacts(config),
-        "test" | "tests" => clear_test_artifacts(config),
+        "specification" | "specifications" => clear_specification_artifacts(names, config),
+        "implementation" | "implementations" => clear_implementation_artifacts(names, config),
+        "test" | "tests" => clear_test_artifacts(names, config),
         other => anyhow::bail!(
             "Unsupported clear target '{}'. Expected specification(s), implementation(s), or test(s).",
             other
@@ -870,33 +1023,64 @@ pub async fn clear_artifacts(target: &str, config: &Config) -> Result<()> {
     }
 }
 
-fn clear_specification_artifacts(config: &Config) -> Result<()> {
+fn clear_specification_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
     let specs_dir = PathBuf::from(SPECIFICATIONS_DIR);
     if !specs_dir.exists() {
         println!("No specification artifacts found");
         return Ok(());
     }
 
-    if config.dry_run {
-        println!("[DRY RUN] Would remove {}", specs_dir.display());
+    if names.is_empty() {
+        if config.dry_run {
+            println!("[DRY RUN] Would remove {}", specs_dir.display());
+            return Ok(());
+        }
+
+        fs::remove_dir_all(&specs_dir)
+            .with_context(|| format!("Failed to remove {}", specs_dir.display()))?;
+        println!("✓ Removed specification artifacts at {}", specs_dir.display());
         return Ok(());
     }
 
-    fs::remove_dir_all(&specs_dir)
-        .with_context(|| format!("Failed to remove {}", specs_dir.display()))?;
-    println!("✓ Removed specification artifacts at {}", specs_dir.display());
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    let mut removed = 0usize;
+    let mut found = 0usize;
+    for spec_file in spec_files {
+        found += 1;
+        if spec_file.exists() {
+            if config.dry_run {
+                println!("[DRY RUN] Would remove {}", spec_file.display());
+            } else {
+                fs::remove_file(&spec_file)
+                    .with_context(|| format!("Failed to remove {}", spec_file.display()))?;
+            }
+            removed += 1;
+        }
+    }
+    if removed == 0 {
+        println!("No matching specification artifacts found");
+    } else if config.dry_run {
+        println!("[DRY RUN] Would remove {} specification artifact file(s)", removed);
+    } else {
+        println!("✓ Removed {} specification artifact file(s)", removed);
+    }
+    if found == 0 {
+        println!("No matching names were resolved in {}", specs_dir.display());
+    }
     Ok(())
 }
 
-fn clear_implementation_artifacts(config: &Config) -> Result<()> {
-    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, Vec::new(), "md")?;
+fn clear_implementation_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
     if spec_files.is_empty() {
         println!("No implementation artifacts found");
         return Ok(());
     }
     let mut removed = 0usize;
+    let mut found = 0usize;
 
     for spec_file in spec_files {
+        found += 1;
         let output_path = determine_implementation_output_path(&spec_file, SPECIFICATIONS_DIR)?;
         if output_path.exists() {
             if config.dry_run {
@@ -904,32 +1088,43 @@ fn clear_implementation_artifacts(config: &Config) -> Result<()> {
             } else {
                 fs::remove_file(&output_path)
                     .with_context(|| format!("Failed to remove {}", output_path.display()))?;
-                removed += 1;
             }
+            removed += 1;
         }
     }
 
     if config.dry_run {
         if removed == 0 {
             println!("[DRY RUN] No implementation artifacts would be removed");
+        } else {
+            println!("[DRY RUN] Would remove {} implementation artifact file(s)", removed);
         }
     } else {
         remove_dir_if_empty(Path::new("src/data"))?;
         remove_dir_if_empty(Path::new("src/contexts"))?;
-        println!("✓ Removed {} implementation artifact file(s)", removed);
+        if removed == 0 {
+            println!("No matching implementation artifacts found");
+        } else {
+            println!("✓ Removed {} implementation artifact file(s)", removed);
+        }
+    }
+    if found == 0 {
+        println!("No matching names were resolved in {}", SPECIFICATIONS_DIR);
     }
     Ok(())
 }
 
-fn clear_test_artifacts(config: &Config) -> Result<()> {
-    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, Vec::new(), "md")?;
+fn clear_test_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
     if spec_files.is_empty() {
         println!("No test artifacts found");
         return Ok(());
     }
     let mut candidates = Vec::new();
+    let mut found = 0usize;
 
     for spec_file in spec_files {
+        found += 1;
         let Some(stem) = spec_file.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -955,10 +1150,19 @@ fn clear_test_artifacts(config: &Config) -> Result<()> {
     if config.dry_run {
         if removed == 0 {
             println!("[DRY RUN] No test artifacts would be removed");
+        } else {
+            println!("[DRY RUN] Would remove {} test artifact file(s)", removed);
         }
     } else {
         remove_dir_if_empty(Path::new("tests/generated"))?;
-        println!("✓ Removed {} test artifact file(s)", removed);
+        if removed == 0 {
+            println!("No matching test artifacts found");
+        } else {
+            println!("✓ Removed {} test artifact file(s)", removed);
+        }
+    }
+    if found == 0 {
+        println!("No matching names were resolved in {}", SPECIFICATIONS_DIR);
     }
     Ok(())
 }

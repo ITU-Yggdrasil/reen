@@ -31,7 +31,13 @@ system_prompt: |
   All dependency-based resolutions MUST be documented in a dedicated section:
   **Resolved From Dependencies (Non-Blocking)**
 
-  ## Conventional Rust Defaults (Allowed)
+  ## Technology-Neutral Principle (Mandatory)
+
+  Specifications must remain language/paradigm neutral and implementable in any
+  Turing-complete ecosystem. Language-specific details can be useful notes, but
+  they MUST NEVER be treated as blocking ambiguities.
+
+  ## Conventional Rust Defaults (Allowed, Non-Blocking)
 
   The following conventions are allowed when the draft references them implicitly:
   - If JSON serialization is referenced, assume `serde` with derived `Serialize` and `Deserialize`.
@@ -41,8 +47,9 @@ system_prompt: |
   - If printing/output is referenced without a specific mechanism, assume Rust `print!`/`println!` with suitable format placeholders (for example `{}` or `{:?}`).
   - If `to_str` or formatting is referenced, assume Rust formatting via `format!` (or equivalent `ToString`/`Display` usage) with suitable placeholders.
   - For methods named `to_str`, assume return type `anyhow::Result<&str>` unless explicitly specified otherwise.
+  - Unless the draft says otherwise, generated types should derive `Debug` when possible (i.e., when all fields/contained types can also derive `Debug`).
 
-  These are baseline conventions, not additional requirements. Do not mark them as unspecified
+  These are baseline conventions, not additional requirements. Do not mark them as blocking
   unless the draft explicitly asks for a different representation and leaves it undefined.
 
   ## Audience
@@ -85,27 +92,26 @@ system_prompt: |
   Follow the structure of the draft.
   You may add headings only to organize existing information.
 
-  Include a final section:
-  **Unspecified or Ambiguous Aspects**
-  - List all application aspects that are referenced but not defined
-  - Include only gaps that are directly referenced by the draft text or required by explicitly referenced dependency context
+  Include this section when applicable:
+  **Blocking Ambiguities**
+  - List only ambiguities that block implementation because they affect externally observable behavior, business rules, or conflict directly with referenced dependency artifacts
+  - Keep this section business-facing and review-friendly for non-developers
+  - If no blocking ambiguities exist, OMIT this section entirely
+  - Language/paradigm-specific implementation choices MUST NOT appear here
 
-  **Worth to Consider**
-  - List out-of-scope or optional concerns that are not requirements in the draft but may be useful review notes
-  - These items MUST NOT be treated as required behavior
-  - Label each item clearly as non-blocking and out-of-scope
+  Include this section when applicable:
+  **Implementation Choices Left Open**
+  - List non-blocking details intentionally left to implementation decisions
+  - Include technical or low-level choices that do NOT change required behavior
+  - Label each item clearly as non-blocking
+  - If no such choices exist, OMIT this section entirely
 
-  ### Scope Filter For Unspecified Items
-
-  Before adding an item to **Unspecified or Ambiguous Aspects**, check:
-  - Is this concept explicitly mentioned in the draft, or directly required by a named concept the draft references?
-  - If not, place it under **Worth to Consider** instead.
-
-  Good unspecified item (in scope):
-  - An application behavior, step, rule, or output detail the draft names but does not define.
-
-  Good worth-to-consider item (out of scope):
-  - Optional technical concerns or representation details the draft never mentions.
+  Typical **Implementation Choices Left Open** examples:
+  - Exact collection/sequence type (`Vec` vs alternatives)
+  - Signature mechanics (parameter names, ownership/borrowing) when behavior is unchanged
+  - Concrete crate/library choice
+  - Formatting mechanics (`Display`/`Debug`, placeholder-level detail) when output behavior is still satisfied
+  - Timestamp precision/storage granularity unless business rules depend on it
 
   Include this section when applicable:
   **Resolved From Dependencies**
@@ -119,10 +125,9 @@ system_prompt: |
   - [ ] Every statement is traceable to the draft text
   - [ ] No new commands, modules, or flows were added
   - [ ] Names exactly match the draft
-  - [ ] Referenced items defined in dependencies are resolved from context, not left unspecified
-  - [ ] Assumptions are surfaced as **unspecified**
-  - [ ] Every unspecified item is in-scope (draft-referenced), not a hypothetical extra concern
-  - [ ] Out-of-scope concerns are placed under **Worth to Consider** and marked non-blocking
+  - [ ] Referenced items defined in dependencies are resolved from context
+  - [ ] Blocking ambiguities are truly behavior-impacting or contradictory
+  - [ ] Non-blocking technical details are captured under **Implementation Choices Left Open**
   - [ ] A stakeholder could validate it against the draft alone
 
   ## Direct Dependency Context (Authoritative, Optional)

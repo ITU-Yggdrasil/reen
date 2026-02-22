@@ -27,7 +27,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Note:** The `runner.py` script will automatically detect and use the `.venv` virtual environment if it exists, so you don't need to manually activate it.
+**Note** The `runner.py` script will automatically detect and use the `.venv` virtual environment if it exists, so you don't need to manually activate it.
 
 ## LLM Provider Setup
 
@@ -69,7 +69,7 @@ Set your OpenAI API key:
 export OPENAI_API_KEY='your-api-key-here'
 ```
 
-**Tip:** Add these to your `~/.bashrc`, `~/.zshrc`, or `~/.bash_profile` to make them permanent.
+**Tip** Add these to your `~/.bashrc`, `~/.zshrc`, or `~/.bash_profile` to make them permanent.
 
 ## Building
 
@@ -94,7 +94,7 @@ Supported model names:
 - **Anthropic**: Any model name containing "claude" or "anthropic" (e.g., `claude-3-opus-20240229`, `claude-3-5-sonnet-20241022`)
 - **OpenAI**: Any model name containing "gpt", "openai", "o1", or "o3" (e.g., `gpt-4`, `gpt-4-turbo`, `gpt-3.5-turbo`)
 
-**Note:** Unknown model names default to Ollama (local, no API key required).
+**Note** Unknown model names default to Ollama (local, no API key required).
 
 ## Verification
 

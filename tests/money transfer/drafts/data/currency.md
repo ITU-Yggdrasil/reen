@@ -10,4 +10,4 @@ Serialisation and deserialization should use serde aut-implementation
 
 ## Functionality
 
-- **to_str:** : &str - returns the three letter acronym (i.e. the TLA from the list above) 
+- **to_str** returns the three-letter code from the list above

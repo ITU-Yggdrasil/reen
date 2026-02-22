@@ -227,6 +227,28 @@ impl BuildTracker {
         let stage_key = format!("{:?}", stage);
         self.tracks.remove(&stage_key).map(|m| m.len()).unwrap_or(0)
     }
+
+    /// Clear cache entries for specific names within a stage.
+    /// Returns number of entries removed.
+    pub fn clear_stage_names(&mut self, stage: Stage, names: &[String]) -> usize {
+        let stage_key = format!("{:?}", stage);
+        let Some(stage_tracks) = self.tracks.get_mut(&stage_key) else {
+            return 0;
+        };
+
+        let mut removed = 0usize;
+        for name in names {
+            if stage_tracks.remove(name).is_some() {
+                removed += 1;
+            }
+        }
+
+        if stage_tracks.is_empty() {
+            self.tracks.remove(&stage_key);
+        }
+
+        removed
+    }
 }
 
 #[cfg(test)]

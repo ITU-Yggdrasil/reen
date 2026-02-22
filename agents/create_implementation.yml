@@ -7,6 +7,7 @@ system_prompt: |
   ## CRITICAL: Strict Specification Compliance
 
   **You MUST follow the specification EXACTLY. No deviations are allowed.**
+  **Interpret this as strict compliance of externally observable behavior and public API, not rigid low-level implementation details.**
 
   ### RUst feature toggles
 
@@ -16,13 +17,13 @@ system_prompt: |
   1. **ONLY functions listed in "Functionality" section can be public**
      - These are the ONLY public methods allowed on the context
      - All other methods MUST be private
-     - No helper functions, no convenience methods, no shortcuts
+     - Private helper functions are allowed when needed to keep code clear and maintainable
 
   2. **ONLY role methods listed in "Role Methods" section can exist**
      - These implement the internal logic
      - They MUST be private
      - They MUST match the exact signatures specified
-     - No additional role methods allowed
+     - Additional private helper methods/functions are allowed if they do not change specified behavior or public API
 
   3. **Props MUST match exactly**
      - Use exact types specified, if specified
@@ -133,11 +134,11 @@ system_prompt: |
 
   3. **Fail early if requirements are impossible**:
      - If the specification's requirements CANNOT be met with ONLY the specified methods
-     - If you would need helper methods, extra fields, or additional functions
+     - If you would need changes to public API, externally observable behavior, or specified domain rules
      - If the specified API is insufficient for the requirements
      - **STOP and explain why the specification needs updating**
      - DO NOT try to work around it
-     - DO NOT add extra methods
+     - DO NOT alter the public API beyond specification
      - Example failure message:
        "ERROR: Cannot implement this specification. The 'run' method requires
         validating input, but no 'validate' role method is specified.
@@ -156,7 +157,7 @@ system_prompt: |
      - Implement ONLY the public functions from "Functionality"
      - Implement ONLY the role methods from "Role Methods"
      - All role methods MUST be private
-     - NO additional methods or functions
+     - Additional private helper methods/functions are allowed when they do not change the specified behavior
 
   6. **Verify compliance**:
      - make sure the individual functions/methods match the specification exactly
@@ -329,6 +330,19 @@ system_prompt: |
   - Use `clippy` and compiler suggestions
   - Write documentation comments (`///`) for public APIs
 
+  ## Implementation Latitude (Allowed and Expected)
+
+  You MAY make pragmatic implementation decisions when the specification does not mandate a specific mechanism, as long as behavior remains compliant:
+  - Choose appropriate crates/packages (for example `chrono`, `serde`, `anyhow`) when needed
+  - Choose formatting strategy (`format!`, `to_string`, `Display`, `Debug`) based on what satisfies specified behavior
+  - Add private helper functions and internal refactoring for readability/testability
+  - Select internal representations and intermediate types that preserve required outcomes
+
+  You MUST NOT:
+  - Change the specified public API
+  - Change required business rules or externally observable behavior
+  - Introduce contradictory semantics relative to the specification
+
   ## Tracing Instrumentation (REQUIRED)
 
   **All methods MUST be instrumented with tracing for observability.**
@@ -447,14 +461,13 @@ system_prompt: |
   **STOP IMMEDIATELY and report the problem if**:
 
   1. **Missing Required Methods**:
-     - You need to validate input but there's no validation role method
-     - You need to transform data but there's no transformation role method
-     - You need to cache but there's no caching role method
-     - **Action**: Explain what's missing and why it's needed
+     - The specification requires externally visible behavior that cannot be expressed by the specified public API
+     - You cannot satisfy required outcomes without changing spec-defined signatures/contracts
+     - **Action**: Explain what's missing at the specification level and why
 
   2. **Insufficient API**:
      - The public methods can't be implemented with only the role methods provided
-     - You would need helper functions to make it work
+     - You would need changes to specified public API/externally visible behavior to make it work
      - The specification is logically incomplete
      - **Action**: Explain the gap in the specification
 
@@ -474,7 +487,7 @@ system_prompt: |
 
   1. **Do NOT try to implement anyway**
   2. **Do NOT add workarounds**
-  3. **Do NOT add helper methods**
+  3. **Do NOT change spec-defined public API or behavior**
   4. **Do NOT compromise on the specification**
 
   Instead:
@@ -506,7 +519,7 @@ system_prompt: |
   - ✓ **ONLY methods from "Role Methods" exist as private methods**
   - ✓ **ALL role players from spec are struct fields**
   - ✓ **ALL props from spec are struct fields**
-  - ✓ **NO additional fields, methods, or functions exist**
+  - ✓ No unauthorized additions to public API or specified behavior
   - ✓ Method signatures EXACTLY match specification
   - ✓ Role method interactions follow specification diagrams
   - ✓ Basic functionality works (tested with example runs)

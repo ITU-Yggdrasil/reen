@@ -1,5 +1,5 @@
 1. Description
-A ledger entry representing one transaction recorded in the main ledger. It has a source account, a destination (sink) account, and an amount. The source may be None to signify a cash deposit; the sink may be None to signify a cash withdrawal. If the ledger entry reflects a transfer, both sink and source are Some(...).
+A ledger entry representing a single transaction in the main ledger. It records a source account, a destination account (sink), an amount, and related hash linkage. The source may be None to represent a cash deposit. The sink may be None to represent a cash withdrawal. For transfers, both source and sink are Some(...). The amount must be greater than 0.
 
 2. Type Kind (Struct / Enum / NewType / Unspecified)
 Struct
@@ -9,51 +9,56 @@ Immutable
 
 4. Properties (only those explicitly mentioned)
 - sink: Option<i32>
-  - Destination account identifier. May be None. If None, the entry signifies a cash withdrawal.
+  - Destination account identifier. May be None (e.g., for a cash withdrawal).
 - source: Option<i32>
-  - Source account identifier. May be None. If None, the entry signifies a cash deposit.
+  - Source account identifier. May be None (e.g., for a cash deposit).
 - amount: amount
-  - The transacted amount. The amount must be larger than 0.
-- timestamp: DateTime<Utc>
-  - The timestamp (utc.now) of when the ledger entry was created.
-- prev_hash_source: Option<string>
-  - The hash of the most recent transaction—as determined by the timestamp—on the ledger for the source account. This shall be None if source is None. If source is not None then this cannot be None.
-- prev_hash_sink: Option<string>
-  - The hash of the most recent transaction—as determined by the timestamp—on the ledger for the sink account. This might be None even if a sink account is specified.
+  - A monetary amount. The amount must be larger than 0.
+- timestamp: chrono::DateTime<Utc>
+  - Timestamp of the ledger entry.
+- prev_hash_source: Option<String>
+  - The hash of the most recent transaction — determined by timestamp — on the ledger for the source account.
+  - Must be None if source is None.
+  - Must not be None if source is not None.
+  - It is not possible for two ledger entries for the same account to have matching timestamps.
+- prev_hash_sink: Option<String>
+  - The hash of the most recent transaction — determined by timestamp — on the ledger for the sink account.
+  - May be None even if a sink account is specified.
+  - It is not possible for two ledger entries for the same account to have matching timestamps.
 - hash: String
-  - A SHA256 calculated on a JSON serialization of all other fields. The JSON serialization should be handled by the auto-implementation from serde. The fields must be serialized in the order they are listed above (sink, source, amount, timestamp, prev_hash_source, prev_hash_sink).
+  - A SHA256 calculated over a UTF-8 encoded string formed by concatenating the values of the type (excluding the hash field). The method of concatenation and ensuring stable, reproducible hashes is an implementation detail.
+  - All hashes must be represented as strings and be Base64-encoded per RFC 4648 §4 (alphabet A–Z a–z 0–9 + /) with = padding. No line breaks or whitespace are permitted.
 
 5. Functionalities (only those explicitly named)
-- to_str: {date use ISO 8601 as the format. Example: 2026-02-21T14:35:00Z} - {source id or none} - {sink id or none}:  {amount.to_str()}
-  - Formats a string that includes:
-    - date in ISO 8601 (example: 2026-02-21T14:35:00Z)
-    - source id or the literal "none"
-    - sink id or the literal "none"
-    - the result of amount.to_str()
-- create: anyhow::Result<LedgerEntry>
-  - Should set all fields.
-  - The constructor should be pub(crate).
-  - The hash is calculated and is the only value not provided as an argument.
-  - If business rules are violated, returns an Error with a message detailing which rule(s) have been violated.
+- to_str -> anyhow::Result<&str>
+  - Returns a string formatted exactly as: "{timestamp:?} - {source:?} - {sink:?}:  {amount:?}".
+- create -> anyhow::Result<LedgerEntry>
+  - Constructs a LedgerEntry and sets all fields. The hash is calculated and is the only value not provided as an argument.
+  - The constructor should be pub(crate) (intended to be called from a factory method on the Ledger type).
+  - If business rules are violated, returns an Error with a message detailing the violated rule(s).
+- currency
+  - Returns the currency of the amount. (Return type unspecified in the draft; behavior is to return amount.currency.)
 
 6. Constraints & Rules (only those explicitly stated or directly implied)
 - At least one of sink and source must be not None.
 - The amount must always be larger than 0.
-- If source is None then prev_hash_source shall also be None; if source is not None then prev_hash_source cannot be None.
-- For hashing:
-  - hash is the SHA256 over the JSON serialization of [sink, source, amount, timestamp, prev_hash_source, prev_hash_sink] in exactly that order.
-  - All hashes (prev_hash_source, prev_hash_sink when present, and hash) MUST be represented as strings and be encoded using Base64 as defined in RFC 4648 §4 (the base64 alphabet A–Z a–z 0–9 + /) and MUST include = padding. No line breaks or whitespace are permitted.
+- If source is None, then prev_hash_source must be None.
+- If source is not None, then prev_hash_source must not be None.
+- prev_hash_source must equal the hash of the most recent transaction for the source account (as determined by timestamp).
+- prev_hash_sink must equal the hash of the most recent transaction for the sink account (as determined by timestamp), but it may be None even if sink is specified.
+- It is not possible for two ledger entries for the same account to have matching timestamps.
+- Hash calculation:
+  - Computed as a SHA256 over a UTF-8 encoded concatenation of the type’s values, excluding the hash field.
+  - Base64 encoding requirements: RFC 4648 §4 alphabet, must include = padding, and must not contain line breaks or whitespace.
+  - The exact concatenation and stabilization approach is explicitly an implementation detail.
 
 Inferred Types or Structures (Non-Blocking)
-- Location: to_str (method)
-  - Inference made: Return type anyhow::Result<&str>.
-  - Basis for inference: Allowed convention for methods named to_str where no explicit return type is provided.
+- Location: LedgerEntry (type)
+  - Inference made: Type Kind is a Struct.
+  - Basis for inference: The draft lists named fields (“Properties”) typical of a record/struct shape.
 
-Unspecified or Ambiguous Aspects
-- Representation details for the JSON serialization beyond “serde auto-implementation” and the mandated field order are not specified (e.g., whitespace, key naming/style, numeric formatting of amount’s internals).
-- The exact string type behind “string” in Option<string> is not further defined beyond being a string (e.g., whether this corresponds to Rust’s String type is not stated in the draft text itself).
-- Validation of sink/source numeric values (e.g., whether negative values are allowed) is not specified here. Only their optionality and the coupling with prev_hash_source are specified.
-
-Worth to Consider
-- Non-blocking, out-of-scope: Canonicalization of JSON for hashing (e.g., ensuring stable serializer configuration) to guarantee identical hashes across environments.
-- Non-blocking, out-of-scope: Aligning sink/source identifier constraints with the Account context (e.g., positive integers) if that is a system-wide rule.
+Implementation Choices Left Open
+- Hash input construction (non-blocking): The exact order, delimiters, and formatting used when concatenating field values for hash input, as well as any canonicalization to ensure reproducibility, are explicitly implementation details.
+- Visibility mapping (non-blocking): The “pub(crate)” requirement for create is Rust-specific; equivalent restricted visibility in other ecosystems is left to implementation.
+- Error detail structure (non-blocking): The exact error type and structure/messages within anyhow::Result are not specified beyond containing information about violated rules.
+- Collection/formatting internals (non-blocking): The precise mechanics of Debug formatting used by to_str (e.g., how Option and amount debug output render) are determined by the target platform’s Debug/formatter behavior.
