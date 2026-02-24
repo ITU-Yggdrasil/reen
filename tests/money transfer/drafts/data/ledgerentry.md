@@ -32,3 +32,8 @@ All hashes MUST represented as strings and be encoded using Base64 as defined in
 - **create** anyhow::Result<LedgerEntry> - should set all fields except the hash. The constructor should however be pub(crate) since it's going to be called from a factory method on the Ledger type. The hash is calculated and is as the only value not provided as an argument. If business ruless are violated an Error is returned and the message would be detailing what rule(s) have been violated
 
 - **get_amount**: returns the amount object of the entry
+- **get_source**: returns the source
+- **get_sink**: returns the sink
+- **get_timestamp**: returns the timestamp
+- **get_prev_hash**: returns the prev_hash
+- **get_hash**: returns the hash

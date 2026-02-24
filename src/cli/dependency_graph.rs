@@ -83,6 +83,88 @@ impl ExecutionNode {
 
         Ok(resolved)
     }
+
+    pub fn resolve_dependency_closure(
+        &self,
+        primary_root: &str,
+        fallback_root: Option<&str>,
+    ) -> Result<Vec<DependencyArtifact>> {
+        let primary_index = build_index(primary_root)?;
+        let fallback_index = match fallback_root {
+            Some(root) => build_index(root)?,
+            None => Vec::new(),
+        };
+        let primary_by_canonical = index_by_canonical(&primary_index);
+        let fallback_by_canonical = index_by_canonical(&fallback_index);
+
+        let mut queue = self.direct_dependencies.clone();
+        let mut seen_paths = HashSet::new();
+        let mut resolved = Vec::new();
+
+        while let Some(dep) = queue.pop() {
+            let (path, source) = match resolve_dependency_locator(&dep) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            if path == self.input_path {
+                continue;
+            }
+
+            let key = path.to_string_lossy().to_string();
+            if !seen_paths.insert(key.clone()) {
+                continue;
+            }
+
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("failed reading dependency artifact: {}", path.display()))?;
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            let sha256 = hex::encode(hasher.finalize());
+
+            resolved.push(DependencyArtifact {
+                name: dep.name.clone(),
+                path: key,
+                source,
+                content: content.clone(),
+                sha256,
+            });
+
+            let canonicals = extract_dependency_canonicals(&content, &primary_index, &fallback_index);
+            for canonical in canonicals {
+                let primary_candidates = primary_by_canonical.get(&canonical).cloned().unwrap_or_default();
+                let fallback_candidates = fallback_by_canonical.get(&canonical).cloned().unwrap_or_default();
+
+                if !primary_candidates.is_empty() {
+                    for candidate in primary_candidates {
+                        if candidate.path == path || candidate.path == self.input_path {
+                            continue;
+                        }
+
+                        queue.push(DependencyLocator {
+                            name: candidate.name.clone(),
+                            primary_path: Some(candidate.path.clone()),
+                            fallback_path: fallback_candidates.first().map(|f| f.path.clone()),
+                        });
+                    }
+                } else {
+                    for candidate in fallback_candidates {
+                        if candidate.path == path || candidate.path == self.input_path {
+                            continue;
+                        }
+                        queue.push(DependencyLocator {
+                            name: candidate.name.clone(),
+                            primary_path: None,
+                            fallback_path: Some(candidate.path.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        resolved.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(resolved)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +172,28 @@ struct DependencyLocator {
     name: String,
     primary_path: Option<PathBuf>,
     fallback_path: Option<PathBuf>,
+}
+
+fn resolve_dependency_locator(dep: &DependencyLocator) -> Option<(PathBuf, DependencySource)> {
+    if let Some(primary) = dep.primary_path.as_ref() {
+        if primary.exists() {
+            return Some((primary.clone(), DependencySource::Primary));
+        }
+        if let Some(fallback) = dep.fallback_path.as_ref() {
+            if fallback.exists() {
+                return Some((fallback.clone(), DependencySource::Fallback));
+            }
+        }
+        return None;
+    }
+
+    if let Some(fallback) = dep.fallback_path.as_ref() {
+        if fallback.exists() {
+            return Some((fallback.clone(), DependencySource::Fallback));
+        }
+    }
+
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -554,6 +658,42 @@ mod tests {
         assert_eq!(deps.len(), 1);
         assert!(matches!(deps[0].source, DependencySource::Fallback));
         assert!(deps[0].path.ends_with("money_transfer.md"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dependency_closure_includes_transitive_dependencies() {
+        let root = temp_root("closure");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+
+        let app = drafts.join("app.md");
+        let amount = drafts.join("data").join("amount.md");
+        let currency = drafts.join("data").join("currency.md");
+
+        fs::write(
+            &app,
+            "Uses Amount and requires DKK to be supported",
+        )
+        .expect("write");
+        fs::write(&amount, "Amount stores a Currency value").expect("write");
+        fs::write(&currency, "Currency enum includes DKK").expect("write");
+
+        let levels = build_execution_plan(
+            vec![app.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+
+        let closure = levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("closure");
+        let paths: Vec<String> = closure.iter().map(|d| d.path.clone()).collect();
+
+        assert!(paths.iter().any(|p| p.ends_with("amount.md")));
+        assert!(paths.iter().any(|p| p.ends_with("currency.md")));
 
         let _ = fs::remove_dir_all(root);
     }

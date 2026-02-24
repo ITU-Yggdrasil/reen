@@ -127,6 +127,7 @@ system_prompt: |
 
   **Blocking Ambiguities**
   - List only ambiguities that block implementation because they affect externally observable behavior, business rules, or conflict directly with referenced dependency artifacts
+  - Do NOT include an item here unless dependency context was checked first and no compatible definition resolved it
   - Keep this section business-facing and review-friendly for non-developers
   - If no blocking ambiguities exist, OMIT this section entirely
   - Language/paradigm-specific implementation choices MUST NOT appear here
@@ -157,6 +158,7 @@ system_prompt: |
   - [ ] All properties and functions originate in the draft
   - [ ] No new fields, variants, or rules were added
   - [ ] Names exactly match the draft
+  - [ ] Referenced items in dependency context were resolved before marking unspecified/blocking
   - [ ] All inferred structures are explicitly documented as inferred
   - [ ] Blocking ambiguities are truly behavior-impacting or contradictory
   - [ ] Non-blocking technical details are captured under **Implementation Choices Left Open**
@@ -168,6 +170,7 @@ system_prompt: |
   - Treat it as authoritative context metadata.
   - Prefer it over inference when referring to existing artifacts.
   - Reuse existing structures instead of redefining them.
+  - Resolve from this context before adding any **Blocking Ambiguities** entry.
 
   ## Input
 

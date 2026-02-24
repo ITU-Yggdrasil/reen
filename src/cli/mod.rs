@@ -203,10 +203,6 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
         }
     }
 
-    if !config.dry_run {
-        validate_generated_rust_layout(Path::new("."))?;
-    }
-
     // Save tracker
     tracker.save()?;
 
@@ -573,6 +569,21 @@ async fn process_implementation(
     // Extract code from the agent output and write to file
     // The agent output may contain markdown code blocks or raw code
     let code = extract_code_from_output(&impl_result, context_name);
+
+    // Surface compile_error! diagnostics directly in CLI output.
+    if let Some(message) = extract_compile_error_message(&code) {
+        eprintln!("error[impl:compile_error]:");
+        eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
+        eprintln!(
+            "  Generated implementation for '{}' contains compile_error!:",
+            context_name
+        );
+        eprintln!();
+        for line in message.lines() {
+            eprintln!("  {}", line);
+        }
+        eprintln!();
+    }
     
     // Determine output path preserving folder structure
     let output_path = determine_implementation_output_path(context_file, SPECIFICATIONS_DIR)?;
@@ -631,6 +642,40 @@ fn extract_code_from_output(output: &str, _context_name: &str) -> String {
     
     // Fallback: return the entire output trimmed
     trimmed.to_string()
+}
+
+fn extract_compile_error_message(code: &str) -> Option<String> {
+    use regex::Regex;
+
+    let re = Regex::new(r#"(?s)compile_error!\s*\(\s*"((?:\\.|[^"\\])*)"\s*\)\s*;"#).ok()?;
+    let captures = re.captures(code)?;
+    let raw = captures.get(1)?.as_str();
+    Some(unescape_common_rust_string_escapes(raw))
+}
+
+fn unescape_common_rust_string_escapes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('0') => out.push('\0'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// Extracts the content of a markdown/plain section by exact title.
@@ -973,9 +1018,20 @@ async fn process_tests(
 
 fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serde_json::Value>> {
     let mut context = HashMap::new();
-    let dependencies = node.resolve_direct_dependencies()?;
-    let value = json!(dependencies);
+    let direct_dependencies = node.resolve_direct_dependencies()?;
+    let (primary_root, fallback_root) = if node.input_path.starts_with(SPECIFICATIONS_DIR) {
+        (SPECIFICATIONS_DIR, Some(DRAFTS_DIR))
+    } else {
+        (DRAFTS_DIR, None)
+    };
+    let dependency_closure = node.resolve_dependency_closure(primary_root, fallback_root)?;
+
+    // Expose full closure via direct_dependencies so existing agent prompts
+    // receive transitive context without prompt/template changes.
+    let value = json!(dependency_closure);
     context.insert("direct_dependencies".to_string(), value.clone());
+    context.insert("direct_dependencies_only".to_string(), json!(direct_dependencies));
+    context.insert("dependency_closure".to_string(), value.clone());
     // Backward compatibility with agent prompts that still reference mcp_context
     context.insert("mcp_context".to_string(), value);
     Ok(context)
@@ -1726,4 +1782,31 @@ fn determine_implementation_output_path(
     
     let output_path = output_dir.join(output_filename);
     Ok(output_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_compile_error_message;
+
+    #[test]
+    fn extracts_compile_error_message_from_generated_code() {
+        let code = r#"#![cfg(feature = "account")]
+compile_error!(
+    "ERROR: Cannot implement specification as written.
+
+Problem:
+- Missing required role method.
+"
+);"#;
+
+        let msg = extract_compile_error_message(code).expect("expected compile_error message");
+        assert!(msg.contains("ERROR: Cannot implement specification as written."));
+        assert!(msg.contains("Missing required role method."));
+    }
+
+    #[test]
+    fn returns_none_when_compile_error_macro_is_absent() {
+        let code = "pub struct Account {}";
+        assert!(extract_compile_error_message(code).is_none());
+    }
 }

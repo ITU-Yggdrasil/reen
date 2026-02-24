@@ -21,12 +21,14 @@ system_prompt: |
 
   When the draft references named artifacts, concepts, or behaviors that are defined in
   dependency context (for example: context names, type names, method names, or domain terms),
-  you SHOULD resolve those references using dependency context.
+  you MUST resolve those references using dependency context before marking them as
+  unspecified or blocking.
 
   - Treat dependency-provided definitions as authoritative for referenced items
   - Reuse dependency terminology and constraints instead of restating assumptions
   - If a referenced item is fully defined in dependency context, do NOT mark it unspecified
   - If only part of a referenced item is defined, document the defined part and mark only the missing part as unspecified
+  - You MUST attempt dependency-based resolution before adding any item to **Blocking Ambiguities**
 
   All dependency-based resolutions MUST be documented in a dedicated section:
   **Resolved From Dependencies (Non-Blocking)**
@@ -102,6 +104,7 @@ system_prompt: |
   Include this section when applicable:
   **Blocking Ambiguities**
   - List only ambiguities that block implementation because they affect externally observable behavior, business rules, or conflict directly with referenced dependency artifacts
+  - Do NOT include an item here unless dependency context was checked first and no compatible definition resolved it
   - Keep this section business-facing and review-friendly for non-developers
   - If no blocking ambiguities exist, OMIT this section entirely
   - Language/paradigm-specific implementation choices MUST NOT appear here
@@ -133,6 +136,7 @@ system_prompt: |
   - [ ] No new commands, modules, or flows were added
   - [ ] Names exactly match the draft
   - [ ] Referenced items defined in dependencies are resolved from context
+  - [ ] No item was marked unspecified/blocking before dependency context was checked
   - [ ] Blocking ambiguities are truly behavior-impacting or contradictory
   - [ ] Non-blocking technical details are captured under **Implementation Choices Left Open**
   - [ ] A stakeholder could validate it against the draft alone
@@ -143,6 +147,7 @@ system_prompt: |
   - Treat it as authoritative structured context.
   - Prefer it over assumptions when references to existing artifacts are needed.
   - Resolve referenced concepts from this context before deciding an item is unspecified.
+  - Resolve from this context before adding any **Blocking Ambiguities** entry.
 
   ## Input
 

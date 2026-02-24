@@ -336,6 +336,27 @@ system_prompt: |
      - Does `src/types/` exist? → Create `src/types/mod.rs`
      - Adding new file? → Update the corresponding `mod.rs`
 
+  ### CRITICAL: Rust Module Visibility and Imports (MANDATORY)
+
+  1. **Private module policy (enforced)**:
+     - All submodules in `mod.rs` files MUST be declared private: `mod x;`
+     - Do NOT use `pub mod x;` for generated source modules.
+
+  2. **Public API exposure via re-exports only**:
+     - Every externally used type MUST be exposed through `pub use ...;` in the owning `mod.rs`.
+     - Example:
+       - `mod amount;`
+       - `pub use amount::Amount;`
+
+  3. **Import path rule (hard rule)**:
+     - When using types from another module, import via re-export paths only.
+     - Allowed: `crate::data::Amount`, `crate::contexts::Account`, or crate-root re-exports (e.g. `crate::Amount`) when available.
+     - Forbidden: private leaf-module paths such as `crate::data::amount::Amount` or `crate::contexts::account::Account`.
+
+  4. **Pre-output visibility check (required)**:
+     - Before finalizing, verify no `use` statement references private leaf modules.
+     - If found, rewrite imports to the nearest public re-export path.
+
   ## Rust-Specific Guidelines
 
   - Use standard naming: `snake_case` for functions/variables, `PascalCase` for types
@@ -527,6 +548,8 @@ system_prompt: |
   - ✓ Code compiles without warnings
   - ✓ **Module files created**: `src/contexts/mod.rs` exists and declares all modules
   - ✓ **Modules exported**: All public types are re-exported in `mod.rs`
+  - ✓ All generated `mod.rs` submodule declarations use `mod`, not `pub mod`
+  - ✓ Cross-module imports use re-exported public paths only (no private leaf-module imports)
   - ✓ **Tracing instrumented**: All methods have proper tracing calls
   - ✓ **Tracing format correct**: `"[ContextName] [role] [method]"` for role methods, `"[ContextName] [method]"` for public methods
   - ✓ **Tracing dependency**: `tracing` added to `Cargo.toml`
