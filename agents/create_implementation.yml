@@ -366,6 +366,33 @@ system_prompt: |
   - Use `clippy` and compiler suggestions
   - Write documentation comments (`///`) for public APIs
 
+  ### Borrowing vs owning vs cloning (Idiomatic Rust)
+
+  **CRITICAL**: If the specification defines a public signature (argument/return types), it is authoritative. The guidance below applies only when the specification allows latitude (internal/private helpers, and default constructors/getters for data types when the spec does not explicitly specify signatures).
+
+  - Prefer borrowing for read-only inputs:
+    - Use `&T` when you only need to read the value.
+    - Use `&mut T` only when you need to mutate the caller’s value in place.
+    - Prefer borrowed string/slice forms where appropriate: `&str`, `&[T]`.
+
+  - Prefer ownership when you need to keep the value:
+    - Take `T` (owned) when you need to store it in a struct, move it into another owner, or keep it beyond the call.
+    - Avoid forcing clones in the API; taking ownership lets the *caller* decide whether to clone or move.
+
+  - Return references only when borrowing existing data:
+    - Getters should generally return references (`&T`, `&str`, `&[T]`) tied to `self` or an input.
+    - Do not return references to temporaries or locally-created values.
+
+  - Prefer returning owned values for computed/constructed outputs:
+    - If you construct new data, return `T` (owned) rather than forcing lifetimes.
+
+  - Avoid “clone-by-default”:
+    - Do not introduce clones unless necessary for correctness or required by the spec.
+    - If cloning is needed, prefer cloning in the smallest possible scope and document why in code only when non-obvious.
+
+  - Small `Copy` types:
+    - For small `Copy` types (e.g. integers), pass/return by value.
+
   ## Implementation Latitude (Allowed and Expected)
 
   You MAY make pragmatic implementation decisions when the specification does not mandate a specific mechanism, as long as behavior remains compliant:

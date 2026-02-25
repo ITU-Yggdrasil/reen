@@ -10,11 +10,14 @@ mod agent_executor;
 mod dependency_graph;
 mod progress;
 mod project_structure;
+mod compilation_fix;
 
 use agent_executor::AgentExecutor;
 use dependency_graph::{build_execution_plan, ExecutionNode};
 use progress::ProgressIndicator;
-use project_structure::{analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files};
+use project_structure::{
+    analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
+};
 use reen::build_tracker::{BuildTracker, Stage};
 
 #[derive(Clone, Copy)]
@@ -26,7 +29,12 @@ pub struct Config {
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
 
-pub async fn create_specification(names: Vec<String>, config: &Config) -> Result<()> {
+pub async fn create_specification(
+    names: Vec<String>,
+    clear_cache: bool,
+    config: &Config,
+) -> Result<()> {
+    let names_for_clear = names.clone();
     let draft_files = resolve_input_files(DRAFTS_DIR, names, "md")?;
 
     if draft_files.is_empty() {
@@ -38,6 +46,9 @@ pub async fn create_specification(names: Vec<String>, config: &Config) -> Result
 
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
+    if clear_cache {
+        clear_tracker_stage(&mut tracker, Stage::Specification, &names_for_clear, config)?;
+    }
 
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating specifications for {} draft(s)", total_count);
@@ -341,7 +352,13 @@ async fn process_specification(
     Ok(())
 }
 
-pub async fn create_implementation(names: Vec<String>, config: &Config) -> Result<()> {
+pub async fn create_implementation(
+    names: Vec<String>,
+    max_compile_fix_attempts: usize,
+    clear_cache: bool,
+    config: &Config,
+) -> Result<()> {
+    let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
 
     if context_files.is_empty() {
@@ -351,6 +368,9 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
 
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
+    if clear_cache {
+        clear_tracker_stage(&mut tracker, Stage::Implementation, &names_for_clear, config)?;
+    }
 
     // Check if any specifications need to be regenerated first
     if tracker.upstream_changed(Stage::Implementation, "")? {
@@ -388,6 +408,18 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
 
     if config.verbose {
         println!("✓ Project structure generated");
+    }
+
+    let mut recent_generated_files: Vec<PathBuf> = Vec::new();
+    for p in [
+        PathBuf::from("Cargo.toml"),
+        PathBuf::from("src/lib.rs"),
+        PathBuf::from("src/contexts/mod.rs"),
+        PathBuf::from("src/data/mod.rs"),
+    ] {
+        if p.exists() {
+            recent_generated_files.push(p);
+        }
     }
 
     // Step 2: Generate individual implementation files
@@ -473,6 +505,7 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
                         tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
+                        recent_generated_files.push(output_path.clone());
                         progress.complete_item(&context_name, true);
                         if config.verbose {
                             println!("✓ Successfully created implementation for {}", context_name);
@@ -505,6 +538,7 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
                         tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
+                        recent_generated_files.push(output_path.clone());
                         progress.complete_item(&context_name, true);
                         if config.verbose {
                             println!("✓ Successfully created implementation for {}", context_name);
@@ -525,6 +559,16 @@ pub async fn create_implementation(names: Vec<String>, config: &Config) -> Resul
     if !config.dry_run {
         validate_generated_rust_layout(Path::new("."))?;
     }
+
+    // Automatic compile + bounded auto-fix loop to restore build validity.
+    compilation_fix::ensure_compiles_with_auto_fix(
+        config,
+        max_compile_fix_attempts,
+        Path::new("."),
+        &project_info,
+        &recent_generated_files,
+    )
+    .await?;
 
     // Save tracker
     tracker.save()?;
@@ -872,12 +916,24 @@ fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &st
     Ok(false)
 }
 
-pub async fn create_tests(names: Vec<String>, config: &Config) -> Result<()> {
+pub async fn create_tests(names: Vec<String>, clear_cache: bool, config: &Config) -> Result<()> {
+    let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
 
     if context_files.is_empty() {
         println!("No context files found to process");
         return Ok(());
+    }
+
+    // Clear build-tracker entries for tests stage if requested.
+    // Note: test generation does not currently use build-tracker caching,
+    // but we support the flag for consistency.
+    if clear_cache {
+        let mut tracker = BuildTracker::load()?;
+        clear_tracker_stage(&mut tracker, Stage::Tests, &names_for_clear, config)?;
+        if !config.dry_run {
+            tracker.save()?;
+        }
     }
 
     let execution_levels = build_execution_plan(
@@ -985,6 +1041,45 @@ pub async fn create_tests(names: Vec<String>, config: &Config) -> Result<()> {
     }
 }
 
+fn clear_tracker_stage(
+    tracker: &mut BuildTracker,
+    stage: Stage,
+    names: &[String],
+    config: &Config,
+) -> Result<()> {
+    if config.dry_run {
+        if names.is_empty() {
+            println!("[DRY RUN] Would clear cache entries for {:?}", stage);
+        } else {
+            println!(
+                "[DRY RUN] Would clear cache entries for {:?}: {}",
+                stage,
+                names.join(", ")
+            );
+        }
+        return Ok(());
+    }
+
+    let removed = if names.is_empty() {
+        tracker.clear_stage(stage)
+    } else {
+        tracker.clear_stage_names(stage, names)
+    };
+    if config.verbose {
+        if names.is_empty() {
+            println!("✓ Cleared {} cache entries for {:?}", removed, stage);
+        } else {
+            println!(
+                "✓ Cleared {} cache entries for {:?}: {}",
+                removed,
+                stage,
+                names.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn process_tests(
     executor: &AgentExecutor,
     context_file: &Path,
@@ -1061,6 +1156,52 @@ pub async fn compile(config: &Config) -> Result<()> {
     } else {
         anyhow::bail!("Build failed");
     }
+}
+
+pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()> {
+    println!(
+        "Attempting to restore compilation (max_attempts={})...",
+        max_compile_fix_attempts
+    );
+
+    if config.dry_run {
+        println!("[DRY RUN] Would run compilation-fix loop");
+        return Ok(());
+    }
+
+    let project_root = Path::new(".");
+    let spec_dir = PathBuf::from(SPECIFICATIONS_DIR);
+    let drafts_dir = PathBuf::from(DRAFTS_DIR);
+
+    let project_info = if spec_dir.exists() && spec_dir.is_dir() {
+        analyze_specifications(&spec_dir, Some(&drafts_dir))
+            .context("Failed to analyze specifications for fix loop")?
+    } else {
+        // If specs are missing, still allow the loop to run from compiler diagnostics alone.
+        ProjectInfo::default()
+    };
+
+    let mut recent_files: Vec<PathBuf> = Vec::new();
+    for p in [
+        PathBuf::from("Cargo.toml"),
+        PathBuf::from("src/lib.rs"),
+        PathBuf::from("src/main.rs"),
+        PathBuf::from("src/contexts/mod.rs"),
+        PathBuf::from("src/data/mod.rs"),
+    ] {
+        if p.exists() {
+            recent_files.push(p);
+        }
+    }
+
+    compilation_fix::ensure_compiles_with_auto_fix(
+        config,
+        max_compile_fix_attempts,
+        project_root,
+        &project_info,
+        &recent_files,
+    )
+    .await
 }
 
 pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {

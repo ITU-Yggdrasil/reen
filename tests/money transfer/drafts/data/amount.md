@@ -11,11 +11,8 @@ A data type representing an amount of a currency.
 
 ## Functionality
 
-- **major** major equals abs(amount) / 100 with the sign applied separately
-- **minor** returns the absolute value iof amount modulo 100.
-- **to_str** format: "{major}.{minor} {currency.to_str()}" minor should be zero padded if less that 10
+- **get_amount** amount / 100 (floating point division)
 - **get_currency** returns the currency
-
-**comparisons** two amount objects can be comapred with <,>,=, >= and <= which has the same result as if the amount field of the twon objects was compared.ß
-**addition** two amount objects can be added provided that the currency is the same for both. THe result is a new account object where the amount is set to the sum of the amounts of the operands. The currency is unchanged
-**subtraction** two amount objects can be subtracted provided that the currency is the same for both. the result is a new amount object where the amount is set to the difference of the amounts of the operands. The currency remains unchanged.
+- **zero** takes a currency and returns an amount object with the amount set to zero
+**addition** two amount objects can be added provided that the currency is the same for both. The result is a new amount object where the amount is set to the sum of the amounts of the operands. The currency is unchanged. If the currencies don't match we panic
+**subtraction** two amount objects can be subtracted provided that the currency is the same for both. the result is a new amount object where the amount is set to the difference of the amounts of the operands. The currency remains unchanged. If the currencies don't match we panic

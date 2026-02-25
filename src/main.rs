@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use anyhow::Result;
 
 mod cli;
@@ -19,11 +19,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(subcommand)]
-    Create(CreateCommands),
+    Create(CreateArgs),
 
     #[command(subcommand)]
     Check(CheckCommands),
+
+    #[command(about = "Attempt to automatically fix compilation errors (compile → patch → recompile loop)")]
+    Fix {
+        #[arg(
+            long,
+            default_value_t = 3,
+            help = "Maximum automatic compilation-fix attempts"
+        )]
+        max_compile_fix_attempts: u32,
+    },
 
     #[command(about = "Compile the generated project using cargo build")]
     Compile,
@@ -102,6 +111,13 @@ enum CreateCommands {
 
     #[command(about = "Create implementation from context files")]
     Implementation {
+        #[arg(
+            long,
+            default_value_t = 3,
+            help = "Maximum automatic compilation-fix attempts after code generation"
+        )]
+        max_compile_fix_attempts: u32,
+
         #[arg(help = "Optional list of context names (without .md extension)")]
         names: Vec<String>,
     },
@@ -111,6 +127,18 @@ enum CreateCommands {
         #[arg(help = "Optional list of context names (without .md extension)")]
         names: Vec<String>,
     },
+}
+
+#[derive(Args)]
+struct CreateArgs {
+    #[arg(
+        long,
+        help = "Clear build-tracker cache for this stage before creating (optionally scoped by provided names)"
+    )]
+    clear_cache: bool,
+
+    #[command(subcommand)]
+    command: CreateCommands,
 }
 
 #[derive(Subcommand)]
@@ -132,25 +160,37 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Create(create_cmd) => {
-            match create_cmd {
-                CreateCommands::Specification { names } => {
-                    cli::create_specification(names, &config).await?;
-                }
-                CreateCommands::Implementation { names } => {
-                    cli::create_implementation(names, &config).await?;
-                }
-                CreateCommands::Tests { names } => {
-                    cli::create_tests(names, &config).await?;
-                }
+        Commands::Create(create_args) => match create_args.command {
+            CreateCommands::Specification { names } => {
+                cli::create_specification(names, create_args.clear_cache, &config).await?;
             }
-        }
+            CreateCommands::Implementation {
+                max_compile_fix_attempts,
+                names,
+            } => {
+                cli::create_implementation(
+                    names,
+                    max_compile_fix_attempts as usize,
+                    create_args.clear_cache,
+                    &config,
+                )
+                .await?;
+            }
+            CreateCommands::Tests { names } => {
+                cli::create_tests(names, create_args.clear_cache, &config).await?;
+            }
+        },
         Commands::Check(check_cmd) => {
             match check_cmd {
                 CheckCommands::Specification { names } => {
                     cli::check_specification(names, &config).await?;
                 }
             }
+        }
+        Commands::Fix {
+            max_compile_fix_attempts,
+        } => {
+            cli::fix(max_compile_fix_attempts as usize, &config).await?;
         }
         Commands::Compile => {
             cli::compile(&config).await?;

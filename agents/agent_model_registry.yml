@@ -13,3 +13,7 @@ create_implementation:
 create_test:
   model: gpt-5 # qwen2.5:7b
   parallel: false
+
+resolve_compilation_errors:
+  model: gpt-5
+  parallel: false
