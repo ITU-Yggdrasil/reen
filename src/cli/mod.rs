@@ -5,6 +5,8 @@ use std::process::Command;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 mod agent_executor;
 mod dependency_graph;
@@ -13,12 +15,14 @@ mod project_structure;
 mod compilation_fix;
 
 use agent_executor::AgentExecutor;
-use dependency_graph::{build_execution_plan, ExecutionNode};
+use dependency_graph::{build_execution_plan, DependencyArtifact, ExecutionNode};
 use progress::ProgressIndicator;
 use project_structure::{
     analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
 };
 use reen::build_tracker::{BuildTracker, Stage};
+use reen::contexts::{AgentModelRegistry, AgentRegistry};
+use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
 
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -377,11 +381,7 @@ pub async fn create_implementation(
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    let execution_levels = build_execution_plan(
-        context_files,
-        SPECIFICATIONS_DIR,
-        Some(DRAFTS_DIR),
-    )?;
+    let execution_levels = build_implementation_execution_plan(context_files)?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating implementation for {} context(s)", total_count);
 
@@ -437,7 +437,7 @@ pub async fn create_implementation(
 
         let mut runnable = Vec::new();
         for node in level_nodes {
-            let context_file = node.input_path.clone();
+            let context_file = resolve_implementation_context_file(&node.input_path)?;
             let context_name = node.name.clone();
             let dependency_invalidated = node
                 .direct_dependency_names()
@@ -614,12 +614,13 @@ async fn process_implementation(
     // The agent output may contain markdown code blocks or raw code
     let code = extract_code_from_output(&impl_result, context_name);
 
-    // Surface compile_error! diagnostics directly in CLI output.
-    if let Some(message) = extract_compile_error_message(&code) {
+    // Surface explicit implementation-failure diagnostics directly in CLI output.
+    let implementation_failure = extract_implementation_failure_message(&code);
+    if let Some(message) = implementation_failure.as_deref() {
         eprintln!("error[impl:compile_error]:");
         eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
         eprintln!(
-            "  Generated implementation for '{}' contains compile_error!:",
+            "  Generated implementation for '{}' contains an explicit failure marker:",
             context_name
         );
         eprintln!();
@@ -644,6 +645,13 @@ async fn process_implementation(
 
     if config.verbose {
         println!("✓ Written implementation to: {}", output_path.display());
+    }
+
+    if implementation_failure.is_some() {
+        return Err(anyhow::anyhow!(
+            "Generated implementation for '{}' contains explicit failure marker",
+            context_name
+        ));
     }
 
     Ok(())
@@ -695,6 +703,19 @@ fn extract_compile_error_message(code: &str) -> Option<String> {
     let captures = re.captures(code)?;
     let raw = captures.get(1)?.as_str();
     Some(unescape_common_rust_string_escapes(raw))
+}
+
+fn extract_implementation_failure_message(code: &str) -> Option<String> {
+    if let Some(msg) = extract_compile_error_message(code) {
+        return Some(msg);
+    }
+
+    const MARKER: &str = "ERROR: Cannot implement specification as written.";
+    if code.contains(MARKER) {
+        return Some(MARKER.to_string());
+    }
+
+    None
 }
 
 fn unescape_common_rust_string_escapes(input: &str) -> String {
@@ -1065,6 +1086,7 @@ fn clear_tracker_stage(
     } else {
         tracker.clear_stage_names(stage, names)
     };
+    let removed_agent_cache_entries = clear_agent_response_cache_for_stage(stage, names, config)?;
     if config.verbose {
         if names.is_empty() {
             println!("✓ Cleared {} cache entries for {:?}", removed, stage);
@@ -1076,8 +1098,245 @@ fn clear_tracker_stage(
                 names.join(", ")
             );
         }
+        println!(
+            "✓ Cleared {} agent response cache entrie(s) for {:?}",
+            removed_agent_cache_entries, stage
+        );
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct CacheAgentInput {
+    draft_content: Option<String>,
+    context_content: Option<String>,
+    #[serde(flatten)]
+    additional: HashMap<String, serde_json::Value>,
+}
+
+fn clear_agent_response_cache_for_stage(stage: Stage, names: &[String], config: &Config) -> Result<usize> {
+    if names.is_empty() {
+        return clear_stage_agent_cache_dirs(stage, config);
+    }
+    clear_stage_agent_cache_entries_by_name(stage, names, config)
+}
+
+fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> {
+    let agents: &[&str] = match stage {
+        Stage::Specification => &[
+            "create_specifications",
+            "create_specifications_data",
+            "create_specifications_context",
+            "create_specifications_main",
+        ],
+        Stage::Implementation => &["create_implementation"],
+        Stage::Tests => &["create_test"],
+        Stage::Compile => &[],
+    };
+
+    if config.dry_run {
+        println!(
+            "[DRY RUN] Would clear agent response cache directories for {:?}: {}",
+            stage,
+            agents.join(", ")
+        );
+        return Ok(0);
+    }
+
+    let agent_registry = FileAgentRegistry::new(None);
+    let model_registry = FileAgentModelRegistry::new(None, None, None);
+    let mut removed = 0usize;
+
+    for agent_name in agents {
+        let instructions = match agent_registry.get_specification(agent_name) {
+            Ok(s) => s,
+            Err(e) => {
+                if config.verbose {
+                    eprintln!(
+                        "Skipping agent cache clear for '{}': failed to load agent spec ({})",
+                        agent_name, e
+                    );
+                }
+                continue;
+            }
+        };
+        let model = match model_registry.get_model(agent_name) {
+            Ok(m) => m,
+            Err(e) => {
+                if config.verbose {
+                    eprintln!(
+                        "Skipping agent cache clear for '{}': failed to resolve model ({})",
+                        agent_name, e
+                    );
+                }
+                continue;
+            }
+        };
+
+        let instructions_model_hash = instructions_model_hash(&instructions, &model.name);
+        let cache_dir = PathBuf::from(".reen").join(instructions_model_hash);
+        if cache_dir.exists() {
+            fs::remove_dir_all(&cache_dir).with_context(|| {
+                format!(
+                    "Failed to remove agent response cache directory: {}",
+                    cache_dir.display()
+                )
+            })?;
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn clear_stage_agent_cache_entries_by_name(
+    stage: Stage,
+    names: &[String],
+    config: &Config,
+) -> Result<usize> {
+    let names_vec = names.to_vec();
+    let mut removed = 0usize;
+    let mut candidates: Vec<(String, CacheAgentInput)> = Vec::new();
+
+    match stage {
+        Stage::Specification => {
+            let files = resolve_input_files(DRAFTS_DIR, names_vec, "md")?;
+            let levels = build_execution_plan(files, DRAFTS_DIR, None)?;
+            for node in levels.into_iter().flatten() {
+                let draft_content = fs::read_to_string(&node.input_path)
+                    .with_context(|| format!("Failed to read draft file: {}", node.input_path.display()))?;
+                let additional = build_dependency_context(&node)?;
+                let agent_name = determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
+                candidates.push((
+                    agent_name,
+                    CacheAgentInput {
+                        draft_content: Some(draft_content),
+                        context_content: None,
+                        additional,
+                    },
+                ));
+            }
+        }
+        Stage::Implementation => {
+            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md")?;
+            let levels = build_implementation_execution_plan(files)?;
+            for node in levels.into_iter().flatten() {
+                let context_file = resolve_implementation_context_file(&node.input_path)?;
+                let context_content = fs::read_to_string(&context_file)
+                    .with_context(|| format!("Failed to read specification file: {}", context_file.display()))?;
+                let mut additional = build_dependency_context(&node)?;
+                if let Some(target_type_name) = infer_target_type_name(&context_file)? {
+                    additional.insert("target_type_name".to_string(), json!(target_type_name));
+                }
+                candidates.push((
+                    "create_implementation".to_string(),
+                    CacheAgentInput {
+                        draft_content: None,
+                        context_content: Some(context_content),
+                        additional,
+                    },
+                ));
+            }
+        }
+        Stage::Tests => {
+            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md")?;
+            let levels = build_execution_plan(files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
+            for node in levels.into_iter().flatten() {
+                let context_content = fs::read_to_string(&node.input_path)
+                    .with_context(|| format!("Failed to read specification file: {}", node.input_path.display()))?;
+                let additional = build_dependency_context(&node)?;
+                candidates.push((
+                    "create_test".to_string(),
+                    CacheAgentInput {
+                        draft_content: None,
+                        context_content: Some(context_content),
+                        additional,
+                    },
+                ));
+            }
+        }
+        Stage::Compile => {}
+    }
+
+    if config.dry_run {
+        println!(
+            "[DRY RUN] Would clear {} agent response cache entrie(s) for {:?}: {}",
+            candidates.len(),
+            stage,
+            names.join(", ")
+        );
+        return Ok(0);
+    }
+
+    let agent_registry = FileAgentRegistry::new(None);
+    let model_registry = FileAgentModelRegistry::new(None, None, None);
+    for (agent_name, input) in candidates {
+        if clear_single_agent_cache_entry(&agent_registry, &model_registry, &agent_name, &input, config)? {
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn clear_single_agent_cache_entry(
+    agent_registry: &FileAgentRegistry,
+    model_registry: &FileAgentModelRegistry,
+    agent_name: &str,
+    input: &CacheAgentInput,
+    config: &Config,
+) -> Result<bool> {
+    let instructions = match agent_registry.get_specification(agent_name) {
+        Ok(s) => s,
+        Err(e) => {
+            if config.verbose {
+                eprintln!(
+                    "Skipping targeted agent cache clear for '{}': failed to load agent spec ({})",
+                    agent_name, e
+                );
+            }
+            return Ok(false);
+        }
+    };
+
+    let model = match model_registry.get_model(agent_name) {
+        Ok(m) => m,
+        Err(e) => {
+            if config.verbose {
+                eprintln!(
+                    "Skipping targeted agent cache clear for '{}': failed to resolve model ({})",
+                    agent_name, e
+                );
+            }
+            return Ok(false);
+        }
+    };
+
+    let folder_hash = instructions_model_hash(&instructions, &model.name);
+    let input_json = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}:{}", instructions, input_json).as_bytes());
+    let cache_key = hex::encode(hasher.finalize());
+    let cache_path = PathBuf::from(".reen")
+        .join(folder_hash)
+        .join(format!("{}.cache", cache_key));
+    if cache_path.exists() {
+        fs::remove_file(&cache_path).with_context(|| {
+            format!(
+                "Failed to remove targeted agent response cache file: {}",
+                cache_path.display()
+            )
+        })?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn instructions_model_hash(agent_instructions: &str, model_name: &str) -> String {
+    let composite = format!("{}:{}", agent_instructions, model_name);
+    let mut hasher = Sha256::new();
+    hasher.update(composite.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 async fn process_tests(
@@ -1129,7 +1388,92 @@ fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serd
     context.insert("dependency_closure".to_string(), value.clone());
     // Backward compatibility with agent prompts that still reference mcp_context
     context.insert("mcp_context".to_string(), value);
+
+    let implemented_dependencies = build_implemented_dependency_context(&dependency_closure)?;
+    context.insert(
+        "implemented_dependencies".to_string(),
+        json!(implemented_dependencies),
+    );
     Ok(context)
+}
+
+fn build_implementation_execution_plan(spec_files: Vec<PathBuf>) -> Result<Vec<Vec<ExecutionNode>>> {
+    let mut draft_inputs = Vec::new();
+    for spec_file in spec_files {
+        let draft_path =
+            determine_draft_input_path(&spec_file, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
+        if draft_path.exists() {
+            draft_inputs.push(draft_path);
+        } else {
+            draft_inputs.push(spec_file);
+        }
+    }
+
+    build_execution_plan(draft_inputs, DRAFTS_DIR, None)
+}
+
+fn resolve_implementation_context_file(node_input_path: &Path) -> Result<PathBuf> {
+    if node_input_path.starts_with(DRAFTS_DIR) {
+        determine_specification_output_path(node_input_path, DRAFTS_DIR, SPECIFICATIONS_DIR)
+    } else {
+        Ok(node_input_path.to_path_buf())
+    }
+}
+
+fn build_implemented_dependency_context(
+    dependency_closure: &[DependencyArtifact],
+) -> Result<Vec<serde_json::Value>> {
+    let mut artifacts = Vec::new();
+
+    for dep in dependency_closure {
+        let mut spec_path = PathBuf::from(&dep.path);
+        if spec_path.starts_with(DRAFTS_DIR) {
+            let mapped =
+                determine_specification_output_path(&spec_path, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+            if mapped.exists() {
+                spec_path = mapped;
+            }
+        }
+        if !spec_path.starts_with(SPECIFICATIONS_DIR) {
+            continue;
+        }
+
+        let impl_path = match determine_implementation_output_path(&spec_path, SPECIFICATIONS_DIR) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+
+        if !impl_path.exists() {
+            continue;
+        }
+
+        let content = fs::read_to_string(&impl_path).with_context(|| {
+            format!(
+                "failed reading implemented dependency artifact: {}",
+                impl_path.display()
+            )
+        })?;
+
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let sha256 = hex::encode(hasher.finalize());
+
+        artifacts.push(json!({
+            "name": dep.name,
+            "spec_path": dep.path,
+            "path": impl_path.to_string_lossy().to_string(),
+            "content": content,
+            "sha256": sha256
+        }));
+    }
+
+    artifacts.sort_by(|a, b| {
+        let ap = a.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let bp = b.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        ap.cmp(bp)
+    });
+
+    Ok(artifacts)
 }
 
 pub async fn compile(config: &Config) -> Result<()> {
@@ -1301,6 +1645,7 @@ pub async fn clear_cache(target: &str, names: Vec<String>, config: &Config) -> R
     } else {
         tracker.clear_stage_names(stage, &names)
     };
+    let removed_agent_cache_entries = clear_agent_response_cache_for_stage(stage, &names, config)?;
     tracker.save()?;
     if names.is_empty() {
         println!("✓ Cleared {} cache entries for {:?}", removed, stage);
@@ -1312,6 +1657,10 @@ pub async fn clear_cache(target: &str, names: Vec<String>, config: &Config) -> R
             names.join(", ")
         );
     }
+    println!(
+        "✓ Cleared {} agent response cache entrie(s) for {:?}",
+        removed_agent_cache_entries, stage
+    );
     Ok(())
 }
 
@@ -1617,6 +1966,51 @@ fn determine_specification_output_path(
     // Build output path in specifications directory
     let output_path = PathBuf::from(specifications_dir).join(relative_path);
     Ok(output_path)
+}
+
+/// Determines the draft input path preserving folder structure
+///
+/// Maps:
+/// - specifications/data/X.md → drafts/data/X.md
+/// - specifications/contexts/X.md → drafts/contexts/X.md
+/// - specifications/X.md → drafts/X.md
+fn determine_draft_input_path(
+    specification_file: &Path,
+    specifications_dir: &str,
+    drafts_dir: &str,
+) -> Result<PathBuf> {
+    let spec_path = specification_file.to_path_buf();
+    let specs_root = PathBuf::from(specifications_dir);
+
+    let relative_path = match spec_path.strip_prefix(&specs_root) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => {
+            let spec_components: Vec<_> = spec_path.components().collect();
+            let specs_components: Vec<_> = specs_root.components().collect();
+
+            if spec_components.len() > specs_components.len()
+                && spec_components
+                    .iter()
+                    .zip(specs_components.iter())
+                    .all(|(a, b)| a == b)
+            {
+                PathBuf::from_iter(spec_components.iter().skip(specs_components.len()))
+            } else {
+                let spec_str = specification_file.to_str().unwrap_or("");
+                if spec_str.starts_with(specifications_dir) {
+                    let rel_str = &spec_str[specifications_dir.len()..].trim_start_matches('/');
+                    PathBuf::from(rel_str)
+                } else {
+                    spec_path
+                        .file_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from(""))
+                }
+            }
+        }
+    };
+
+    Ok(PathBuf::from(drafts_dir).join(relative_path))
 }
 
 /// Determines which specification agent to use based on file path

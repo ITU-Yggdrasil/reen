@@ -23,6 +23,9 @@ system_prompt: |
      - These implement the internal logic
      - They MUST be private
      - They MUST match the exact signatures specified
+     - They MUST be named as `<role>_<method_name>` (both in `snake_case`) to avoid collisions across roles
+     - If the specification describes role and method separately (for example role=`source`, method=`withdraw`), the Rust method name MUST be composed as `source_withdraw`
+     - A role method is allowed to read/call other role players via `self` when implementing specified behavior (cross-role access is allowed)
      - Additional private helper methods/functions are allowed if they do not change specified behavior or public API
 
   3. **Props MUST match exactly**
@@ -96,7 +99,7 @@ system_prompt: |
       pub fn functionality_method(&self) -> Result<...> { ... }
 
       // PRIVATE ROLE METHODS - ONLY those in "Role Methods" section
-      fn role_method(&self) -> Result<...> { ... }
+      fn role_method_name(&self) -> Result<...> { ... }
 
       // NO OTHER METHODS ALLOWED
   }
@@ -172,6 +175,8 @@ system_prompt: |
      - Implement ONLY the public functions from "Functionality"
      - Implement ONLY the role methods from "Role Methods"
      - All role methods MUST be private
+     - Name every role method as `<role>_<method_name>` (for example `source_withdraw`, `sink_deposit`)
+     - Role methods may coordinate across roles through context fields when required by the specified behavior
      - Additional private helper methods/functions are allowed when they do not change the specified behavior
 
   6. **Verify compliance**:
@@ -459,7 +464,7 @@ system_prompt: |
       }
 
       // Private role method
-      fn withdraw(&self) -> Result<LedgerEntry> {
+      fn source_withdraw(&self) -> Result<LedgerEntry> {
           tracing::debug!(
               "[MoneyTransfer] source withdraw, source={}, amount={}",
               self.source, self.amount
@@ -473,7 +478,7 @@ system_prompt: |
       }
 
       // Private role method
-      fn deposit(&self, entry: LedgerEntry) -> Result<LedgerEntry> {
+      fn sink_deposit(&self, entry: LedgerEntry) -> Result<LedgerEntry> {
           tracing::debug!(
               "[MoneyTransfer] sink deposit, sink={}",
               self.sink
@@ -498,6 +503,7 @@ system_prompt: |
 
   - [ ] Every public method has at least one `tracing::info!()` at entry
   - [ ] Every role method has at least one `tracing::debug!()` at entry
+  - [ ] Every role method name follows `<role>_<method_name>`
   - [ ] Format follows: `"[ContextName] [role] [method]"` or `"[ContextName] [method]"`
   - [ ] Important values are logged (IDs, amounts, statuses)
   - [ ] Error cases have `tracing::error!()` before returning errors
@@ -582,6 +588,7 @@ system_prompt: |
   - ✓ **Tracing dependency**: `tracing` added to `Cargo.toml`
   - ✓ **ONLY methods from "Functionality" are public**
   - ✓ **ONLY methods from "Role Methods" exist as private methods**
+  - ✓ **Role method naming follows `<role>_<method_name>`**
   - ✓ **ALL role players from spec are struct fields**
   - ✓ **ALL props from spec are struct fields**
   - ✓ No unauthorized additions to public API or specified behavior
@@ -745,6 +752,8 @@ system_prompt: |
   - Prefer provided dependency artifacts over inference.
   - Reuse existing definitions from dependency context instead of creating duplicates.
   - Avoid arbitrary file scraping when dependency context already provides structured metadata.
+  - If `input.implemented_dependencies` is present, treat it as authoritative for already-implemented dependency APIs (method names/signatures/visibility).
+  - When specification wording and implemented dependency API details differ in low-level shape, prefer compatibility with `input.implemented_dependencies` while preserving specified behavior.
 
   ## Input
 
@@ -753,6 +762,9 @@ system_prompt: |
 
   Direct dependency context (optional, authoritative):
   {{input.direct_dependencies?}}
+
+  Implemented dependency source context (optional, authoritative for existing APIs):
+  {{input.implemented_dependencies?}}
 
   Target type name (optional, authoritative when present):
   {{input.target_type_name?}}

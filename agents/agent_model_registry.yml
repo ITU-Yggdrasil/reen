@@ -1,19 +1,18 @@
 create_specifications_data:
   model: gpt-5 # qwen2.5:7b
-  parallel: false
+  parallel: true
 create_specifications_context:
   model: gpt-5 # qwen2.5:7b
-  parallel: false
+  parallel: true
 create_specifications_main:
   model: gpt-5 # qwen2.5:7b
-  parallel: false
+  parallel: true
 create_implementation:
   model: gpt-5
   parallel: true
 create_test:
   model: gpt-5 # qwen2.5:7b
   parallel: false
-
 resolve_compilation_errors:
   model: gpt-5
   parallel: false
