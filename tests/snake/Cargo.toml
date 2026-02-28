@@ -1,0 +1,15 @@
+[package]
+name = "specifications"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "specifications"
+path = "src/lib.rs"
+
+[dependencies]
+tracing = "0.1"
+
+[features]
+default = ["game_loop"]
+game_loop = []
