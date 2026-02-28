@@ -18,7 +18,12 @@ impl ProgressIndicator {
     }
 
     pub fn start_item(&self, name: &str) {
-        println!("Processing: {} ({}/{})", name, self.completed + self.failed + 1, self.total);
+        println!(
+            "Processing: {} ({}/{})",
+            name,
+            self.completed + self.failed + 1,
+            self.total
+        );
     }
 
     pub fn complete_item(&mut self, _name: &str, success: bool) {

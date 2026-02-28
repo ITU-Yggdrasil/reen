@@ -1,18 +1,18 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
-use std::fs;
-use std::process::Command;
-use serde_json::json;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use serde::Serialize;
+use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
 
 mod agent_executor;
+mod compilation_fix;
 mod dependency_graph;
 mod progress;
 mod project_structure;
-mod compilation_fix;
 
 use agent_executor::AgentExecutor;
 use dependency_graph::{build_execution_plan, DependencyArtifact, ExecutionNode};
@@ -64,7 +64,11 @@ pub async fn create_specification(
 
     for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
         if config.verbose {
-            println!("Processing dependency level {} ({} item(s))", level_idx, level_nodes.len());
+            println!(
+                "Processing dependency level {} ({} item(s))",
+                level_idx,
+                level_nodes.len()
+            );
         }
 
         let mut nodes_by_agent: HashMap<String, Vec<ExecutionNode>> = HashMap::new();
@@ -75,7 +79,10 @@ pub async fn create_specification(
 
         for (agent_name, nodes) in nodes_by_agent {
             if !executors.contains_key(&agent_name) {
-                executors.insert(agent_name.clone(), Arc::new(AgentExecutor::new(&agent_name, config)?));
+                executors.insert(
+                    agent_name.clone(),
+                    Arc::new(AgentExecutor::new(&agent_name, config)?),
+                );
             }
             let executor = executors
                 .get(&agent_name)
@@ -95,8 +102,11 @@ pub async fn create_specification(
                         .direct_dependency_names()
                         .iter()
                         .any(|dep_name| updated_in_run.contains(dep_name));
-                    let output_path =
-                        determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+                    let output_path = determine_specification_output_path(
+                        &draft_file,
+                        DRAFTS_DIR,
+                        SPECIFICATIONS_DIR,
+                    )?;
                     progress.start_item(&draft_name);
 
                     let needs_update = if dependency_invalidated {
@@ -145,7 +155,12 @@ pub async fn create_specification(
                     let (draft_name, draft_file, output_path, result) = task.await?;
                     match result {
                         Ok(_) => {
-                            tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
+                            tracker.record(
+                                Stage::Specification,
+                                &draft_name,
+                                &draft_file,
+                                &output_path,
+                            )?;
                             updated_count += 1;
                             updated_in_run.insert(draft_name.clone());
                             progress.complete_item(&draft_name, true);
@@ -167,8 +182,11 @@ pub async fn create_specification(
                         .direct_dependency_names()
                         .iter()
                         .any(|dep_name| updated_in_run.contains(dep_name));
-                    let output_path =
-                        determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+                    let output_path = determine_specification_output_path(
+                        &draft_file,
+                        DRAFTS_DIR,
+                        SPECIFICATIONS_DIR,
+                    )?;
 
                     progress.start_item(&draft_name);
                     let needs_update = if dependency_invalidated {
@@ -200,7 +218,12 @@ pub async fn create_specification(
                     .await
                     {
                         Ok(_) => {
-                            tracker.record(Stage::Specification, &draft_name, &draft_file, &output_path)?;
+                            tracker.record(
+                                Stage::Specification,
+                                &draft_name,
+                                &draft_file,
+                                &output_path,
+                            )?;
                             updated_count += 1;
                             updated_in_run.insert(draft_name.clone());
                             progress.complete_item(&draft_name, true);
@@ -266,8 +289,9 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
             continue;
         }
 
-        let spec_content = fs::read_to_string(&spec_path)
-            .with_context(|| format!("Failed to read specification file: {}", spec_path.display()))?;
+        let spec_content = fs::read_to_string(&spec_path).with_context(|| {
+            format!("Failed to read specification file: {}", spec_path.display())
+        })?;
         if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
             let actionable = extract_actionable_blocking_bullets(&blocking);
             if !actionable.is_empty() {
@@ -295,6 +319,161 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
     Ok(())
 }
 
+struct ReviewIssue {
+    draft_path: PathBuf,
+    error_source: PathBuf,
+    error_section: String,
+}
+
+pub async fn review_specification(names: Vec<String>, fix: bool, config: &Config) -> Result<()> {
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md")?;
+    if draft_files.is_empty() {
+        println!("No draft files found to process");
+        return Ok(());
+    }
+
+    let mut issues = Vec::new();
+    for draft_file in draft_files {
+        let spec_path =
+            determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+        if !spec_path.exists() {
+            continue;
+        }
+
+        let spec_content = fs::read_to_string(&spec_path).with_context(|| {
+            format!("Failed to read specification file: {}", spec_path.display())
+        })?;
+        if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
+            let actionable = extract_actionable_blocking_bullets(&blocking);
+            if !actionable.is_empty() {
+                issues.push(ReviewIssue {
+                    draft_path: draft_file.clone(),
+                    error_source: spec_path,
+                    error_section: actionable.join("\n"),
+                });
+            }
+        }
+    }
+
+    if issues.is_empty() {
+        println!("No specification issues found to review");
+        return Ok(());
+    }
+
+    review_issues_with_agent("specification", issues, fix, config).await
+}
+
+pub async fn review_implementation(names: Vec<String>, fix: bool, config: &Config) -> Result<()> {
+    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    if context_files.is_empty() {
+        println!("No specification files found to process");
+        return Ok(());
+    }
+
+    let mut issues = Vec::new();
+    for context_file in context_files {
+        let implementation_path =
+            determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
+        if !implementation_path.exists() {
+            continue;
+        }
+
+        let implementation_code = fs::read_to_string(&implementation_path).with_context(|| {
+            format!(
+                "Failed to read implementation file: {}",
+                implementation_path.display()
+            )
+        })?;
+
+        let Some(error_section) = extract_implementation_review_error_section(&implementation_code)
+        else {
+            continue;
+        };
+
+        let draft_path =
+            determine_specification_output_path(&context_file, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
+        if !draft_path.exists() {
+            continue;
+        }
+
+        issues.push(ReviewIssue {
+            draft_path,
+            error_source: implementation_path,
+            error_section,
+        });
+    }
+
+    if issues.is_empty() {
+        println!("No implementation errors found to review");
+        return Ok(());
+    }
+
+    review_issues_with_agent("implementation", issues, fix, config).await
+}
+
+async fn review_issues_with_agent(
+    stage: &str,
+    issues: Vec<ReviewIssue>,
+    fix: bool,
+    config: &Config,
+) -> Result<()> {
+    let executor = AgentExecutor::new("review_draft_errors", config)?;
+    let mut updated_files = Vec::new();
+
+    for issue in issues {
+        let draft_content = fs::read_to_string(&issue.draft_path).with_context(|| {
+            format!("Failed to read draft file: {}", issue.draft_path.display())
+        })?;
+
+        let mut additional_context = HashMap::new();
+        additional_context.insert("stage".to_string(), json!(stage));
+        additional_context.insert(
+            "error_source".to_string(),
+            json!(issue.error_source.display().to_string()),
+        );
+        additional_context.insert("error_section".to_string(), json!(issue.error_section));
+        additional_context.insert("fix_mode".to_string(), json!(fix));
+
+        let response = executor
+            .execute_with_context(&draft_content, additional_context)
+            .await?;
+        let output = match response {
+            agent_executor::AgentResponse::Final(s) => s,
+            agent_executor::AgentResponse::Questions(q) => q,
+        };
+
+        if fix {
+            if config.dry_run {
+                println!("[DRY RUN] {}", issue.draft_path.display());
+                continue;
+            }
+            if !should_apply_review_fix(&draft_content, &output) {
+                continue;
+            }
+            fs::write(&issue.draft_path, output.trim()).with_context(|| {
+                format!(
+                    "Failed to update draft file: {}",
+                    issue.draft_path.display()
+                )
+            })?;
+            updated_files.push(issue.draft_path);
+        } else {
+            eprintln!("\u{001b}[31m{}\u{001b}[0m", issue.error_source.display());
+            println!("\u{001b}[32m{}\u{001b}[0m", output.trim());
+        }
+    }
+
+    if fix {
+        updated_files.sort();
+        updated_files.dedup();
+        for path in updated_files {
+            println!("{}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
 async fn process_specification(
     executor: &AgentExecutor,
     draft_file: &Path,
@@ -302,8 +481,7 @@ async fn process_specification(
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
 ) -> Result<()> {
-    let draft_content = fs::read_to_string(draft_file)
-        .context("Failed to read draft file")?;
+    let draft_content = fs::read_to_string(draft_file).context("Failed to read draft file")?;
 
     if config.dry_run {
         println!("[DRY RUN] Would create specification for: {}", draft_name);
@@ -316,7 +494,8 @@ async fn process_specification(
         .await?;
 
     // Determine output path preserving folder structure
-    let output_path = determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+    let output_path =
+        determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
     let mut has_blocking_ambiguities = false;
 
@@ -339,15 +518,13 @@ async fn process_specification(
             eprintln!();
         }
     }
-    
+
     // Ensure the output directory exists
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .context("Failed to create specification output directory")?;
+        fs::create_dir_all(parent).context("Failed to create specification output directory")?;
     }
-    
-    fs::write(&output_path, spec_content)
-        .context("Failed to write specification file")?;
+
+    fs::write(&output_path, spec_content).context("Failed to write specification file")?;
 
     if has_blocking_ambiguities {
         anyhow::bail!("generated specification contains blocking ambiguities");
@@ -373,7 +550,12 @@ pub async fn create_implementation(
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
     if clear_cache {
-        clear_tracker_stage(&mut tracker, Stage::Implementation, &names_for_clear, config)?;
+        clear_tracker_stage(
+            &mut tracker,
+            Stage::Implementation,
+            &names_for_clear,
+            config,
+        )?;
     }
 
     // Check if any specifications need to be regenerated first
@@ -397,14 +579,11 @@ pub async fn create_implementation(
 
     let output_dir = PathBuf::from(".");
 
-    generate_cargo_toml(&project_info, &output_dir)
-        .context("Failed to generate Cargo.toml")?;
+    generate_cargo_toml(&project_info, &output_dir).context("Failed to generate Cargo.toml")?;
 
-    generate_lib_rs(&project_info, &output_dir)
-        .context("Failed to generate lib.rs")?;
+    generate_lib_rs(&project_info, &output_dir).context("Failed to generate lib.rs")?;
 
-    generate_mod_files(&project_info, &output_dir)
-        .context("Failed to generate mod.rs files")?;
+    generate_mod_files(&project_info, &output_dir).context("Failed to generate mod.rs files")?;
 
     if config.verbose {
         println!("✓ Project structure generated");
@@ -432,7 +611,11 @@ pub async fn create_implementation(
     let mut had_unspecified = false;
     for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
         if config.verbose {
-            println!("Processing dependency level {} ({} item(s))", level_idx, level_nodes.len());
+            println!(
+                "Processing dependency level {} ({} item(s))",
+                level_idx,
+                level_nodes.len()
+            );
         }
 
         let mut runnable = Vec::new();
@@ -443,7 +626,8 @@ pub async fn create_implementation(
                 .direct_dependency_names()
                 .iter()
                 .any(|dep_name| updated_in_run.contains(dep_name));
-            let output_path = determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
+            let output_path =
+                determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
             progress.start_item(&context_name);
 
             if has_unfinished_specification(&context_file, &context_name, "implementation")? {
@@ -502,7 +686,12 @@ pub async fn create_implementation(
                 let (context_name, context_file, output_path, result) = task.await?;
                 match result {
                     Ok(_) => {
-                        tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
+                        tracker.record(
+                            Stage::Implementation,
+                            &context_name,
+                            &context_file,
+                            &output_path,
+                        )?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
                         recent_generated_files.push(output_path.clone());
@@ -516,7 +705,10 @@ pub async fn create_implementation(
                             had_unspecified = true;
                         }
                         progress.complete_item(&context_name, false);
-                        eprintln!("✗ Failed to create implementation for {}: {}", context_name, e);
+                        eprintln!(
+                            "✗ Failed to create implementation for {}: {}",
+                            context_name, e
+                        );
                     }
                 }
             }
@@ -535,7 +727,12 @@ pub async fn create_implementation(
                 .await
                 {
                     Ok(_) => {
-                        tracker.record(Stage::Implementation, &context_name, &context_file, &output_path)?;
+                        tracker.record(
+                            Stage::Implementation,
+                            &context_name,
+                            &context_file,
+                            &output_path,
+                        )?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
                         recent_generated_files.push(output_path.clone());
@@ -549,7 +746,10 @@ pub async fn create_implementation(
                             had_unspecified = true;
                         }
                         progress.complete_item(&context_name, false);
-                        eprintln!("✗ Failed to create implementation for {}: {}", context_name, e);
+                        eprintln!(
+                            "✗ Failed to create implementation for {}: {}",
+                            context_name, e
+                        );
                     }
                 }
             }
@@ -597,11 +797,14 @@ async fn process_implementation(
         anyhow::bail!("unfinished specification");
     }
 
-    let context_content = fs::read_to_string(context_file)
-        .context("Failed to read context file")?;
+    let context_content =
+        fs::read_to_string(context_file).context("Failed to read context file")?;
 
     if config.dry_run {
-        println!("[DRY RUN] Would create implementation for: {}", context_name);
+        println!(
+            "[DRY RUN] Would create implementation for: {}",
+            context_name
+        );
         return Ok(());
     }
 
@@ -629,19 +832,17 @@ async fn process_implementation(
         }
         eprintln!();
     }
-    
+
     // Determine output path preserving folder structure
     let output_path = determine_implementation_output_path(context_file, SPECIFICATIONS_DIR)?;
-    
+
     // Ensure the output directory exists
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .context("Failed to create implementation output directory")?;
+        fs::create_dir_all(parent).context("Failed to create implementation output directory")?;
     }
-    
+
     // Write the implementation file
-    fs::write(&output_path, code)
-        .context("Failed to write implementation file")?;
+    fs::write(&output_path, code).context("Failed to write implementation file")?;
 
     if config.verbose {
         println!("✓ Written implementation to: {}", output_path.display());
@@ -661,7 +862,7 @@ async fn process_implementation(
 /// Handles both raw code and markdown code blocks
 fn extract_code_from_output(output: &str, _context_name: &str) -> String {
     use regex::Regex;
-    
+
     // Try to find Rust code blocks in markdown (```rust ... ```)
     if let Ok(re) = Regex::new(r"(?s)```rust\s*\n(.*?)```") {
         if let Some(captures) = re.captures(output) {
@@ -670,7 +871,7 @@ fn extract_code_from_output(output: &str, _context_name: &str) -> String {
             }
         }
     }
-    
+
     // Try generic code blocks (``` ... ```)
     if let Ok(re) = Regex::new(r"(?s)```\s*\n(.*?)```") {
         if let Some(captures) = re.captures(output) {
@@ -679,19 +880,23 @@ fn extract_code_from_output(output: &str, _context_name: &str) -> String {
             }
         }
     }
-    
+
     // If no code blocks found, try to find code after markdown headers
     let trimmed = output.trim();
     if trimmed.starts_with("#") {
         // Looks like markdown, try to find the first code-like section
         let lines: Vec<&str> = trimmed.lines().collect();
         for (i, line) in lines.iter().enumerate() {
-            if line.contains("pub struct") || line.contains("impl ") || line.contains("fn ") || line.contains("mod ") {
+            if line.contains("pub struct")
+                || line.contains("impl ")
+                || line.contains("fn ")
+                || line.contains("mod ")
+            {
                 return lines[i..].join("\n").trim().to_string();
             }
         }
     }
-    
+
     // Fallback: return the entire output trimmed
     trimmed.to_string()
 }
@@ -716,6 +921,70 @@ fn extract_implementation_failure_message(code: &str) -> Option<String> {
     }
 
     None
+}
+
+fn extract_implementation_review_error_section(code: &str) -> Option<String> {
+    if let Some(msg) = extract_compile_error_message(code) {
+        return Some(msg);
+    }
+    extract_legacy_implementation_error_message(code)
+}
+
+fn extract_legacy_implementation_error_message(code: &str) -> Option<String> {
+    const MARKER: &str = "ERROR: Cannot implement specification as written.";
+    if !code.contains(MARKER) {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if !trimmed.contains("push_str(") {
+            continue;
+        }
+        if let Some(unescaped) = extract_first_quoted_string(trimmed) {
+            lines.push(unescaped);
+        }
+    }
+
+    if lines.is_empty() {
+        return Some(MARKER.to_string());
+    }
+    Some(lines.join(""))
+}
+
+fn extract_first_quoted_string(s: &str) -> Option<String> {
+    let start = s.find('"')?;
+    let bytes = s.as_bytes();
+    let mut idx = start + 1;
+    let mut out = String::new();
+
+    while idx < bytes.len() {
+        let c = bytes[idx] as char;
+        if c == '\\' {
+            if idx + 1 >= bytes.len() {
+                out.push('\\');
+                break;
+            }
+            out.push('\\');
+            out.push(bytes[idx + 1] as char);
+            idx += 2;
+            continue;
+        }
+        if c == '"' {
+            return Some(unescape_common_rust_string_escapes(&out));
+        }
+        out.push(c);
+        idx += 1;
+    }
+
+    None
+}
+
+fn should_apply_review_fix(existing: &str, proposed: &str) -> bool {
+    let normalized_existing = existing.trim();
+    let normalized_output = proposed.trim();
+    !normalized_output.is_empty() && normalized_output != normalized_existing
 }
 
 fn unescape_common_rust_string_escapes(input: &str) -> String {
@@ -776,7 +1045,11 @@ fn extract_section(content: &str, section_title: &str) -> Option<String> {
     }
 
     let section = section_lines.join("\n").trim().to_string();
-    if section.is_empty() { None } else { Some(section) }
+    if section.is_empty() {
+        None
+    } else {
+        Some(section)
+    }
 }
 
 fn is_known_section_title(line: &str) -> bool {
@@ -957,11 +1230,8 @@ pub async fn create_tests(names: Vec<String>, clear_cache: bool, config: &Config
         }
     }
 
-    let execution_levels = build_execution_plan(
-        context_files,
-        SPECIFICATIONS_DIR,
-        Some(DRAFTS_DIR),
-    )?;
+    let execution_levels =
+        build_execution_plan(context_files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating tests for {} context(s)", total_count);
 
@@ -972,7 +1242,11 @@ pub async fn create_tests(names: Vec<String>, clear_cache: bool, config: &Config
     let mut had_unspecified = false;
     for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
         if config.verbose {
-            println!("Processing dependency level {} ({} item(s))", level_idx, level_nodes.len());
+            println!(
+                "Processing dependency level {} ({} item(s))",
+                level_idx,
+                level_nodes.len()
+            );
         }
 
         let mut runnable = Vec::new();
@@ -1114,7 +1388,11 @@ struct CacheAgentInput {
     additional: HashMap<String, serde_json::Value>,
 }
 
-fn clear_agent_response_cache_for_stage(stage: Stage, names: &[String], config: &Config) -> Result<usize> {
+fn clear_agent_response_cache_for_stage(
+    stage: Stage,
+    names: &[String],
+    config: &Config,
+) -> Result<usize> {
     if names.is_empty() {
         return clear_stage_agent_cache_dirs(stage, config);
     }
@@ -1203,10 +1481,12 @@ fn clear_stage_agent_cache_entries_by_name(
             let files = resolve_input_files(DRAFTS_DIR, names_vec, "md")?;
             let levels = build_execution_plan(files, DRAFTS_DIR, None)?;
             for node in levels.into_iter().flatten() {
-                let draft_content = fs::read_to_string(&node.input_path)
-                    .with_context(|| format!("Failed to read draft file: {}", node.input_path.display()))?;
+                let draft_content = fs::read_to_string(&node.input_path).with_context(|| {
+                    format!("Failed to read draft file: {}", node.input_path.display())
+                })?;
                 let additional = build_dependency_context(&node)?;
-                let agent_name = determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
+                let agent_name =
+                    determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
                 candidates.push((
                     agent_name,
                     CacheAgentInput {
@@ -1222,8 +1502,12 @@ fn clear_stage_agent_cache_entries_by_name(
             let levels = build_implementation_execution_plan(files)?;
             for node in levels.into_iter().flatten() {
                 let context_file = resolve_implementation_context_file(&node.input_path)?;
-                let context_content = fs::read_to_string(&context_file)
-                    .with_context(|| format!("Failed to read specification file: {}", context_file.display()))?;
+                let context_content = fs::read_to_string(&context_file).with_context(|| {
+                    format!(
+                        "Failed to read specification file: {}",
+                        context_file.display()
+                    )
+                })?;
                 let mut additional = build_dependency_context(&node)?;
                 if let Some(target_type_name) = infer_target_type_name(&context_file)? {
                     additional.insert("target_type_name".to_string(), json!(target_type_name));
@@ -1242,8 +1526,12 @@ fn clear_stage_agent_cache_entries_by_name(
             let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md")?;
             let levels = build_execution_plan(files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
             for node in levels.into_iter().flatten() {
-                let context_content = fs::read_to_string(&node.input_path)
-                    .with_context(|| format!("Failed to read specification file: {}", node.input_path.display()))?;
+                let context_content = fs::read_to_string(&node.input_path).with_context(|| {
+                    format!(
+                        "Failed to read specification file: {}",
+                        node.input_path.display()
+                    )
+                })?;
                 let additional = build_dependency_context(&node)?;
                 candidates.push((
                     "create_test".to_string(),
@@ -1271,7 +1559,13 @@ fn clear_stage_agent_cache_entries_by_name(
     let agent_registry = FileAgentRegistry::new(None);
     let model_registry = FileAgentModelRegistry::new(None, None, None);
     for (agent_name, input) in candidates {
-        if clear_single_agent_cache_entry(&agent_registry, &model_registry, &agent_name, &input, config)? {
+        if clear_single_agent_cache_entry(
+            &agent_registry,
+            &model_registry,
+            &agent_name,
+            &input,
+            config,
+        )? {
             removed += 1;
         }
     }
@@ -1350,8 +1644,8 @@ async fn process_tests(
         anyhow::bail!("unfinished specification");
     }
 
-    let context_content = fs::read_to_string(context_file)
-        .context("Failed to read context file")?;
+    let context_content =
+        fs::read_to_string(context_file).context("Failed to read context file")?;
 
     if config.dry_run {
         println!("[DRY RUN] Would create tests for: {}", context_name);
@@ -1384,7 +1678,10 @@ fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serd
     // receive transitive context without prompt/template changes.
     let value = json!(dependency_closure);
     context.insert("direct_dependencies".to_string(), value.clone());
-    context.insert("direct_dependencies_only".to_string(), json!(direct_dependencies));
+    context.insert(
+        "direct_dependencies_only".to_string(),
+        json!(direct_dependencies),
+    );
     context.insert("dependency_closure".to_string(), value.clone());
     // Backward compatibility with agent prompts that still reference mcp_context
     context.insert("mcp_context".to_string(), value);
@@ -1397,11 +1694,12 @@ fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serd
     Ok(context)
 }
 
-fn build_implementation_execution_plan(spec_files: Vec<PathBuf>) -> Result<Vec<Vec<ExecutionNode>>> {
+fn build_implementation_execution_plan(
+    spec_files: Vec<PathBuf>,
+) -> Result<Vec<Vec<ExecutionNode>>> {
     let mut draft_inputs = Vec::new();
     for spec_file in spec_files {
-        let draft_path =
-            determine_draft_input_path(&spec_file, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
+        let draft_path = determine_draft_input_path(&spec_file, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
         if draft_path.exists() {
             draft_inputs.push(draft_path);
         } else {
@@ -1570,8 +1868,7 @@ pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
         cmd.args(&args);
     }
 
-    let output = cmd.output()
-        .context("Failed to execute cargo run")?;
+    let output = cmd.output().context("Failed to execute cargo run")?;
 
     if config.verbose || !output.status.success() {
         print!("{}", String::from_utf8_lossy(&output.stdout));
@@ -1691,7 +1988,10 @@ fn clear_specification_artifacts(names: Vec<String>, config: &Config) -> Result<
 
         fs::remove_dir_all(&specs_dir)
             .with_context(|| format!("Failed to remove {}", specs_dir.display()))?;
-        println!("✓ Removed specification artifacts at {}", specs_dir.display());
+        println!(
+            "✓ Removed specification artifacts at {}",
+            specs_dir.display()
+        );
         return Ok(());
     }
 
@@ -1713,7 +2013,10 @@ fn clear_specification_artifacts(names: Vec<String>, config: &Config) -> Result<
     if removed == 0 {
         println!("No matching specification artifacts found");
     } else if config.dry_run {
-        println!("[DRY RUN] Would remove {} specification artifact file(s)", removed);
+        println!(
+            "[DRY RUN] Would remove {} specification artifact file(s)",
+            removed
+        );
     } else {
         println!("✓ Removed {} specification artifact file(s)", removed);
     }
@@ -1750,7 +2053,10 @@ fn clear_implementation_artifacts(names: Vec<String>, config: &Config) -> Result
         if removed == 0 {
             println!("[DRY RUN] No implementation artifacts would be removed");
         } else {
-            println!("[DRY RUN] Would remove {} implementation artifact file(s)", removed);
+            println!(
+                "[DRY RUN] Would remove {} implementation artifact file(s)",
+                removed
+            );
         }
     } else {
         remove_dir_if_empty(Path::new("src/data"))?;
@@ -1824,8 +2130,8 @@ fn remove_dir_if_empty(path: &Path) -> Result<()> {
     if !path.exists() || !path.is_dir() {
         return Ok(());
     }
-    let mut entries = fs::read_dir(path)
-        .with_context(|| format!("Failed to inspect {}", path.display()))?;
+    let mut entries =
+        fs::read_dir(path).with_context(|| format!("Failed to inspect {}", path.display()))?;
     if entries.next().is_none() {
         fs::remove_dir(path)
             .with_context(|| format!("Failed to remove empty directory {}", path.display()))?;
@@ -1877,8 +2183,8 @@ fn resolve_input_files(dir: &str, names: Vec<String>, extension: &str) -> Result
         }
 
         // 3. Process root files last
-        let entries = fs::read_dir(&dir_path)
-            .context(format!("Failed to read {} directory", dir))?;
+        let entries =
+            fs::read_dir(&dir_path).context(format!("Failed to read {} directory", dir))?;
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
@@ -1894,14 +2200,18 @@ fn resolve_input_files(dir: &str, names: Vec<String>, extension: &str) -> Result
         let mut files = Vec::new();
         for name in names {
             // Try data/ folder first
-            let data_path = dir_path.join("data").join(format!("{}.{}", name, extension));
+            let data_path = dir_path
+                .join("data")
+                .join(format!("{}.{}", name, extension));
             if data_path.exists() {
                 files.push(data_path);
                 continue;
             }
 
             // Try contexts/ folder second
-            let contexts_path = dir_path.join("contexts").join(format!("{}.{}", name, extension));
+            let contexts_path = dir_path
+                .join("contexts")
+                .join(format!("{}.{}", name, extension));
             if contexts_path.exists() {
                 files.push(contexts_path);
                 continue;
@@ -1912,7 +2222,10 @@ fn resolve_input_files(dir: &str, names: Vec<String>, extension: &str) -> Result
             if root_path.exists() {
                 files.push(root_path);
             } else {
-                eprintln!("Warning: File not found: {}.{} (searched in data/, contexts/, and root)", name, extension);
+                eprintln!(
+                    "Warning: File not found: {}.{} (searched in data/, contexts/, and root)",
+                    name, extension
+                );
             }
         }
         Ok(files)
@@ -1920,7 +2233,7 @@ fn resolve_input_files(dir: &str, names: Vec<String>, extension: &str) -> Result
 }
 
 /// Determines the specification output path preserving folder structure
-/// 
+///
 /// Maps:
 /// - drafts/data/X.md → specifications/data/X.md
 /// - drafts/contexts/X.md → specifications/contexts/X.md
@@ -1932,7 +2245,7 @@ fn determine_specification_output_path(
 ) -> Result<PathBuf> {
     let draft_path = draft_file.to_path_buf();
     let drafts_path = PathBuf::from(drafts_dir);
-    
+
     // Get relative path from drafts directory
     let relative_path = match draft_path.strip_prefix(&drafts_path) {
         Ok(rel) => rel.to_path_buf(),
@@ -1940,10 +2253,14 @@ fn determine_specification_output_path(
             // If strip_prefix fails, try component-based approach
             let draft_components: Vec<_> = draft_path.components().collect();
             let drafts_components: Vec<_> = drafts_path.components().collect();
-            
+
             // Check if draft_path starts with drafts_path components
-            if draft_components.len() > drafts_components.len() 
-                && draft_components.iter().zip(drafts_components.iter()).all(|(a, b)| a == b) {
+            if draft_components.len() > drafts_components.len()
+                && draft_components
+                    .iter()
+                    .zip(drafts_components.iter())
+                    .all(|(a, b)| a == b)
+            {
                 // Build path from remaining components
                 PathBuf::from_iter(draft_components.iter().skip(drafts_components.len()))
             } else {
@@ -1955,14 +2272,15 @@ fn determine_specification_output_path(
                     PathBuf::from(rel_str)
                 } else {
                     // Just use the filename
-                    draft_path.file_name()
+                    draft_path
+                        .file_name()
                         .map(|n| PathBuf::from(n))
                         .unwrap_or_else(|| PathBuf::from(""))
                 }
             }
         }
     };
-    
+
     // Build output path in specifications directory
     let output_path = PathBuf::from(specifications_dir).join(relative_path);
     Ok(output_path)
@@ -2024,8 +2342,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
     let drafts_path = PathBuf::from(drafts_dir);
 
     // Get relative path from drafts directory
-    let relative_path = draft_path.strip_prefix(&drafts_path)
-        .unwrap_or(draft_file);
+    let relative_path = draft_path.strip_prefix(&drafts_path).unwrap_or(draft_file);
 
     // Check first component to determine folder
     if let Some(first_component) = relative_path.components().next() {
@@ -2044,10 +2361,12 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
 fn infer_target_type_name(spec_file: &Path) -> Result<Option<String>> {
     let rel = match spec_file.strip_prefix(Path::new(SPECIFICATIONS_DIR)) {
         Ok(r) => r.to_path_buf(),
-        Err(_) => return Ok(spec_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(to_pascal_case_title)),
+        Err(_) => {
+            return Ok(spec_file
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(to_pascal_case_title))
+        }
     };
 
     let draft_path = PathBuf::from(DRAFTS_DIR).join(&rel);
@@ -2108,7 +2427,11 @@ fn to_pascal_case_title(s: &str) -> Option<String> {
         };
         out.push_str(&token);
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn validate_generated_rust_layout(project_root: &Path) -> Result<()> {
@@ -2153,10 +2476,16 @@ fn validate_generated_rust_layout(project_root: &Path) -> Result<()> {
         let cargo_content = fs::read_to_string(&cargo_toml)
             .with_context(|| format!("Failed to read {}", cargo_toml.display()))?;
         if needs_base64 && !cargo_content.contains("\nbase64") {
-            issues.push("Cargo.toml is missing dependency `base64` while generated code references it.".to_string());
+            issues.push(
+                "Cargo.toml is missing dependency `base64` while generated code references it."
+                    .to_string(),
+            );
         }
         if needs_sha2 && !cargo_content.contains("\nsha2") {
-            issues.push("Cargo.toml is missing dependency `sha2` while generated code references it.".to_string());
+            issues.push(
+                "Cargo.toml is missing dependency `sha2` while generated code references it."
+                    .to_string(),
+            );
         }
     }
 
@@ -2210,7 +2539,10 @@ fn validate_mod_exports(mod_file: &Path, issues: &mut Vec<String>) -> Result<()>
             format!("pub type {}", type_name),
             format!("pub trait {}", type_name),
         ];
-        if !candidates.iter().any(|needle| module_content.contains(needle)) {
+        if !candidates
+            .iter()
+            .any(|needle| module_content.contains(needle))
+        {
             issues.push(format!(
                 "{} exports `{}` but {} does not declare a matching public type.",
                 mod_file.display(),
@@ -2229,9 +2561,7 @@ fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
         return Ok(files);
     }
 
-    for entry in fs::read_dir(root)
-        .with_context(|| format!("Failed to read {}", root.display()))?
-    {
+    for entry in fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
@@ -2245,7 +2575,7 @@ fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Determines the implementation output path preserving folder structure
-/// 
+///
 /// Maps:
 /// - specifications/data/X.md → src/data/X.rs
 /// - specifications/contexts/X.md → src/contexts/X.rs
@@ -2256,7 +2586,7 @@ fn determine_implementation_output_path(
 ) -> Result<PathBuf> {
     let context_path = context_file.to_path_buf();
     let specifications_path = PathBuf::from(specifications_dir);
-    
+
     // Get relative path from specifications directory by comparing components
     let relative_path = match context_path.strip_prefix(&specifications_path) {
         Ok(rel) => rel.to_path_buf(),
@@ -2264,12 +2594,20 @@ fn determine_implementation_output_path(
             // If strip_prefix fails, try component-based approach
             let context_components: Vec<_> = context_path.components().collect();
             let specifications_components: Vec<_> = specifications_path.components().collect();
-            
+
             // Check if context_path starts with specifications_path components
-            if context_components.len() > specifications_components.len() 
-                && context_components.iter().zip(specifications_components.iter()).all(|(a, b)| a == b) {
+            if context_components.len() > specifications_components.len()
+                && context_components
+                    .iter()
+                    .zip(specifications_components.iter())
+                    .all(|(a, b)| a == b)
+            {
                 // Build path from remaining components
-                PathBuf::from_iter(context_components.iter().skip(specifications_components.len()))
+                PathBuf::from_iter(
+                    context_components
+                        .iter()
+                        .skip(specifications_components.len()),
+                )
             } else {
                 // Use string-based fallback
                 let context_str = context_file.to_str().unwrap_or("");
@@ -2279,14 +2617,15 @@ fn determine_implementation_output_path(
                     PathBuf::from(rel_str)
                 } else {
                     // Just use the filename
-                    context_path.file_name()
+                    context_path
+                        .file_name()
                         .map(|n| PathBuf::from(n))
                         .unwrap_or_else(|| PathBuf::from(""))
                 }
             }
         }
     };
-    
+
     // Determine output directory based on source folder
     // Check if relative_path starts with "data" or "contexts" by looking at first component
     let output_dir = if let Some(first_comp) = relative_path.components().next() {
@@ -2302,26 +2641,31 @@ fn determine_implementation_output_path(
     } else {
         PathBuf::from("src")
     };
-    
+
     // Get the filename and change extension to .rs
-    let file_stem = relative_path.file_stem()
+    let file_stem = relative_path
+        .file_stem()
         .and_then(|s| s.to_str())
         .context("Invalid context filename")?;
-    
+
     // Special case: app.md → main.rs
     let output_filename = if file_stem.eq_ignore_ascii_case("app") {
         "main.rs"
     } else {
         &format!("{}.rs", file_stem.to_ascii_lowercase())
     };
-    
+
     let output_path = output_dir.join(output_filename);
     Ok(output_path)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::extract_compile_error_message;
+    use super::{
+        determine_specification_output_path, extract_compile_error_message,
+        extract_implementation_review_error_section, should_apply_review_fix,
+    };
+    use std::path::Path;
 
     #[test]
     fn extracts_compile_error_message_from_generated_code() {
@@ -2343,5 +2687,38 @@ Problem:
     fn returns_none_when_compile_error_macro_is_absent() {
         let code = "pub struct Account {}";
         assert!(extract_compile_error_message(code).is_none());
+    }
+
+    #[test]
+    fn extracts_legacy_review_error_message_from_push_str_source() {
+        let code = r#"
+let mut msg = String::new();
+msg.push_str("ERROR: Cannot implement specification as written.\n\n");
+msg.push_str("Problems:\n");
+msg.push_str("- Missing constructor.\n");
+msg.push_str("- Missing accessor.\n");
+"#;
+        let msg = extract_implementation_review_error_section(code).expect("legacy message");
+        assert!(msg.contains("ERROR: Cannot implement specification as written."));
+        assert!(msg.contains("Missing constructor."));
+        assert!(msg.contains("Missing accessor."));
+    }
+
+    #[test]
+    fn maps_specification_path_back_to_draft_path() {
+        let path = determine_specification_output_path(
+            Path::new("specifications/contexts/game_loop.md"),
+            "specifications",
+            "drafts",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("drafts/contexts/game_loop.md"));
+    }
+
+    #[test]
+    fn applies_review_fix_only_for_nonempty_changes() {
+        assert!(!should_apply_review_fix("hello", "hello"));
+        assert!(!should_apply_review_fix("hello", "   \n\t"));
+        assert!(should_apply_review_fix("hello", "hello world"));
     }
 }

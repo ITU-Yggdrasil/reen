@@ -67,7 +67,10 @@ impl AgentExecutor {
 
         // Prepare input based on agent type
         let agent_input = match self.agent_name.as_str() {
-            "create_specifications" | "create_specifications_context" | "create_specifications_data" | "create_specifications_main" => AgentInput {
+            "create_specifications"
+            | "create_specifications_context"
+            | "create_specifications_data"
+            | "create_specifications_main" => AgentInput {
                 draft_content: Some(input.to_string()),
                 context_content: None,
                 additional: enriched_context,
@@ -115,8 +118,12 @@ impl AgentExecutor {
         // A more sophisticated implementation might parse structured output
         let question_markers = ["?", "## Questions", "# Questions", "**Questions**"];
 
-        question_markers.iter().any(|marker| output.contains(marker))
-            && (output.contains("clarification") || output.contains("answer") || output.contains("question"))
+        question_markers
+            .iter()
+            .any(|marker| output.contains(marker))
+            && (output.contains("clarification")
+                || output.contains("answer")
+                || output.contains("question"))
     }
 
     /// Handles the full conversational loop with question/answer cycles and caller-provided seed context
@@ -150,7 +157,10 @@ impl AgentExecutor {
                     // Prompt user for answers
                     println!("\n{}", "=".repeat(60));
                     println!("The agent has questions that need answers.");
-                    println!("Questions have been written to: {}", questions_file.display());
+                    println!(
+                        "Questions have been written to: {}",
+                        questions_file.display()
+                    );
                     println!("Please edit the file to provide your answers.");
                     println!("{}", "=".repeat(60));
                     println!("\nPress Enter when you're ready to continue (or type 'ready'):");
@@ -189,18 +199,15 @@ impl AgentExecutor {
 
         // Create questions directory if it doesn't exist
         if !questions_dir.exists() {
-            fs::create_dir_all(&questions_dir)
-                .context("Failed to create questions directory")?;
+            fs::create_dir_all(&questions_dir).context("Failed to create questions directory")?;
         }
 
         let questions_file = questions_dir.join(format!("{}.md", context_name));
 
-        fs::write(&questions_file, questions)
-            .context("Failed to write questions file")?;
+        fs::write(&questions_file, questions).context("Failed to write questions file")?;
 
         Ok(questions_file)
     }
-
 }
 
 fn validate_agent_exists(agent_name: &str) -> Result<()> {

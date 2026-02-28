@@ -561,18 +561,24 @@ system_prompt: |
 
   Instead:
 
-  ```
-  ERROR: Cannot implement specification as written.
+  - Emit the failure through `compile_error!` in the generated Rust output.
+  - This requirement applies to every target, including app/main outputs (`src/main.rs`).
+  - Do not only print the message to stdout/stderr or return a runtime `Err` without `compile_error!`.
 
-  Problem: The 'run' method in "Functionality" is documented to perform
-  input validation, but no 'validate' role method exists in "Role Methods".
+  ```
+  compile_error!(
+      "ERROR: Cannot implement specification as written.
+
+  Problem: The 'run' method in \"Functionality\" is documented to perform
+  input validation, but no 'validate' role method exists in \"Role Methods\".
 
   Required: Either:
   - Add 'validate' role method to handle validation
   - Remove validation requirement from 'run' documentation
   - Clarify how validation should happen within existing methods
 
-  I cannot proceed without specification clarification.
+  I cannot proceed without specification clarification."
+  );
   ```
 
   ## Quality Standards

@@ -200,8 +200,8 @@ where
         specification: &AgentSpecification,
         model: &Model,
     ) -> Result<ExecutionResult, ExecutionError> {
-        use std::process::{Command, Stdio};
         use std::io::Write;
+        use std::process::{Command, Stdio};
 
         // Prepare the request JSON
         let request = serde_json::json!({
@@ -209,8 +209,9 @@ where
             "system_prompt": specification.system_prompt
         });
 
-        let request_json = serde_json::to_string(&request)
-            .map_err(|e| ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e)))?;
+        let request_json = serde_json::to_string(&request).map_err(|e| {
+            ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
+        })?;
 
         // Spawn the Python runner
         let mut child = Command::new("python3")
@@ -219,17 +220,24 @@ where
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| ExecutionError::PythonRunnerError(format!("Failed to spawn Python runner: {}", e)))?;
+            .map_err(|e| {
+                ExecutionError::PythonRunnerError(format!("Failed to spawn Python runner: {}", e))
+            })?;
 
         // Write the request to stdin
         if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(request_json.as_bytes())
-                .map_err(|e| ExecutionError::PythonRunnerError(format!("Failed to write to Python runner stdin: {}", e)))?;
+            stdin.write_all(request_json.as_bytes()).map_err(|e| {
+                ExecutionError::PythonRunnerError(format!(
+                    "Failed to write to Python runner stdin: {}",
+                    e
+                ))
+            })?;
         }
 
         // Wait for the process to complete and capture output
-        let output = child.wait_with_output()
-            .map_err(|e| ExecutionError::PythonRunnerError(format!("Failed to read Python runner output: {}", e)))?;
+        let output = child.wait_with_output().map_err(|e| {
+            ExecutionError::PythonRunnerError(format!("Failed to read Python runner output: {}", e))
+        })?;
 
         // Check if the process succeeded
         if !output.status.success() {
@@ -242,11 +250,13 @@ where
         }
 
         // Parse the response JSON
-        let response_json = String::from_utf8(output.stdout)
-            .map_err(|e| ExecutionError::PythonRunnerError(format!("Invalid UTF-8 in response: {}", e)))?;
+        let response_json = String::from_utf8(output.stdout).map_err(|e| {
+            ExecutionError::PythonRunnerError(format!("Invalid UTF-8 in response: {}", e))
+        })?;
 
-        let response: serde_json::Value = serde_json::from_str(&response_json)
-            .map_err(|e| ExecutionError::PythonRunnerError(format!("Failed to parse response JSON: {}", e)))?;
+        let response: serde_json::Value = serde_json::from_str(&response_json).map_err(|e| {
+            ExecutionError::PythonRunnerError(format!("Failed to parse response JSON: {}", e))
+        })?;
 
         // Check if execution was successful
         if !response["success"].as_bool().unwrap_or(false) {
@@ -255,7 +265,8 @@ where
         }
 
         // Extract the output
-        let output_text = response["output"].as_str()
+        let output_text = response["output"]
+            .as_str()
             .ok_or_else(|| ExecutionError::PythonRunnerError("No output in response".to_string()))?
             .to_string();
 
@@ -268,7 +279,11 @@ where
     ///
     /// This hash is used to create a folder that groups all cache entries
     /// for a specific agent instruction set and model combination.
-    fn generate_instructions_model_hash(&self, agent_instructions: &str, model_name: &str) -> String {
+    fn generate_instructions_model_hash(
+        &self,
+        agent_instructions: &str,
+        model_name: &str,
+    ) -> String {
         let composite = format!("{}:{}", agent_instructions, model_name);
         let mut hasher = Sha256::new();
         hasher.update(composite.as_bytes());
@@ -300,8 +315,13 @@ where
     ///
     /// Creates and returns a FileCache instance configured for this agent and model.
     /// The cache folder is based on hash(agent_instructions + model_name).
-    fn get_cached_artefact(&self, agent_instructions: &str, model_name: &str) -> Result<FileCache, ExecutionError> {
-        let instructions_model_hash = self.generate_instructions_model_hash(agent_instructions, model_name);
+    fn get_cached_artefact(
+        &self,
+        agent_instructions: &str,
+        model_name: &str,
+    ) -> Result<FileCache, ExecutionError> {
+        let instructions_model_hash =
+            self.generate_instructions_model_hash(agent_instructions, model_name);
         Ok(FileCache::new(None, instructions_model_hash))
     }
 
@@ -377,7 +397,11 @@ where
     /// Helper: Resolve a dotted path in a JSON value
     ///
     /// Supports paths like "input.prop1.prop2"
-    fn resolve_path<'a>(&self, value: &'a serde_json::Value, path: &str) -> Result<Option<&'a serde_json::Value>, PopulateError> {
+    fn resolve_path<'a>(
+        &self,
+        value: &'a serde_json::Value,
+        path: &str,
+    ) -> Result<Option<&'a serde_json::Value>, PopulateError> {
         let parts: Vec<&str> = path.split('.').collect();
 
         // First part should be "input"
@@ -405,7 +429,9 @@ where
     pub fn run(self) -> Result<ExecutionResult, AgentRunnerError> {
         // Step 1: Load agent template (instructions) before populating
         // This is needed to generate the cache folder hash
-        let agent_template = self.agent_registry.get_specification(&self.agent)
+        let agent_template = self
+            .agent_registry
+            .get_specification(&self.agent)
             .map_err(|e| AgentRunnerError::Populate(e))?;
 
         // Step 2: Resolve model
@@ -667,7 +693,8 @@ mod tests {
             TestModelRegistry,
         );
 
-        let template = "{{input.name}} lives in {{input.location.city}}, {{input.location.country}}";
+        let template =
+            "{{input.name}} lives in {{input.location.city}}, {{input.location.country}}";
         let result = runner.replace_placeholders(template);
 
         assert!(result.is_ok());

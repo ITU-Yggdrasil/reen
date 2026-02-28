@@ -16,3 +16,9 @@ create_test:
 resolve_compilation_errors:
   model: gpt-5
   parallel: false
+review_draft_errors:
+  model: gpt-5
+  parallel: false
+review_draft_errors:
+  model: gpt-5
+  parallel: false

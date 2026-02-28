@@ -32,9 +32,8 @@ impl FileAgentModelRegistry {
         default_parallel: Option<bool>,
     ) -> Self {
         Self {
-            registry_path: registry_path.unwrap_or_else(|| {
-                PathBuf::from("agents/agent_model_registry.yml")
-            }),
+            registry_path: registry_path
+                .unwrap_or_else(|| PathBuf::from("agents/agent_model_registry.yml")),
             default_model: default_model.unwrap_or_else(|| "default".to_string()),
             default_parallel: default_parallel.unwrap_or(false),
         }
@@ -47,10 +46,7 @@ impl FileAgentModelRegistry {
         }
 
         let content = fs::read_to_string(&self.registry_path).map_err(|e| {
-            ExecutionError::ExecutionFailed(format!(
-                "Failed to read agent model registry: {}",
-                e
-            ))
+            ExecutionError::ExecutionFailed(format!("Failed to read agent model registry: {}", e))
         })?;
 
         parse_registry(&content, &self.default_model, self.default_parallel)
@@ -59,7 +55,7 @@ impl FileAgentModelRegistry {
     /// Checks if an agent can run in parallel
     pub fn can_run_parallel(&self, agent_name: &str) -> Result<bool, ExecutionError> {
         let registry = self.load_registry()?;
-        
+
         if let Some(config) = registry.get(agent_name) {
             Ok(config.parallel)
         } else {
@@ -90,9 +86,8 @@ fn parse_registry(
 ) -> Result<HashMap<String, AgentConfig>, ExecutionError> {
     use yaml_rust::YamlLoader;
 
-    let docs = YamlLoader::load_from_str(yaml_content).map_err(|e| {
-        ExecutionError::ExecutionFailed(format!("Invalid registry YAML: {}", e))
-    })?;
+    let docs = YamlLoader::load_from_str(yaml_content)
+        .map_err(|e| ExecutionError::ExecutionFailed(format!("Invalid registry YAML: {}", e)))?;
 
     if docs.is_empty() {
         return Ok(HashMap::new());
@@ -118,12 +113,12 @@ fn parse_registry(
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| default_model.to_string());
-                    
+
                     let parallel = v_hash
                         .get(&yaml_rust::Yaml::String("parallel".to_string()))
                         .and_then(|v| v.as_bool())
                         .unwrap_or(default_parallel);
-                    
+
                     AgentConfig { model, parallel }
                 } else {
                     // Fallback to defaults
@@ -132,7 +127,7 @@ fn parse_registry(
                         parallel: default_parallel,
                     }
                 };
-                
+
                 registry.insert(k.to_string(), config);
             }
         }
@@ -185,7 +180,7 @@ create_implementation:
         let spec_config = registry.get("create_specifications").unwrap();
         assert_eq!(spec_config.model, "gpt-4");
         assert_eq!(spec_config.parallel, true);
-        
+
         let impl_config = registry.get("create_implementation").unwrap();
         assert_eq!(impl_config.model, "claude-3-opus");
         assert_eq!(impl_config.parallel, false);
@@ -194,7 +189,7 @@ create_implementation:
     #[test]
     fn test_parse_empty_registry() {
         let yaml = "";
-        let result = parse_registry(yaml, "default", false); 
+        let result = parse_registry(yaml, "default", false);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }

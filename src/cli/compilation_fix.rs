@@ -116,7 +116,10 @@ pub async fn ensure_compiles_with_auto_fix(
             .context("Failed to create compilation error resolver agent")?;
 
         let agent_response = executor
-            .execute_with_context("Compilation failed; propose minimal fix patch.", additional_context)
+            .execute_with_context(
+                "Compilation failed; propose minimal fix patch.",
+                additional_context,
+            )
             .await
             .context("Failed to execute compilation error resolver agent")?;
 
@@ -193,8 +196,7 @@ fn run_cargo_build(project_root: &Path) -> Result<CompilationOutput> {
 
 fn create_session_dir(project_root: &Path) -> Result<PathBuf> {
     let base = project_root.join(".reen").join("compilation_fixes");
-    fs::create_dir_all(&base)
-        .with_context(|| format!("Failed to create {}", base.display()))?;
+    fs::create_dir_all(&base).with_context(|| format!("Failed to create {}", base.display()))?;
     let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let dir = base.join(ts);
     fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
@@ -257,7 +259,12 @@ fn collect_relevant_paths(
     let mut paths: HashSet<PathBuf> = HashSet::new();
 
     // Always include Cargo.toml and src/lib.rs if present.
-    for always in ["Cargo.toml", "src/lib.rs", "src/contexts/mod.rs", "src/data/mod.rs"] {
+    for always in [
+        "Cargo.toml",
+        "src/lib.rs",
+        "src/contexts/mod.rs",
+        "src/data/mod.rs",
+    ] {
         let p = project_root.join(always);
         if p.exists() {
             paths.insert(p);
@@ -265,7 +272,11 @@ fn collect_relevant_paths(
     }
 
     for p in recent_generated_files {
-        let full = if p.is_absolute() { p.clone() } else { project_root.join(p) };
+        let full = if p.is_absolute() {
+            p.clone()
+        } else {
+            project_root.join(p)
+        };
         if full.exists() {
             paths.insert(full);
         }
@@ -306,15 +317,22 @@ fn snapshot_files_json(project_root: &Path, paths: &[PathBuf]) -> Result<BTreeMa
         if !p.exists() || p.is_dir() {
             continue;
         }
-        let rel = p.strip_prefix(project_root).unwrap_or(p).to_string_lossy().to_string();
-        let content = fs::read_to_string(p)
-            .with_context(|| format!("Failed to read {}", p.display()))?;
+        let rel = p
+            .strip_prefix(project_root)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .to_string();
+        let content =
+            fs::read_to_string(p).with_context(|| format!("Failed to read {}", p.display()))?;
         map.insert(rel, content);
     }
     Ok(map)
 }
 
-fn snapshot_specs_json(project_root: &Path, src_paths: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+fn snapshot_specs_json(
+    project_root: &Path,
+    src_paths: &[PathBuf],
+) -> Result<BTreeMap<String, String>> {
     let mut spec_paths: HashSet<PathBuf> = HashSet::new();
     for p in src_paths {
         let rel = p.strip_prefix(project_root).unwrap_or(p);
@@ -332,8 +350,13 @@ fn snapshot_specs_json(project_root: &Path, src_paths: &[PathBuf]) -> Result<BTr
     let mut list: Vec<PathBuf> = spec_paths.into_iter().collect();
     list.sort();
     for p in list {
-        let rel = p.strip_prefix(project_root).unwrap_or(&p).to_string_lossy().to_string();
-        let content = fs::read_to_string(&p).with_context(|| format!("Failed to read {}", p.display()))?;
+        let rel = p
+            .strip_prefix(project_root)
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .to_string();
+        let content =
+            fs::read_to_string(&p).with_context(|| format!("Failed to read {}", p.display()))?;
         map.insert(rel, content);
     }
     Ok(map)
@@ -344,10 +367,16 @@ fn map_src_to_spec(src_rel: &str) -> Option<String> {
     // src/contexts/x.rs -> specifications/contexts/x.md
     // src/data/x.rs -> specifications/data/x.md
     // src/main.rs -> specifications/app.md
-    if let Some(stem) = src_rel.strip_prefix("src/contexts/").and_then(|s| s.strip_suffix(".rs")) {
+    if let Some(stem) = src_rel
+        .strip_prefix("src/contexts/")
+        .and_then(|s| s.strip_suffix(".rs"))
+    {
         return Some(format!("specifications/contexts/{}.md", stem));
     }
-    if let Some(stem) = src_rel.strip_prefix("src/data/").and_then(|s| s.strip_suffix(".rs")) {
+    if let Some(stem) = src_rel
+        .strip_prefix("src/data/")
+        .and_then(|s| s.strip_suffix(".rs"))
+    {
         return Some(format!("specifications/data/{}.md", stem));
     }
     if src_rel == "src/main.rs" {
@@ -444,7 +473,11 @@ fn check_guardrails(project_root: &Path, diff: &str) -> Result<GuardrailReport> 
             continue;
         }
 
-        let target = if !path.is_empty() { path.clone() } else { old.clone() };
+        let target = if !path.is_empty() {
+            path.clone()
+        } else {
+            old.clone()
+        };
         if target.is_empty() {
             issues.push("Patch contains an empty path".to_string());
             continue;
@@ -515,14 +548,21 @@ fn check_guardrails(project_root: &Path, diff: &str) -> Result<GuardrailReport> 
             }
         }
 
-        issues.extend(evaluate_public_api_changes(&target, &removed_pub_fns, &added_pub_fns));
+        issues.extend(evaluate_public_api_changes(
+            &target,
+            &removed_pub_fns,
+            &added_pub_fns,
+        ));
 
         // Also ensure target resolves within root when joined.
         let full = project_root.join(&target);
         if let Ok(canon) = full.canonicalize() {
             if let Ok(root) = project_root.canonicalize() {
                 if !canon.starts_with(root) {
-                    issues.push(format!("Blocked path (outside repo after resolve): {}", target));
+                    issues.push(format!(
+                        "Blocked path (outside repo after resolve): {}",
+                        target
+                    ));
                 }
             }
         }
@@ -600,7 +640,10 @@ fn parse_pub_fn_signature(line: &str) -> Option<FnSig> {
     let mut params: Vec<String> = if params_raw.is_empty() {
         Vec::new()
     } else {
-        params_raw.split(',').map(|p| p.trim().to_string()).collect()
+        params_raw
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .collect()
     };
 
     let receiver = match params.first().map(|s| s.as_str()) {
@@ -617,7 +660,10 @@ fn parse_pub_fn_signature(line: &str) -> Option<FnSig> {
         // Drop the receiver position if it looks like self.
         if matches!(
             receiver,
-            ReceiverKind::RefSelf | ReceiverKind::ValSelf | ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+            ReceiverKind::RefSelf
+                | ReceiverKind::ValSelf
+                | ReceiverKind::MutRefSelf
+                | ReceiverKind::MutValSelf
         ) {
             params.remove(0);
         }
@@ -726,7 +772,10 @@ fn is_allowed_new_public_method(sig: &FnSig) -> bool {
     if sig.name.starts_with("set_") {
         return false;
     }
-    if matches!(sig.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf) {
+    if matches!(
+        sig.receiver,
+        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+    ) {
         return false;
     }
     if matches!(sig.name.as_str(), "new" | "try_new") {
@@ -742,9 +791,13 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
     if old.name != new.name {
         return Some("function name changed".to_string());
     }
-    if matches!(old.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
-        || matches!(new.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
-    {
+    if matches!(
+        old.receiver,
+        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+    ) || matches!(
+        new.receiver,
+        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+    ) {
         return Some("introduces mutable receiver (`&mut self`/`mut self`)".to_string());
     }
     if old.non_self_param_types.len() != new.non_self_param_types.len() {
@@ -756,14 +809,20 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
         .zip(new.non_self_param_types.iter())
     {
         if !is_ref_value_equivalent(a, b) {
-            return Some(format!("parameter type changed beyond &T<->T: `{}` -> `{}`", a, b));
+            return Some(format!(
+                "parameter type changed beyond &T<->T: `{}` -> `{}`",
+                a, b
+            ));
         }
     }
     match (&old.return_type, &new.return_type) {
         (None, None) => {}
         (Some(a), Some(b)) => {
             if !is_ref_value_equivalent(a, b) {
-                return Some(format!("return type changed beyond &T<->T: `{}` -> `{}`", a, b));
+                return Some(format!(
+                    "return type changed beyond &T<->T: `{}` -> `{}`",
+                    a, b
+                ));
             }
         }
         _ => return Some("return type presence changed".to_string()),
@@ -996,7 +1055,6 @@ fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
         let new_content = join_lines(&new_lines);
         fs::write(&target_full, &new_content)
             .with_context(|| format!("Failed to write {}", target_full.display()))?;
-
     }
     Ok(diff.trim().to_string())
 }
@@ -1039,9 +1097,9 @@ fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
         for hl in &h.lines {
             match hl.kind {
                 HunkLineKind::Context => {
-                    let line = current.get(pos).ok_or_else(|| {
-                        anyhow::anyhow!("Context line beyond EOF at pos {}", pos)
-                    })?;
+                    let line = current
+                        .get(pos)
+                        .ok_or_else(|| anyhow::anyhow!("Context line beyond EOF at pos {}", pos))?;
                     if line != &hl.text {
                         anyhow::bail!(
                             "Context mismatch at pos {}: expected {:?}, found {:?}",
@@ -1054,9 +1112,9 @@ fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
                     pos += 1;
                 }
                 HunkLineKind::Remove => {
-                    let line = current.get(pos).ok_or_else(|| {
-                        anyhow::anyhow!("Remove line beyond EOF at pos {}", pos)
-                    })?;
+                    let line = current
+                        .get(pos)
+                        .ok_or_else(|| anyhow::anyhow!("Remove line beyond EOF at pos {}", pos))?;
                     if line != &hl.text {
                         anyhow::bail!(
                             "Remove mismatch at pos {}: expected {:?}, found {:?}",
@@ -1138,4 +1196,3 @@ fn find_hunk_start(lines: &[String], pattern: &[&str], preferred: usize) -> Opti
 
     None
 }
-
