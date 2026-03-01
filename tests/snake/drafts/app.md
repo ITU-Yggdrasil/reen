@@ -9,6 +9,7 @@ The application is responsible for:
 - rendering the game state. Board and score can be obtained from the game loop. 
 - restarting the game when it is not running
 - managing terminal input mode for interactive keyboard control
+- owning a shared CommandInputContext used by both menus and gameplay
 
 Game progression logic itself is delegated to the GameLoopContext.
 
@@ -41,13 +42,14 @@ The application runs an outer loop with the following behavior:
 0. Terminal input mode:
    - Before entering the main loop, enable raw terminal input mode so single key presses are available immediately (without pressing Enter), and disable input echo.
    - On application exit (normal or error), restore the previous terminal mode.
+   - Create one CommandInputContext instance before entering the main loop and keep it for the entire process lifetime.
 
 1. If there is no active GameLoopContext (including when the application first starts):
    - Render a start screen (including score from the previous game if one has been completed in this session).
-   - Wait for user input as single key presses.
+   - Call CommandInputContext.capture and then poll keys via CommandInputContext.next_key.
    - If the user presses the start key "S" or "s":
      - Recreate the initial state.
-     - Create a new GameLoopContext.
+     - Create a new GameLoopContext and pass the same shared CommandInputContext instance as the `command` role.
    - If "Q" or "q" is pressed exit the program
    - Otherwise continue waiting.
 

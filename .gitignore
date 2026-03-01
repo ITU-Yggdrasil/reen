@@ -6,3 +6,4 @@ target/
 *.lock
 tests/**/specifications/
 tests/**/src/
+tests/**/Cargo.*

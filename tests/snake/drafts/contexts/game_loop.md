@@ -13,11 +13,10 @@ user input and collision detection and score is handled. The context also handle
   The snake itself, representing occupied cells and current direction. Provides steering and movement operations.
 
 - **command**
-  The command role is played by keyboard input from standard input (`stdin`), not by a separate domain object.
-  It yields the next direction intention for the snake.
+  A CommandInputContext role player provided by the application.
+  It yields the next direction intention for the snake from the shared keystroke buffer.
 
-- **food_dropper**
-  RNG that places a new food object when needed.
+- **food_dropper** encapsulates the logic for food placement. Played by a RNG
 
 - **game_state** The state of the game represented by a GameState object
 
@@ -58,11 +57,11 @@ user input and collision detection and score is handled. The context also handle
 ### command
 
 - **next**
-  The command role is a FIFO buffer of keystrokes read from `stdin`.
-  - In each call to `next`, pop keystrokes from the front of the buffer until:
-    - a movement key is found (`W`/`A`/`S`/`D`, case-insensitive), in which case return `UP`/`LEFT`/`DOWN`/`RIGHT`, or
-    - the buffer becomes empty.
-  - If the buffer becomes empty before any `W`/`A`/`S`/`D` is found, return None
+  Uses the shared command buffer to determine the next steering direction.
+  - pop keys from the front until:
+    - a movement key is found (`W`/`A`/`S`/`D`, case-insensitive), then return `Some(UP|LEFT|DOWN|RIGHT)`, or
+    - the buffer is empty.
+  - if the buffer becomes empty before a movement key is found, return `None`.
 
 ### food_dropper
 
@@ -73,8 +72,9 @@ user input and collision detection and score is handled. The context also handle
 ---
 
 ## Functionality
-- **new(board, snake, food_dropper, game_state) -> GameLoopContext** constructs a new context by assigning the provided collaborators to their roles/props. The `command` role is implicitly bound to keyboard input (`stdin`) by the runtime and is therefore not passed as a constructor argument.
-  - `new` uses the shared command keystroke buffer bound to `stdin`.
+- **new(board, snake, command, food_dropper, game_state) -> GameLoopContext** constructs a new context by assigning the provided collaborators to their roles/props.
+  - `command` is a CommandInputContext provided by the application.
+  - GameLoopContext must not create or own a separate global stdin reader.
 
 - **current_board** returns a two dimensional array of characters, indices into the array matches coordinates on the board. i.e. array[0][1] matches the coordinates (x=0,y=1) .
   - 'w' for wall at the boundary
