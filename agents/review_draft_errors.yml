@@ -11,6 +11,8 @@ system_prompt: |
   - error source path: {{input.error_source}}
   - error section: {{input.error_section}}
   - fix mode: {{input.fix_mode}}
+  - target draft path: {{input.target_draft?}}
+  - ownership reason: {{input.ownership_reason?}}
 
   ## Rules
   - Keep intent and domain behavior aligned with the existing draft.
@@ -24,5 +26,18 @@ system_prompt: |
     - Return concise, actionable draft improvements as bullet points.
     - Each bullet must be concrete and directly tied to a supplied error.
   - If fix mode is true:
-    - Return the full corrected draft markdown only.
-    - Do not include explanations, headers, or code fences outside the markdown itself.
+    - Return JSON only using this schema:
+      {
+        "changes": [
+          {
+            "section": "Functionality",
+            "change_type": "append_bullet",
+            "before": null,
+            "after": "Concrete draft delta text",
+            "reason": "why this section owns the fix"
+          }
+        ]
+      }
+    - Allowed change_type values: append_bullet, replace_bullet, insert_paragraph.
+    - Prefer Functionality for public API changes, Role methods for role API changes, and Props/Properties for state field changes.
+    - Do not return markdown fences or prose outside JSON in fix mode.

@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -320,9 +320,36 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
 }
 
 struct ReviewIssue {
-    draft_path: PathBuf,
+    origin_draft_path: PathBuf,
     error_source: PathBuf,
     error_section: String,
+}
+
+#[derive(Clone, Debug)]
+struct ReviewTarget {
+    draft_path: PathBuf,
+    ownership_reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ReviewDeltaEnvelope {
+    changes: Vec<ReviewDelta>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ReviewDelta {
+    section: String,
+    change_type: String,
+    before: Option<String>,
+    after: String,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct AppliedReviewChange {
+    section: String,
+    change_type: String,
+    preview: String,
 }
 
 pub async fn review_specification(names: Vec<String>, fix: bool, config: &Config) -> Result<()> {
@@ -347,7 +374,7 @@ pub async fn review_specification(names: Vec<String>, fix: bool, config: &Config
             let actionable = extract_actionable_blocking_bullets(&blocking);
             if !actionable.is_empty() {
                 issues.push(ReviewIssue {
-                    draft_path: draft_file.clone(),
+                    origin_draft_path: draft_file.clone(),
                     error_source: spec_path,
                     error_section: actionable.join("\n"),
                 });
@@ -397,7 +424,7 @@ pub async fn review_implementation(names: Vec<String>, fix: bool, config: &Confi
         }
 
         issues.push(ReviewIssue {
-            draft_path,
+            origin_draft_path: draft_path,
             error_source: implementation_path,
             error_section,
         });
@@ -418,60 +445,395 @@ async fn review_issues_with_agent(
     config: &Config,
 ) -> Result<()> {
     let executor = AgentExecutor::new("review_draft_errors", config)?;
-    let mut updated_files = Vec::new();
+    let mut change_report: BTreeMap<PathBuf, Vec<AppliedReviewChange>> = BTreeMap::new();
 
     for issue in issues {
-        let draft_content = fs::read_to_string(&issue.draft_path).with_context(|| {
-            format!("Failed to read draft file: {}", issue.draft_path.display())
-        })?;
+        let targets = resolve_review_targets(&issue.origin_draft_path, &issue.error_section)?;
+        let mut emitted_source_header = false;
 
-        let mut additional_context = HashMap::new();
-        additional_context.insert("stage".to_string(), json!(stage));
-        additional_context.insert(
-            "error_source".to_string(),
-            json!(issue.error_source.display().to_string()),
-        );
-        additional_context.insert("error_section".to_string(), json!(issue.error_section));
-        additional_context.insert("fix_mode".to_string(), json!(fix));
-
-        let response = executor
-            .execute_with_context(&draft_content, additional_context)
-            .await?;
-        let output = match response {
-            agent_executor::AgentResponse::Final(s) => s,
-            agent_executor::AgentResponse::Questions(q) => q,
-        };
-
-        if fix {
-            if config.dry_run {
-                println!("[DRY RUN] {}", issue.draft_path.display());
-                continue;
-            }
-            if !should_apply_review_fix(&draft_content, &output) {
-                continue;
-            }
-            fs::write(&issue.draft_path, output.trim()).with_context(|| {
-                format!(
-                    "Failed to update draft file: {}",
-                    issue.draft_path.display()
-                )
+        for target in targets {
+            let draft_content = fs::read_to_string(&target.draft_path).with_context(|| {
+                format!("Failed to read draft file: {}", target.draft_path.display())
             })?;
-            updated_files.push(issue.draft_path);
-        } else {
-            eprintln!("\u{001b}[31m{}\u{001b}[0m", issue.error_source.display());
-            println!("\u{001b}[32m{}\u{001b}[0m", output.trim());
+
+            let mut additional_context = HashMap::new();
+            additional_context.insert("stage".to_string(), json!(stage));
+            additional_context.insert(
+                "error_source".to_string(),
+                json!(issue.error_source.display().to_string()),
+            );
+            additional_context.insert("error_section".to_string(), json!(issue.error_section));
+            additional_context.insert("fix_mode".to_string(), json!(fix));
+            additional_context.insert(
+                "target_draft".to_string(),
+                json!(target.draft_path.display().to_string()),
+            );
+            additional_context.insert(
+                "ownership_reason".to_string(),
+                json!(target.ownership_reason.clone()),
+            );
+
+            let response = executor
+                .execute_with_context(&draft_content, additional_context)
+                .await?;
+            let output = match response {
+                agent_executor::AgentResponse::Final(s) => s,
+                agent_executor::AgentResponse::Questions(q) => q,
+            };
+
+            if fix {
+                let deltas = parse_review_delta_envelope(&output)?;
+                let applied = apply_review_deltas(
+                    &target.draft_path,
+                    &draft_content,
+                    deltas.changes,
+                    config.dry_run,
+                )?;
+                if !applied.is_empty() {
+                    change_report
+                        .entry(target.draft_path.clone())
+                        .or_default()
+                        .extend(applied);
+                }
+            } else {
+                if !emitted_source_header {
+                    eprintln!("\u{001b}[31m{}\u{001b}[0m", issue.error_source.display());
+                    emitted_source_header = true;
+                }
+                println!(
+                    "  target: {} ({})",
+                    target.draft_path.display(),
+                    target.ownership_reason
+                );
+                println!("\u{001b}[32m{}\u{001b}[0m", output.trim());
+            }
         }
     }
 
     if fix {
-        updated_files.sort();
-        updated_files.dedup();
-        for path in updated_files {
+        for (path, changes) in change_report {
             println!("{}", path.display());
+            for change in changes {
+                println!(
+                    "  - {} [{}]: {}",
+                    change.section, change.change_type, change.preview
+                );
+            }
         }
     }
 
     Ok(())
+}
+
+fn resolve_review_targets(
+    origin_draft_path: &Path,
+    error_section: &str,
+) -> Result<Vec<ReviewTarget>> {
+    let candidates = build_review_candidates(origin_draft_path)?;
+    let mut scored = Vec::new();
+    for (path, is_dependency, is_reverse_dependency) in candidates {
+        let (score, reason) = score_review_candidate(
+            &path,
+            origin_draft_path,
+            error_section,
+            is_dependency,
+            is_reverse_dependency,
+        );
+        scored.push((path, score, reason));
+    }
+
+    if scored.is_empty() {
+        return Ok(vec![ReviewTarget {
+            draft_path: origin_draft_path.to_path_buf(),
+            ownership_reason: "fallback_origin".to_string(),
+        }]);
+    }
+
+    let max_score = scored.iter().map(|(_, score, _)| *score).max().unwrap_or(0);
+    if max_score <= 0 {
+        return Ok(vec![ReviewTarget {
+            draft_path: origin_draft_path.to_path_buf(),
+            ownership_reason: "fallback_origin".to_string(),
+        }]);
+    }
+
+    let mut targets = Vec::new();
+    for (path, score, reason) in scored {
+        if score == max_score {
+            targets.push(ReviewTarget {
+                draft_path: path,
+                ownership_reason: reason,
+            });
+        }
+    }
+    if targets.is_empty() {
+        targets.push(ReviewTarget {
+            draft_path: origin_draft_path.to_path_buf(),
+            ownership_reason: "fallback_origin".to_string(),
+        });
+    }
+    Ok(targets)
+}
+
+fn build_review_candidates(origin_draft_path: &Path) -> Result<Vec<(PathBuf, bool, bool)>> {
+    let mut candidates: HashMap<PathBuf, (bool, bool)> = HashMap::new();
+    candidates.insert(origin_draft_path.to_path_buf(), (false, false));
+
+    let origin_levels =
+        build_execution_plan(vec![origin_draft_path.to_path_buf()], DRAFTS_DIR, None)?;
+    if let Some(origin_node) = origin_levels.into_iter().flatten().next() {
+        for dep in origin_node.resolve_dependency_closure(DRAFTS_DIR, None)? {
+            let path = PathBuf::from(dep.path);
+            if path.exists() {
+                let entry = candidates.entry(path).or_insert((false, false));
+                entry.0 = true;
+            }
+        }
+    }
+
+    let all_drafts = resolve_input_files(DRAFTS_DIR, Vec::new(), "md")?;
+    for draft in all_drafts {
+        if draft == origin_draft_path {
+            continue;
+        }
+        let levels = build_execution_plan(vec![draft.clone()], DRAFTS_DIR, None)?;
+        let Some(node) = levels.into_iter().flatten().next() else {
+            continue;
+        };
+        let depends_on_origin = node
+            .resolve_dependency_closure(DRAFTS_DIR, None)?
+            .iter()
+            .any(|artifact| Path::new(&artifact.path) == origin_draft_path);
+        if depends_on_origin {
+            let entry = candidates.entry(draft).or_insert((false, false));
+            entry.1 = true;
+        }
+    }
+
+    let mut result = candidates
+        .into_iter()
+        .map(|(path, (is_dependency, is_reverse_dependency))| {
+            (path, is_dependency, is_reverse_dependency)
+        })
+        .collect::<Vec<_>>();
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(result)
+}
+
+fn score_review_candidate(
+    candidate_path: &Path,
+    origin_draft_path: &Path,
+    error_section: &str,
+    is_dependency: bool,
+    is_reverse_dependency: bool,
+) -> (i32, String) {
+    let mut score = 0;
+    let mut reason = "fallback_origin".to_string();
+    let error_lower = error_section.to_ascii_lowercase();
+    let compact_error: String = error_lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let stem = candidate_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let compact_stem: String = stem.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+
+    if candidate_path == origin_draft_path {
+        score += 10;
+        reason = "origin".to_string();
+    }
+    if is_dependency {
+        score += 25;
+        reason = "dependency".to_string();
+    }
+    if is_reverse_dependency {
+        score += 5;
+    }
+    if !compact_stem.is_empty() && compact_error.contains(&compact_stem) {
+        score += 45;
+        reason = "error_mentions_draft_name".to_string();
+    }
+    if !compact_stem.is_empty() && compact_error.contains(&(compact_stem.clone() + "context")) {
+        score += 70;
+        reason = "error_mentions_context_symbol".to_string();
+    }
+
+    (score, reason)
+}
+
+fn parse_review_delta_envelope(output: &str) -> Result<ReviewDeltaEnvelope> {
+    let trimmed = output.trim();
+    if let Ok(parsed) = serde_json::from_str::<ReviewDeltaEnvelope>(trimmed) {
+        return Ok(parsed);
+    }
+
+    if let Some(json_payload) = extract_fenced_json_payload(trimmed) {
+        return serde_json::from_str::<ReviewDeltaEnvelope>(&json_payload)
+            .context("Failed to parse fenced JSON review delta payload");
+    }
+
+    anyhow::bail!("Fix mode expected structured JSON delta output from review agent");
+}
+
+fn extract_fenced_json_payload(text: &str) -> Option<String> {
+    let start = text.find("```json")?;
+    let rest = &text[start + "```json".len()..];
+    let end = rest.find("```")?;
+    Some(rest[..end].trim().to_string())
+}
+
+fn apply_review_deltas(
+    draft_path: &Path,
+    original_content: &str,
+    deltas: Vec<ReviewDelta>,
+    dry_run: bool,
+) -> Result<Vec<AppliedReviewChange>> {
+    let mut working = original_content.to_string();
+    let mut applied = Vec::new();
+
+    for delta in deltas {
+        if delta.after.trim().is_empty() {
+            continue;
+        }
+        let Some((start, end)) = find_section_bounds(&working, &delta.section) else {
+            continue;
+        };
+        let (next, did_apply) = apply_single_review_delta(&working, start, end, &delta)?;
+        if did_apply {
+            working = next;
+            let _ = delta.reason.as_deref();
+            applied.push(AppliedReviewChange {
+                section: delta.section.clone(),
+                change_type: delta.change_type.clone(),
+                preview: delta.after.trim().chars().take(100).collect(),
+            });
+        }
+    }
+
+    if !dry_run && !applied.is_empty() {
+        fs::write(draft_path, &working)
+            .with_context(|| format!("Failed to update draft file: {}", draft_path.display()))?;
+    }
+
+    Ok(applied)
+}
+
+fn apply_single_review_delta(
+    content: &str,
+    section_start: usize,
+    section_end: usize,
+    delta: &ReviewDelta,
+) -> Result<(String, bool)> {
+    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
+    let section_slice = &lines[section_start..section_end];
+    let change_type = delta.change_type.trim().to_ascii_lowercase();
+
+    let mut applied = false;
+    match change_type.as_str() {
+        "append_bullet" => {
+            let bullet = format!("- {}", delta.after.trim());
+            if !section_slice
+                .iter()
+                .any(|line| line.trim() == bullet.trim())
+            {
+                lines.insert(section_end, bullet);
+                applied = true;
+            }
+        }
+        "insert_paragraph" => {
+            let paragraph = delta.after.trim().to_string();
+            if !paragraph.is_empty() && !section_slice.iter().any(|line| line.trim() == paragraph) {
+                lines.insert(section_end, paragraph);
+                applied = true;
+            }
+        }
+        "replace_bullet" => {
+            let Some(before) = delta.before.as_deref() else {
+                return Ok((content.to_string(), false));
+            };
+            let replacement = format!("- {}", delta.after.trim());
+            for idx in section_start..section_end {
+                if lines[idx].trim_start().starts_with("- ") && lines[idx].contains(before.trim()) {
+                    lines[idx] = replacement.clone();
+                    applied = true;
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if !applied {
+        return Ok((content.to_string(), false));
+    }
+
+    let mut updated = lines.join("\n");
+    if content.ends_with('\n') {
+        updated.push('\n');
+    }
+    Ok((updated, true))
+}
+
+fn find_section_bounds(content: &str, requested_section: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut heading_idx = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if section_heading_matches(line, requested_section) {
+            heading_idx = Some(idx);
+            break;
+        }
+    }
+
+    let heading_idx = heading_idx?;
+    let start = heading_idx + 1;
+    let mut end = lines.len();
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        if line.trim_start().starts_with('#') {
+            end = idx;
+            break;
+        }
+    }
+    Some((start, end))
+}
+
+fn section_heading_matches(line: &str, requested_section: &str) -> bool {
+    let heading = normalize_section_label(line);
+    let requested = normalize_section_label(requested_section);
+    if heading.is_empty() || requested.is_empty() {
+        return false;
+    }
+    heading == requested
+        || (requested == "functionality" && heading == "functionalities")
+        || (requested == "functionalities" && heading == "functionality")
+        || (requested == "role methods" && heading == "role method")
+        || (requested == "role method" && heading == "role methods")
+        || (requested == "props" && heading == "properties")
+        || (requested == "properties" && heading == "props")
+}
+
+fn normalize_section_label(input: &str) -> String {
+    let stripped = input
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .trim_end_matches(':');
+    stripped
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == ' ' {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn process_specification(
@@ -979,12 +1341,6 @@ fn extract_first_quoted_string(s: &str) -> Option<String> {
     }
 
     None
-}
-
-fn should_apply_review_fix(existing: &str, proposed: &str) -> bool {
-    let normalized_existing = existing.trim();
-    let normalized_output = proposed.trim();
-    !normalized_output.is_empty() && normalized_output != normalized_existing
 }
 
 fn unescape_common_rust_string_escapes(input: &str) -> String {
@@ -2662,10 +3018,11 @@ fn determine_implementation_output_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        determine_specification_output_path, extract_compile_error_message,
-        extract_implementation_review_error_section, should_apply_review_fix,
+        apply_review_deltas, determine_specification_output_path, extract_compile_error_message,
+        extract_implementation_review_error_section, parse_review_delta_envelope,
+        score_review_candidate, AppliedReviewChange, ReviewDelta,
     };
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn extracts_compile_error_message_from_generated_code() {
@@ -2716,9 +3073,74 @@ msg.push_str("- Missing accessor.\n");
     }
 
     #[test]
-    fn applies_review_fix_only_for_nonempty_changes() {
-        assert!(!should_apply_review_fix("hello", "hello"));
-        assert!(!should_apply_review_fix("hello", "   \n\t"));
-        assert!(should_apply_review_fix("hello", "hello world"));
+    fn score_prefers_dependency_when_error_mentions_context_symbol() {
+        let origin = Path::new("drafts/app.md");
+        let candidate = Path::new("drafts/contexts/game_loop.md");
+        let (score, reason) = score_review_candidate(
+            candidate,
+            origin,
+            "GameLoopContext exposes no public constructor",
+            true,
+            false,
+        );
+        assert!(score > 70);
+        assert_eq!(reason, "error_mentions_context_symbol");
+    }
+
+    #[test]
+    fn parse_fix_mode_delta_payload() {
+        let payload = r#"{
+  "changes": [
+    {
+      "section": "Functionality",
+      "change_type": "append_bullet",
+      "before": null,
+      "after": "Add getter for score",
+      "reason": "public API needed by app"
+    }
+  ]
+}"#;
+        let parsed = parse_review_delta_envelope(payload).expect("parsed");
+        assert_eq!(parsed.changes.len(), 1);
+        assert_eq!(parsed.changes[0].section, "Functionality");
+        assert_eq!(parsed.changes[0].change_type, "append_bullet");
+    }
+
+    #[test]
+    fn apply_review_deltas_updates_only_target_section() {
+        let original = r#"# GameLoopContext
+
+## Description
+- Existing description line
+
+## Functionality
+- Existing behavior
+
+## Error handling
+- Existing error handling
+"#;
+        let deltas = vec![ReviewDelta {
+            section: "Functionality".to_string(),
+            change_type: "append_bullet".to_string(),
+            before: None,
+            after: "Expose read-only getter for score".to_string(),
+            reason: Some("public API".to_string()),
+        }];
+        let tmp_path = PathBuf::from("drafts/contexts/_tmp_review_test.md");
+        let applied = apply_review_deltas(&tmp_path, original, deltas, true).expect("applied");
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].section, "Functionality");
+        assert_eq!(applied[0].change_type, "append_bullet");
+        assert!(applied[0].preview.contains("Expose read-only getter"));
+    }
+
+    #[test]
+    fn detailed_fix_output_record_shape() {
+        let report = AppliedReviewChange {
+            section: "Functionality".to_string(),
+            change_type: "replace_bullet".to_string(),
+            preview: "Replace run bullet to use dependency getter".to_string(),
+        };
+        assert!(report.preview.contains("dependency getter"));
     }
 }

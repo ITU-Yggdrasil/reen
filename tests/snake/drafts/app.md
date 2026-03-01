@@ -8,6 +8,7 @@ The application is responsible for:
 - running the main loop
 - rendering the game state. Board and score can be obtained from the game loop. 
 - restarting the game when it is not running
+- managing terminal input mode for interactive keyboard control
 
 Game progression logic itself is delegated to the GameLoopContext.
 
@@ -20,8 +21,9 @@ The application should display a message such as:
 When the game is started:
 
 - A Board is created with predefined width and height matching the height and iwdth of the terminal (meassured in characters (width) and lines (heinght)).
+  - The board should use the full available terminal size.
 - A snake is created and place at the center most cell. defined as (width / 2, height / 2) as integer division (truncated)
-  - then initial length is one i.e. only a head
+  - the initial length is one i.e. only a head
   - direction RIGHT
 - A GameState is created containing:
   - score = 0
@@ -36,9 +38,13 @@ When the game is started:
 
 The application runs an outer loop with the following behavior:
 
+0. Terminal input mode:
+   - Before entering the main loop, enable raw terminal input mode so single key presses are available immediately (without pressing Enter), and disable input echo.
+   - On application exit (normal or error), restore the previous terminal mode.
+
 1. If there is no active GameLoopContext (including when the application first starts):
    - Render a start screen (including score from the previous game if one has been completed in this session).
-   - Wait for user input.
+   - Wait for user input as single key presses.
    - If the user presses the start key "S" or "s":
      - Recreate the initial state.
      - Create a new GameLoopContext.
@@ -47,6 +53,8 @@ The application runs an outer loop with the following behavior:
 
 2. If a GameLoopContext exists:
    - Render the current game state to the terminal:
+     - Rendering is in-place: clear the terminal and move cursor to the top-left before drawing each frame.
+     - Each rendered line must start at column 0 (use carriage return semantics so rows do not drift right in raw mode).
      - Draw board boundaries
      - Draw snake body
      - Draw food if food_placement is not None
