@@ -36,26 +36,28 @@ pip install -r requirements.txt
 Ollama is the default provider and runs models locally. No API key is needed!
 
 1. **Install Ollama** (if not already installed):
+2.  # For windows:
    ```bash
-   # For windows:
    irm https://ollama.com/install.ps1 | iex
-   # For linux:
+   ```
+ # For linux:
+   ```bash
    curl -fsSL https://ollama.com/install.sh | sh
    ```
 
-2. **Start Ollama** (if not running):
+3. **Start Ollama** (if not running):
    ```bash
    ollama serve
    ```
 
-3. **Pull a model** (e.g., for testing):
+4. **Pull a model** (e.g., for testing):
    ```bash
    ollama pull qwen2.5:7b
    # or
    ollama pull llama3.1:8b
    ```
 
-4. **Optional**: Set a custom Ollama server URL (for remote instances):
+5. **Optional**: Set a custom Ollama server URL (for remote instances):
    ```bash
    export OLLAMA_BASE_URL='http://your-ollama-server:11434'
    ```
