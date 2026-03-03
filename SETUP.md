@@ -36,11 +36,11 @@ pip install -r requirements.txt
 Ollama is the default provider and runs models locally. No API key is needed!
 
 1. **Install Ollama** (if not already installed):
-2.  # For windows:
+  For windows:
    ```bash
    irm https://ollama.com/install.ps1 | iex
    ```
- # For linux:
+  For linux:
    ```bash
    curl -fsSL https://ollama.com/install.sh | sh
    ```
