@@ -23,7 +23,7 @@ This script will:
 Alternatively, you can install manually:
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate         # source is not required on windows.
 pip install -r requirements.txt
 ```
 
