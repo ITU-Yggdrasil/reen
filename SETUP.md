@@ -37,6 +37,9 @@ Ollama is the default provider and runs models locally. No API key is needed!
 
 1. **Install Ollama** (if not already installed):
    ```bash
+   # For windows:
+   irm https://ollama.com/install.ps1 | iex
+   # For linux:
    curl -fsSL https://ollama.com/install.sh | sh
    ```
 
