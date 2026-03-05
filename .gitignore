@@ -7,3 +7,4 @@ target/
 tests/**/specifications/
 tests/**/src/
 tests/**/Cargo.*
+errors.txt
