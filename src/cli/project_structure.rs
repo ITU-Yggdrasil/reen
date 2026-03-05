@@ -78,9 +78,7 @@ fn analyze_spec_file(
         .with_context(|| format!("Failed to read spec file: {}", spec_path.display()))?;
 
     // Extract module path
-    let relative_path = spec_path
-        .strip_prefix(base_dir)
-        .unwrap_or(spec_path);
+    let relative_path = spec_path.strip_prefix(base_dir).unwrap_or(spec_path);
 
     if let Some(parent) = relative_path.parent() {
         let folder = parent.to_string_lossy().to_string();
@@ -195,12 +193,17 @@ fn to_pascal_case_title(s: &str) -> Option<String> {
         out.push_str(&token);
     }
 
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn detect_dependencies(content: &str, project_info: &mut ProjectInfo) {
     // Detect serde (from Serialization section or Serialize/Deserialize keywords)
-    if content.contains("Serialize") || content.contains("Deserialize") || content.contains("serde") {
+    if content.contains("Serialize") || content.contains("Deserialize") || content.contains("serde")
+    {
         project_info.dependencies.insert(
             "serde".to_string(),
             r#"{ version = "1.0", features = ["derive"] }"#.to_string(),
@@ -227,10 +230,7 @@ fn detect_dependencies(content: &str, project_info: &mut ProjectInfo) {
     }
 
     // Detect base64
-    if content.contains("base64")
-        || content.contains("Base64")
-        || content.contains("RFC 4648")
-    {
+    if content.contains("base64") || content.contains("Base64") || content.contains("RFC 4648") {
         project_info
             .dependencies
             .insert("base64".to_string(), "0.22".to_string());
@@ -305,8 +305,12 @@ pub fn generate_cargo_toml(project_info: &ProjectInfo, output_dir: &Path) -> Res
         }
     }
 
-    fs::write(&cargo_toml_path, content)
-        .with_context(|| format!("Failed to write Cargo.toml to {}", cargo_toml_path.display()))?;
+    fs::write(&cargo_toml_path, content).with_context(|| {
+        format!(
+            "Failed to write Cargo.toml to {}",
+            cargo_toml_path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -427,7 +431,10 @@ mod tests {
     #[test]
     fn test_extract_type_name_from_header_title_words() {
         let content = "# Money transfer\n\n## Description\n...";
-        assert_eq!(extract_type_name(content), Some("MoneyTransfer".to_string()));
+        assert_eq!(
+            extract_type_name(content),
+            Some("MoneyTransfer".to_string())
+        );
     }
 
     #[test]

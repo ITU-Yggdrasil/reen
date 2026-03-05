@@ -1,0 +1,22 @@
+[package]
+name = "specifications"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "specifications"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[features]
+default = ["account", "money_transfer"]
+account = []
+money_transfer = []

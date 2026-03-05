@@ -84,7 +84,7 @@ system_prompt: |
   - Organize content into a consistent structure
   - Surface structural intent without adding behavior
   - Add serialization formats if not explicitly stated
-  - Add constructors if none are specified in the draft
+  - Add a constructor signature when required by the constructor policy below
   - add traits if required to be able to create the required types. E.g. if a rust implementation of the type would otherwise have an unknown size
 
   You MUST:
@@ -96,7 +96,7 @@ system_prompt: |
   - Add fields, properties, or variants
   - Add validation rules not mentioned or implied
   - Add timestamps, identifiers, metadata, or storage concepts
-  - Add APIs, or methods unless named in the draft
+  - Add APIs, or methods unless named in the draft, except for the constructor policy below
   - Split one concept into multiple types unless the draft already does so
 
   ## Immutability
@@ -104,6 +104,26 @@ system_prompt: |
   - If immutability is explicitly stated, document it
   - If mutability is explicitly stated, document it
   - Otherwise, mark mutability as **immutable**
+
+  ## Constructor Policy (Mandatory)
+
+  - If **Type Kind = Struct** or **Type Kind = NewType** and `new` is NOT explicitly listed under Functionalities in the draft:
+    - You MUST include `new` in Functionalities.
+    - `new` MUST construct the type from all explicitly listed properties/fields.
+    - The constructor inputs MUST correspond to all fields (no omissions, no extra inputs).
+  - If **Type Kind = Enum**:
+    - Do NOT add a constructor unless it is explicitly named in the draft.
+  - If `new` is explicitly defined in the draft:
+    - Preserve and specify that explicit definition (do not replace it with an inferred one).
+
+  ## Auto-Implemented Getter Rule (Mandatory)
+
+  - For any property/field whose name ends with a trailing underscore (`_`), you MUST include an auto-implemented getter in Functionalities.
+  - Getter naming rule:
+    - If the field is named `field_`, the getter MUST be named `field`.
+    - In general, remove exactly one trailing underscore from the field name to form the getter name.
+  - This auto-generated getter does not imply any additional behavior beyond returning the field value.
+  - Do not apply this rule to enum variants.
 
   ## Output Structure
 
@@ -156,6 +176,8 @@ system_prompt: |
 
   Before submitting, verify:
   - [ ] All properties and functions originate in the draft
+  - [ ] Constructor policy applied correctly (Struct/NewType gets `new` when missing; Enum does not unless explicit)
+  - [ ] Trailing-underscore fields include auto-implemented getters with one underscore removed (for example `field_` -> `field`)
   - [ ] No new fields, variants, or rules were added
   - [ ] Names exactly match the draft
   - [ ] Referenced items in dependency context were resolved before marking unspecified/blocking

@@ -30,11 +30,13 @@ impl AgentRegistry for FileAgentRegistry {
         }
 
         fs::read_to_string(&agent_path)
-            .map_err(|e| PopulateError::InvalidSpecification(format!(
-                "Failed to read agent specification {}: {}",
-                agent_path.display(),
-                e
-            )))
+            .map_err(|e| {
+                PopulateError::InvalidSpecification(format!(
+                    "Failed to read agent specification {}: {}",
+                    agent_path.display(),
+                    e
+                ))
+            })
             .and_then(|content| {
                 // Extract the system_prompt from the YAML
                 // This is a simple extraction - could use a proper YAML parser

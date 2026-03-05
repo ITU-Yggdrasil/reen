@@ -50,10 +50,10 @@ impl BuildTracker {
         let tracker_path = Self::tracker_path();
 
         if tracker_path.exists() {
-            let content = fs::read_to_string(&tracker_path)
-                .context("Failed to read build tracker")?;
-            let tracker: BuildTracker = serde_json::from_str(&content)
-                .context("Failed to parse build tracker")?;
+            let content =
+                fs::read_to_string(&tracker_path).context("Failed to read build tracker")?;
+            let tracker: BuildTracker =
+                serde_json::from_str(&content).context("Failed to parse build tracker")?;
             Ok(tracker)
         } else {
             Ok(BuildTracker::default())
@@ -63,15 +63,13 @@ impl BuildTracker {
     /// Save the build tracker to disk
     pub fn save(&self) -> Result<()> {
         let tracker_dir = PathBuf::from(TRACKER_DIR);
-        fs::create_dir_all(&tracker_dir)
-            .context("Failed to create .reen directory")?;
+        fs::create_dir_all(&tracker_dir).context("Failed to create .reen directory")?;
 
         let tracker_path = Self::tracker_path();
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize build tracker")?;
+        let content =
+            serde_json::to_string_pretty(self).context("Failed to serialize build tracker")?;
 
-        fs::write(&tracker_path, content)
-            .context("Failed to write build tracker")?;
+        fs::write(&tracker_path, content).context("Failed to write build tracker")?;
 
         Ok(())
     }
@@ -88,7 +86,13 @@ impl BuildTracker {
     /// - The output file doesn't exist
     /// - There's no previous track record
     /// - Any upstream dependency has changed
-    pub fn needs_update(&self, stage: Stage, name: &str, input_path: &Path, output_path: &Path) -> Result<bool> {
+    pub fn needs_update(
+        &self,
+        stage: Stage,
+        name: &str,
+        input_path: &Path,
+        output_path: &Path,
+    ) -> Result<bool> {
         // If output doesn't exist, definitely need to regenerate
         if !output_path.exists() {
             return Ok(true);
@@ -166,7 +170,13 @@ impl BuildTracker {
     }
 
     /// Record a successful file transformation
-    pub fn record(&mut self, stage: Stage, name: &str, input_path: &Path, output_path: &Path) -> Result<()> {
+    pub fn record(
+        &mut self,
+        stage: Stage,
+        name: &str,
+        input_path: &Path,
+        output_path: &Path,
+    ) -> Result<()> {
         let input_hash = Self::hash_file(input_path)?;
         // Output file may not exist yet if the agent hasn't written it
         // Use empty hash if file doesn't exist (will trigger regeneration next time)
@@ -181,19 +191,22 @@ impl BuildTracker {
 
         let stage_tracks = self.tracks.entry(stage_key).or_insert_with(HashMap::new);
 
-        stage_tracks.insert(name.to_string(), FileTrack {
-            input_hash,
-            output_hash,
-            timestamp,
-        });
+        stage_tracks.insert(
+            name.to_string(),
+            FileTrack {
+                input_hash,
+                output_hash,
+                timestamp,
+            },
+        );
 
         Ok(())
     }
 
     /// Compute SHA256 hash of a file
     fn hash_file(path: &Path) -> Result<String> {
-        let content = fs::read(path)
-            .with_context(|| format!("Failed to read file: {}", path.display()))?;
+        let content =
+            fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
 
         let mut hasher = Sha256::new();
         hasher.update(&content);
@@ -296,7 +309,9 @@ mod tests {
         fs::write(&input_file, "input content").unwrap();
         fs::write(&output_file, "output content").unwrap();
 
-        tracker.record(Stage::Specification, "test", &input_file, &output_file).unwrap();
+        tracker
+            .record(Stage::Specification, "test", &input_file, &output_file)
+            .unwrap();
 
         // Check that it was recorded
         let stage_key = format!("{:?}", Stage::Specification);

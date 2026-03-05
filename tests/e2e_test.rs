@@ -1,3 +1,4 @@
+use std::fs;
 /// End-to-end integration test for the reen system
 ///
 /// This test verifies the complete workflow:
@@ -8,18 +9,19 @@
 ///
 /// Run with: cargo test e2e_money_transfer --test e2e_test -- --nocapture --ignored
 /// The test is marked as ignored because it requires API keys and takes longer to run.
-
 use std::process::Command;
-use std::fs;
 
 #[test]
-#[ignore]  // Ignore by default - requires API keys and is slow
+#[ignore] // Ignore by default - requires API keys and is slow
 fn e2e_money_transfer() {
     let root_dir = std::env::current_dir().expect("Failed to get current directory");
     let test_dir = root_dir.join("tests").join("money transfer");
 
     // Ensure test directory exists
-    assert!(test_dir.exists(), "Test directory 'tests/money transfer' not found");
+    assert!(
+        test_dir.exists(),
+        "Test directory 'tests/money transfer' not found"
+    );
 
     println!("Root directory: {:?}", root_dir);
     println!("Test directory: {:?}", test_dir);
@@ -56,8 +58,14 @@ fn e2e_money_transfer() {
     assert!(spec_status.success(), "Failed to create specifications");
 
     // Verify specifications exist
-    assert!(contexts_dir.join("account.md").exists(), "account.md specification not created");
-    assert!(contexts_dir.join("money_transfer.md").exists(), "money_transfer.md specification not created");
+    assert!(
+        contexts_dir.join("account.md").exists(),
+        "account.md specification not created"
+    );
+    assert!(
+        contexts_dir.join("money_transfer.md").exists(),
+        "money_transfer.md specification not created"
+    );
     println!("✓ Specifications created");
 
     // Step 3: Create implementation
@@ -74,7 +82,10 @@ fn e2e_money_transfer() {
 
     // Verify implementation was created
     let contexts_src_dir = test_dir.join("src").join("contexts");
-    assert!(contexts_src_dir.exists(), "src/contexts directory not created");
+    assert!(
+        contexts_src_dir.exists(),
+        "src/contexts directory not created"
+    );
     println!("✓ Implementation created");
 
     // Step 4: Create tests
@@ -111,9 +122,15 @@ fn e2e_money_transfer() {
         .output()
         .expect("Failed to run tests");
 
-    println!("Test output:\n{}", String::from_utf8_lossy(&test_output.stdout));
+    println!(
+        "Test output:\n{}",
+        String::from_utf8_lossy(&test_output.stdout)
+    );
     if !test_output.stderr.is_empty() {
-        println!("Test stderr:\n{}", String::from_utf8_lossy(&test_output.stderr));
+        println!(
+            "Test stderr:\n{}",
+            String::from_utf8_lossy(&test_output.stderr)
+        );
     }
 
     // Note: We don't assert success here because the generated tests might need refinement
@@ -132,7 +149,7 @@ fn e2e_money_transfer() {
 }
 
 #[test]
-#[ignore]  // Ignore by default - depends on generated code
+#[ignore] // Ignore by default - depends on generated code
 fn test_money_transfer_functionality() {
     // This test would verify the actual money transfer logic
     // It's marked as ignored because it depends on the generated code
@@ -206,10 +223,8 @@ fn main() {
 
     // Write the test code to a temporary file
     let temp_test = test_dir.join("examples").join("transfer_test.rs");
-    fs::create_dir_all(temp_test.parent().unwrap())
-        .expect("Failed to create examples directory");
-    fs::write(&temp_test, test_code)
-        .expect("Failed to write test code");
+    fs::create_dir_all(temp_test.parent().unwrap()).expect("Failed to create examples directory");
+    fs::write(&temp_test, test_code).expect("Failed to write test code");
 
     println!("✓ Test code written to: {:?}", temp_test);
 }

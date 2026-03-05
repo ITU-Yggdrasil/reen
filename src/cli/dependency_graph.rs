@@ -31,7 +31,10 @@ pub struct ExecutionNode {
 
 impl ExecutionNode {
     pub fn direct_dependency_names(&self) -> Vec<String> {
-        self.direct_dependencies.iter().map(|d| d.name.clone()).collect()
+        self.direct_dependencies
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
     }
 
     pub fn resolve_direct_dependencies(&self) -> Result<Vec<DependencyArtifact>> {
@@ -66,8 +69,9 @@ impl ExecutionNode {
                 continue;
             }
 
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("failed reading dependency artifact: {}", path.display()))?;
+            let content = fs::read_to_string(&path).with_context(|| {
+                format!("failed reading dependency artifact: {}", path.display())
+            })?;
             let mut hasher = Sha256::new();
             hasher.update(content.as_bytes());
             let sha256 = hex::encode(hasher.finalize());
@@ -116,8 +120,9 @@ impl ExecutionNode {
                 continue;
             }
 
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("failed reading dependency artifact: {}", path.display()))?;
+            let content = fs::read_to_string(&path).with_context(|| {
+                format!("failed reading dependency artifact: {}", path.display())
+            })?;
             let mut hasher = Sha256::new();
             hasher.update(content.as_bytes());
             let sha256 = hex::encode(hasher.finalize());
@@ -130,10 +135,17 @@ impl ExecutionNode {
                 sha256,
             });
 
-            let canonicals = extract_dependency_canonicals(&content, &primary_index, &fallback_index);
+            let canonicals =
+                extract_dependency_canonicals(&content, &primary_index, &fallback_index);
             for canonical in canonicals {
-                let primary_candidates = primary_by_canonical.get(&canonical).cloned().unwrap_or_default();
-                let fallback_candidates = fallback_by_canonical.get(&canonical).cloned().unwrap_or_default();
+                let primary_candidates = primary_by_canonical
+                    .get(&canonical)
+                    .cloned()
+                    .unwrap_or_default();
+                let fallback_candidates = fallback_by_canonical
+                    .get(&canonical)
+                    .cloned()
+                    .unwrap_or_default();
 
                 if !primary_candidates.is_empty() {
                     for candidate in primary_candidates {
@@ -245,8 +257,14 @@ pub fn build_execution_plan(
 
         let canonicals = extract_dependency_canonicals(&content, &primary_index, &fallback_index);
         for canonical in canonicals {
-            let primary_candidates = primary_by_canonical.get(&canonical).cloned().unwrap_or_default();
-            let fallback_candidates = fallback_by_canonical.get(&canonical).cloned().unwrap_or_default();
+            let primary_candidates = primary_by_canonical
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_default();
+            let fallback_candidates = fallback_by_canonical
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_default();
 
             if primary_candidates.is_empty() && fallback_candidates.is_empty() {
                 continue;
@@ -299,7 +317,10 @@ pub fn build_execution_plan(
     Ok(levels)
 }
 
-fn levelize_with_cycles(nodes: Vec<ExecutionNode>, edges: Vec<Vec<usize>>) -> Vec<Vec<ExecutionNode>> {
+fn levelize_with_cycles(
+    nodes: Vec<ExecutionNode>,
+    edges: Vec<Vec<usize>>,
+) -> Vec<Vec<ExecutionNode>> {
     let components = strongly_connected_components(edges.as_slice());
     let component_count = components.len();
     let mut node_component = vec![0usize; nodes.len()];
@@ -535,7 +556,8 @@ fn extract_dependency_canonicals(
 }
 
 fn extract_explicit_dependency_names(content: &str) -> Vec<String> {
-    let depends_on_re = Regex::new(r"(?im)^\s*depends\s+on\s*:\s*(.+)\s*$").expect("valid depends regex");
+    let depends_on_re =
+        Regex::new(r"(?im)^\s*depends\s+on\s*:\s*(.+)\s*$").expect("valid depends regex");
     let mut names = Vec::new();
     for captures in depends_on_re.captures_iter(content) {
         if let Some(raw) = captures.get(1) {
@@ -603,7 +625,8 @@ mod tests {
         fs::write(&c, "depends on: b").expect("write");
 
         let selected = vec![a.clone(), b.clone(), c.clone()];
-        let levels = build_execution_plan(selected, drafts.to_str().unwrap_or("drafts"), None).expect("plan");
+        let levels = build_execution_plan(selected, drafts.to_str().unwrap_or("drafts"), None)
+            .expect("plan");
 
         assert_eq!(levels.len(), 3);
         assert_eq!(levels[0].len(), 1);
@@ -625,8 +648,12 @@ mod tests {
         fs::write(&x, "depends on: y").expect("write");
         fs::write(&y, "depends on: x").expect("write");
 
-        let levels = build_execution_plan(vec![x.clone(), y.clone()], drafts.to_str().unwrap_or("drafts"), None)
-            .expect("plan");
+        let levels = build_execution_plan(
+            vec![x.clone(), y.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
 
         assert_eq!(levels.len(), 1);
         assert_eq!(levels[0].len(), 2);
@@ -672,20 +699,13 @@ mod tests {
         let amount = drafts.join("data").join("amount.md");
         let currency = drafts.join("data").join("currency.md");
 
-        fs::write(
-            &app,
-            "Uses Amount and requires DKK to be supported",
-        )
-        .expect("write");
+        fs::write(&app, "Uses Amount and requires DKK to be supported").expect("write");
         fs::write(&amount, "Amount stores a Currency value").expect("write");
         fs::write(&currency, "Currency enum includes DKK").expect("write");
 
-        let levels = build_execution_plan(
-            vec![app.clone()],
-            drafts.to_str().unwrap_or("drafts"),
-            None,
-        )
-        .expect("plan");
+        let levels =
+            build_execution_plan(vec![app.clone()], drafts.to_str().unwrap_or("drafts"), None)
+                .expect("plan");
 
         let closure = levels[0][0]
             .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)

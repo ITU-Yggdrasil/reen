@@ -9,6 +9,8 @@ It supports multiple LLM providers through a unified interface.
 import json
 import sys
 import os
+import socket
+from urllib.parse import urlparse
 from typing import Dict, Any, Optional
 
 # Load environment variables from .env file if it exists
@@ -110,7 +112,28 @@ def execute_with_openai(model: str, system_prompt: str) -> str:
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set")
 
-    client = OpenAI(api_key=api_key)
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    timeout = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "180"))
+    max_retries = int(os.environ.get("OPENAI_MAX_RETRIES", "3"))
+    client_kwargs: Dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": timeout,
+        "max_retries": max_retries,
+    }
+    if base_url:
+        client_kwargs["base_url"] = base_url
+
+    # Validate DNS resolution before request to produce actionable failures.
+    endpoint = base_url if base_url else "https://api.openai.com/v1"
+    parsed = urlparse(endpoint)
+    host = parsed.hostname
+    if host:
+        try:
+            socket.getaddrinfo(host, 443)
+        except OSError as e:
+            raise RuntimeError(f"DNS resolution failed for OpenAI host '{host}': {e}")
+
+    client = OpenAI(**client_kwargs)
 
     response = client.chat.completions.create(
         model=model,
@@ -172,8 +195,27 @@ def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {
             "success": False,
-            "error": str(e)
+            "error": format_exception(e)
         }
+
+
+def format_exception(exc: Exception) -> str:
+    """Format exceptions with chained causes to keep root cause visible."""
+    parts = [f"{type(exc).__name__}: {exc}"]
+    seen = {id(exc)}
+
+    current: Optional[BaseException] = exc
+    depth = 0
+    while current is not None and depth < 3:
+        cause = current.__cause__ or current.__context__
+        if cause is None or id(cause) in seen:
+            break
+        seen.add(id(cause))
+        parts.append(f"caused by {type(cause).__name__}: {cause}")
+        current = cause
+        depth += 1
+
+    return " | ".join(parts)
 
 
 def main():
