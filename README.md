@@ -64,6 +64,10 @@ reen create specification
 # Process specific drafts
 reen create specification app agent_runner
 ```
+# The reen command has been found to sometimes not work, if it doesn't, use this instead:
+.\target\release\reen.exe      #This is only a replacement for the 'reen' part, still follow the instructions otherwise given.
+# NOTE: It has been found that some don't have a .exe file, and as such it should instead just say reen, instead of reen.exe
+
 
 ### Create Implementation
 
