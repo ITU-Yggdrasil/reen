@@ -57,11 +57,11 @@ user input and collision detection and score is handled. The context also handle
 ### command
 
 - **next**
-  Uses the shared command buffer to determine the next steering direction.
-  - pop keys from the front until:
-    - a movement key is found (`W`/`A`/`S`/`D`, case-insensitive), then return `Some(UP|LEFT|DOWN|RIGHT)`, or
-    - the buffer is empty.
-  - if the buffer becomes empty before a movement key is found, return `None`.
+  uses command_input.next_action to get the next user action
+  - if the result is Some(direction) then return Some(direction)
+  - if the result is Some(...) then call next (recursive)
+  - if the result is None return None
+
 
 ### food_dropper
 

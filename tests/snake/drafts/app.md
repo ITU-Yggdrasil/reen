@@ -21,9 +21,9 @@ The application should display a message such as:
 
 When the game is started:
 
-- A Board is created with predefined width and height matching the height and iwdth of the terminal (meassured in characters (width) and lines (heinght)).
+- A Board is created with predefined width and height matching the height and width of the terminal (meassured in characters (width) and lines (heinght)).
   - The board should use the full available terminal size.
-- A snake is created and place at the center most cell. defined as (width / 2, height / 2) as integer division (truncated)
+- A snake is created and placed at the center most cell. defined as (width / 2, height / 2) as integer division (truncated)
   - the initial length is one i.e. only a head
   - direction RIGHT
 - A GameState is created containing:
@@ -32,6 +32,7 @@ When the game is started:
   the nake
   - the time the game was started represented as ms since 2026-01-01 0:00
 - A GameLoopContext is constructed
+- A terminal renderer context is constructed
 
 ---
 
@@ -43,6 +44,7 @@ The application runs an outer loop with the following behavior:
    - Before entering the main loop, enable raw terminal input mode so single key presses are available immediately (without pressing Enter), and disable input echo.
    - On application exit (normal or error), restore the previous terminal mode.
    - Create one CommandInputContext instance before entering the main loop and keep it for the entire process lifetime.
+   - if the terminal width is less than 20 or the terminal height is less than 20, exit immediately with the error code 20 and print to stderr that the terminal is too little to start the game
 
 1. If there is no active GameLoopContext (including when the application first starts):
    - Render a start screen (including score from the previous game if one has been completed in this session).
@@ -54,14 +56,7 @@ The application runs an outer loop with the following behavior:
    - Otherwise continue waiting.
 
 2. If a GameLoopContext exists:
-   - Render the current game state to the terminal:
-     - Rendering is in-place: clear the terminal and move cursor to the top-left before drawing each frame.
-     - Each rendered line must start at column 0 (use carriage return semantics so rows do not drift right in raw mode).
-     - Draw board boundaries
-     - Draw snake body
-     - Draw food if food_placement is not None
-     - Display current score
-
+   - Render the current frame by passing  the board (gameloopcontext.current_board) and the current to the renderer context.
    - Call `gameLoopContext.tick()`
    - If the result is:
      - a new GameLoopContext → replace the current one and continue.

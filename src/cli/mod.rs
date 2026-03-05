@@ -15,7 +15,9 @@ mod progress;
 mod project_structure;
 
 use agent_executor::AgentExecutor;
-use dependency_graph::{build_execution_plan, DependencyArtifact, ExecutionNode};
+use dependency_graph::{
+    build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
+};
 use progress::ProgressIndicator;
 use project_structure::{
     analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
@@ -46,7 +48,8 @@ pub async fn create_specification(
         return Ok(());
     }
 
-    let execution_levels = build_execution_plan(draft_files, DRAFTS_DIR, None)?;
+    let expanded_draft_files = expand_with_transitive_dependencies(draft_files, DRAFTS_DIR, None)?;
+    let execution_levels = build_execution_plan(expanded_draft_files, DRAFTS_DIR, None)?;
 
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
@@ -102,6 +105,8 @@ pub async fn create_specification(
                         .direct_dependency_names()
                         .iter()
                         .any(|dep_name| updated_in_run.contains(dep_name));
+                    let dependency_fingerprint =
+                        dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
                     let output_path = determine_specification_output_path(
                         &draft_file,
                         DRAFTS_DIR,
@@ -117,6 +122,7 @@ pub async fn create_specification(
                             &draft_name,
                             &draft_file,
                             &output_path,
+                            &dependency_fingerprint,
                         )?
                     };
                     if !needs_update {
@@ -147,12 +153,19 @@ pub async fn create_specification(
                             dependency_context,
                         )
                         .await;
-                        (draft_name, draft_file, output_path, result)
+                        (
+                            draft_name,
+                            draft_file,
+                            output_path,
+                            dependency_fingerprint,
+                            result,
+                        )
                     }));
                 }
 
                 for task in tasks {
-                    let (draft_name, draft_file, output_path, result) = task.await?;
+                    let (draft_name, draft_file, output_path, dependency_fingerprint, result) =
+                        task.await?;
                     match result {
                         Ok(_) => {
                             tracker.record(
@@ -160,6 +173,7 @@ pub async fn create_specification(
                                 &draft_name,
                                 &draft_file,
                                 &output_path,
+                                &dependency_fingerprint,
                             )?;
                             updated_count += 1;
                             updated_in_run.insert(draft_name.clone());
@@ -182,6 +196,8 @@ pub async fn create_specification(
                         .direct_dependency_names()
                         .iter()
                         .any(|dep_name| updated_in_run.contains(dep_name));
+                    let dependency_fingerprint =
+                        dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
                     let output_path = determine_specification_output_path(
                         &draft_file,
                         DRAFTS_DIR,
@@ -197,6 +213,7 @@ pub async fn create_specification(
                             &draft_name,
                             &draft_file,
                             &output_path,
+                            &dependency_fingerprint,
                         )?
                     };
                     if !needs_update {
@@ -223,6 +240,7 @@ pub async fn create_specification(
                                 &draft_name,
                                 &draft_file,
                                 &output_path,
+                                &dependency_fingerprint,
                             )?;
                             updated_count += 1;
                             updated_in_run.insert(draft_name.clone());
@@ -988,6 +1006,7 @@ pub async fn create_implementation(
                 .direct_dependency_names()
                 .iter()
                 .any(|dep_name| updated_in_run.contains(dep_name));
+            let dependency_fingerprint = dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
             let output_path =
                 determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
             progress.start_item(&context_name);
@@ -1006,6 +1025,7 @@ pub async fn create_implementation(
                     &context_name,
                     &context_file,
                     &output_path,
+                    &dependency_fingerprint,
                 )?
             };
 
@@ -1021,7 +1041,13 @@ pub async fn create_implementation(
             if let Some(target_type_name) = infer_target_type_name(&context_file)? {
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
-            runnable.push((context_file, context_name, output_path, dependency_context));
+            runnable.push((
+                context_file,
+                context_name,
+                output_path,
+                dependency_fingerprint,
+                dependency_context,
+            ));
         }
 
         if can_parallel {
@@ -1030,7 +1056,14 @@ pub async fn create_implementation(
             }
             let cfg = *config;
             let mut tasks = Vec::new();
-            for (context_file, context_name, output_path, dependency_context) in runnable {
+            for (
+                context_file,
+                context_name,
+                output_path,
+                dependency_fingerprint,
+                dependency_context,
+            ) in runnable
+            {
                 let executor_clone = executor.clone();
                 tasks.push(tokio::task::spawn(async move {
                     let result = process_implementation(
@@ -1041,11 +1074,18 @@ pub async fn create_implementation(
                         dependency_context,
                     )
                     .await;
-                    (context_name, context_file, output_path, result)
+                    (
+                        context_name,
+                        context_file,
+                        output_path,
+                        dependency_fingerprint,
+                        result,
+                    )
                 }));
             }
             for task in tasks {
-                let (context_name, context_file, output_path, result) = task.await?;
+                let (context_name, context_file, output_path, dependency_fingerprint, result) =
+                    task.await?;
                 match result {
                     Ok(_) => {
                         tracker.record(
@@ -1053,6 +1093,7 @@ pub async fn create_implementation(
                             &context_name,
                             &context_file,
                             &output_path,
+                            &dependency_fingerprint,
                         )?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
@@ -1075,7 +1116,14 @@ pub async fn create_implementation(
                 }
             }
         } else {
-            for (context_file, context_name, output_path, dependency_context) in runnable {
+            for (
+                context_file,
+                context_name,
+                output_path,
+                dependency_fingerprint,
+                dependency_context,
+            ) in runnable
+            {
                 if config.verbose {
                     println!("Processing context: {}", context_name);
                 }
@@ -1094,6 +1142,7 @@ pub async fn create_implementation(
                             &context_name,
                             &context_file,
                             &output_path,
+                            &dependency_fingerprint,
                         )?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
@@ -2063,7 +2112,29 @@ fn build_implementation_execution_plan(
         }
     }
 
-    build_execution_plan(draft_inputs, DRAFTS_DIR, None)
+    let expanded_inputs = expand_with_transitive_dependencies(draft_inputs, DRAFTS_DIR, None)?;
+    build_execution_plan(expanded_inputs, DRAFTS_DIR, None)
+}
+
+fn dependency_fingerprint_for_node(
+    node: &ExecutionNode,
+    primary_root: &str,
+    fallback_root: Option<&str>,
+) -> Result<String> {
+    let closure = node.resolve_dependency_closure(primary_root, fallback_root)?;
+    if closure.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut deps: Vec<String> = closure
+        .into_iter()
+        .map(|dep| format!("{}:{}", dep.path, dep.sha256))
+        .collect();
+    deps.sort();
+    let joined = deps.join("|");
+    let mut hasher = Sha256::new();
+    hasher.update(joined.as_bytes());
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn resolve_implementation_context_file(node_input_path: &Path) -> Result<PathBuf> {

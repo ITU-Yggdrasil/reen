@@ -6,7 +6,7 @@ THe money transfer is a context where two accounts play the roles of sink and so
 The money transfer context represents a menoy transfer from the source to the sink. 
 
 
-## Role Players
+## Roles
 
 - **source**: the account that serves as the source of the funds to be transferred
   - Must have an `account_id` field

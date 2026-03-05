@@ -35,6 +35,9 @@ pub struct FileTrack {
     pub output_hash: String,
     /// Timestamp of last update
     pub timestamp: String,
+    /// Aggregate fingerprint of dependencies used to produce this output
+    #[serde(default)]
+    pub dependency_fingerprint: String,
 }
 
 /// Main build tracker
@@ -92,6 +95,7 @@ impl BuildTracker {
         name: &str,
         input_path: &Path,
         output_path: &Path,
+        dependency_fingerprint: &str,
     ) -> Result<bool> {
         // If output doesn't exist, definitely need to regenerate
         if !output_path.exists() {
@@ -113,7 +117,9 @@ impl BuildTracker {
         let current_input_hash = Self::hash_file(input_path)?;
 
         // If input hasn't changed, no need to regenerate
-        if current_input_hash == track.input_hash {
+        if current_input_hash == track.input_hash
+            && dependency_fingerprint == track.dependency_fingerprint
+        {
             return Ok(false);
         }
 
@@ -176,6 +182,7 @@ impl BuildTracker {
         name: &str,
         input_path: &Path,
         output_path: &Path,
+        dependency_fingerprint: &str,
     ) -> Result<()> {
         let input_hash = Self::hash_file(input_path)?;
         // Output file may not exist yet if the agent hasn't written it
@@ -197,6 +204,7 @@ impl BuildTracker {
                 input_hash,
                 output_hash,
                 timestamp,
+                dependency_fingerprint: dependency_fingerprint.to_string(),
             },
         );
 
@@ -310,13 +318,59 @@ mod tests {
         fs::write(&output_file, "output content").unwrap();
 
         tracker
-            .record(Stage::Specification, "test", &input_file, &output_file)
+            .record(Stage::Specification, "test", &input_file, &output_file, "")
             .unwrap();
 
         // Check that it was recorded
         let stage_key = format!("{:?}", Stage::Specification);
         assert!(tracker.tracks.contains_key(&stage_key));
         assert!(tracker.tracks[&stage_key].contains_key("test"));
+
+        fs::remove_file(&input_file).ok();
+        fs::remove_file(&output_file).ok();
+    }
+
+    #[test]
+    fn dependency_fingerprint_change_triggers_update() {
+        let mut tracker = BuildTracker::default();
+        let temp_dir = std::env::temp_dir();
+        let input_file = temp_dir.join("dep_fp_input.txt");
+        let output_file = temp_dir.join("dep_fp_output.txt");
+
+        fs::write(&input_file, "input").unwrap();
+        fs::write(&output_file, "output").unwrap();
+
+        tracker
+            .record(
+                Stage::Specification,
+                "dep_fp_test",
+                &input_file,
+                &output_file,
+                "deps:v1",
+            )
+            .unwrap();
+
+        let unchanged = tracker
+            .needs_update(
+                Stage::Specification,
+                "dep_fp_test",
+                &input_file,
+                &output_file,
+                "deps:v1",
+            )
+            .unwrap();
+        assert!(!unchanged);
+
+        let changed = tracker
+            .needs_update(
+                Stage::Specification,
+                "dep_fp_test",
+                &input_file,
+                &output_file,
+                "deps:v2",
+            )
+            .unwrap();
+        assert!(changed);
 
         fs::remove_file(&input_file).ok();
         fs::remove_file(&output_file).ok();
