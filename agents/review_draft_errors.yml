@@ -13,6 +13,8 @@ system_prompt: |
   - fix mode: {{input.fix_mode}}
   - target draft path: {{input.target_draft?}}
   - ownership reason: {{input.ownership_reason?}}
+  - draft sections: {{input.draft_sections?}}
+  - style hints: {{input.style_constraints?}}
 
   ## Rules
   - Keep intent and domain behavior aligned with the existing draft.
@@ -20,6 +22,7 @@ system_prompt: |
   - Do not introduce unrelated features.
   - Do not output implementation code.
   - Preserve markdown structure unless a structure change is required for clarity.
+  - Match specification-writing style used in the target draft: concise requirement language, no implementation details.
 
   ## Response contract
   - If fix mode is false:
@@ -34,10 +37,12 @@ system_prompt: |
             "change_type": "append_bullet",
             "before": null,
             "after": "Concrete draft delta text",
-            "reason": "why this section owns the fix"
+            "reason": "why this section owns the fix",
+            "style_intent": "specification wording, no implementation detail"
           }
         ]
       }
     - Allowed change_type values: append_bullet, replace_bullet, insert_paragraph.
     - Prefer Functionality for public API changes, Role methods for role API changes, and Props/Properties for state field changes.
+    - Include one `style_intent` value per change.
     - Do not return markdown fences or prose outside JSON in fix mode.

@@ -4,6 +4,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -344,6 +345,16 @@ struct ReviewIssue {
 }
 
 #[derive(Clone, Debug)]
+pub struct ReviewFixOptions {
+    pub fix: bool,
+    pub interactive: bool,
+    pub all: bool,
+    pub step: bool,
+    pub max: Option<usize>,
+    pub file_filters: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 struct ReviewTarget {
     draft_path: PathBuf,
     ownership_reason: String,
@@ -361,6 +372,8 @@ struct ReviewDelta {
     before: Option<String>,
     after: String,
     reason: Option<String>,
+    #[serde(default)]
+    style_intent: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -368,9 +381,29 @@ struct AppliedReviewChange {
     section: String,
     change_type: String,
     preview: String,
+    style_intent: Option<String>,
 }
 
-pub async fn review_specification(names: Vec<String>, fix: bool, config: &Config) -> Result<()> {
+#[derive(Clone, Debug)]
+struct ReviewSuggestion {
+    draft_path: PathBuf,
+    delta: ReviewDelta,
+    error_source: PathBuf,
+    ownership_reason: String,
+}
+
+#[derive(Clone, Debug)]
+struct RejectedSuggestion {
+    draft_path: PathBuf,
+    reason: String,
+    delta: ReviewDelta,
+}
+
+pub async fn review_specification(
+    names: Vec<String>,
+    fix_options: ReviewFixOptions,
+    config: &Config,
+) -> Result<()> {
     let draft_files = resolve_input_files(DRAFTS_DIR, names, "md")?;
     if draft_files.is_empty() {
         println!("No draft files found to process");
@@ -401,14 +434,18 @@ pub async fn review_specification(names: Vec<String>, fix: bool, config: &Config
     }
 
     if issues.is_empty() {
-        println!("No specification issues found to review");
+        println!("✓ All good: no blocking ambiguities found");
         return Ok(());
     }
 
-    review_issues_with_agent("specification", issues, fix, config).await
+    review_issues_with_agent("specification", issues, fix_options, config).await
 }
 
-pub async fn review_implementation(names: Vec<String>, fix: bool, config: &Config) -> Result<()> {
+pub async fn review_implementation(
+    names: Vec<String>,
+    fix_options: ReviewFixOptions,
+    config: &Config,
+) -> Result<()> {
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
     if context_files.is_empty() {
         println!("No specification files found to process");
@@ -449,21 +486,21 @@ pub async fn review_implementation(names: Vec<String>, fix: bool, config: &Confi
     }
 
     if issues.is_empty() {
-        println!("No implementation errors found to review");
+        println!("✓ All good: no implementation error markers found");
         return Ok(());
     }
 
-    review_issues_with_agent("implementation", issues, fix, config).await
+    review_issues_with_agent("implementation", issues, fix_options, config).await
 }
 
 async fn review_issues_with_agent(
     stage: &str,
     issues: Vec<ReviewIssue>,
-    fix: bool,
+    fix_options: ReviewFixOptions,
     config: &Config,
 ) -> Result<()> {
     let executor = AgentExecutor::new("review_draft_errors", config)?;
-    let mut change_report: BTreeMap<PathBuf, Vec<AppliedReviewChange>> = BTreeMap::new();
+    let mut suggestions: Vec<ReviewSuggestion> = Vec::new();
 
     for issue in issues {
         let targets = resolve_review_targets(&issue.origin_draft_path, &issue.error_section)?;
@@ -481,7 +518,7 @@ async fn review_issues_with_agent(
                 json!(issue.error_source.display().to_string()),
             );
             additional_context.insert("error_section".to_string(), json!(issue.error_section));
-            additional_context.insert("fix_mode".to_string(), json!(fix));
+            additional_context.insert("fix_mode".to_string(), json!(fix_options.fix));
             additional_context.insert(
                 "target_draft".to_string(),
                 json!(target.draft_path.display().to_string()),
@@ -489,6 +526,16 @@ async fn review_issues_with_agent(
             additional_context.insert(
                 "ownership_reason".to_string(),
                 json!(target.ownership_reason.clone()),
+            );
+            additional_context.insert(
+                "draft_sections".to_string(),
+                json!(extract_draft_section_names(&draft_content)),
+            );
+            additional_context.insert(
+                "style_constraints".to_string(),
+                json!(
+                    "Use specification style. Prefer concise requirement bullets. Avoid implementation details."
+                ),
             );
 
             let response = executor
@@ -499,19 +546,15 @@ async fn review_issues_with_agent(
                 agent_executor::AgentResponse::Questions(q) => q,
             };
 
-            if fix {
+            if fix_options.fix {
                 let deltas = parse_review_delta_envelope(&output)?;
-                let applied = apply_review_deltas(
-                    &target.draft_path,
-                    &draft_content,
-                    deltas.changes,
-                    config.dry_run,
-                )?;
-                if !applied.is_empty() {
-                    change_report
-                        .entry(target.draft_path.clone())
-                        .or_default()
-                        .extend(applied);
+                for delta in deltas.changes {
+                    suggestions.push(ReviewSuggestion {
+                        draft_path: target.draft_path.clone(),
+                        delta,
+                        error_source: issue.error_source.clone(),
+                        ownership_reason: target.ownership_reason.clone(),
+                    });
                 }
             } else {
                 if !emitted_source_header {
@@ -528,16 +571,84 @@ async fn review_issues_with_agent(
         }
     }
 
-    if fix {
-        for (path, changes) in change_report {
-            println!("{}", path.display());
-            for change in changes {
+    if !fix_options.fix {
+        return Ok(());
+    }
+    if !fix_options.file_filters.is_empty() {
+        suggestions.retain(|suggestion| {
+            suggestion_matches_file_filter(&suggestion.draft_path, &fix_options.file_filters)
+        });
+    }
+    if suggestions.is_empty() {
+        if fix_options.file_filters.is_empty() {
+            println!("No suggestions generated for --fix");
+        } else {
+            println!("No suggestions matched --file filters");
+        }
+        return Ok(());
+    }
+
+    let selected_indices = select_suggestions(&suggestions, fix_options)?;
+    if selected_indices.is_empty() {
+        println!("No suggestions applied");
+        return Ok(());
+    }
+
+    let mut grouped: BTreeMap<PathBuf, Vec<ReviewDelta>> = BTreeMap::new();
+    for idx in selected_indices {
+        if let Some(s) = suggestions.get(idx) {
+            grouped
+                .entry(s.draft_path.clone())
+                .or_default()
+                .push(s.delta.clone());
+        }
+    }
+
+    let mut change_report: BTreeMap<PathBuf, Vec<AppliedReviewChange>> = BTreeMap::new();
+    let mut rejected = Vec::<RejectedSuggestion>::new();
+    for (path, deltas) in grouped {
+        let draft_content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read draft file: {}", path.display()))?;
+        let (applied, rejected_for_file) =
+            apply_review_deltas(&path, &draft_content, deltas, config.dry_run)?;
+        if !applied.is_empty() {
+            change_report.insert(path.clone(), applied);
+        }
+        rejected.extend(
+            rejected_for_file
+                .into_iter()
+                .map(|(delta, reason)| RejectedSuggestion {
+                    draft_path: path.clone(),
+                    reason,
+                    delta,
+                }),
+        );
+    }
+
+    for (path, changes) in &change_report {
+        println!("{}", path.display());
+        for change in changes {
+            if let Some(style_intent) = &change.style_intent {
+                println!(
+                    "  - {} [{}]: {} ({})",
+                    change.section, change.change_type, change.preview, style_intent
+                );
+            } else {
                 println!(
                     "  - {} [{}]: {}",
                     change.section, change.change_type, change.preview
                 );
             }
         }
+    }
+    for item in rejected {
+        println!(
+            "rejected: {} [{} {}] - {}",
+            item.draft_path.display(),
+            item.delta.section,
+            item.delta.change_type,
+            item.reason
+        );
     }
 
     Ok(())
@@ -696,6 +807,168 @@ fn parse_review_delta_envelope(output: &str) -> Result<ReviewDeltaEnvelope> {
     anyhow::bail!("Fix mode expected structured JSON delta output from review agent");
 }
 
+fn extract_draft_section_names(content: &str) -> Vec<String> {
+    let mut sections = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let section = trimmed.trim_start_matches('#').trim();
+            if !section.is_empty() {
+                sections.push(section.to_string());
+            }
+        }
+    }
+    sections
+}
+
+fn suggestion_matches_file_filter(path: &Path, filters: &[String]) -> bool {
+    let full_path = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let file_stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    filters.iter().any(|raw_filter| {
+        let normalized = raw_filter.trim().replace('\\', "/").to_ascii_lowercase();
+        if normalized.is_empty() {
+            return false;
+        }
+        let normalized_stem = normalized
+            .strip_suffix(".md")
+            .or_else(|| normalized.strip_suffix(".rs"))
+            .unwrap_or(&normalized);
+
+        full_path.ends_with(&normalized)
+            || file_name == normalized
+            || file_stem == normalized
+            || file_stem == normalized_stem
+    })
+}
+
+fn select_suggestions(
+    suggestions: &[ReviewSuggestion],
+    mut options: ReviewFixOptions,
+) -> Result<Vec<usize>> {
+    if options.max == Some(0) {
+        return Ok(Vec::new());
+    }
+    if !options.fix {
+        return Ok(Vec::new());
+    }
+    if !options.all && !options.interactive && !options.step {
+        options.interactive = true;
+    }
+
+    let mut selected = if options.all {
+        (0..suggestions.len()).collect::<Vec<_>>()
+    } else if options.step {
+        select_suggestions_step_mode(suggestions)?
+    } else {
+        select_suggestions_interactive(suggestions)?
+    };
+
+    if let Some(limit) = options.max {
+        selected.truncate(limit);
+    }
+    Ok(selected)
+}
+
+fn select_suggestions_step_mode(suggestions: &[ReviewSuggestion]) -> Result<Vec<usize>> {
+    let mut selected = Vec::new();
+    for (idx, suggestion) in suggestions.iter().enumerate() {
+        println!(
+            "[{}] {} | {} [{}] {}",
+            idx + 1,
+            suggestion.draft_path.display(),
+            suggestion.delta.section,
+            suggestion.delta.change_type,
+            suggestion.delta.after
+        );
+        print!("Apply this suggestion? [y]es/[n]o/[q]uit: ");
+        io::stdout().flush().ok();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let answer = input.trim().to_ascii_lowercase();
+        if answer == "q" {
+            break;
+        }
+        if answer.is_empty() || answer == "y" || answer == "yes" {
+            selected.push(idx);
+        }
+    }
+    Ok(selected)
+}
+
+fn select_suggestions_interactive(suggestions: &[ReviewSuggestion]) -> Result<Vec<usize>> {
+    println!("Suggested changes:");
+    for (idx, suggestion) in suggestions.iter().enumerate() {
+        println!(
+            "  {}. {} | {} [{}] {}",
+            idx + 1,
+            suggestion.draft_path.display(),
+            suggestion.delta.section,
+            suggestion.delta.change_type,
+            suggestion.delta.after
+        );
+        println!(
+            "     source: {} ({})",
+            suggestion.error_source.display(),
+            suggestion.ownership_reason
+        );
+    }
+    print!("Select indices/ranges (e.g. 1,3-5), 'all', or 'none': ");
+    io::stdout().flush().ok();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    parse_selection_input(input.trim(), suggestions.len())
+}
+
+fn parse_selection_input(input: &str, total: usize) -> Result<Vec<usize>> {
+    let normalized = input.trim().to_ascii_lowercase();
+    if normalized == "none" || normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    if normalized == "all" {
+        return Ok((0..total).collect());
+    }
+
+    let mut out = HashSet::new();
+    for token in normalized.split(',') {
+        let t = token.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Some((a, b)) = t.split_once('-') {
+            let start = a.trim().parse::<usize>().context("Invalid range start")?;
+            let end = b.trim().parse::<usize>().context("Invalid range end")?;
+            if start == 0 || end == 0 || start > end || end > total {
+                anyhow::bail!("Range out of bounds: {}", t);
+            }
+            for i in start..=end {
+                out.insert(i - 1);
+            }
+        } else {
+            let idx = t.parse::<usize>().context("Invalid index")?;
+            if idx == 0 || idx > total {
+                anyhow::bail!("Index out of bounds: {}", idx);
+            }
+            out.insert(idx - 1);
+        }
+    }
+    let mut values: Vec<usize> = out.into_iter().collect();
+    values.sort_unstable();
+    Ok(values)
+}
+
 fn extract_fenced_json_payload(text: &str) -> Option<String> {
     let start = text.find("```json")?;
     let rest = &text[start + "```json".len()..];
@@ -708,15 +981,18 @@ fn apply_review_deltas(
     original_content: &str,
     deltas: Vec<ReviewDelta>,
     dry_run: bool,
-) -> Result<Vec<AppliedReviewChange>> {
+) -> Result<(Vec<AppliedReviewChange>, Vec<(ReviewDelta, String)>)> {
     let mut working = original_content.to_string();
     let mut applied = Vec::new();
+    let mut rejected = Vec::new();
 
     for delta in deltas {
         if delta.after.trim().is_empty() {
+            rejected.push((delta, "empty_after".to_string()));
             continue;
         }
         let Some((start, end)) = find_section_bounds(&working, &delta.section) else {
+            rejected.push((delta, "missing_section".to_string()));
             continue;
         };
         let (next, did_apply) = apply_single_review_delta(&working, start, end, &delta)?;
@@ -727,7 +1003,10 @@ fn apply_review_deltas(
                 section: delta.section.clone(),
                 change_type: delta.change_type.clone(),
                 preview: delta.after.trim().chars().take(100).collect(),
+                style_intent: delta.style_intent.clone(),
             });
+        } else {
+            rejected.push((delta, "no_op_or_invalid".to_string()));
         }
     }
 
@@ -736,7 +1015,7 @@ fn apply_review_deltas(
             .with_context(|| format!("Failed to update draft file: {}", draft_path.display()))?;
     }
 
-    Ok(applied)
+    Ok((applied, rejected))
 }
 
 fn apply_single_review_delta(
@@ -1556,6 +1835,20 @@ fn is_language_or_paradigm_specific_detail(text: &str) -> bool {
     markers.iter().any(|m| t.contains(m))
 }
 
+fn is_no_issue_placeholder_bullet(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "none" | "n/a" | "na" | "no blockers" | "no ambiguities" | "no blocking ambiguities"
+    )
+}
+
 fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
     let bullets = extract_bullets_with_indent(section);
     if bullets.is_empty() {
@@ -1566,7 +1859,8 @@ fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); bullets.len()];
 
     for i in 0..bullets.len() {
-        actionable[i] = !is_language_or_paradigm_specific_detail(&bullets[i].1);
+        actionable[i] = !is_language_or_paradigm_specific_detail(&bullets[i].1)
+            && !is_no_issue_placeholder_bullet(&bullets[i].1);
         let parent_indent = bullets[i].0;
         let mut j = i + 1;
         while j < bullets.len() && bullets[j].0 > parent_indent {
@@ -3089,9 +3383,12 @@ fn determine_implementation_output_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_review_deltas, determine_specification_output_path, extract_compile_error_message,
+        apply_review_deltas, determine_specification_output_path,
+        extract_actionable_blocking_bullets, extract_compile_error_message,
         extract_implementation_review_error_section, parse_review_delta_envelope,
-        score_review_candidate, AppliedReviewChange, ReviewDelta,
+        parse_selection_input, score_review_candidate, select_suggestions,
+        suggestion_matches_file_filter, AppliedReviewChange, ReviewDelta, ReviewFixOptions,
+        ReviewSuggestion,
     };
     use std::path::{Path, PathBuf};
 
@@ -3196,10 +3493,13 @@ msg.push_str("- Missing accessor.\n");
             before: None,
             after: "Expose read-only getter for score".to_string(),
             reason: Some("public API".to_string()),
+            style_intent: Some("specification wording".to_string()),
         }];
         let tmp_path = PathBuf::from("drafts/contexts/_tmp_review_test.md");
-        let applied = apply_review_deltas(&tmp_path, original, deltas, true).expect("applied");
+        let (applied, rejected) =
+            apply_review_deltas(&tmp_path, original, deltas, true).expect("applied");
         assert_eq!(applied.len(), 1);
+        assert!(rejected.is_empty());
         assert_eq!(applied[0].section, "Functionality");
         assert_eq!(applied[0].change_type, "append_bullet");
         assert!(applied[0].preview.contains("Expose read-only getter"));
@@ -3211,7 +3511,98 @@ msg.push_str("- Missing accessor.\n");
             section: "Functionality".to_string(),
             change_type: "replace_bullet".to_string(),
             preview: "Replace run bullet to use dependency getter".to_string(),
+            style_intent: Some("specification wording".to_string()),
         };
         assert!(report.preview.contains("dependency getter"));
+    }
+
+    #[test]
+    fn ignores_placeholder_no_issue_bullets() {
+        let section = r#"
+- None
+- no blocking ambiguities
+- N/A
+"#;
+        let actionable = extract_actionable_blocking_bullets(section);
+        assert!(actionable.is_empty());
+    }
+
+    #[test]
+    fn preserves_real_blockers_while_ignoring_placeholders() {
+        let section = r#"
+- none
+- Missing required role method for game loop construction
+"#;
+        let actionable = extract_actionable_blocking_bullets(section);
+        assert_eq!(actionable.len(), 1);
+        assert!(actionable[0].contains("Missing required role method"));
+    }
+
+    #[test]
+    fn parses_selection_ranges_and_indices() {
+        let selected = parse_selection_input("1,3-4", 5).expect("selection");
+        assert_eq!(selected, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn select_suggestions_all_with_max_applies_limit() {
+        let suggestions = vec![
+            ReviewSuggestion {
+                draft_path: PathBuf::from("drafts/app.md"),
+                delta: ReviewDelta {
+                    section: "Functionality".to_string(),
+                    change_type: "append_bullet".to_string(),
+                    before: None,
+                    after: "a".to_string(),
+                    reason: None,
+                    style_intent: None,
+                },
+                error_source: PathBuf::from("src/main.rs"),
+                ownership_reason: "origin".to_string(),
+            },
+            ReviewSuggestion {
+                draft_path: PathBuf::from("drafts/app.md"),
+                delta: ReviewDelta {
+                    section: "Functionality".to_string(),
+                    change_type: "append_bullet".to_string(),
+                    before: None,
+                    after: "b".to_string(),
+                    reason: None,
+                    style_intent: None,
+                },
+                error_source: PathBuf::from("src/main.rs"),
+                ownership_reason: "origin".to_string(),
+            },
+        ];
+        let selected = select_suggestions(
+            &suggestions,
+            ReviewFixOptions {
+                fix: true,
+                interactive: false,
+                all: true,
+                step: false,
+                max: Some(1),
+                file_filters: Vec::new(),
+            },
+        )
+        .expect("selected");
+        assert_eq!(selected, vec![0]);
+    }
+
+    #[test]
+    fn file_filter_matches_stem_or_path_suffix() {
+        let path = Path::new("drafts/contexts/game_loop.md");
+        assert!(suggestion_matches_file_filter(
+            path,
+            &[String::from("game_loop")]
+        ));
+        assert!(suggestion_matches_file_filter(
+            path,
+            &[String::from("contexts/game_loop.md")]
+        ));
+        assert!(!suggestion_matches_file_filter(
+            path,
+            &[String::from("app")]
+        ));
     }
 }
