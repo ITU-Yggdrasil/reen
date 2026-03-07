@@ -1,42 +1,84 @@
-# App
+# The primary application
 
+## Description
+This is a simple terminal-based Snake game application.
 
-# Description
+The application is responsible for:
+- initializing the game state
+- running the main loop
+- rendering the game state. Board and score can be obtained from the game loop. 
+- restarting the game when it is not running
+- managing terminal input mode for interactive keyboard control
+- owning a shared CommandInputContext used by both menus and gameplay
 
-This is the main application. It's a CLI that functions as a compiler. It is however much more than that. Based on draft for individual use cases and functionalt areas, the system will be able to create specifications. The specifications can then be reviewed and subsequently implemented and compiled.
+Game progression logic itself is delegated to the GameLoopContext.
 
-The app has three commands:
+---
 
-- **create** The create command has a few sub commands
-  - **specification** This operation will read all files in the draft folder and create specifications for them in the `specifications/` folder. Files are processed in order: first the `data/` folder (simple data types), then the `contexts/` folder (use cases with role players), and finally root files (like `app.md`). An optional list of names can be provided. In which case only those files will be read. (It's assumed that they are all md files and only the name will be supplied). This is driven by an agent named "create_specifications" and utilises the agent_runner. If the agent is configured with `parallel: true` in the agent-model registry, multiple files will be processed concurrently for faster execution.
-  - **implementation** This operation will read all files in the specifications folder and implement them in rust, unless otherwise specified. Files are processed in order: first the `data/` folder (simple data types), then the `contexts/` folder (use cases with role players), and finally root files. As with `specifications` an optional list of named contexts can be supplied. They are also assumed to be .md files and only the name will be supplied not the extension. This is driven by an agent named "create_implementation" and utilises the agent_runner. If the agent is configured with `parallel: true` in the agent-model registry, multiple files will be processed concurrently for faster execution.
-  - **tests** This operation will read all files in the specifications folder and implement matching tests using a idiomatic rust approach, As with `implementation` an optional list of named contexts can be supplied. They are also assumed to be .md files and only the name will be supplied not the extension. This is driven by an agent named "create_test" and utilises the agent_runner. If the agent is configured with `parallel: true` in the agent-model registry, multiple files will be processed concurrently for faster execution.
-- **compile** Compiles generated project. Uses the rust-cli
-- **run** Similar to cargo run. Will build and run the application
-- **test** Tests the project. Uses the rust-cli
+### Initial state
+The application should display a message such as:
+"Press s to start a new game"
 
+When the game is started:
 
-Agent specifications are kept in the agents folder, as is a yml file holding the agent-model registry. The agent-model registry maps each agent to a model and optionally specifies whether the agent can process multiple files in parallel. This allows for faster processing when agents support concurrent execution.
+- A Board is created with predefined width and height matching the height and width of the terminal (meassured in characters (width) and lines (heinght)).
+  - The board should use the full available terminal size.
+- A snake is created and placed at the center most cell. defined as (width / 2, height / 2) as integer division (truncated)
+  - the initial length is one i.e. only a head
+  - direction RIGHT
+- A GameState is created containing:
+  - score = 0
+  - a single food item placed at a valid coordinate i.e. not on the boundaries of the board and not overlapping with 
+  the nake
+  - the time the game was started represented as ms since 2026-01-01 0:00
+- A GameLoopContext is constructed
+- A terminal renderer context is constructed
 
-The agents are instructed not to assume anything but ask questions, so the cli should be able to accept the answers and send them to the agent as part of the conversation, so we might have to keep a conversational context.
+---
 
-A hidden `.reen` folder should be created to store build artifacts. For each input file, store:
-- A hash of the input content
-- A hash of the corresponding output
+### functionality
 
-The draft folder structure supports:
-- `data/` folder: Contains simple data types with no interaction between properties. These are processed first.
-- `contexts/` folder: Contains use cases with different objects acting as actors/role players. These are processed second.
-- Root files: Files like `app.md` in the root of the drafts folder. These are processed last.
+The application runs an outer loop with the following behavior:
 
-The folder structure is preserved when creating specifications and implementations:
-- `drafts/data/X.md` → `specifications/data/X.md` → `src/data/X.rs`
-- `drafts/contexts/X.md` → `specifications/contexts/X.md` → `src/contexts/X.rs`
-- `drafts/X.md` → `specifications/X.md` → `src/X.rs` (or `src/main.rs` for `app.md`)
+0. Terminal input mode:
+   - Before entering the main loop, enable raw terminal input mode so single key presses are available immediately (without pressing Enter), and disable input echo.
+   - On application exit (normal or error), restore the previous terminal mode.
+   - Create one CommandInputContext instance before entering the main loop and keep it for the entire process lifetime.
+   - if the terminal width is less than 20 or the terminal height is less than 20, exit immediately with the error code 20 and print to stderr that the terminal is too little to start the game
 
-The build stages have these dependencies:
-specification → implementation → {compile, run, test}
+1. If there is no active GameLoopContext (including when the application first starts):
+   - Render a start screen (including score from the previous game if one has been completed in this session).
+   - Call CommandInputContext.capture and then poll keys via CommandInputContext.next_key.
+   - If the user presses the start key "S" or "s":
+     - Recreate the initial state.
+     - Create a new GameLoopContext and pass the same shared CommandInputContext instance as the `command` role.
+   - If "Q" or "q" is pressed exit the program
+   - Otherwise continue waiting.
 
-Before running any action, check the stored hashes to verify that upstream stages don't need re-execution. If inputs have changed, re-run the affected stages first.
+2. If a GameLoopContext exists:
+   - Render the current frame by passing  the board (gameloopcontext.current_board) and the current to the renderer context.
+   - Call `gameLoopContext.tick()`
+   - If the result is:
+     - a new GameLoopContext → replace the current one and continue.
+     - None → the game ends, set current context to None.
 
+3. When the game ends:
+   - Render final board state.
+   - Render a "Game Over" message and final score.
+   - Allow the user to start a new game.
 
+The application continues running until explicitly terminated (presing "q" or "Q" when no gaming is running).
+
+The exit code should be 0.
+
+---
+
+### Error handling
+
+In case of a runtime error:
+
+- The application should exit with a non-zero exit code.
+- The exit code should be 42.
+- If an error message is available, it should be printed to standard error.
+
+No partial state recovery is required.
