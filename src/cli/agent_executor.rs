@@ -3,10 +3,13 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use reen::contexts::{AgentRunner, AgentRunnerError};
-use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
+use reen::contexts::{AgentModelRegistry, AgentRunner, AgentRunnerError};
+use reen::registries::{
+    candidate_agent_spec_paths, resolve_existing_agent_spec_path, FileAgentModelRegistry,
+    FileAgentRegistry,
+};
 
 use super::Config;
 
@@ -211,15 +214,86 @@ impl AgentExecutor {
 }
 
 fn validate_agent_exists(agent_name: &str) -> Result<()> {
-    let agent_path = PathBuf::from("agents").join(format!("{}.yml", agent_name));
+    validate_agent_exists_at(
+        agent_name,
+        Path::new("agents"),
+        &FileAgentModelRegistry::new(None, None, None),
+    )
+}
 
-    if !agent_path.exists() {
+fn validate_agent_exists_at(
+    agent_name: &str,
+    agents_dir: &Path,
+    model_registry: &FileAgentModelRegistry,
+) -> Result<()> {
+    let model_name = model_registry
+        .get_model(agent_name)
+        .map(|model| model.name)
+        .unwrap_or_default();
+    if resolve_existing_agent_spec_path(agents_dir, agent_name, &model_name).is_none() {
+        let expected = candidate_agent_spec_paths(agents_dir, agent_name, &model_name)
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" or ");
         anyhow::bail!(
             "Agent '{}' not found. Expected file: {}",
             agent_name,
-            agent_path.display()
+            expected
         );
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_agent_exists_at;
+    use reen::registries::FileAgentModelRegistry;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("reen_agent_executor_{}_{}", prefix, nanos))
+    }
+
+    #[test]
+    fn validate_prefers_variant_then_falls_back_to_default() {
+        let test_dir = unique_test_dir("variant_default");
+        let agents_dir = test_dir.join("agents");
+        fs::create_dir_all(&agents_dir).expect("create agents dir");
+        fs::write(
+            agents_dir.join("agent_model_registry.yml"),
+            "create_implementation:\n  model: claude-3-sonnet\n  parallel: false\n",
+        )
+        .expect("write model registry");
+        fs::write(
+            agents_dir.join("create_implementation.yml"),
+            "system_prompt: default prompt\n",
+        )
+        .expect("write default spec");
+
+        let registry = FileAgentModelRegistry::new(
+            Some(agents_dir.join("agent_model_registry.yml")),
+            None,
+            None,
+        );
+        validate_agent_exists_at("create_implementation", &agents_dir, &registry)
+            .expect("default fallback should validate");
+
+        fs::write(
+            agents_dir.join("create_implementation.sonnet.yml"),
+            "system_prompt: sonnet prompt\n",
+        )
+        .expect("write variant spec");
+        validate_agent_exists_at("create_implementation", &agents_dir, &registry)
+            .expect("variant should validate");
+
+        fs::remove_dir_all(&test_dir).expect("cleanup");
+    }
 }
