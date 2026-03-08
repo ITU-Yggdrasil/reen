@@ -59,8 +59,7 @@ impl FileAgentModelRegistry {
         default_parallel: Option<bool>,
     ) -> Self {
         Self {
-            registry_path: registry_path
-                .unwrap_or_else(resolve_registry_path),
+            registry_path: registry_path.unwrap_or_else(resolve_registry_path),
             default_model: default_model.unwrap_or_else(|| "default".to_string()),
             default_parallel: default_parallel.unwrap_or(false),
         }

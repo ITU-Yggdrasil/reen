@@ -44,25 +44,6 @@ def ensure_venv():
 ensure_venv()
 
 
-# region agent log
-def debug_log(hypothesis_id: str, location: str, message: str, data: Dict[str, Any]) -> None:
-    payload = {
-        "sessionId": "efecc2",
-        "runId": "initial",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(__import__("time").time() * 1000),
-    }
-    try:
-        with open("/Users/rune/projects/reen/.cursor/debug-efecc2.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
-    except Exception:
-        pass
-# endregion
-
-
 def execute_with_anthropic(model: str, system_prompt: str) -> str:
     """Execute using Anthropic's Claude API."""
     try:
@@ -108,20 +89,7 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
     if model_name.startswith("ollama:"):
         model_name = model_name[7:]
 
-    # region agent log
-    debug_log(
-        "H4",
-        "runner.py:111",
-        "ollama_chat_request",
-        {
-            "provider": "ollama",
-            "base_url": base_url,
-            "model_name": model_name,
-            "system_prompt_len": len(system_prompt),
-        },
-    )
-    # endregion
-    
+
     # The model name format "qwen2.5:7b" is correct for Ollama (model:tag)
     response = client.chat(
         model=model_name,
@@ -131,17 +99,6 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
         ]
     )
 
-    # region agent log
-    debug_log(
-        "H5",
-        "runner.py:130",
-        "ollama_chat_response",
-        {
-            "response_prefix": response.get("message", {}).get("content", "")[:180],
-            "response_len": len(response.get("message", {}).get("content", "")),
-        },
-    )
-    # endregion
     first_output = response["message"]["content"]
     lower = first_output.lower()
     asks_for_prompt = (
@@ -151,14 +108,6 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
         or "provide details of the task" in lower
     )
     if asks_for_prompt:
-        # region agent log
-        debug_log(
-            "H5",
-            "runner.py:145",
-            "ollama_fallback_prompt_in_user_message",
-            {"model_name": model_name},
-        )
-        # endregion
         fallback_response = client.chat(
             model=model_name,
             messages=[
@@ -172,17 +121,6 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
                 }
             ],
         )
-        # region agent log
-        debug_log(
-            "H5",
-            "runner.py:161",
-            "ollama_fallback_response",
-            {
-                "response_prefix": fallback_response.get("message", {}).get("content", "")[:180],
-                "response_len": len(fallback_response.get("message", {}).get("content", "")),
-            },
-        )
-        # endregion
         return fallback_response["message"]["content"]
 
     return first_output
@@ -261,20 +199,6 @@ def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
             }
 
         provider = determine_provider(model)
-        # region agent log
-        debug_log(
-            "H2",
-            "runner.py:209",
-            "runner_execute_model_input",
-            {
-                "model": model,
-                "provider": provider,
-                "system_prompt_len": len(system_prompt),
-                "system_prompt_prefix": system_prompt[:180],
-            },
-        )
-        # endregion
-
         if provider == "anthropic":
             output = execute_with_anthropic(model, system_prompt)
         elif provider == "ollama":
