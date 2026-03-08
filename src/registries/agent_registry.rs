@@ -1,25 +1,19 @@
-use super::agent_spec_resolver::resolve_existing_agent_spec_path;
+use super::agent_spec_resolver::candidate_agent_spec_filenames;
 use crate::contexts::{AgentModelRegistry, AgentRegistry, PopulateError};
-use crate::registries::FileAgentModelRegistry;
-use std::fs;
-use std::path::PathBuf;
+use crate::registries::{embedded_agent_spec, FileAgentModelRegistry};
 
 /// File-based implementation of AgentRegistry
 /// Loads agent specifications from YAML files in the agents/ directory
 #[derive(Clone)]
-pub struct FileAgentRegistry {
-    agents_dir: PathBuf,
-}
+pub struct FileAgentRegistry;
 
 impl FileAgentRegistry {
     /// Creates a new FileAgentRegistry
     ///
     /// # Arguments
     /// * `agents_dir` - Optional path to agents directory (defaults to "agents")
-    pub fn new(agents_dir: Option<PathBuf>) -> Self {
-        Self {
-            agents_dir: agents_dir.unwrap_or_else(|| PathBuf::from("agents")),
-        }
+    pub fn new(_agents_dir: Option<std::path::PathBuf>) -> Self {
+        Self
     }
 }
 
@@ -30,25 +24,17 @@ impl AgentRegistry for FileAgentRegistry {
             .map(|model| model.name)
             .unwrap_or_default();
 
-        let Some(agent_path) =
-            resolve_existing_agent_spec_path(&self.agents_dir, agent_name, &model_name)
+        let candidate_names = candidate_agent_spec_filenames(agent_name, &model_name);
+        let Some(agent_content) = candidate_names
+            .iter()
+            .find_map(|name| embedded_agent_spec(name))
         else {
             return Err(PopulateError::AgentNotFound(agent_name.to_string()));
         };
 
-        fs::read_to_string(&agent_path)
-            .map_err(|e| {
-                PopulateError::InvalidSpecification(format!(
-                    "Failed to read agent specification {}: {}",
-                    agent_path.display(),
-                    e
-                ))
-            })
-            .and_then(|content| {
-                // Extract the system_prompt from the YAML
-                // This is a simple extraction - could use a proper YAML parser
-                extract_system_prompt(&content)
-            })
+        // Extract the system_prompt from the YAML.
+        // This is a simple extraction - could use a proper YAML parser.
+        extract_system_prompt(agent_content)
     }
 }
 
@@ -80,15 +66,6 @@ fn extract_system_prompt(yaml_content: &str) -> Result<String, PopulateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn unique_test_dir(prefix: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("reen_agent_registry_{}_{}", prefix, nanos))
-    }
 
     #[test]
     fn test_extract_system_prompt() {
@@ -118,100 +95,32 @@ description: Test agent
     }
 
     #[test]
-    fn prefers_model_specific_file_for_supported_variants() {
-        let test_dir = unique_test_dir("prefer_variants");
-        fs::create_dir_all(test_dir.join("agents")).expect("create agents dir");
-        fs::write(
-            test_dir.join("agents/create_implementation.yml"),
-            "system_prompt: default prompt\n",
-        )
-        .expect("write default spec");
-
-        let previous_dir = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&test_dir).expect("set cwd");
+    fn loads_embedded_agent_specification() {
         let registry = FileAgentRegistry::new(None);
-
-        let models_and_variants = [
-            ("gpt-5", "gpt"),
-            ("qwen2.5:7b", "qwen"),
-            ("claude-3-opus", "opus"),
-            ("claude-3-7-sonnet", "sonnet"),
-            ("mistral:7b", "mistral"),
-        ];
-        for (model_name, variant) in models_and_variants {
-            fs::write(
-                test_dir.join("agents/agent_model_registry.yml"),
-                format!(
-                    "create_implementation:\n  model: {}\n  parallel: false\n",
-                    model_name
-                ),
-            )
-            .expect("write model registry");
-            fs::write(
-                test_dir.join(format!("agents/create_implementation.{}.yml", variant)),
-                format!("system_prompt: {} prompt\n", variant),
-            )
-            .expect("write variant spec");
-            let output = registry
-                .get_specification("create_implementation")
-                .expect("spec load");
-            assert_eq!(output.trim(), format!("{} prompt", variant));
-            fs::remove_file(test_dir.join(format!("agents/create_implementation.{}.yml", variant)))
-                .expect("cleanup variant");
-        }
-
-        std::env::set_current_dir(previous_dir).expect("restore cwd");
-        fs::remove_dir_all(&test_dir).expect("cleanup");
+        let output = registry
+            .get_specification("create_implementation")
+            .expect("embedded spec should load");
+        assert!(output.contains("code implementation agent"));
     }
 
     #[test]
-    fn falls_back_to_default_when_variant_missing() {
-        let test_dir = unique_test_dir("fallback_default");
-        fs::create_dir_all(test_dir.join("agents")).expect("create agents dir");
-        fs::write(
-            test_dir.join("agents/agent_model_registry.yml"),
-            "create_implementation:\n  model: qwen2.5:7b\n  parallel: false\n",
-        )
-        .expect("write model registry");
-        fs::write(
-            test_dir.join("agents/create_implementation.yml"),
-            "system_prompt: default prompt\n",
-        )
-        .expect("write default spec");
-
-        let previous_dir = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&test_dir).expect("set cwd");
+    fn falls_back_to_default_embedded_spec_for_variant_model() {
         let registry = FileAgentRegistry::new(None);
         let output = registry
             .get_specification("create_implementation")
             .expect("spec load");
-        std::env::set_current_dir(previous_dir).expect("restore cwd");
-        fs::remove_dir_all(&test_dir).expect("cleanup");
-
-        assert_eq!(output.trim(), "default prompt");
+        assert!(output.contains("Strict Specification Compliance"));
     }
 
     #[test]
     fn returns_agent_not_found_when_no_candidates_exist() {
-        let test_dir = unique_test_dir("missing_both");
-        fs::create_dir_all(test_dir.join("agents")).expect("create agents dir");
-        fs::write(
-            test_dir.join("agents/agent_model_registry.yml"),
-            "create_implementation:\n  model: claude-3-opus\n  parallel: false\n",
-        )
-        .expect("write model registry");
-
-        let previous_dir = std::env::current_dir().expect("cwd");
-        std::env::set_current_dir(&test_dir).expect("set cwd");
         let registry = FileAgentRegistry::new(None);
         let error = registry
-            .get_specification("create_implementation")
+            .get_specification("agent_that_does_not_exist")
             .expect_err("expected missing agent");
-        std::env::set_current_dir(previous_dir).expect("restore cwd");
-        fs::remove_dir_all(&test_dir).expect("cleanup");
 
         match error {
-            PopulateError::AgentNotFound(name) => assert_eq!(name, "create_implementation"),
+            PopulateError::AgentNotFound(name) => assert_eq!(name, "agent_that_does_not_exist"),
             other => panic!("expected AgentNotFound, got {:?}", other),
         }
     }

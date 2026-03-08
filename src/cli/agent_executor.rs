@@ -3,12 +3,11 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use reen::contexts::{AgentModelRegistry, AgentRunner, AgentRunnerError};
 use reen::registries::{
-    candidate_agent_spec_paths, resolve_existing_agent_spec_path, FileAgentModelRegistry,
-    FileAgentRegistry,
+    candidate_agent_spec_filenames, embedded_agent_spec, FileAgentModelRegistry, FileAgentRegistry,
 };
 
 use super::Config;
@@ -214,28 +213,23 @@ impl AgentExecutor {
 }
 
 fn validate_agent_exists(agent_name: &str) -> Result<()> {
-    validate_agent_exists_at(
-        agent_name,
-        Path::new("agents"),
-        &FileAgentModelRegistry::new(None, None, None),
-    )
+    validate_agent_exists_with_registry(agent_name, &FileAgentModelRegistry::new(None, None, None))
 }
 
-fn validate_agent_exists_at(
+fn validate_agent_exists_with_registry(
     agent_name: &str,
-    agents_dir: &Path,
     model_registry: &FileAgentModelRegistry,
 ) -> Result<()> {
     let model_name = model_registry
         .get_model(agent_name)
         .map(|model| model.name)
         .unwrap_or_default();
-    if resolve_existing_agent_spec_path(agents_dir, agent_name, &model_name).is_none() {
-        let expected = candidate_agent_spec_paths(agents_dir, agent_name, &model_name)
-            .into_iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(" or ");
+    let candidates = candidate_agent_spec_filenames(agent_name, &model_name);
+    if candidates
+        .iter()
+        .all(|filename| embedded_agent_spec(filename).is_none())
+    {
+        let expected = candidates.into_iter().collect::<Vec<_>>().join(" or ");
         anyhow::bail!(
             "Agent '{}' not found. Expected file: {}",
             agent_name,
@@ -248,7 +242,7 @@ fn validate_agent_exists_at(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_agent_exists_at;
+    use super::validate_agent_exists_with_registry;
     use reen::registries::FileAgentModelRegistry;
     use std::fs;
     use std::path::PathBuf;
@@ -263,37 +257,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_prefers_variant_then_falls_back_to_default() {
-        let test_dir = unique_test_dir("variant_default");
-        let agents_dir = test_dir.join("agents");
-        fs::create_dir_all(&agents_dir).expect("create agents dir");
+    fn validate_uses_embedded_specs_without_agents_symlink() {
+        let test_dir = unique_test_dir("embedded_only");
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let registry_path = test_dir.join("agent_model_registry.yml");
         fs::write(
-            agents_dir.join("agent_model_registry.yml"),
+            &registry_path,
             "create_implementation:\n  model: claude-3-sonnet\n  parallel: false\n",
         )
         .expect("write model registry");
-        fs::write(
-            agents_dir.join("create_implementation.yml"),
-            "system_prompt: default prompt\n",
-        )
-        .expect("write default spec");
 
-        let registry = FileAgentModelRegistry::new(
-            Some(agents_dir.join("agent_model_registry.yml")),
-            None,
-            None,
-        );
-        validate_agent_exists_at("create_implementation", &agents_dir, &registry)
+        let registry = FileAgentModelRegistry::new(Some(registry_path), None, None);
+        validate_agent_exists_with_registry("create_implementation", &registry)
             .expect("default fallback should validate");
-
-        fs::write(
-            agents_dir.join("create_implementation.sonnet.yml"),
-            "system_prompt: sonnet prompt\n",
-        )
-        .expect("write variant spec");
-        validate_agent_exists_at("create_implementation", &agents_dir, &registry)
-            .expect("variant should validate");
-
         fs::remove_dir_all(&test_dir).expect("cleanup");
     }
 }

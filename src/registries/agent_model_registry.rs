@@ -1,4 +1,5 @@
 use crate::contexts::{AgentModelRegistry, ExecutionError, Model};
+use crate::registries::embedded_default_model_registry;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -41,13 +42,16 @@ impl FileAgentModelRegistry {
 
     /// Loads the registry from the file
     fn load_registry(&self) -> Result<HashMap<String, AgentConfig>, ExecutionError> {
-        if !self.registry_path.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let content = fs::read_to_string(&self.registry_path).map_err(|e| {
-            ExecutionError::ExecutionFailed(format!("Failed to read agent model registry: {}", e))
-        })?;
+        let content = if self.registry_path.exists() {
+            fs::read_to_string(&self.registry_path).map_err(|e| {
+                ExecutionError::ExecutionFailed(format!(
+                    "Failed to read agent model registry: {}",
+                    e
+                ))
+            })?
+        } else {
+            embedded_default_model_registry().to_string()
+        };
 
         parse_registry(&content, &self.default_model, self.default_parallel)
     }
@@ -139,6 +143,16 @@ fn parse_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("reen_agent_model_registry_{}_{}", prefix, nanos))
+    }
 
     #[test]
     fn test_parse_registry_old_format() {
@@ -192,5 +206,40 @@ create_implementation:
         let result = parse_registry(yaml, "default", false);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn uses_embedded_default_when_local_registry_missing() {
+        let registry = FileAgentModelRegistry::new(
+            Some(PathBuf::from(
+                "__definitely_missing__/agent_model_registry.yml",
+            )),
+            Some("default".to_string()),
+            Some(false),
+        );
+        let model = registry
+            .get_model("create_implementation")
+            .expect("embedded default registry should resolve model");
+        assert_eq!(model.name, "qwen2.5:7b");
+    }
+
+    #[test]
+    fn local_registry_overrides_embedded_default() {
+        let test_dir = unique_test_dir("override");
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let registry_path = test_dir.join("agent_model_registry.yml");
+        fs::write(
+            &registry_path,
+            "create_implementation:\n  model: gpt-5\n  parallel: false\n",
+        )
+        .expect("write local registry");
+
+        let registry = FileAgentModelRegistry::new(Some(registry_path), None, None);
+        let model = registry
+            .get_model("create_implementation")
+            .expect("local override should resolve");
+        assert_eq!(model.name, "gpt-5");
+
+        fs::remove_dir_all(&test_dir).expect("cleanup");
     }
 }

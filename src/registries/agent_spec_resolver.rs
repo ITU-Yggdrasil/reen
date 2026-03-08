@@ -39,11 +39,19 @@ pub fn candidate_agent_spec_paths(
     agent_name: &str,
     model_name: &str,
 ) -> Vec<PathBuf> {
+    candidate_agent_spec_filenames(agent_name, model_name)
+        .into_iter()
+        .map(|name| agents_dir.join(name))
+        .collect()
+}
+
+/// Returns candidate spec filenames in priority order.
+pub fn candidate_agent_spec_filenames(agent_name: &str, model_name: &str) -> Vec<String> {
     let mut candidates = Vec::new();
     if let Some(variant) = model_variant_suffix(model_name) {
-        candidates.push(agents_dir.join(format!("{}.{}.yml", agent_name, variant)));
+        candidates.push(format!("{}.{}.yml", agent_name, variant));
     }
-    candidates.push(agents_dir.join(format!("{}.yml", agent_name)));
+    candidates.push(format!("{}.yml", agent_name));
     candidates
 }
 
@@ -60,7 +68,7 @@ pub fn resolve_existing_agent_spec_path(
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_agent_spec_paths, model_variant_suffix};
+    use super::{candidate_agent_spec_filenames, candidate_agent_spec_paths, model_variant_suffix};
     use std::path::Path;
 
     #[test]
@@ -80,5 +88,17 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths[0].ends_with("create_implementation.gpt.yml"));
         assert!(paths[1].ends_with("create_implementation.yml"));
+    }
+
+    #[test]
+    fn filename_candidates_match_expected_order() {
+        let names = candidate_agent_spec_filenames("create_implementation", "claude-3-sonnet");
+        assert_eq!(
+            names,
+            vec![
+                "create_implementation.sonnet.yml",
+                "create_implementation.yml"
+            ]
+        );
     }
 }
