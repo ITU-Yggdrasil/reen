@@ -55,6 +55,11 @@ impl AgentExecutor {
             .map_err(|e| anyhow::anyhow!("Failed to read model registry: {}", e))
     }
 
+    /// Reference to the model registry (for diagnostics).
+    pub fn model_registry(&self) -> &FileAgentModelRegistry {
+        &self.model_registry
+    }
+
     /// Executes the agent with additional context (for conversational interactions)
     pub async fn execute_with_context(
         &self,

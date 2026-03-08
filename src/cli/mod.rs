@@ -1264,6 +1264,15 @@ pub async fn create_implementation(
     let executor = Arc::new(AgentExecutor::new("create_implementation", config)?);
     let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
+    if config.verbose {
+        let path = executor.model_registry().registry_path();
+        println!(
+            "Agent model registry: {}, create_implementation parallel: {}",
+            path.display(),
+            can_parallel
+        );
+    }
+
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
     let mut updated_in_run: HashSet<String> = HashSet::new();

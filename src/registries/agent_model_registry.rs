@@ -2,7 +2,33 @@ use crate::contexts::{AgentModelRegistry, ExecutionError, Model};
 use crate::registries::embedded_default_model_registry;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Resolves the agent model registry path by searching upward from the current
+/// directory for a directory that contains `agents/agent_model_registry.yml`.
+/// This ensures the same registry is used when running from project subdirectories
+/// (e.g. `tests/snake`). Falls back to `agents/agent_model_registry.yml` relative
+/// to the current directory if no project root is found.
+pub fn resolve_registry_path() -> PathBuf {
+    const REGISTRY_REL: &str = "agents/agent_model_registry.yml";
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return PathBuf::from(REGISTRY_REL),
+    };
+    let mut dir = cwd.as_path();
+    loop {
+        let candidate = dir.join(REGISTRY_REL);
+        if candidate.exists() {
+            return candidate;
+        }
+        if let Some(parent) = dir.parent() {
+            dir = parent;
+        } else {
+            break;
+        }
+    }
+    PathBuf::from(REGISTRY_REL)
+}
 
 /// Agent configuration from the registry
 #[derive(Clone, Debug)]
@@ -34,7 +60,7 @@ impl FileAgentModelRegistry {
     ) -> Self {
         Self {
             registry_path: registry_path
-                .unwrap_or_else(|| PathBuf::from("agents/agent_model_registry.yml")),
+                .unwrap_or_else(resolve_registry_path),
             default_model: default_model.unwrap_or_else(|| "default".to_string()),
             default_parallel: default_parallel.unwrap_or(false),
         }
@@ -65,6 +91,11 @@ impl FileAgentModelRegistry {
         } else {
             Ok(self.default_parallel)
         }
+    }
+
+    /// Path to the registry file (for diagnostics).
+    pub fn registry_path(&self) -> &Path {
+        &self.registry_path
     }
 }
 

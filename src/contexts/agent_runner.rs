@@ -4,6 +4,34 @@ use serde::Serialize;
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+// #region agent log
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let payload = serde_json::json!({
+        "sessionId": "efecc2",
+        "runId": "initial",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": timestamp
+    });
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/Users/rune/projects/reen/.cursor/debug-efecc2.log")
+    {
+        let _ = writeln!(file, "{}", payload);
+    }
+}
+// #endregion
 
 /// Errors that can occur during agent population
 #[derive(Debug)]
@@ -212,6 +240,18 @@ where
         let request_json = serde_json::to_string(&request).map_err(|e| {
             ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
         })?;
+        // #region agent log
+        debug_log(
+            "H3",
+            "src/contexts/agent_runner.rs:243",
+            "python_request_prepared",
+            serde_json::json!({
+                "model": model.name,
+                "system_prompt_len": specification.system_prompt.len(),
+                "system_prompt_prefix": specification.system_prompt.chars().take(180).collect::<String>()
+            }),
+        );
+        // #endregion
 
         // Spawn the Python runner
         let mut child = Command::new("python3")
@@ -269,6 +309,17 @@ where
             .as_str()
             .ok_or_else(|| ExecutionError::PythonRunnerError("No output in response".to_string()))?
             .to_string();
+        // #region agent log
+        debug_log(
+            "H5",
+            "src/contexts/agent_runner.rs:318",
+            "python_response_output_received",
+            serde_json::json!({
+                "output_prefix": output_text.chars().take(180).collect::<String>(),
+                "output_len": output_text.len()
+            }),
+        );
+        // #endregion
 
         Ok(ExecutionResult {
             output: output_text,
@@ -436,6 +487,18 @@ where
 
         // Step 2: Resolve model
         let model = self.agent_model_registry.get_model(&self.agent)?;
+        // #region agent log
+        debug_log(
+            "H2",
+            "src/contexts/agent_runner.rs:466",
+            "resolved_agent_and_model",
+            serde_json::json!({
+                "agent": self.agent,
+                "model": model.name,
+                "template_len": agent_template.len()
+            }),
+        );
+        // #endregion
 
         // Step 3: Generate cache key based on agent instructions + input
         let cache_key = self.generate_cache_key(&agent_template);
@@ -445,11 +508,32 @@ where
 
         // Step 5: Check cache for existing result
         if let Some(cached_value) = cache.get(&cache_key) {
+            // #region agent log
+            debug_log(
+                "H1",
+                "src/contexts/agent_runner.rs:482",
+                "cache_hit_returning_cached_output",
+                serde_json::json!({
+                    "cache_key_prefix": cache_key.chars().take(12).collect::<String>(),
+                    "cached_output_prefix": cached_value.chars().take(160).collect::<String>()
+                }),
+            );
+            // #endregion
             // Cache hit - return immediately
             return Ok(ExecutionResult {
                 output: cached_value,
             });
         }
+        // #region agent log
+        debug_log(
+            "H1",
+            "src/contexts/agent_runner.rs:497",
+            "cache_miss_executing_model",
+            serde_json::json!({
+                "cache_key_prefix": cache_key.chars().take(12).collect::<String>()
+            }),
+        );
+        // #endregion
 
         // Cache miss - proceed with execution
         // Step 6: Populate the specification (replace placeholders in template)
