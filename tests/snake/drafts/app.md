@@ -22,7 +22,7 @@ The application should display a message such as:
 When the game is started:
 
 - A Board is created with predefined width and height matching the height and width of the terminal (meassured in characters (width) and lines (heinght)).
-  - The board should use the full available terminal size.
+  - The board should use the full available terminal size, except leaving one line below for the score.
 - A snake is created and placed at the center most cell. defined as (width / 2, height / 2) as integer division (truncated)
   - the initial length is one i.e. only a head
   - direction RIGHT
