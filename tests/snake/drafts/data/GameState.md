@@ -8,7 +8,7 @@ Holds the current score, the placement of food, and a representation of how the 
 
 - **score_** an integer >=0 representing the current score
 - **food_placement** None if no food is available Some(food) if there's food on the board
-- **game_started** start time of the game represented as an integer denoting signed milliseconds from the UTC baseline `2026-01-01T00:00:00Z` to the game start time, i.e. `game_started = start_utc_ms - baseline_utc_ms`
+- **game_started** start time of the game represented as an integer denoting utc.now_ms of when the game was started
 
 
 ## Functionality
