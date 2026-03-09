@@ -3,6 +3,11 @@ pub fn embedded_default_model_registry() -> &'static str {
     include_str!("../../agents/agent_model_registry.yml")
 }
 
+/// Returns the embedded Python runner script content.
+pub fn embedded_runner_py() -> &'static str {
+    include_str!("../../runner.py")
+}
+
 /// Returns embedded agent specification YAML by filename.
 ///
 /// Expected keys are filenames like `create_implementation.yml`.
@@ -29,7 +34,7 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{embedded_agent_spec, embedded_default_model_registry};
+    use super::{embedded_agent_spec, embedded_default_model_registry, embedded_runner_py};
 
     #[test]
     fn embedded_model_registry_is_available() {
@@ -41,5 +46,12 @@ mod tests {
     fn embedded_agent_specs_are_available() {
         let content = embedded_agent_spec("create_implementation.yml").expect("embedded spec");
         assert!(content.contains("system_prompt"));
+    }
+
+    #[test]
+    fn embedded_runner_py_is_available() {
+        let content = embedded_runner_py();
+        assert!(content.contains("def main"));
+        assert!(content.contains("def execute_model"));
     }
 }

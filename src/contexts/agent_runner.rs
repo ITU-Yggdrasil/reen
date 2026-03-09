@@ -200,8 +200,15 @@ where
         specification: &AgentSpecification,
         model: &Model,
     ) -> Result<ExecutionResult, ExecutionError> {
+        use crate::registries::embedded_runner_py;
         use std::io::Write;
         use std::process::{Command, Stdio};
+
+        // Write the embedded runner script to a temp file
+        let runner_path = std::env::temp_dir().join("reen_runner.py");
+        std::fs::write(&runner_path, embedded_runner_py()).map_err(|e| {
+            ExecutionError::PythonRunnerError(format!("Failed to write embedded runner: {}", e))
+        })?;
 
         // Prepare the request JSON
         let request = serde_json::json!({
@@ -213,9 +220,9 @@ where
             ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
         })?;
 
-        // Spawn the Python runner
+        // Spawn the Python runner from the embedded temp file
         let mut child = Command::new("python3")
-            .arg("runner.py")
+            .arg(&runner_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -269,6 +276,8 @@ where
             .as_str()
             .ok_or_else(|| ExecutionError::PythonRunnerError("No output in response".to_string()))?
             .to_string();
+
+        let _ = std::fs::remove_file(&runner_path);
 
         Ok(ExecutionResult {
             output: output_text,
