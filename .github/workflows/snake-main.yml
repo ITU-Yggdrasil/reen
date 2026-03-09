@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - dev
 
 jobs:
   snake-main:
@@ -46,13 +45,3 @@ jobs:
       - name: Build generated snake project
         working-directory: tests/snake
         run: cargo build
-
-      - name: Upload snake outputs (debug artifacts)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: snake-generated-output
-          path: |
-            tests/snake/specifications
-            tests/snake/.reen
-          if-no-files-found: warn
