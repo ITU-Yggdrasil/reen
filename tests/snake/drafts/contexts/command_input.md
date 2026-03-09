@@ -43,7 +43,7 @@ The same CommandInputContext instance is created by the application and shared w
   Calls `stdin_source.read_available` and appends returned keystrokes to `buffer` in FIFO order.
   Returns a new updated context.
 
-- **next_key() -> (Option<char>, CommandInputContext)**
+- **next_key() -> Option<char>**
   Pops and returns the next key from `buffer` if available; otherwise returns `None`.
   Returns the updated context.
 
