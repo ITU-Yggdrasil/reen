@@ -13,13 +13,30 @@ import socket
 from urllib.parse import urlparse
 from typing import Dict, Any, Optional
 
+# Resolve the starting directory. When the script is embedded in the reen binary
+# and written to a temp file, REEN_PROJECT_DIR tells us where to start looking.
+_start_dir = os.environ.get("REEN_PROJECT_DIR") or os.path.dirname(os.path.realpath(__file__))
+
+
+def _find_upwards(start: str, name: str) -> Optional[str]:
+    """Walk from start up to the filesystem root looking for a file or directory."""
+    current = os.path.abspath(start)
+    while True:
+        candidate = os.path.join(current, name)
+        if os.path.exists(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
 # Load environment variables from .env file if it exists
 try:
     from dotenv import load_dotenv
-    # Load .env from the script's directory, resolving symlinks
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    dotenv_path = os.path.join(script_dir, '.env')
-    load_dotenv(dotenv_path)
+    dotenv_path = _find_upwards(_start_dir, '.env')
+    if dotenv_path:
+        load_dotenv(dotenv_path)
 except ImportError:
     # dotenv not installed, continue without it
     pass
@@ -27,18 +44,14 @@ except ImportError:
 # Auto-detect and use venv if available
 def ensure_venv():
     """Ensure we're using the project's virtual environment if it exists."""
-    # Check if we're already in a venv
     if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
-        # Already in a venv
         return
     
-    # Look for project venv, resolving symlinks to find the real script location
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    venv_python = os.path.join(script_dir, '.venv', 'bin', 'python3')
-    
-    if os.path.exists(venv_python):
-        # Re-execute with venv Python
-        os.execv(venv_python, [venv_python] + sys.argv)
+    venv_python = _find_upwards(_start_dir, '.venv')
+    if venv_python:
+        venv_python = os.path.join(venv_python, 'bin', 'python3')
+        if os.path.exists(venv_python):
+            os.execv(venv_python, [venv_python] + sys.argv)
 
 # Run venv check before anything else
 ensure_venv()

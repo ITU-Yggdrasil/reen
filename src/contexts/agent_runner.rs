@@ -220,9 +220,12 @@ where
             ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
         })?;
 
-        // Spawn the Python runner from the embedded temp file
+        // Spawn the Python runner from the embedded temp file.
+        // Pass the current working directory so the script can find .env and .venv
+        // even though it runs from a temp location.
         let mut child = Command::new("python3")
             .arg(&runner_path)
+            .env("REEN_PROJECT_DIR", std::env::current_dir().unwrap_or_default())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -66,7 +66,7 @@ user input and collision detection and score is handled. The context also handle
 ### food_dropper
 
 - **drop**
-  Produces a new food object with a coordinate within the board that is not occupied by the snake nor by the boundary itself.
+  Produces a new food object with a coordinate within the board that is not occupied by the snake nor by the boundary itself. IF no free cells are available no new food is dropped
   (Implementation policy is up to you: retry sampling, sample from precomputed free cells, etc.)
 
 ---
