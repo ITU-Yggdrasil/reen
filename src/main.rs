@@ -152,6 +152,12 @@ struct CreateArgs {
     )]
     clear_cache: bool,
 
+    #[arg(long, help = "Only process drafts from the contexts/ folder")]
+    contexts: bool,
+
+    #[arg(long, help = "Only process drafts from the data/ folder")]
+    data: bool,
+
     #[command(subcommand)]
     command: CreateCommands,
 }
@@ -285,26 +291,40 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Create(create_args) => match create_args.command {
-            CreateCommands::Specification { names } => {
-                cli::create_specification(names, create_args.clear_cache, &config).await?;
-            }
-            CreateCommands::Implementation {
-                max_compile_fix_attempts,
-                names,
-            } => {
-                cli::create_implementation(
+        Commands::Create(create_args) => {
+            let category_filter = cli::CategoryFilter {
+                contexts: create_args.contexts,
+                data: create_args.data,
+            };
+            match create_args.command {
+                CreateCommands::Specification { names } => {
+                    cli::create_specification(
+                        names,
+                        create_args.clear_cache,
+                        &category_filter,
+                        &config,
+                    )
+                    .await?;
+                }
+                CreateCommands::Implementation {
+                    max_compile_fix_attempts,
                     names,
-                    max_compile_fix_attempts as usize,
-                    create_args.clear_cache,
-                    &config,
-                )
-                .await?;
+                } => {
+                    cli::create_implementation(
+                        names,
+                        max_compile_fix_attempts as usize,
+                        create_args.clear_cache,
+                        &category_filter,
+                        &config,
+                    )
+                    .await?;
+                }
+                CreateCommands::Tests { names } => {
+                    cli::create_tests(names, create_args.clear_cache, &category_filter, &config)
+                        .await?;
+                }
             }
-            CreateCommands::Tests { names } => {
-                cli::create_tests(names, create_args.clear_cache, &config).await?;
-            }
-        },
+        }
         Commands::Check(check_cmd) => match check_cmd {
             CheckCommands::Specification { names } => {
                 cli::check_specification(names, &config).await?;

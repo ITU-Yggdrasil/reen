@@ -33,16 +33,46 @@ pub struct Config {
     pub dry_run: bool,
 }
 
+/// Controls which draft categories are included when resolving input files.
+/// When both fields are false, all categories are included (no filter).
+/// When one or both are true, only the selected categories are included.
+pub struct CategoryFilter {
+    pub contexts: bool,
+    pub data: bool,
+}
+
+impl CategoryFilter {
+    pub fn all() -> Self {
+        Self {
+            contexts: false,
+            data: false,
+        }
+    }
+
+    fn include_data(&self) -> bool {
+        !self.contexts && !self.data || self.data
+    }
+
+    fn include_contexts(&self) -> bool {
+        !self.contexts && !self.data || self.contexts
+    }
+
+    fn include_root(&self) -> bool {
+        !self.contexts && !self.data
+    }
+}
+
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
 
 pub async fn create_specification(
     names: Vec<String>,
     clear_cache: bool,
+    filter: &CategoryFilter,
     config: &Config,
 ) -> Result<()> {
     let names_for_clear = names.clone();
-    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md")?;
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", filter)?;
 
     if draft_files.is_empty() {
         println!("No draft files found to process");
@@ -273,7 +303,7 @@ pub async fn create_specification(
 }
 
 pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result<()> {
-    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md")?;
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &CategoryFilter::all())?;
     if draft_files.is_empty() {
         println!("No draft files found to process");
         return Ok(());
@@ -404,7 +434,7 @@ pub async fn review_specification(
     fix_options: ReviewFixOptions,
     config: &Config,
 ) -> Result<()> {
-    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md")?;
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &CategoryFilter::all())?;
     if draft_files.is_empty() {
         println!("No draft files found to process");
         return Ok(());
@@ -446,7 +476,7 @@ pub async fn review_implementation(
     fix_options: ReviewFixOptions,
     config: &Config,
 ) -> Result<()> {
-    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", &CategoryFilter::all())?;
     if context_files.is_empty() {
         println!("No specification files found to process");
         return Ok(());
@@ -720,7 +750,7 @@ fn build_review_candidates(origin_draft_path: &Path) -> Result<Vec<(PathBuf, boo
         }
     }
 
-    let all_drafts = resolve_input_files(DRAFTS_DIR, Vec::new(), "md")?;
+    let all_drafts = resolve_input_files(DRAFTS_DIR, Vec::new(), "md", &CategoryFilter::all())?;
     for draft in all_drafts {
         if draft == origin_draft_path {
             continue;
@@ -1196,10 +1226,11 @@ pub async fn create_implementation(
     names: Vec<String>,
     max_compile_fix_attempts: usize,
     clear_cache: bool,
+    filter: &CategoryFilter,
     config: &Config,
 ) -> Result<()> {
     let names_for_clear = names.clone();
-    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
     if context_files.is_empty() {
         println!("No context files found to process");
@@ -1918,9 +1949,14 @@ fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &st
     Ok(false)
 }
 
-pub async fn create_tests(names: Vec<String>, clear_cache: bool, config: &Config) -> Result<()> {
+pub async fn create_tests(
+    names: Vec<String>,
+    clear_cache: bool,
+    filter: &CategoryFilter,
+    config: &Config,
+) -> Result<()> {
     let names_for_clear = names.clone();
-    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
     if context_files.is_empty() {
         println!("No context files found to process");
@@ -2186,7 +2222,7 @@ fn clear_stage_agent_cache_entries_by_name(
 
     match stage {
         Stage::Specification => {
-            let files = resolve_input_files(DRAFTS_DIR, names_vec, "md")?;
+            let files = resolve_input_files(DRAFTS_DIR, names_vec, "md", &CategoryFilter::all())?;
             let levels = build_execution_plan(files, DRAFTS_DIR, None)?;
             for node in levels.into_iter().flatten() {
                 let draft_content = fs::read_to_string(&node.input_path).with_context(|| {
@@ -2206,7 +2242,7 @@ fn clear_stage_agent_cache_entries_by_name(
             }
         }
         Stage::Implementation => {
-            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md")?;
+            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
             let levels = build_implementation_execution_plan(files)?;
             for node in levels.into_iter().flatten() {
                 let context_file = resolve_implementation_context_file(&node.input_path)?;
@@ -2231,7 +2267,7 @@ fn clear_stage_agent_cache_entries_by_name(
             }
         }
         Stage::Tests => {
-            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md")?;
+            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
             let levels = build_execution_plan(files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
             for node in levels.into_iter().flatten() {
                 let context_content = fs::read_to_string(&node.input_path).with_context(|| {
@@ -2725,7 +2761,7 @@ fn clear_specification_artifacts(names: Vec<String>, config: &Config) -> Result<
         return Ok(());
     }
 
-    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", &CategoryFilter::all())?;
     let mut removed = 0usize;
     let mut found = 0usize;
     for spec_file in spec_files {
@@ -2757,7 +2793,7 @@ fn clear_specification_artifacts(names: Vec<String>, config: &Config) -> Result<
 }
 
 fn clear_implementation_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
-    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", &CategoryFilter::all())?;
     if spec_files.is_empty() {
         println!("No implementation artifacts found");
         return Ok(());
@@ -2804,7 +2840,7 @@ fn clear_implementation_artifacts(names: Vec<String>, config: &Config) -> Result
 }
 
 fn clear_test_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
-    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md")?;
+    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", &CategoryFilter::all())?;
     if spec_files.is_empty() {
         println!("No test artifacts found");
         return Ok(());
@@ -2873,7 +2909,15 @@ fn remove_dir_if_empty(path: &Path) -> Result<()> {
 /// 1. data/ folder (simple data types)
 /// 2. contexts/ folder (use cases with role players)
 /// 3. Root files (like app.md)
-fn resolve_input_files(dir: &str, names: Vec<String>, extension: &str) -> Result<Vec<PathBuf>> {
+///
+/// The `filter` controls which categories are included. When no filter is
+/// active (both flags false), all three categories are scanned.
+fn resolve_input_files(
+    dir: &str,
+    names: Vec<String>,
+    extension: &str,
+    filter: &CategoryFilter,
+) -> Result<Vec<PathBuf>> {
     let dir_path = PathBuf::from(dir);
 
     if !dir_path.exists() {
@@ -2881,80 +2925,102 @@ fn resolve_input_files(dir: &str, names: Vec<String>, extension: &str) -> Result
     }
 
     if names.is_empty() {
-        // Process files in order: data/, contexts/, then root
         let mut files = Vec::new();
 
-        // 1. Process data/ folder first
-        let data_dir = dir_path.join("data");
-        if data_dir.exists() && data_dir.is_dir() {
-            let entries = fs::read_dir(&data_dir)
-                .context(format!("Failed to read {}/data directory", dir))?;
-            for entry in entries {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
-                    files.push(path);
+        if filter.include_data() {
+            let data_dir = dir_path.join("data");
+            if data_dir.exists() && data_dir.is_dir() {
+                let entries = fs::read_dir(&data_dir)
+                    .context(format!("Failed to read {}/data directory", dir))?;
+                for entry in entries {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_file()
+                        && path.extension().and_then(|s| s.to_str()) == Some(extension)
+                    {
+                        files.push(path);
+                    }
                 }
             }
         }
 
-        // 2. Process contexts/ folder second
-        let contexts_dir = dir_path.join("contexts");
-        if contexts_dir.exists() && contexts_dir.is_dir() {
-            let entries = fs::read_dir(&contexts_dir)
-                .context(format!("Failed to read {}/contexts directory", dir))?;
-            for entry in entries {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
-                    files.push(path);
+        if filter.include_contexts() {
+            let contexts_dir = dir_path.join("contexts");
+            if contexts_dir.exists() && contexts_dir.is_dir() {
+                let entries = fs::read_dir(&contexts_dir)
+                    .context(format!("Failed to read {}/contexts directory", dir))?;
+                for entry in entries {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_file()
+                        && path.extension().and_then(|s| s.to_str()) == Some(extension)
+                    {
+                        files.push(path);
+                    }
                 }
             }
         }
 
-        // 3. Process root files last
-        let entries =
-            fs::read_dir(&dir_path).context(format!("Failed to read {} directory", dir))?;
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            // Only include files (not directories) with the correct extension
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
-                files.push(path);
+        if filter.include_root() {
+            let entries =
+                fs::read_dir(&dir_path).context(format!("Failed to read {} directory", dir))?;
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().and_then(|s| s.to_str()) == Some(extension)
+                {
+                    files.push(path);
+                }
             }
         }
 
         Ok(files)
     } else {
-        // When specific names are provided, search in order: data/, contexts/, then root
         let mut files = Vec::new();
         for name in names {
-            // Try data/ folder first
-            let data_path = dir_path
-                .join("data")
-                .join(format!("{}.{}", name, extension));
-            if data_path.exists() {
-                files.push(data_path);
-                continue;
+            let mut found = false;
+
+            if filter.include_data() {
+                let data_path = dir_path
+                    .join("data")
+                    .join(format!("{}.{}", name, extension));
+                if data_path.exists() {
+                    files.push(data_path);
+                    found = true;
+                }
             }
 
-            // Try contexts/ folder second
-            let contexts_path = dir_path
-                .join("contexts")
-                .join(format!("{}.{}", name, extension));
-            if contexts_path.exists() {
-                files.push(contexts_path);
-                continue;
+            if !found && filter.include_contexts() {
+                let contexts_path = dir_path
+                    .join("contexts")
+                    .join(format!("{}.{}", name, extension));
+                if contexts_path.exists() {
+                    files.push(contexts_path);
+                    found = true;
+                }
             }
 
-            // Try root folder last
-            let root_path = dir_path.join(format!("{}.{}", name, extension));
-            if root_path.exists() {
-                files.push(root_path);
-            } else {
+            if !found && filter.include_root() {
+                let root_path = dir_path.join(format!("{}.{}", name, extension));
+                if root_path.exists() {
+                    files.push(root_path);
+                    found = true;
+                }
+            }
+
+            if !found {
+                let searched = match (filter.include_data(), filter.include_contexts(), filter.include_root()) {
+                    (true, true, true) => "data/, contexts/, and root",
+                    (true, true, false) => "data/ and contexts/",
+                    (true, false, false) => "data/",
+                    (false, true, false) => "contexts/",
+                    (false, false, true) => "root",
+                    _ => "data/, contexts/, and root",
+                };
                 eprintln!(
-                    "Warning: File not found: {}.{} (searched in data/, contexts/, and root)",
-                    name, extension
+                    "Warning: File not found: {}.{} (searched in {})",
+                    name, extension, searched
                 );
             }
         }
