@@ -45,7 +45,6 @@ The same CommandInputContext instance is created by the application and shared w
 
 - **next_key() -> Option<char>**
   Pops and returns the next key from `buffer` if available; otherwise returns `None`.
-  Returns the updated context.
 
 - **next_action() -> Option<UserAction>**
   Calls next_key

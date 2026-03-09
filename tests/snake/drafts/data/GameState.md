@@ -13,7 +13,7 @@ Holds the current score, the placement of food, and a representation of how the 
 
 ## Functionality
 
-- **new** initialises the game state by setting score to 0 and `game_started = utc.now_ms - baseline_utc_ms`, where `baseline_utc_ms` is `2026-01-01T00:00:00Z`; `food_placement` is set to None
+- **new** initialises the game state by setting score to 0 and `game_started = utc.now_ms`; `food_placement` is set to None
 - **place_food** gets a food object (f) and creates a new state object with food_placement updated to Some(f)
 - **game time** returns utc.now_ms - game_started in milliseconds
 - **increament_score** gets a positive integer and returns a new GameState with the score incremented by the argument value
