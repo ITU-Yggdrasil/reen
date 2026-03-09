@@ -93,21 +93,24 @@ user input and collision detection and score is handled. The context also handle
 
   1. **calculate game speed**. We should start at 10 ticks pr second and then increase that in a logarithmic fashion (the exact algorithm is a free implementation choice). sleep for the calculated delay before proceeding
      
-  2. **Steering**
+  2. **Capture input**
+      - Call command.capture to ingest any pending keystrokes from stdin into the shared buffer.
+
+  3. **Steering**
       - next_direction = command.next
       - if next_direction is None then snake = snake
       - else snake = snake.set_direction(next_direction)
   
-  3. obtain the new position without moving the snake yet (snake.next())
+  4. obtain the new position without moving the snake yet (snake.next())
 
-  4. Test for collision at the new head position
+  5. Test for collision at the new head position
     - The collisionType is Some(Obstacle) if the head location is also occupied by
       - any boundary cell (where x==0, y==0, x==board.width-1, y==board.height-1)
       - any snake segment coordinate excluding the head coordinate
     - the collisionType is Some(Food) if Food is not None and the coordiantes of the head equals the current food coordinate. 
     - otherwise the collisionType is None
 
-  5. handle game logic:  
+  6. handle game logic:  
     - If collisionType is Some(Obstacle):
        - return None
 
