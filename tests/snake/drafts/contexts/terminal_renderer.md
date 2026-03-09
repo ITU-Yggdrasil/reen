@@ -2,18 +2,19 @@
 
 ## Description
 
-This context is a render used to render the current frame for a game. This rendered specifically renders the game frame as ascii-art in the terminal.
+TerminalRenderer draws the current game frame as ASCII in the terminal.
 
-## Functionality
+## Behavior
 
-- **render** 
-  Renders based on a coordinate system with (0,0) in the bottom left corner and (width - 1, height - 1) in the upper right corner
-  - input:
-    - **board** a two dimensional array of chars representing the current board. The array represents the cells in the grid. board[x][y] matches the coordinate (x,y).
-    - **score** The current score of the game
+- **render(board, score)**
+  - Coordinate system is `(0,0)` bottom-left and `(width-1, height-1)` top-right.
+  - Input:
+    - `board`: 2D char grid where `board[x][y]` is cell `(x,y)`.
+    - `score`: current score.
 
-  - Render the current game state to the terminal:
-     - Rendering is in-place: clear the terminal and move cursor to the top-left before drawing each frame.
-     - for each cell in the board simply print the character, start a the line from (0, height - 1) to (widht - 1, height - 1) i.e. the top most and work the way down to (0,0) to (width - 1, 0) i.e. the bottom most line.
-     - Each rendered line must start at column 0 (use carriage return semantics so rows do not drift right in raw mode).
-     - Display the score below the board to the left
+  - Output rules:
+    - Rendering is in-place: clear terminal and move cursor to top-left before each frame.
+    - Print rows from top (`y=height-1`) to bottom (`y=0`).
+    - Within each row, print columns left-to-right (`x=0` to `x=width-1`).
+    - Each row starts at terminal column 0.
+    - Print score below the board, left aligned.

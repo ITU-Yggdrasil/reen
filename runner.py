@@ -184,19 +184,61 @@ def execute_with_openai(model: str, system_prompt: str) -> str:
     return response.choices[0].message.content
 
 
-def determine_provider(model: str) -> str:
-    """Determine which provider to use based on model name."""
+def execute_with_mistral(model: str, system_prompt: str) -> str:
+    """Execute using Mistral's API (OpenAI-compatible)."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError("openai package not installed. Run: pip install openai")
+
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        raise RuntimeError("MISTRAL_API_KEY environment variable not set")
+
+    base_url = os.environ.get("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
+    timeout = float(os.environ.get("MISTRAL_TIMEOUT_SECONDS", "180"))
+    max_retries = int(os.environ.get("MISTRAL_MAX_RETRIES", "3"))
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "Please complete the task described in the system prompt."}
+        ]
+    )
+
+    return response.choices[0].message.content
+
+
+def determine_provider(model: str) -> tuple:
+    """Determine which provider to use based on model name.
+
+    Supports an explicit 'provider/model' prefix (e.g. 'mistral/codestral-latest').
+    When no prefix is present, falls back to substring-based heuristics.
+
+    Returns (provider, model_name).
+    """
+    if "/" in model:
+        provider, model_name = model.split("/", 1)
+        return provider.lower(), model_name
+
     model_lower = model.lower()
 
     if any(x in model_lower for x in ["claude", "anthropic"]):
-        return "anthropic"
+        return "anthropic", model
     elif any(x in model_lower for x in ["ollama", "qwen", "llama", "mistral", "phi", "gemma", "codellama"]):
-        return "ollama"
+        return "ollama", model
     elif any(x in model_lower for x in ["gpt", "openai", "o1", "o3"]):
-        return "openai"
+        return "openai", model
     else:
-        # Default to Ollama for unknown models (local, no API key needed)
-        return "ollama"
+        return "ollama", model
 
 
 def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -211,13 +253,15 @@ def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
                 "error": "Missing required fields: model and system_prompt"
             }
 
-        provider = determine_provider(model)
+        provider, model_name = determine_provider(model)
         if provider == "anthropic":
-            output = execute_with_anthropic(model, system_prompt)
+            output = execute_with_anthropic(model_name, system_prompt)
         elif provider == "ollama":
-            output = execute_with_ollama(model, system_prompt)
+            output = execute_with_ollama(model_name, system_prompt)
         elif provider == "openai":
-            output = execute_with_openai(model, system_prompt)
+            output = execute_with_openai(model_name, system_prompt)
+        elif provider == "mistral":
+            output = execute_with_mistral(model_name, system_prompt)
         else:
             return {
                 "success": False,

@@ -2,19 +2,19 @@
 
 ## Description
 
-CommandInputContext encapsulates keyboard input capture for the application.
-It owns a FIFO buffer of keystrokes and provides read operations for both:
+CommandInputContext defines how keyboard input is captured and consumed.
+It supports both:
 - menu/application controls (`s`/`q`), and
-- gameplay steering (`w`/`a`/`s`/`d`).
+- gameplay controls (`w`/`a`/`s`/`d`, space).
 
-The same CommandInputContext instance is created by the application and shared with GameLoopContext, so both use one consistent input stream.
+The important behavior is that input is handled as one shared FIFO stream for the whole application session.
 
 ---
 
 ## Roles
 
 - **stdin_source**
-  Reads keyboard input from standard input.
+  Provides non-blocking reads from standard input.
 
 ---
 
@@ -30,30 +30,39 @@ The same CommandInputContext instance is created by the application and shared w
 ### stdin_source
 
 - **read_available**
-  Reads all currently available keystrokes from stdin (non-blocking) and returns them in arrival order.
+  Returns all currently available keystrokes in arrival order without blocking.
 
 ---
 
-## Functionality
+## Behavior
 
-- **new() -> CommandInputContext**
-  Creates a new input context with an empty buffer. The stdin_source role is implicitly bound to the process's standard input.
+- **new()**
+  - Starts with an empty input buffer.
 
-- **capture() -> CommandInputContext**
-  Calls `stdin_source.read_available` and appends returned keystrokes to `buffer` in FIFO order.
-  Returns a new updated context.
+- **capture()**
+  - Reads currently available stdin keystrokes.
+  - Appends them to the end of the buffer in arrival order.
+  - Does not remove previously buffered keys.
 
 - **next_key() -> Option<char>**
-  Pops and returns the next key from `buffer` if available; otherwise returns `None`.
+  - If the buffer is non-empty, returns and removes the oldest key.
+  - If the buffer is empty, returns `None`.
 
 - **next_action() -> Option<UserAction>**
-  Calls next_key
-    - if None returns None.
-    - if a movement key is found (Some(`W`)/Some(`A`)/Some(`S`)/Some(`D`), case-insensitive), 
-      - if `W` return `Some(Movement(UP))`
-      - if `A` return `Some(Movement(LEFT))`
-      - if `S` return `Some(Movement(DOWN))`
-      - if `D` return `Some(Movement(RIGHT))`
-    - if the fire key is found ` ` (space) in which case Some(Fire) is returned
-    - if Some(c) is returned that is nonne of the above then call next_action recursively
-  - or if the buffer becomes empty before an action key is found, return `None`.
+  - Reads from the same FIFO stream used by `next_key()`.
+  - Mapping is case-insensitive:
+    - `w` -> `Movement(UP)`
+    - `a` -> `Movement(LEFT)`
+    - `s` -> `Movement(DOWN)`
+    - `d` -> `Movement(RIGHT)`
+    - space -> `Fire`
+  - Non-action keys are ignored and consumed.
+  - Returns the first valid action found, or `None` if no action key is available.
+
+---
+
+## Acceptance examples
+
+- Given an empty buffer, when `next_key()` is called, then the result is `None`.
+- Given captured keys `x`, `w`, when `next_action()` is called, then the result is `Movement(UP)` and both keys are consumed.
+- Given captured keys `a`, `d`, when `next_action()` is called twice, then results are `Movement(LEFT)` then `Movement(RIGHT)`.
