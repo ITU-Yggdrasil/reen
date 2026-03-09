@@ -37,7 +37,7 @@ The same CommandInputContext instance is created by the application and shared w
 ## Functionality
 
 - **new() -> CommandInputContext**
-  Creates a new input context with an empty buffer.
+  Creates a new input context with an empty buffer. The stdin_source role is implicitly bound to the process's standard input.
 
 - **capture() -> CommandInputContext**
   Calls `stdin_source.read_available` and appends returned keystrokes to `buffer` in FIFO order.

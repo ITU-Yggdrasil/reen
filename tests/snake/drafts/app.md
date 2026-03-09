@@ -30,7 +30,7 @@ When the game is started:
   - score = 0
   - a single food item placed at a valid coordinate i.e. not on the boundaries of the board and not overlapping with 
   the nake
-  - the time the game was started represented as ms since 2026-01-01 0:00
+  - the time the game was started represented as utc.now_ms
 - A GameLoopContext is constructed
 - A terminal renderer context is constructed
 
