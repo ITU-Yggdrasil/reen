@@ -56,4 +56,4 @@ The same CommandInputContext instance is created by the application and shared w
       - if `D` return `Some(Movement(RIGHT))`
     - if the fire key is found ` ` (space) in which case Some(Fire) is returned
     - if Some(c) is returned that is nonne of the above then call next_action recursively
-  - or if the buffer becomes empty before a movement key is found, return `None`.
+  - or if the buffer becomes empty before an action key is found, return `None`.
