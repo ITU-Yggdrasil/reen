@@ -1,0 +1,24 @@
+# Maximum API requests per second (optional). Can also be set via --rate-limit or REEN_RATE_LIMIT.
+rate_limit: 2
+
+create_specifications_data:
+  model: mistral/mistral-large-latest
+  parallel: true
+create_specifications_context:
+  model: mistral/mistral-large-latest
+  parallel: true
+create_specifications_main:
+  model: mistral/mistral-large-latest
+  parallel: true
+create_implementation:
+  model: mistral/codestral-latest
+  parallel: true
+create_test:
+  model: mistral/codestral-latest
+  parallel: false
+resolve_compilation_errors:
+  model: mistral/codestral-latest
+  parallel: false
+review_draft_errors:
+  model: mistral/mistral-large-latest
+  parallel: false
