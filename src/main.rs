@@ -158,6 +158,18 @@ struct CreateArgs {
     #[arg(long, help = "Only process drafts from the data/ folder")]
     data: bool,
 
+    #[arg(
+        long,
+        help = "Maximum API requests per second (overrides REEN_RATE_LIMIT and registry)"
+    )]
+    rate_limit: Option<f64>,
+
+    #[arg(
+        long,
+        help = "Maximum tokens per minute (overrides REEN_TOKEN_LIMIT and registry)"
+    )]
+    token_limit: Option<f64>,
+
     #[command(subcommand)]
     command: CreateCommands,
 }
@@ -296,12 +308,16 @@ async fn main() -> Result<()> {
                 contexts: create_args.contexts,
                 data: create_args.data,
             };
+            let rate_limit = cli::resolve_rate_limit(create_args.rate_limit);
+            let token_limit = cli::resolve_token_limit(create_args.token_limit);
             match create_args.command {
                 CreateCommands::Specification { names } => {
                     cli::create_specification(
                         names,
                         create_args.clear_cache,
                         &category_filter,
+                        rate_limit,
+                        token_limit,
                         &config,
                     )
                     .await?;
@@ -315,13 +331,22 @@ async fn main() -> Result<()> {
                         max_compile_fix_attempts as usize,
                         create_args.clear_cache,
                         &category_filter,
+                        rate_limit,
+                        token_limit,
                         &config,
                     )
                     .await?;
                 }
                 CreateCommands::Tests { names } => {
-                    cli::create_tests(names, create_args.clear_cache, &category_filter, &config)
-                        .await?;
+                    cli::create_tests(
+                        names,
+                        create_args.clear_cache,
+                        &category_filter,
+                        rate_limit,
+                        token_limit,
+                        &config,
+                    )
+                    .await?;
                 }
             }
         }

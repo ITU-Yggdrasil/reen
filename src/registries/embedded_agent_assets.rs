@@ -32,6 +32,19 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
     }
 }
 
+/// Returns the canonical set of agent names expected in the model registry.
+pub fn embedded_expected_agent_names() -> &'static [&'static str] {
+    &[
+        "create_specifications_data",
+        "create_specifications_context",
+        "create_specifications_main",
+        "create_implementation",
+        "create_test",
+        "resolve_compilation_errors",
+        "review_draft_errors",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::{embedded_agent_spec, embedded_default_model_registry, embedded_runner_py};

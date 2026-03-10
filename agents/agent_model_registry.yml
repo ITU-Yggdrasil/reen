@@ -1,21 +1,21 @@
 create_specifications_data:
-  model: gpt-5 # qwen2.5:7b
-  parallel: true
+  model: mistral/mistral-large-latest
+  parallel: false
 create_specifications_context:
-  model: gpt-5 # qwen2.5:7b
-  parallel: true
+  model: mistral/mistral-large-latest
+  parallel: false
 create_specifications_main:
-  model: gpt-5 # qwen2.5:7b
-  parallel: true
+  model: mistral/mistral-large-latest
+  parallel: false
 create_implementation:
-  model: gpt-5
-  parallel: true
+  model: mistral/codestral-latest
+  parallel: false
 create_test:
-  model: gpt-5 # qwen2.5:7b
+  model: mistral/codestral-latest
   parallel: false
 resolve_compilation_errors:
-  model: gpt-5
+  model: openai/gpt-5
   parallel: false
 review_draft_errors:
-  model: gpt-5
+  model: mistral/mistral-large-latest
   parallel: false

@@ -36,10 +36,11 @@ reen/
 pip install -r requirements.txt
 ```
 
-2. Set your API keys:
+2. Set your API key(s) for your chosen provider:
 ```bash
-export ANTHROPIC_API_KEY='your-api-key-here'
 export OPENAI_API_KEY='your-api-key-here'
+export ANTHROPIC_API_KEY='your-api-key-here'
+export MISTRAL_API_KEY='your-api-key-here'
 ```
 
 3. Build the project:
@@ -64,10 +65,6 @@ reen create specification
 # Process specific drafts
 reen create specification app agent_runner
 ```
-# The reen command has been found to sometimes not work, if it doesn't, use this instead:
-.\target\release\reen.exe      #This is only a replacement for the 'reen' part, still follow the instructions otherwise given.
-# NOTE: It has been found that some don't have a .exe file, and as such it should instead just say reen, instead of reen.exe
-
 
 ### Create Implementation
 
@@ -165,13 +162,24 @@ See [docs/TRACING_STANDARDS.md](docs/TRACING_STANDARDS.md) for details.
 
 ### Agent-Model Registry
 
-The `agents/agent_model_registry.yml` file maps agents to specific models:
+The `agents/agent_model_registry.yml` file maps agents to specific models.
+Use the `provider/model` format to choose a provider explicitly:
 
 ```yaml
-create_specifications: gpt-4
-create_implementation: claude-3-opus
-create_test: gpt-4
+create_specifications_data:
+  model: mistral/codestral-latest
+create_implementation:
+  model: openai/gpt-5
+create_test:
+  model: ollama/qwen2.5:7b
 ```
+
+Supported providers: **OpenAI**, **Anthropic**, **Mistral**, and **Ollama** (local).
+Preset registry files are available for quick switching:
+
+- `agents/agent_model_registry.gpt.yml` — OpenAI (GPT-5)
+- `agents/agent_model_registry.mistral.yml` — Mistral API (Codestral / Mistral Large)
+- `agents/agent_model_registry.qwen.yml` — Ollama (Qwen 2.5)
 
 ## Specification Format
 

@@ -1,5 +1,5 @@
 use super::agent_spec_resolver::candidate_agent_spec_filenames;
-use crate::contexts::{AgentModelRegistry, AgentRegistry, PopulateError};
+use crate::contexts::{AgentModelRegistry, AgentRegistry, ExecutionError, PopulateError};
 use crate::registries::{embedded_agent_spec, FileAgentModelRegistry};
 
 /// File-based implementation of AgentRegistry
@@ -22,7 +22,15 @@ impl AgentRegistry for FileAgentRegistry {
         let model_name = FileAgentModelRegistry::new(None, None, None)
             .get_model(agent_name)
             .map(|model| model.name)
-            .unwrap_or_default();
+            .map_err(|e| match e {
+                ExecutionError::ModelNotFound(_) => {
+                    PopulateError::AgentNotFound(agent_name.to_string())
+                }
+                _ => PopulateError::InvalidSpecification(format!(
+                    "Failed to resolve model for '{}': {}",
+                    agent_name, e
+                )),
+            })?;
 
         let candidate_names = candidate_agent_spec_filenames(agent_name, &model_name);
         let Some(agent_content) = candidate_names

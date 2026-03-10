@@ -3,19 +3,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use tokio::time::sleep;
 
 mod agent_executor;
 mod compilation_fix;
 mod dependency_graph;
 mod progress;
 mod project_structure;
+mod rate_limiter;
+mod token_limiter;
 
 use agent_executor::AgentExecutor;
+use rate_limiter::RateLimiter;
+use token_limiter::{estimate_request_tokens, TokenLimiter};
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };
@@ -31,6 +37,34 @@ use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
 pub struct Config {
     pub verbose: bool,
     pub dry_run: bool,
+}
+
+/// Resolves rate limit (requests per second) from CLI, env, or registry.
+/// Precedence: cli_arg > REEN_RATE_LIMIT env > agent_model_registry.yml rate_limit.
+pub fn resolve_rate_limit(cli_arg: Option<f64>) -> Option<f64> {
+    if let Some(r) = cli_arg {
+        return Some(r);
+    }
+    if let Ok(s) = env::var("REEN_RATE_LIMIT") {
+        if let Ok(r) = s.parse::<f64>() {
+            return Some(r);
+        }
+    }
+    FileAgentModelRegistry::new(None, None, None).get_rate_limit()
+}
+
+/// Resolves token limit (tokens per minute) from CLI, env, or registry.
+/// Precedence: cli_arg > REEN_TOKEN_LIMIT env > agent_model_registry.yml token_limit.
+pub fn resolve_token_limit(cli_arg: Option<f64>) -> Option<f64> {
+    if let Some(t) = cli_arg {
+        return Some(t);
+    }
+    if let Ok(s) = env::var("REEN_TOKEN_LIMIT") {
+        if let Ok(t) = s.parse::<f64>() {
+            return Some(t);
+        }
+    }
+    FileAgentModelRegistry::new(None, None, None).get_token_limit()
 }
 
 /// Controls which draft categories are included when resolving input files.
@@ -49,26 +83,62 @@ impl CategoryFilter {
         }
     }
 
+    fn is_active(&self) -> bool {
+        self.contexts || self.data
+    }
+
     fn include_data(&self) -> bool {
-        !self.contexts && !self.data || self.data
+        !self.is_active() || self.data
     }
 
     fn include_contexts(&self) -> bool {
-        !self.contexts && !self.data || self.contexts
+        !self.is_active() || self.contexts
     }
 
     fn include_root(&self) -> bool {
-        !self.contexts && !self.data
+        !self.is_active()
+    }
+
+    /// Returns true if the given path (relative to a base dir like "drafts" or
+    /// "specifications") belongs to a category this filter includes.
+    fn matches_path(&self, path: &Path, base_dir: &str) -> bool {
+        if !self.is_active() {
+            return true;
+        }
+        let base = PathBuf::from(base_dir);
+        if let Ok(relative) = path.strip_prefix(&base) {
+            if let Some(first) = relative.components().next() {
+                let component = first.as_os_str().to_string_lossy();
+                return match component.as_ref() {
+                    "data" => self.include_data(),
+                    "contexts" => self.include_contexts(),
+                    _ => self.include_root(),
+                };
+            }
+        }
+        self.include_root()
     }
 }
 
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
 
+/// Returns true if the error indicates a 429 rate limit response.
+fn is_rate_limit_error(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    let lower = s.to_lowercase();
+    s.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("ratelimit")
+}
+
 pub async fn create_specification(
     names: Vec<String>,
     clear_cache: bool,
     filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
     let names_for_clear = names.clone();
@@ -80,7 +150,15 @@ pub async fn create_specification(
     }
 
     let expanded_draft_files = expand_with_transitive_dependencies(draft_files, DRAFTS_DIR, None)?;
-    let execution_levels = build_execution_plan(expanded_draft_files, DRAFTS_DIR, None)?;
+    let filtered_draft_files = if filter.is_active() {
+        expanded_draft_files
+            .into_iter()
+            .filter(|f| filter.matches_path(f, DRAFTS_DIR))
+            .collect()
+    } else {
+        expanded_draft_files
+    };
+    let execution_levels = build_execution_plan(filtered_draft_files, DRAFTS_DIR, None)?;
 
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
@@ -90,6 +168,9 @@ pub async fn create_specification(
 
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating specifications for {} draft(s)", total_count);
+
+    let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
+    let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
@@ -143,7 +224,6 @@ pub async fn create_specification(
                         DRAFTS_DIR,
                         SPECIFICATIONS_DIR,
                     )?;
-                    progress.start_item(&draft_name);
 
                     let needs_update = if dependency_invalidated {
                         true
@@ -157,6 +237,7 @@ pub async fn create_specification(
                         )?
                     };
                     if !needs_update {
+                        progress.start_item(&draft_name, None);
                         if config.verbose {
                             println!("⊚ Skipping {} (up to date)", draft_name);
                         }
@@ -173,17 +254,55 @@ pub async fn create_specification(
                         }
                     };
 
+                    let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
+                    let estimated = estimate_request_tokens(&draft_content, &dependency_context);
+                    progress.start_item(&draft_name, Some(estimated));
+
                     let cfg = *config;
                     let executor_clone = executor.clone();
+                    let rate_limiter_clone = rate_limiter.clone();
+                    let token_limiter_clone = token_limiter.clone();
                     tasks.push(tokio::task::spawn(async move {
-                        let result = process_specification(
+                        if let Some(ref limiter) = token_limiter_clone {
+                            limiter.acquire_tokens(estimated).await;
+                        }
+                        if let Some(ref limiter) = rate_limiter_clone {
+                            limiter.acquire().await;
+                        }
+                        let mut result = process_specification(
                             &executor_clone,
+                            &draft_content,
                             &draft_file,
                             &draft_name,
                             &cfg,
-                            dependency_context,
+                            dependency_context.clone(),
                         )
                         .await;
+                        if let Err(ref e) = result {
+                            if is_rate_limit_error(e) {
+                                if let Some(ref limiter) = rate_limiter_clone {
+                                    eprintln!(
+                                        "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
+                                        draft_name
+                                    );
+                                    sleep(limiter.retry_delay()).await;
+                                    limiter.back_off().await;
+                                    if let Some(ref tlimiter) = token_limiter_clone {
+                                        tlimiter.acquire_tokens(estimated).await;
+                                    }
+                                    limiter.acquire().await;
+                                    result = process_specification(
+                                        &executor_clone,
+                                        &draft_content,
+                                        &draft_file,
+                                        &draft_name,
+                                        &cfg,
+                                        dependency_context,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
                         (
                             draft_name,
                             draft_file,
@@ -235,7 +354,6 @@ pub async fn create_specification(
                         SPECIFICATIONS_DIR,
                     )?;
 
-                    progress.start_item(&draft_name);
                     let needs_update = if dependency_invalidated {
                         true
                     } else {
@@ -248,6 +366,7 @@ pub async fn create_specification(
                         )?
                     };
                     if !needs_update {
+                        progress.start_item(&draft_name, None);
                         if config.verbose {
                             println!("⊚ Skipping {} (up to date)", draft_name);
                         }
@@ -256,15 +375,50 @@ pub async fn create_specification(
                     }
 
                     let dependency_context = build_dependency_context(&node)?;
-                    match process_specification(
+                    let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
+                    let estimated = estimate_request_tokens(&draft_content, &dependency_context);
+                    progress.start_item(&draft_name, Some(estimated));
+                    if let Some(ref limiter) = token_limiter {
+                        limiter.acquire_tokens(estimated).await;
+                    }
+                    if let Some(ref limiter) = rate_limiter {
+                        limiter.acquire().await;
+                    }
+                    let mut result = process_specification(
                         &executor,
+                        &draft_content,
                         &draft_file,
                         &draft_name,
                         config,
-                        dependency_context,
+                        dependency_context.clone(),
                     )
-                    .await
-                    {
+                    .await;
+                    if let Err(ref e) = result {
+                        if is_rate_limit_error(e) {
+                            if let Some(ref limiter) = rate_limiter {
+                                eprintln!(
+                                    "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
+                                    draft_name
+                                );
+                                sleep(limiter.retry_delay()).await;
+                                limiter.back_off().await;
+                                if let Some(ref tlimiter) = token_limiter {
+                                    tlimiter.acquire_tokens(estimated).await;
+                                }
+                                limiter.acquire().await;
+                                result = process_specification(
+                                    &executor,
+                                    &draft_content,
+                                    &draft_file,
+                                    &draft_name,
+                                    config,
+                                    dependency_context,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    match result {
                         Ok(_) => {
                             tracker.record(
                                 Stage::Specification,
@@ -1165,13 +1319,12 @@ fn normalize_section_label(input: &str) -> String {
 
 async fn process_specification(
     executor: &AgentExecutor,
+    draft_content: &str,
     draft_file: &Path,
     draft_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
 ) -> Result<()> {
-    let draft_content = fs::read_to_string(draft_file).context("Failed to read draft file")?;
-
     if config.dry_run {
         println!("[DRY RUN] Would create specification for: {}", draft_name);
         return Ok(());
@@ -1227,6 +1380,8 @@ pub async fn create_implementation(
     max_compile_fix_attempts: usize,
     clear_cache: bool,
     filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
     let names_for_clear = names.clone();
@@ -1253,7 +1408,7 @@ pub async fn create_implementation(
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    let execution_levels = build_implementation_execution_plan(context_files)?;
+    let execution_levels = build_implementation_execution_plan(context_files, filter)?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating implementation for {} context(s)", total_count);
 
@@ -1304,6 +1459,9 @@ pub async fn create_implementation(
         );
     }
 
+    let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
+    let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
+
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
     let mut updated_in_run: HashSet<String> = HashSet::new();
@@ -1328,10 +1486,10 @@ pub async fn create_implementation(
             let dependency_fingerprint = dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
             let output_path =
                 determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
-            progress.start_item(&context_name);
 
             if has_unfinished_specification(&context_file, &context_name, "implementation")? {
                 had_unspecified = true;
+                progress.start_item(&context_name, None);
                 progress.complete_item(&context_name, false);
                 continue;
             }
@@ -1349,6 +1507,7 @@ pub async fn create_implementation(
             };
 
             if !needs_update {
+                progress.start_item(&context_name, None);
                 if config.verbose {
                     println!("⊚ Skipping {} (up to date)", context_name);
                 }
@@ -1360,12 +1519,16 @@ pub async fn create_implementation(
             if let Some(target_type_name) = infer_target_type_name(&context_file)? {
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
+            let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+            let estimated = estimate_request_tokens(&context_content, &dependency_context);
             runnable.push((
                 context_file,
                 context_name,
                 output_path,
                 dependency_fingerprint,
                 dependency_context,
+                context_content,
+                estimated,
             ));
         }
 
@@ -1381,18 +1544,55 @@ pub async fn create_implementation(
                 output_path,
                 dependency_fingerprint,
                 dependency_context,
+                context_content,
+                estimated,
             ) in runnable
             {
+                progress.start_item(&context_name, Some(estimated));
                 let executor_clone = executor.clone();
+                let rate_limiter_clone = rate_limiter.clone();
+                let token_limiter_clone = token_limiter.clone();
                 tasks.push(tokio::task::spawn(async move {
-                    let result = process_implementation(
+                    if let Some(ref limiter) = token_limiter_clone {
+                        limiter.acquire_tokens(estimated).await;
+                    }
+                    if let Some(ref limiter) = rate_limiter_clone {
+                        limiter.acquire().await;
+                    }
+                    let mut result = process_implementation(
                         &executor_clone,
+                        &context_content,
                         &context_file,
                         &context_name,
                         &cfg,
-                        dependency_context,
+                        dependency_context.clone(),
                     )
                     .await;
+                    if let Err(ref e) = result {
+                        if is_rate_limit_error(e) {
+                            if let Some(ref limiter) = rate_limiter_clone {
+                                eprintln!(
+                                    "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
+                                    context_name
+                                );
+                                sleep(limiter.retry_delay()).await;
+                                limiter.back_off().await;
+                                if let Some(ref tlimiter) = token_limiter_clone {
+                                    tlimiter.acquire_tokens(estimated).await;
+                                }
+                                limiter.acquire().await;
+                                result = process_implementation(
+                                    &executor_clone,
+                                    &context_content,
+                                    &context_file,
+                                    &context_name,
+                                    &cfg,
+                                    dependency_context,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     (
                         context_name,
                         context_file,
@@ -1441,20 +1641,55 @@ pub async fn create_implementation(
                 output_path,
                 dependency_fingerprint,
                 dependency_context,
+                context_content,
+                estimated,
             ) in runnable
             {
+                progress.start_item(&context_name, Some(estimated));
                 if config.verbose {
                     println!("Processing context: {}", context_name);
                 }
-                match process_implementation(
+                if let Some(ref limiter) = token_limiter {
+                    limiter.acquire_tokens(estimated).await;
+                }
+                if let Some(ref limiter) = rate_limiter {
+                    limiter.acquire().await;
+                }
+                let mut result = process_implementation(
                     &executor,
+                    &context_content,
                     &context_file,
                     &context_name,
                     config,
-                    dependency_context,
+                    dependency_context.clone(),
                 )
-                .await
-                {
+                .await;
+                if let Err(ref e) = result {
+                    if is_rate_limit_error(e) {
+                        if let Some(ref limiter) = rate_limiter {
+                            eprintln!(
+                                "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
+                                context_name
+                            );
+                            sleep(limiter.retry_delay()).await;
+                            limiter.back_off().await;
+                            if let Some(ref tlimiter) = token_limiter {
+                                tlimiter.acquire_tokens(estimated).await;
+                            }
+                            limiter.acquire().await;
+                            result = process_implementation(
+                                &executor,
+                                &context_content,
+                                &context_file,
+                                &context_name,
+                                config,
+                                dependency_context,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                match result {
                     Ok(_) => {
                         tracker.record(
                             Stage::Implementation,
@@ -1518,6 +1753,7 @@ pub async fn create_implementation(
 
 async fn process_implementation(
     executor: &AgentExecutor,
+    context_content: &str,
     context_file: &Path,
     context_name: &str,
     config: &Config,
@@ -1526,9 +1762,6 @@ async fn process_implementation(
     if has_unfinished_specification(context_file, context_name, "implementation")? {
         anyhow::bail!("unfinished specification");
     }
-
-    let context_content =
-        fs::read_to_string(context_file).context("Failed to read context file")?;
 
     if config.dry_run {
         println!(
@@ -1953,6 +2186,8 @@ pub async fn create_tests(
     names: Vec<String>,
     clear_cache: bool,
     filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
     let names_for_clear = names.clone();
@@ -1982,6 +2217,9 @@ pub async fn create_tests(
     let executor = Arc::new(AgentExecutor::new("create_test", config)?);
     let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
+    let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
+    let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
+
     let mut progress = ProgressIndicator::new(total_count);
     let mut had_unspecified = false;
     for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
@@ -1998,8 +2236,10 @@ pub async fn create_tests(
             let context_file = node.input_path.clone();
             let context_name = node.name.clone();
             let dependency_context = build_dependency_context(&node)?;
-            progress.start_item(&context_name);
-            runnable.push((context_file, context_name, dependency_context));
+            let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+            let estimated = estimate_request_tokens(&context_content, &dependency_context);
+            progress.start_item(&context_name, Some(estimated));
+            runnable.push((context_file, context_name, dependency_context, context_content, estimated));
         }
 
         if can_parallel {
@@ -2008,17 +2248,51 @@ pub async fn create_tests(
             }
             let cfg = *config;
             let mut tasks = Vec::new();
-            for (context_file, context_name, dependency_context) in runnable {
+            for (context_file, context_name, dependency_context, context_content, estimated) in runnable {
                 let executor_clone = executor.clone();
+                let rate_limiter_clone = rate_limiter.clone();
+                let token_limiter_clone = token_limiter.clone();
                 tasks.push(tokio::task::spawn(async move {
-                    let result = process_tests(
+                    if let Some(ref limiter) = token_limiter_clone {
+                        limiter.acquire_tokens(estimated).await;
+                    }
+                    if let Some(ref limiter) = rate_limiter_clone {
+                        limiter.acquire().await;
+                    }
+                    let mut result = process_tests(
                         &executor_clone,
+                        &context_content,
                         &context_file,
                         &context_name,
                         &cfg,
-                        dependency_context,
+                        dependency_context.clone(),
                     )
                     .await;
+                    if let Err(ref e) = result {
+                        if is_rate_limit_error(e) {
+                            if let Some(ref limiter) = rate_limiter_clone {
+                                eprintln!(
+                                    "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
+                                    context_name
+                                );
+                                sleep(limiter.retry_delay()).await;
+                                limiter.back_off().await;
+                                if let Some(ref tlimiter) = token_limiter_clone {
+                                    tlimiter.acquire_tokens(estimated).await;
+                                }
+                                limiter.acquire().await;
+                                result = process_tests(
+                                    &executor_clone,
+                                    &context_content,
+                                    &context_file,
+                                    &context_name,
+                                    &cfg,
+                                    dependency_context,
+                                )
+                                .await;
+                            }
+                        }
+                    }
                     (context_name, result)
                 }));
             }
@@ -2041,19 +2315,52 @@ pub async fn create_tests(
                 }
             }
         } else {
-            for (context_file, context_name, dependency_context) in runnable {
+            for (context_file, context_name, dependency_context, context_content, estimated) in runnable {
+                progress.start_item(&context_name, Some(estimated));
                 if config.verbose {
                     println!("Processing context: {}", context_name);
                 }
-                match process_tests(
+                if let Some(ref limiter) = token_limiter {
+                    limiter.acquire_tokens(estimated).await;
+                }
+                if let Some(ref limiter) = rate_limiter {
+                    limiter.acquire().await;
+                }
+                let mut result = process_tests(
                     &executor,
+                    &context_content,
                     &context_file,
                     &context_name,
                     config,
-                    dependency_context,
+                    dependency_context.clone(),
                 )
-                .await
-                {
+                .await;
+                if let Err(ref e) = result {
+                    if is_rate_limit_error(e) {
+                        if let Some(ref limiter) = rate_limiter {
+                            eprintln!(
+                                "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
+                                context_name
+                            );
+                            sleep(limiter.retry_delay()).await;
+                            limiter.back_off().await;
+                            if let Some(ref tlimiter) = token_limiter {
+                                tlimiter.acquire_tokens(estimated).await;
+                            }
+                            limiter.acquire().await;
+                            result = process_tests(
+                                &executor,
+                                &context_content,
+                                &context_file,
+                                &context_name,
+                                config,
+                                dependency_context,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                match result {
                     Ok(_) => {
                         progress.complete_item(&context_name, true);
                         if config.verbose {
@@ -2243,7 +2550,7 @@ fn clear_stage_agent_cache_entries_by_name(
         }
         Stage::Implementation => {
             let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
-            let levels = build_implementation_execution_plan(files)?;
+            let levels = build_implementation_execution_plan(files, &CategoryFilter::all())?;
             for node in levels.into_iter().flatten() {
                 let context_file = resolve_implementation_context_file(&node.input_path)?;
                 let context_content = fs::read_to_string(&context_file).with_context(|| {
@@ -2379,6 +2686,7 @@ fn instructions_model_hash(agent_instructions: &str, model_name: &str) -> String
 
 async fn process_tests(
     executor: &AgentExecutor,
+    context_content: &str,
     context_file: &Path,
     context_name: &str,
     config: &Config,
@@ -2387,9 +2695,6 @@ async fn process_tests(
     if has_unfinished_specification(context_file, context_name, "tests")? {
         anyhow::bail!("unfinished specification");
     }
-
-    let context_content =
-        fs::read_to_string(context_file).context("Failed to read context file")?;
 
     if config.dry_run {
         println!("[DRY RUN] Would create tests for: {}", context_name);
@@ -2440,6 +2745,7 @@ fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serd
 
 fn build_implementation_execution_plan(
     spec_files: Vec<PathBuf>,
+    filter: &CategoryFilter,
 ) -> Result<Vec<Vec<ExecutionNode>>> {
     let mut draft_inputs = Vec::new();
     for spec_file in spec_files {
@@ -2452,7 +2758,15 @@ fn build_implementation_execution_plan(
     }
 
     let expanded_inputs = expand_with_transitive_dependencies(draft_inputs, DRAFTS_DIR, None)?;
-    build_execution_plan(expanded_inputs, DRAFTS_DIR, None)
+    let filtered_inputs = if filter.is_active() {
+        expanded_inputs
+            .into_iter()
+            .filter(|f| filter.matches_path(f, DRAFTS_DIR))
+            .collect()
+    } else {
+        expanded_inputs
+    };
+    build_execution_plan(filtered_inputs, DRAFTS_DIR, None)
 }
 
 fn dependency_fingerprint_for_node(

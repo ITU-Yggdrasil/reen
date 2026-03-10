@@ -122,6 +122,28 @@ When no `provider/` prefix is given, the provider is inferred from the model nam
 
 **Note** Unknown model names default to Ollama (local, no API key required).
 
+**Note** Bare model names containing "mistral" (e.g. `mistral:7b`) are routed to Ollama for local execution. To use the Mistral API instead, use the explicit prefix: `mistral/codestral-latest`, `mistral/mistral-large-latest`, etc.
+
+### Rate limiting
+
+To avoid API rate limit errors (e.g. 429 from Mistral), you can cap requests per second and tokens per minute:
+
+**Requests per second:**
+- **CLI**: `reen create --rate-limit 2 specification`
+- **Env**: `export REEN_RATE_LIMIT=2`
+- **Registry**: Add `rate_limit: 2` at the top level of `agent_model_registry.yml`
+
+**Tokens per minute:**
+- **CLI**: `reen create --token-limit 60000 specification`
+- **Env**: `export REEN_TOKEN_LIMIT=60000`
+- **Registry**: Add `token_limit: 60000` at the top level of `agent_model_registry.yml`
+
+Precedence: CLI > env > registry. Both limits apply to all create commands (specification, implementation, tests).
+
+The token limiter uses a token bucket with continuous refill to keep throughput stable. Token count is approximated from the request content (word count and character-based heuristics) plus a fixed overhead for system prompts.
+
+When a 429 rate limit error occurs and a rate limit is configured, reen will wait for double the minimum interval, retry the request once, and use half the previous rate for the rest of the run.
+
 ## Verification
 
 Test that everything is set up correctly:
