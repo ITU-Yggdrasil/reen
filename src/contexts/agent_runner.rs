@@ -470,13 +470,11 @@ where
         // Step 7: Execute the agent
         let result = self.execute(&specification, &model)?;
 
-        // Step 8: Store result in cache (background operation)
-        // Note: In a real implementation, this would be done in a background thread
-        // to ensure it doesn't block returning the result
+        // Step 8: Store result in cache.
+        // This must be synchronous: CLI invocations are often short-lived, and
+        // detached background threads can be terminated before the write runs.
         let cache_value = result.output.clone();
-        std::thread::spawn(move || {
-            cache.set(&cache_key, &cache_value);
-        });
+        cache.set(&cache_key, &cache_value);
 
         Ok(result)
     }
@@ -486,6 +484,8 @@ where
 mod tests {
     use super::*;
     use serde::Serialize;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[derive(Serialize)]
     struct TestInput {
@@ -520,6 +520,15 @@ mod tests {
             Ok(Model {
                 name: "test-model".to_string(),
             })
+        }
+    }
+
+    struct MissingPlaceholderRegistry;
+
+    impl AgentRegistry for MissingPlaceholderRegistry {
+        fn get_specification(&self, _agent_name: &str) -> Result<String, PopulateError> {
+            // This would fail during populate() on a cache miss.
+            Ok("This will fail: {{input.required_field}}".to_string())
         }
     }
 
@@ -577,6 +586,37 @@ mod tests {
 
         let result = runner.run();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_returns_cached_output_before_populate() {
+        let input = TestInput {
+            name: "test".to_string(),
+            value: 42,
+        };
+        let agent_name = "cache_hit_agent".to_string();
+        let registry = MissingPlaceholderRegistry;
+        let model_registry = TestModelRegistry;
+        let template = registry
+            .get_specification(&agent_name)
+            .expect("template should load");
+
+        let runner = AgentRunner::new(agent_name, input, registry, model_registry);
+        let cache_key = runner.generate_cache_key(&template);
+        let instructions_model_hash = runner.generate_instructions_model_hash(&template, "test-model");
+        let cache = runner
+            .get_cached_artefact(&template, "test-model")
+            .expect("cache should initialize");
+        let cache_dir = PathBuf::from(".reen").join(&instructions_model_hash);
+        let cache_path = cache_dir.join(format!("{}.cache", cache_key));
+
+        cache.set(&cache_key, "cached-output");
+
+        let result = runner.run().expect("cache hit should return successfully");
+        assert_eq!(result.output, "cached-output");
+
+        let _ = fs::remove_file(cache_path);
+        let _ = fs::remove_dir(cache_dir);
     }
 
     #[test]
