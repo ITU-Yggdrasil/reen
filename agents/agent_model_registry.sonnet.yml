@@ -1,0 +1,21 @@
+create_specifications_data:
+  model: claude-sonnet-4-6
+  parallel: true
+create_specifications_context:
+  model: claude-sonnet-4-6
+  parallel: true
+create_specifications_main:
+  model: claude-sonnet-4-6
+  parallel: true
+create_implementation:
+  model: claude-sonnet-4-6
+  parallel: true
+create_test:
+  model: claude-sonnet-4-6
+  parallel: false
+resolve_compilation_errors:
+  model: claude-sonnet-4-6
+  parallel: false
+review_draft_errors:
+  model: claude-sonnet-4-6
+  parallel: false

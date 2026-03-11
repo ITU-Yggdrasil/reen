@@ -141,6 +141,7 @@ pub async fn create_specification(
     token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let names_provided = !names.is_empty();
     let names_for_clear = names.clone();
     let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", filter)?;
 
@@ -149,7 +150,10 @@ pub async fn create_specification(
         return Ok(());
     }
 
-    let expanded_draft_files = expand_with_transitive_dependencies(draft_files, DRAFTS_DIR, None)?;
+    let dependency_roots =
+        select_dependency_roots(draft_files, DRAFTS_DIR, names_provided, filter)?;
+    let expanded_draft_files =
+        expand_with_transitive_dependencies(dependency_roots, DRAFTS_DIR, None)?;
     let filtered_draft_files = if filter.is_active() {
         expanded_draft_files
             .into_iter()
@@ -1400,6 +1404,7 @@ pub async fn create_implementation(
     token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let names_provided = !names.is_empty();
     let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
@@ -1424,7 +1429,13 @@ pub async fn create_implementation(
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    let execution_levels = build_implementation_execution_plan(context_files, filter)?;
+    let dependency_roots = select_dependency_roots(
+        context_files,
+        SPECIFICATIONS_DIR,
+        names_provided,
+        filter,
+    )?;
+    let execution_levels = build_implementation_execution_plan(dependency_roots, filter)?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating implementation for {} context(s)", total_count);
 
@@ -2222,6 +2233,7 @@ pub async fn create_tests(
     token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let names_provided = !names.is_empty();
     let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
@@ -2241,8 +2253,14 @@ pub async fn create_tests(
         }
     }
 
+    let dependency_roots = select_dependency_roots(
+        context_files,
+        SPECIFICATIONS_DIR,
+        names_provided,
+        filter,
+    )?;
     let execution_levels =
-        build_execution_plan(context_files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
+        build_execution_plan(dependency_roots, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating tests for {} context(s)", total_count);
 
@@ -3392,6 +3410,24 @@ fn resolve_input_files(
         }
         Ok(files)
     }
+}
+
+fn select_dependency_roots(
+    selected_inputs: Vec<PathBuf>,
+    base_dir: &str,
+    names_provided: bool,
+    filter: &CategoryFilter,
+) -> Result<Vec<PathBuf>> {
+    if names_provided {
+        return Ok(selected_inputs);
+    }
+
+    let app_path = PathBuf::from(base_dir).join("app.md");
+    if app_path.exists() && filter.matches_path(&app_path, base_dir) {
+        return Ok(vec![app_path]);
+    }
+
+    Ok(selected_inputs)
 }
 
 /// Determines the specification output path preserving folder structure

@@ -3,6 +3,8 @@
 ## Description
 This is a simple Snake game application that runs in a terminal.
 
+Depends on: game_loop, command_input, terminal_renderer
+
 The application is responsible for:
 - initializing game state,
 - running the main loop,
