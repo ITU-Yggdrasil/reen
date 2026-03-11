@@ -2,12 +2,15 @@
 
 ## Description
 
-GameLoopContext advances the game by exactly one tick.
-Per tick it handles:
-- input capture and steering,
-- movement and collision outcomes,
-- score/food updates,
-- tick pacing (difficulty).
+GameLoopContext is the "Game" part of the system.
+It is the single source of truth for the game rules and game state.
+
+Each tick (one step forward), it handles:
+- reading any buffered player input,
+- steering and movement,
+- collisions (wall or snake body),
+- score and food updates,
+- pacing (how fast the game runs).
 
 ---
 
@@ -17,7 +20,8 @@ Per tick it handles:
   Represents occupied cells and current direction.
 
 - **command**
-  Provides shared user input for this tick.
+  Provides player input from one shared key stream used by the whole application session.
+  The GameLoopContext must use the same shared CommandInputContext as the main program uses for menus.
 
 - **food_dropper**
   Produces a valid next food placement when needed.
@@ -75,17 +79,18 @@ Per tick it handles:
 
 - **new(board, snake, command, food_dropper, game_state)**
   - Uses the provided collaborators.
-  - Input must come from the provided shared command context; no separate stdin stream is allowed.
+  - Input must come from the provided shared command context; do not create a separate input stream.
 
 - **current_board**
-  Returns a 2D char grid where `board[x][y]` maps to coordinate `(x,y)`:
+  Returns a 2D character grid (a "picture" of the game right now) where `board[x][y]` maps to coordinate `(x,y)`:
   - 'w' for wall at the boundary
   - ' ' for unoccupied cells
   - 's' for cells occupied by the snake
   - 'f' for where the food is placed
 
 - **get_score**
-  Returns current score.
+  Returns the current score as a whole number between 0 and 2,000,000,000 (never negative).
+  The score returned here is the same score that should be shown to the player.
 
 - **tick**
   Executes one tick and returns:

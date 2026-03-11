@@ -101,6 +101,7 @@ pub struct AgentSpecification {
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub output: String,
+    pub cached: bool,
 }
 
 /// A model that can execute an agent
@@ -284,6 +285,7 @@ where
 
         Ok(ExecutionResult {
             output: output_text,
+            cached: false,
         })
     }
 
@@ -308,8 +310,33 @@ where
     /// The cache key is a hash of agent_instructions + input_json, ensuring that
     /// changes to either the instructions or input will result in a cache miss.
     fn generate_cache_key(&self, agent_instructions: &str) -> String {
-        // Serialize the input to JSON to get a stable representation
-        let input_json = serde_json::to_string(&self.input).unwrap_or_else(|_| "{}".to_string());
+        fn canonicalize_json_value(v: serde_json::Value) -> serde_json::Value {
+            match v {
+                serde_json::Value::Array(items) => serde_json::Value::Array(
+                    items
+                        .into_iter()
+                        .map(canonicalize_json_value)
+                        .collect::<Vec<_>>(),
+                ),
+                serde_json::Value::Object(map) => {
+                    let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+                    entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    let mut out = serde_json::Map::new();
+                    for (k, val) in entries {
+                        out.insert(k, canonicalize_json_value(val));
+                    }
+                    serde_json::Value::Object(out)
+                }
+                other => other,
+            }
+        }
+
+        // Serialize the input to JSON in a stable way (sorted object keys), so cache keys
+        // do not depend on HashMap iteration order.
+        let input_json = serde_json::to_value(&self.input)
+            .map(canonicalize_json_value)
+            .and_then(|v| serde_json::to_string(&v))
+            .unwrap_or_else(|_| "{}".to_string());
 
         // Create a composite key from agent instructions and input
         let composite = format!("{}:{}", agent_instructions, input_json);
@@ -321,6 +348,15 @@ where
 
         // Return hex-encoded hash
         hex::encode(result)
+    }
+
+    /// Returns true if this agent+input combination already exists in the on-disk cache.
+    pub fn is_cache_hit(&self) -> Result<bool, AgentRunnerError> {
+        let agent_template = self.agent_registry.get_specification(&self.agent)?;
+        let model = self.agent_model_registry.get_model(&self.agent)?;
+        let cache_key = self.generate_cache_key(&agent_template);
+        let cache = self.get_cached_artefact(&agent_template, &model.name)?;
+        Ok(cache.get(&cache_key).is_some())
     }
 
     /// Role method: cache.get_cached_artefact
@@ -460,6 +496,7 @@ where
             // Cache hit - return immediately
             return Ok(ExecutionResult {
                 output: cached_value,
+                cached: true,
             });
         }
 
@@ -572,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_runner_execution() {
+    fn test_agent_runner_populate() {
         let input = TestInput {
             name: "test".to_string(),
             value: 42,
@@ -584,7 +621,7 @@ mod tests {
             TestModelRegistry,
         );
 
-        let result = runner.run();
+        let result = runner.populate();
         assert!(result.is_ok());
     }
 
@@ -614,6 +651,7 @@ mod tests {
 
         let result = runner.run().expect("cache hit should return successfully");
         assert_eq!(result.output, "cached-output");
+        assert!(result.cached);
 
         let _ = fs::remove_file(cache_path);
         let _ = fs::remove_dir(cache_dir);

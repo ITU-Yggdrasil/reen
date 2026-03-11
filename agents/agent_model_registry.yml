@@ -8,8 +8,8 @@ create_specifications_main:
   model: mistral/mistral-large-latest
   parallel: false
 create_implementation:
-  model: mistral/codestral-latest
-  parallel: false
+  model: openai/gpt-5
+  parallel: true
 create_test:
   model: mistral/codestral-latest
   parallel: false

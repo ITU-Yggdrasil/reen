@@ -119,6 +119,50 @@ impl AgentExecutor {
         }
     }
 
+    /// Returns true if the agent call would be served from the on-disk cache.
+    pub fn is_cache_hit(
+        &self,
+        input: &str,
+        additional_context: HashMap<String, serde_json::Value>,
+    ) -> Result<bool> {
+        let agent_input = match self.agent_name.as_str() {
+            "create_specifications"
+            | "create_specifications_context"
+            | "create_specifications_data"
+            | "create_specifications_main" => AgentInput {
+                draft_content: Some(input.to_string()),
+                context_content: None,
+                additional: additional_context,
+            },
+            "create_implementation" | "create_test" => AgentInput {
+                draft_content: None,
+                context_content: Some(input.to_string()),
+                additional: additional_context,
+            },
+            _ => AgentInput {
+                draft_content: Some(input.to_string()),
+                context_content: None,
+                additional: additional_context,
+            },
+        };
+
+        let runner = AgentRunner::new(
+            self.agent_name.clone(),
+            agent_input,
+            self.agent_registry.clone(),
+            self.model_registry.clone(),
+        );
+
+        runner.is_cache_hit().map_err(|e| match e {
+            AgentRunnerError::Populate(populate_err) => {
+                anyhow::anyhow!("Failed to populate agent: {}", populate_err)
+            }
+            AgentRunnerError::Execution(exec_err) => {
+                anyhow::anyhow!("Failed to execute agent: {}", exec_err)
+            }
+        })
+    }
+
     /// Detects if the agent output contains questions
     fn contains_questions(&self, output: &str) -> bool {
         // Simple heuristic: check for question markers

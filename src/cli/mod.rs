@@ -237,7 +237,7 @@ pub async fn create_specification(
                         )?
                     };
                     if !needs_update {
-                        progress.start_item(&draft_name, None);
+                        progress.start_item_up_to_date(&draft_name);
                         if config.verbose {
                             println!("⊚ Skipping {} (up to date)", draft_name);
                         }
@@ -256,18 +256,27 @@ pub async fn create_specification(
 
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
                     let estimated = estimate_request_tokens(&draft_content, &dependency_context);
-                    progress.start_item(&draft_name, Some(estimated));
+                    let cache_hit = executor
+                        .is_cache_hit(&draft_content, dependency_context.clone())
+                        .unwrap_or(false);
+                    if cache_hit {
+                        progress.start_item_cached(&draft_name);
+                    } else {
+                        progress.start_item(&draft_name, Some(estimated));
+                    }
 
                     let cfg = *config;
                     let executor_clone = executor.clone();
                     let rate_limiter_clone = rate_limiter.clone();
                     let token_limiter_clone = token_limiter.clone();
                     tasks.push(tokio::task::spawn(async move {
-                        if let Some(ref limiter) = token_limiter_clone {
-                            limiter.acquire_tokens(estimated).await;
-                        }
-                        if let Some(ref limiter) = rate_limiter_clone {
-                            limiter.acquire().await;
+                        if !cache_hit {
+                            if let Some(ref limiter) = token_limiter_clone {
+                                limiter.acquire_tokens(estimated).await;
+                            }
+                            if let Some(ref limiter) = rate_limiter_clone {
+                                limiter.acquire().await;
+                            }
                         }
                         let mut result = process_specification(
                             &executor_clone,
@@ -366,7 +375,7 @@ pub async fn create_specification(
                         )?
                     };
                     if !needs_update {
-                        progress.start_item(&draft_name, None);
+                        progress.start_item_up_to_date(&draft_name);
                         if config.verbose {
                             println!("⊚ Skipping {} (up to date)", draft_name);
                         }
@@ -377,12 +386,19 @@ pub async fn create_specification(
                     let dependency_context = build_dependency_context(&node)?;
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
                     let estimated = estimate_request_tokens(&draft_content, &dependency_context);
-                    progress.start_item(&draft_name, Some(estimated));
-                    if let Some(ref limiter) = token_limiter {
-                        limiter.acquire_tokens(estimated).await;
-                    }
-                    if let Some(ref limiter) = rate_limiter {
-                        limiter.acquire().await;
+                    let cache_hit = executor
+                        .is_cache_hit(&draft_content, dependency_context.clone())
+                        .unwrap_or(false);
+                    if cache_hit {
+                        progress.start_item_cached(&draft_name);
+                    } else {
+                        progress.start_item(&draft_name, Some(estimated));
+                        if let Some(ref limiter) = token_limiter {
+                            limiter.acquire_tokens(estimated).await;
+                        }
+                        if let Some(ref limiter) = rate_limiter {
+                            limiter.acquire().await;
+                        }
                     }
                     let mut result = process_specification(
                         &executor,
@@ -1507,7 +1523,7 @@ pub async fn create_implementation(
             };
 
             if !needs_update {
-                progress.start_item(&context_name, None);
+                progress.start_item_up_to_date(&context_name);
                 if config.verbose {
                     println!("⊚ Skipping {} (up to date)", context_name);
                 }
@@ -1521,6 +1537,9 @@ pub async fn create_implementation(
             }
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
             let estimated = estimate_request_tokens(&context_content, &dependency_context);
+            let cache_hit = executor
+                .is_cache_hit(&context_content, dependency_context.clone())
+                .unwrap_or(false);
             runnable.push((
                 context_file,
                 context_name,
@@ -1529,6 +1548,7 @@ pub async fn create_implementation(
                 dependency_context,
                 context_content,
                 estimated,
+                cache_hit,
             ));
         }
 
@@ -1546,18 +1566,25 @@ pub async fn create_implementation(
                 dependency_context,
                 context_content,
                 estimated,
+                cache_hit,
             ) in runnable
             {
-                progress.start_item(&context_name, Some(estimated));
+                if cache_hit {
+                    progress.start_item_cached(&context_name);
+                } else {
+                    progress.start_item(&context_name, Some(estimated));
+                }
                 let executor_clone = executor.clone();
                 let rate_limiter_clone = rate_limiter.clone();
                 let token_limiter_clone = token_limiter.clone();
                 tasks.push(tokio::task::spawn(async move {
-                    if let Some(ref limiter) = token_limiter_clone {
-                        limiter.acquire_tokens(estimated).await;
-                    }
-                    if let Some(ref limiter) = rate_limiter_clone {
-                        limiter.acquire().await;
+                    if !cache_hit {
+                        if let Some(ref limiter) = token_limiter_clone {
+                            limiter.acquire_tokens(estimated).await;
+                        }
+                        if let Some(ref limiter) = rate_limiter_clone {
+                            limiter.acquire().await;
+                        }
                     }
                     let mut result = process_implementation(
                         &executor_clone,
@@ -1643,17 +1670,22 @@ pub async fn create_implementation(
                 dependency_context,
                 context_content,
                 estimated,
+                cache_hit,
             ) in runnable
             {
-                progress.start_item(&context_name, Some(estimated));
-                if config.verbose {
-                    println!("Processing context: {}", context_name);
-                }
-                if let Some(ref limiter) = token_limiter {
-                    limiter.acquire_tokens(estimated).await;
-                }
-                if let Some(ref limiter) = rate_limiter {
-                    limiter.acquire().await;
+                if cache_hit {
+                    progress.start_item_cached(&context_name);
+                } else {
+                    progress.start_item(&context_name, Some(estimated));
+                    if config.verbose {
+                        println!("Processing context: {}", context_name);
+                    }
+                    if let Some(ref limiter) = token_limiter {
+                        limiter.acquire_tokens(estimated).await;
+                    }
+                    if let Some(ref limiter) = rate_limiter {
+                        limiter.acquire().await;
+                    }
                 }
                 let mut result = process_implementation(
                     &executor,
@@ -2238,8 +2270,17 @@ pub async fn create_tests(
             let dependency_context = build_dependency_context(&node)?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
             let estimated = estimate_request_tokens(&context_content, &dependency_context);
-            progress.start_item(&context_name, Some(estimated));
-            runnable.push((context_file, context_name, dependency_context, context_content, estimated));
+            let cache_hit = executor
+                .is_cache_hit(&context_content, dependency_context.clone())
+                .unwrap_or(false);
+            runnable.push((
+                context_file,
+                context_name,
+                dependency_context,
+                context_content,
+                estimated,
+                cache_hit,
+            ));
         }
 
         if can_parallel {
@@ -2248,16 +2289,23 @@ pub async fn create_tests(
             }
             let cfg = *config;
             let mut tasks = Vec::new();
-            for (context_file, context_name, dependency_context, context_content, estimated) in runnable {
+            for (context_file, context_name, dependency_context, context_content, estimated, cache_hit) in runnable {
+                if cache_hit {
+                    progress.start_item_cached(&context_name);
+                } else {
+                    progress.start_item(&context_name, Some(estimated));
+                }
                 let executor_clone = executor.clone();
                 let rate_limiter_clone = rate_limiter.clone();
                 let token_limiter_clone = token_limiter.clone();
                 tasks.push(tokio::task::spawn(async move {
-                    if let Some(ref limiter) = token_limiter_clone {
-                        limiter.acquire_tokens(estimated).await;
-                    }
-                    if let Some(ref limiter) = rate_limiter_clone {
-                        limiter.acquire().await;
+                    if !cache_hit {
+                        if let Some(ref limiter) = token_limiter_clone {
+                            limiter.acquire_tokens(estimated).await;
+                        }
+                        if let Some(ref limiter) = rate_limiter_clone {
+                            limiter.acquire().await;
+                        }
                     }
                     let mut result = process_tests(
                         &executor_clone,
@@ -2315,16 +2363,20 @@ pub async fn create_tests(
                 }
             }
         } else {
-            for (context_file, context_name, dependency_context, context_content, estimated) in runnable {
-                progress.start_item(&context_name, Some(estimated));
-                if config.verbose {
-                    println!("Processing context: {}", context_name);
-                }
-                if let Some(ref limiter) = token_limiter {
-                    limiter.acquire_tokens(estimated).await;
-                }
-                if let Some(ref limiter) = rate_limiter {
-                    limiter.acquire().await;
+            for (context_file, context_name, dependency_context, context_content, estimated, cache_hit) in runnable {
+                if cache_hit {
+                    progress.start_item_cached(&context_name);
+                } else {
+                    progress.start_item(&context_name, Some(estimated));
+                    if config.verbose {
+                        println!("Processing context: {}", context_name);
+                    }
+                    if let Some(ref limiter) = token_limiter {
+                        limiter.acquire_tokens(estimated).await;
+                    }
+                    if let Some(ref limiter) = rate_limiter {
+                        limiter.acquire().await;
+                    }
                 }
                 let mut result = process_tests(
                     &executor,

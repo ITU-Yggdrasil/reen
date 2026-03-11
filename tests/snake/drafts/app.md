@@ -1,17 +1,26 @@
 # The primary application
 
 ## Description
-This is a simple terminal-based Snake game application.
+This is a simple Snake game application that runs in a terminal.
 
 The application is responsible for:
 - initializing game state,
 - running the main loop,
-- rendering board and score,
+- showing the board and score,
 - restarting after game over,
-- managing terminal input mode,
-- maintaining one shared input stream used by menus and gameplay.
+- putting the terminal in a mode where single key presses are read immediately,
+- keeping exactly one shared input stream that is used by both menus and gameplay.
 
 Game progression logic itself is delegated to the GameLoopContext.
+
+### Helpers the App Uses
+The Primary Application uses these helpers (they must exist as part of the overall system):
+- **CommandInputContext**: captures key presses into one shared FIFO stream for the whole session.
+- **GameLoopContext**: holds the game rules and advances the game by one tick at a time.
+- **TerminalRenderer**: draws the board and the score to the terminal.
+
+The Primary Application must not implement the game rules itself (movement, collisions, scoring, food placement).
+It only (1) collects input, (2) asks the GameLoopContext to advance, and (3) shows what the game looks like.
 
 ---
 
@@ -41,7 +50,7 @@ The application runs an outer loop with the following behavior:
 0. Terminal mode and startup checks:
    - Before entering the main loop, enable raw terminal input mode so single key presses are available immediately (without pressing Enter), and disable input echo.
    - On application exit (normal or error), restore the previous terminal mode.
-   - Create one shared CommandInputContext before the loop and keep using the same shared input stream for the process lifetime.
+   - Create one shared CommandInputContext before the loop and keep using the same shared input stream for the process lifetime (menus + gameplay).
    - If terminal width < 20 or terminal height < 20, print an error to stderr and exit with code `20`.
 
 1. If there is no active GameLoopContext (including when the application first starts):

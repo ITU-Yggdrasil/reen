@@ -28,7 +28,8 @@ system_prompt: |
   - Add standard trait derives or implementations such as `Debug`, `Clone`, `PartialEq`, `Eq`, `Ord`, `Hash` when they do not change runtime behavior.
   - Add **getters** (read-only accessors). Do NOT add setters.
   - Add constructors such as `new(...) -> Self` and `try_new(...) -> Result<Self, _>` when required (do not add mutating setters).
-  - Adjust signatures between by-reference and by-value where it preserves semantics (e.g. `&T` ↔ `T`, including return type adjustments), provided it does not introduce mutability.
+  - Adjust signatures between by-reference and by-value where it preserves semantics (e.g. `&T` ↔ `T`), provided it does not introduce mutability.
+  - You MUST NOT change public API types beyond `&T` ↔ `T`. In particular, do NOT change numeric/primitive types (e.g. `i32` ↔ `u32`, `usize` ↔ `u64`) in public function parameters or return types.
 
   ## Allowed tracing adjustments (explicitly permitted)
   You MAY (only when required for compilation):

@@ -2,12 +2,13 @@
 
 ## Description
 
-CommandInputContext defines how keyboard input is captured and consumed.
+CommandInputContext defines how key presses are collected and read.
 It supports both:
 - menu/application controls (`s`/`q`), and
 - gameplay controls (`w`/`a`/`s`/`d`, space).
 
-The important behavior is that input is handled as one shared FIFO stream for the whole application session.
+The important behavior is that input is handled as one shared first-in-first-out (FIFO) stream for the whole application session.
+This means the same input stream is used for the start menu and for gameplay, without resetting or replacing it.
 
 ---
 
@@ -37,12 +38,12 @@ The important behavior is that input is handled as one shared FIFO stream for th
 ## Behavior
 
 - **new()**
-  - Starts with an empty input buffer.
+  - Starts with an empty input buffer (no keys captured yet).
 
 - **capture()**
-  - Reads currently available stdin keystrokes.
-  - Appends them to the end of the buffer in arrival order.
-  - Does not remove previously buffered keys.
+  - Reads currently available key presses (without waiting).
+  - Adds them to the end of the buffer in the order they arrived.
+  - Does not remove keys that were already buffered.
 
 - **next_key() -> Option<char>**
   - If the buffer is non-empty, returns and removes the oldest key.
