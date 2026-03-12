@@ -20,6 +20,7 @@ The Primary Application uses these helpers (they must exist as part of the overa
 - **CommandInputContext**: captures key presses into one shared FIFO stream for the whole session.
 - **GameLoopContext**: holds the game rules and advances the game by one tick at a time.
 - **TerminalRenderer**: draws the board and the score to the terminal.
+- **food_dropper**: chooses the next food placement on a free interior (non-wall, non-snake) cell.
 
 The Primary Application must not implement the game rules itself (movement, collisions, scoring, food placement).
 It only (1) collects input, (2) asks the GameLoopContext to advance, and (3) shows what the game looks like.
@@ -36,11 +37,17 @@ When the game is started:
 - Create a Snake at center cell `(width/2, height/2)` using integer division:
   - initial length is 1 (head only),
   - initial direction is RIGHT.
+- Create one `food_dropper` collaborator for this game session.
+  - When asked to drop food, it must return:
+    - `Some(food)` on a free interior (non-wall, non-snake) cell, or
+    - `None` if no free interior cell exists.
+- Determine initial food by calling `food_dropper.drop` using the initial Board and Snake.
+  - If the result is `None`, continue the game with no food on the board.
 - Create a GameState containing:
   - score = 0
-  - one food item at a valid non-wall, non-snake coordinate
+  - the initial food returned by `food_dropper.drop`
   - start timestamp `utc.now_ms`.
-- Create a GameLoopContext.
+- Create a GameLoopContext using Board, Snake, shared CommandInputContext, the same `food_dropper`, and GameState.
 - Create a TerminalRenderer.
 
 ---
@@ -60,7 +67,7 @@ The application runs an outer loop with the following behavior:
    - Call CommandInputContext.capture and then poll keys via CommandInputContext.next_key.
    - If the user presses the start key "S" or "s":
      - Recreate the initial state.
-     - Create a new GameLoopContext that uses the same shared command input stream.
+     - Create a new GameLoopContext that uses the same shared command input stream and a `food_dropper` as defined above.
    - If "Q" or "q" is pressed, exit the program.
    - Otherwise continue waiting.
 

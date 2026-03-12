@@ -1,0 +1,10 @@
+.git
+.gitignore
+target
+.venv
+.env
+.reen
+tests
+docs
+drafts
+**/.DS_Store

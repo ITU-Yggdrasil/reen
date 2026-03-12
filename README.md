@@ -274,3 +274,31 @@ See [docs/INCREMENTAL_BUILDS.md](docs/INCREMENTAL_BUILDS.md) for details.
 - Incremental agent execution
 - Build cache across git branches
 - Parallel processing of independent tasks
+
+## Docker CLI Image
+
+You can run `reen` as a containerized CLI so local setup only needs Docker.
+
+Build the image:
+
+```bash
+docker build -t reen:latest .
+```
+
+Run commands against your current project directory:
+
+```bash
+docker run --rm -it \
+  -e MISTRAL_API_KEY="your-key" \
+  -v "$(pwd):/work" \
+  -w /work \
+  reen:latest create specification
+```
+
+Pass any other CLI args the same way:
+
+```bash
+docker run --rm -it -v "$(pwd):/work" -w /work reen:latest create implementation app
+```
+
+If you use OpenAI/Anthropic/Ollama instead, pass the corresponding env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_BASE_URL`, etc.).
