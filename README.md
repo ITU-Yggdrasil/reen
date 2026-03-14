@@ -279,13 +279,19 @@ See [docs/INCREMENTAL_BUILDS.md](docs/INCREMENTAL_BUILDS.md) for details.
 
 You can run `reen` as a containerized CLI so local setup only needs Docker.
 
-Build the image:
+**Quick start:** Build once, then use the wrapper script:
 
 ```bash
 docker build -t reen:latest .
+source scripts/reen.sh   # macOS / Linux / WSL
+# or on Windows PowerShell: . .\scripts\reen.ps1
+
+reen create specification
 ```
 
-Run commands against your current project directory:
+For full instructions (first build, sourcing, and platform-specific setup for macOS, Windows, and WSL), see [docs/DOCKER_WRAPPER.md](docs/DOCKER_WRAPPER.md).
+
+**Manual run** (without the wrapper):
 
 ```bash
 docker run --rm -it \
@@ -293,12 +299,6 @@ docker run --rm -it \
   -v "$(pwd):/work" \
   -w /work \
   reen:latest create specification
-```
-
-Pass any other CLI args the same way:
-
-```bash
-docker run --rm -it -v "$(pwd):/work" -w /work reen:latest create implementation app
 ```
 
 If you use OpenAI/Anthropic/Ollama instead, pass the corresponding env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_BASE_URL`, etc.).
