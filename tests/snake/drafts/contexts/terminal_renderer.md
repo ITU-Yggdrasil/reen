@@ -20,3 +20,4 @@ TerminalRenderer draws the current game frame as text (ASCII) in the terminal.
     - After printing the last board row, print exactly one additional line for score at terminal column 0.
     - Score line format is exactly `Score: <score>` where `<score>` is the score written in normal base-10 digits with no padding, separators, or extra decoration.
     - End the score line with a newline.
+cargo build

@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
     steps:
       - name: Checkout
@@ -31,8 +31,8 @@ jobs:
       - name: Build reen
         run: cargo build --release
 
-      - name: Enable GPT-5 agent registry
-        run: cp "agents/agent_model_registry.gpt.yml" "agents/agent_model_registry.yml"
+      - name: Enable Sonnet agent registry
+        run: cp "agents/agent_model_registry.sonnet.yml" "agents/agent_model_registry.yml"
 
       - name: Create specifications (snake)
         working-directory: tests/snake
