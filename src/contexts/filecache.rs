@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Mutex;
-use sha2::Digest;
 
 #[derive(Debug, Clone)]
 pub struct FileCache {
@@ -53,7 +53,7 @@ impl AgentInstructions {
     pub fn hash(&self) -> String {
         // Implement hash logic for instructions
         // For example:
-        // format!(":{:?}", self)
+        // format!("{:?}", self)
         format!("{:?}", self)
     }
 }
@@ -79,9 +79,11 @@ impl FileCache {
     }
 
     pub fn cache_key(&self, instructions: &AgentInstructions, input_json: &serde_json::Value) -> String {
-        format!("{}/{}", FileCache::hash(instructions), serde_json::json(input_json).to_string())
+        format!("{}/{}", FileCache::hash(&instructions), serde_json::json(input_json).to_string())
     }
+}
 
+impl FileCache {
     pub fn instructions_model_hash(&self, instructions: &AgentInstructions) -> String {
         FileCache::hash(instructions)
     }
