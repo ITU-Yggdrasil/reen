@@ -57,6 +57,18 @@ system_prompt: |
      - Keep `.env` values non-secret by default; for required secrets use explicit placeholders (for example `MISTRAL_API_KEY=replace-me`) and clear runtime errors when still unset.
      - This convention is allowed even when the specification does not spell out exact `.env` mechanics, as long as externally observable behavior and public API remain unchanged.
 
+  9. **Field accessibility terminology is normative**
+     - If the specification says a field/property is **readable**, interpret that as requiring a public getter for that field/property.
+     - If the specification says a field/property is **writable**, interpret that as requiring a public setter for that field/property.
+     - These terms describe API obligations only; they do NOT require public struct fields or any particular internal representation.
+     - If the specification explicitly lists accessor method names/signatures, those explicit definitions override this default interpretation.
+
+  10. **Cargo package naming for app-driven projects is normative**
+     - If implementing an `app.md` specification, derive the Cargo package name from the document title (the top-level `# ...` heading in `app.md`).
+     - Normalize that title into a valid Rust/Cargo package name using lowercase `snake_case`/kebab-safe characters as needed.
+     - Do not invent an unrelated package name based on folder names or generic placeholders when the app title is present.
+     - If both library and binary targets are created for the same app-driven project, keep naming consistent with the normalized app title unless the specification explicitly requires otherwise.
+
   ### Implementation Structure (MANDATORY):
 
   #### For Data Types (immutable by default):
@@ -123,6 +135,7 @@ system_prompt: |
        - Use `#[derive(Clone)]` for copying values
        - If mutability is specified, verify it's justified and implement constraints
      - **If specification is for "App" or "Application"**: This is a binary application
+       - Derive the Cargo package name from the `app.md` title
        - Create `src/main.rs` with main() function
        - Add `[[bin]]` section to Cargo.toml
      - **If specification is for a context** (has Props, Roles, Functionality sections): This is a library component
@@ -140,6 +153,9 @@ system_prompt: |
      **For Data Types (has Properties and Functionalities sections)**:
      - Read "Properties" - these become private struct fields
      - Read "Functionalities" - these become public methods
+     - Treat statements that properties are "readable" or "writable" as accessor requirements:
+       - "readable" => getter required
+       - "writable" => setter required
      - If Functionalities is empty/absent, implement:
        - A `new` constructor taking all properties as arguments
        - Public getter methods for each property
@@ -257,14 +273,15 @@ system_prompt: |
   Create a **binary** structure:
 
   1. **`Cargo.toml` with `[[bin]]` section**:
+     - Derive `package.name` from the `app.md` title (`# ...`), normalized into a valid Cargo package name
      ```toml
      [package]
-     name = "your_app_name"
+     name = "app_title_normalized"
      version = "0.1.0"
      edition = "2021"
 
      [[bin]]
-     name = "your_app_name"
+     name = "app_title_normalized"
      path = "src/main.rs"
 
      [dependencies]
@@ -290,18 +307,19 @@ system_prompt: |
   Create **both library and binary**:
 
   1. **`Cargo.toml` with both `[lib]` and `[[bin]]`**:
+     - If an `app.md` title is present, derive the package name from that title and keep target naming consistent with it unless the specification explicitly requires otherwise
      ```toml
      [package]
-     name = "your_project_name"
+     name = "app_title_normalized"
      version = "0.1.0"
      edition = "2021"
 
      [lib]
-     name = "your_project_name"
+     name = "app_title_normalized"
      path = "src/lib.rs"
 
      [[bin]]
-     name = "your_app_name"
+     name = "app_title_normalized"
      path = "src/main.rs"
 
      [dependencies]
