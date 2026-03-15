@@ -12,8 +12,8 @@ use tokio::time::{sleep, Duration};
 const TOKENS_PER_WORD: f64 = 1.3;
 /// Fallback: characters per token (conservative for code/markdown).
 const CHARS_PER_TOKEN: usize = 4;
-/// Overhead for system prompt and message framing.
-const SYSTEM_OVERHEAD_TOKENS: usize = 800;
+/// Overhead for provider-specific message framing.
+const REQUEST_OVERHEAD_TOKENS: usize = 256;
 
 /// Estimates token count for text using word count and character-based heuristics.
 /// Conservative to avoid exceeding provider limits.
@@ -36,7 +36,7 @@ pub fn estimate_request_tokens(
     let main = estimate_tokens(main_content);
     let context_str = serde_json::to_string(additional_context).unwrap_or_default();
     let context = estimate_tokens(&context_str);
-    (main + context + SYSTEM_OVERHEAD_TOKENS).max(1)
+    (main + context + REQUEST_OVERHEAD_TOKENS).max(1)
 }
 
 /// Limits token throughput to at most `tokens_per_minute` per minute.
@@ -102,6 +102,21 @@ impl TokenLimiter {
             sleep(wait_duration).await;
         }
     }
+
+    /// Returns true when a single request estimate is larger than the configured
+    /// per-minute budget and therefore cannot be reliably scheduled.
+    pub async fn exceeds_limit(&self, estimated: usize) -> bool {
+        let inner = self.inner.lock().await;
+        estimated as f64 > inner.max_tokens
+    }
+
+    /// Returns a conservative retry delay after a token-based 429.
+    pub async fn retry_delay(&self, estimated: usize) -> Duration {
+        let inner = self.inner.lock().await;
+        let estimate = estimated.max(1) as f64;
+        let refill_wait = estimate / inner.refill_per_sec;
+        Duration::from_secs_f64(refill_wait.max(60.0))
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +139,6 @@ mod tests {
         let mut ctx = std::collections::HashMap::new();
         ctx.insert("key".to_string(), serde_json::json!("value"));
         let n = estimate_request_tokens("short", &ctx);
-        assert!(n > 800);
+        assert!(n > REQUEST_OVERHEAD_TOKENS);
     }
 }

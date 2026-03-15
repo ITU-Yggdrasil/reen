@@ -5,6 +5,20 @@ use serde_json;
 use sha2::{Digest, Sha256};
 use std::fmt;
 
+const TOKENS_PER_WORD: f64 = 1.3;
+const CHARS_PER_TOKEN: usize = 4;
+
+fn estimate_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 1;
+    }
+    let word_count = text.split_whitespace().count();
+    let char_count = text.chars().count();
+    let by_words = (word_count as f64 * TOKENS_PER_WORD).ceil() as usize;
+    let by_chars = char_count.div_ceil(CHARS_PER_TOKEN);
+    by_words.max(by_chars).max(1)
+}
+
 /// Errors that can occur during agent population
 #[derive(Debug)]
 pub enum PopulateError {
@@ -421,6 +435,29 @@ where
         let cache_key = self.generate_cache_key(&canonical);
         let cache = self.get_cached_artefact(&canonical, &model.name)?;
         Ok(cache.get(&cache_key).is_some())
+    }
+
+    /// Estimates the populated input token count for the request that would be sent.
+    pub fn estimate_input_tokens(&self) -> Result<usize, AgentRunnerError> {
+        const LEGACY_USER_PROMPT: &str = "Please complete the task described in the system prompt.";
+        const REQUEST_OVERHEAD_TOKENS: usize = 256;
+
+        let specification = self.populate()?;
+        let estimate = if let (Some(static_prompt), Some(variable_prompt)) = (
+            specification.static_prompt.as_deref(),
+            specification.variable_prompt.as_deref(),
+        ) {
+            estimate_tokens(static_prompt) + estimate_tokens(variable_prompt)
+        } else if let Some(system_prompt) = specification.system_prompt.as_deref() {
+            estimate_tokens(system_prompt) + estimate_tokens(LEGACY_USER_PROMPT)
+        } else {
+            return Err(AgentRunnerError::Execution(ExecutionError::ExecutionFailed(
+                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
+                    .to_string(),
+            )));
+        };
+
+        Ok(estimate + REQUEST_OVERHEAD_TOKENS)
     }
 
     /// Role method: cache.get_cached_artefact

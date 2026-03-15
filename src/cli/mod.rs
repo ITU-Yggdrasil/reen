@@ -150,6 +150,66 @@ fn is_rate_limit_error(e: &anyhow::Error) -> bool {
         || lower.contains("ratelimit")
 }
 
+fn estimate_agent_request_tokens(
+    executor: &AgentExecutor,
+    input: &str,
+    additional_context: &HashMap<String, serde_json::Value>,
+) -> usize {
+    executor
+        .estimate_request_tokens(input, additional_context.clone())
+        .unwrap_or_else(|_| estimate_request_tokens(input, additional_context))
+}
+
+async fn acquire_request_capacity(
+    token_limiter: Option<&Arc<TokenLimiter>>,
+    rate_limiter: Option<&Arc<RateLimiter>>,
+    estimated: usize,
+) -> Result<()> {
+    if let Some(limiter) = token_limiter {
+        if limiter.exceeds_limit(estimated).await {
+            anyhow::bail!(
+                "Estimated request size ({estimated} input tokens) exceeds configured --token-limit/REEN_TOKEN_LIMIT budget for a single minute. Reduce prompt size or raise the token limit."
+            );
+        }
+        limiter.acquire_tokens(estimated).await;
+    }
+    if let Some(limiter) = rate_limiter {
+        limiter.acquire().await;
+    }
+    Ok(())
+}
+
+async fn prepare_rate_limit_retry(
+    item_name: &str,
+    estimated: usize,
+    token_limiter: Option<&Arc<TokenLimiter>>,
+    rate_limiter: Option<&Arc<RateLimiter>>,
+) -> bool {
+    let mut waited = false;
+    if let Some(limiter) = token_limiter {
+        let delay = limiter.retry_delay(estimated).await;
+        eprintln!(
+            "Rate limit (429) exceeded for {}, waiting {}s before retrying...",
+            item_name,
+            delay.as_secs()
+        );
+        sleep(delay).await;
+        waited = true;
+    }
+    if let Some(limiter) = rate_limiter {
+        if !waited {
+            eprintln!(
+                "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
+                item_name
+            );
+            sleep(limiter.retry_delay()).await;
+        }
+        limiter.back_off().await;
+        waited = true;
+    }
+    waited
+}
+
 pub async fn create_specification(
     names: Vec<String>,
     clear_cache: bool,
@@ -307,7 +367,8 @@ fn create_specification_inner(
                     };
 
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
-                    let estimated = estimate_request_tokens(&draft_content, &dependency_context);
+                    let estimated =
+                        estimate_agent_request_tokens(&executor, &draft_content, &dependency_context);
                     let cache_hit = executor
                         .is_cache_hit(&draft_content, dependency_context.clone())
                         .unwrap_or(false);
@@ -323,11 +384,20 @@ fn create_specification_inner(
                     let token_limiter_clone = token_limiter.clone();
                     tasks.push(tokio::task::spawn(async move {
                         if !cache_hit {
-                            if let Some(ref limiter) = token_limiter_clone {
-                                limiter.acquire_tokens(estimated).await;
-                            }
-                            if let Some(ref limiter) = rate_limiter_clone {
-                                limiter.acquire().await;
+                            if let Err(e) = acquire_request_capacity(
+                                token_limiter_clone.as_ref(),
+                                rate_limiter_clone.as_ref(),
+                                estimated,
+                            )
+                            .await
+                            {
+                                return (
+                                    draft_name,
+                                    draft_file,
+                                    output_path,
+                                    dependency_fingerprint,
+                                    Err(e),
+                                );
                             }
                         }
                         let mut result = process_specification(
@@ -341,17 +411,29 @@ fn create_specification_inner(
                         .await;
                         if let Err(ref e) = result {
                             if is_rate_limit_error(e) {
-                                if let Some(ref limiter) = rate_limiter_clone {
-                                    eprintln!(
-                                        "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
-                                        draft_name
-                                    );
-                                    sleep(limiter.retry_delay()).await;
-                                    limiter.back_off().await;
-                                    if let Some(ref tlimiter) = token_limiter_clone {
-                                        tlimiter.acquire_tokens(estimated).await;
+                                if prepare_rate_limit_retry(
+                                    &draft_name,
+                                    estimated,
+                                    token_limiter_clone.as_ref(),
+                                    rate_limiter_clone.as_ref(),
+                                )
+                                .await
+                                {
+                                    if let Err(e) = acquire_request_capacity(
+                                        token_limiter_clone.as_ref(),
+                                        rate_limiter_clone.as_ref(),
+                                        estimated,
+                                    )
+                                    .await
+                                    {
+                                        return (
+                                            draft_name,
+                                            draft_file,
+                                            output_path,
+                                            dependency_fingerprint,
+                                            Err(e),
+                                        );
                                     }
-                                    limiter.acquire().await;
                                     result = process_specification(
                                         &executor_clone,
                                         &draft_content,
@@ -467,7 +549,8 @@ fn create_specification_inner(
 
                     let dependency_context = build_dependency_context(&node)?;
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
-                    let estimated = estimate_request_tokens(&draft_content, &dependency_context);
+                    let estimated =
+                        estimate_agent_request_tokens(&executor, &draft_content, &dependency_context);
                     let cache_hit = executor
                         .is_cache_hit(&draft_content, dependency_context.clone())
                         .unwrap_or(false);
@@ -475,12 +558,12 @@ fn create_specification_inner(
                         progress.start_item_cached(&draft_name);
                     } else {
                         progress.start_item(&draft_name, Some(estimated));
-                        if let Some(ref limiter) = token_limiter {
-                            limiter.acquire_tokens(estimated).await;
-                        }
-                        if let Some(ref limiter) = rate_limiter {
-                            limiter.acquire().await;
-                        }
+                        acquire_request_capacity(
+                            token_limiter.as_ref(),
+                            rate_limiter.as_ref(),
+                            estimated,
+                        )
+                        .await?;
                     }
                     let mut result = process_specification(
                         &executor,
@@ -490,23 +573,26 @@ fn create_specification_inner(
                         &config,
                         dependency_context.clone(),
                     )
-                    .await;
-                    if let Err(ref e) = result {
-                        if is_rate_limit_error(e) {
-                            if let Some(ref limiter) = rate_limiter {
-                                eprintln!(
-                                    "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
-                                    draft_name
-                                );
-                                sleep(limiter.retry_delay()).await;
-                                limiter.back_off().await;
-                                if let Some(ref tlimiter) = token_limiter {
-                                    tlimiter.acquire_tokens(estimated).await;
-                                }
-                                limiter.acquire().await;
-                                result = process_specification(
-                                    &executor,
-                                    &draft_content,
+                .await;
+                if let Err(ref e) = result {
+                    if is_rate_limit_error(e) {
+                        if prepare_rate_limit_retry(
+                            &draft_name,
+                            estimated,
+                            token_limiter.as_ref(),
+                            rate_limiter.as_ref(),
+                        )
+                        .await
+                        {
+                            acquire_request_capacity(
+                                token_limiter.as_ref(),
+                                rate_limiter.as_ref(),
+                                estimated,
+                            )
+                            .await?;
+                            result = process_specification(
+                                &executor,
+                                &draft_content,
                                     &draft_file,
                                     &draft_name,
                                     &config,
@@ -989,7 +1075,11 @@ pub async fn create_implementation(
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
-            let estimated = estimate_request_tokens(&context_content, &dependency_context);
+            let estimated = estimate_agent_request_tokens(
+                &executor,
+                &context_content,
+                &dependency_context,
+            );
             let cache_hit = executor
                 .is_cache_hit(&context_content, dependency_context.clone())
                 .unwrap_or(false);
@@ -1032,11 +1122,20 @@ pub async fn create_implementation(
                 let token_limiter_clone = token_limiter.clone();
                 tasks.push(tokio::task::spawn(async move {
                     if !cache_hit {
-                        if let Some(ref limiter) = token_limiter_clone {
-                            limiter.acquire_tokens(estimated).await;
-                        }
-                        if let Some(ref limiter) = rate_limiter_clone {
-                            limiter.acquire().await;
+                        if let Err(e) = acquire_request_capacity(
+                            token_limiter_clone.as_ref(),
+                            rate_limiter_clone.as_ref(),
+                            estimated,
+                        )
+                        .await
+                        {
+                            return (
+                                context_name,
+                                context_file,
+                                output_path,
+                                dependency_fingerprint,
+                                Err(e),
+                            );
                         }
                     }
                     let mut result = process_implementation(
@@ -1050,17 +1149,29 @@ pub async fn create_implementation(
                     .await;
                     if let Err(ref e) = result {
                         if is_rate_limit_error(e) {
-                            if let Some(ref limiter) = rate_limiter_clone {
-                                eprintln!(
-                                    "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
-                                    context_name
-                                );
-                                sleep(limiter.retry_delay()).await;
-                                limiter.back_off().await;
-                                if let Some(ref tlimiter) = token_limiter_clone {
-                                    tlimiter.acquire_tokens(estimated).await;
+                            if prepare_rate_limit_retry(
+                                &context_name,
+                                estimated,
+                                token_limiter_clone.as_ref(),
+                                rate_limiter_clone.as_ref(),
+                            )
+                            .await
+                            {
+                                if let Err(e) = acquire_request_capacity(
+                                    token_limiter_clone.as_ref(),
+                                    rate_limiter_clone.as_ref(),
+                                    estimated,
+                                )
+                                .await
+                                {
+                                    return (
+                                        context_name,
+                                        context_file,
+                                        output_path,
+                                        dependency_fingerprint,
+                                        Err(e),
+                                    );
                                 }
-                                limiter.acquire().await;
                                 result = process_implementation(
                                     &executor_clone,
                                     &context_content,
@@ -1133,12 +1244,12 @@ pub async fn create_implementation(
                     if config.verbose {
                         println!("Processing context: {}", context_name);
                     }
-                    if let Some(ref limiter) = token_limiter {
-                        limiter.acquire_tokens(estimated).await;
-                    }
-                    if let Some(ref limiter) = rate_limiter {
-                        limiter.acquire().await;
-                    }
+                    acquire_request_capacity(
+                        token_limiter.as_ref(),
+                        rate_limiter.as_ref(),
+                        estimated,
+                    )
+                    .await?;
                 }
                 let mut result = process_implementation(
                     &executor,
@@ -1151,17 +1262,20 @@ pub async fn create_implementation(
                 .await;
                 if let Err(ref e) = result {
                     if is_rate_limit_error(e) {
-                        if let Some(ref limiter) = rate_limiter {
-                            eprintln!(
-                                "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
-                                context_name
-                            );
-                            sleep(limiter.retry_delay()).await;
-                            limiter.back_off().await;
-                            if let Some(ref tlimiter) = token_limiter {
-                                tlimiter.acquire_tokens(estimated).await;
-                            }
-                            limiter.acquire().await;
+                        if prepare_rate_limit_retry(
+                            &context_name,
+                            estimated,
+                            token_limiter.as_ref(),
+                            rate_limiter.as_ref(),
+                        )
+                        .await
+                        {
+                            acquire_request_capacity(
+                                token_limiter.as_ref(),
+                                rate_limiter.as_ref(),
+                                estimated,
+                            )
+                            .await?;
                             result = process_implementation(
                                 &executor,
                                 &context_content,
@@ -1207,7 +1321,16 @@ pub async fn create_implementation(
     }
 
     if !config.dry_run {
-        validate_generated_rust_layout(Path::new("."))?;
+        match validate_generated_rust_layout(Path::new(".")) {
+            Ok(None) => {}
+            Ok(Some(issues)) => {
+                eprintln!("Warning: Generated implementation layout validation reported issues:");
+                for issue in issues {
+                    eprintln!("  - {}", issue);
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
 
     // Automatic compile + bounded auto-fix loop to restore build validity.
@@ -1671,7 +1794,11 @@ pub async fn create_tests(
             let context_name = node.name.clone();
             let dependency_context = build_dependency_context(&node)?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
-            let estimated = estimate_request_tokens(&context_content, &dependency_context);
+            let estimated = estimate_agent_request_tokens(
+                &executor,
+                &context_content,
+                &dependency_context,
+            );
             let cache_hit = executor
                 .is_cache_hit(&context_content, dependency_context.clone())
                 .unwrap_or(false);
@@ -1702,11 +1829,14 @@ pub async fn create_tests(
                 let token_limiter_clone = token_limiter.clone();
                 tasks.push(tokio::task::spawn(async move {
                     if !cache_hit {
-                        if let Some(ref limiter) = token_limiter_clone {
-                            limiter.acquire_tokens(estimated).await;
-                        }
-                        if let Some(ref limiter) = rate_limiter_clone {
-                            limiter.acquire().await;
+                        if let Err(e) = acquire_request_capacity(
+                            token_limiter_clone.as_ref(),
+                            rate_limiter_clone.as_ref(),
+                            estimated,
+                        )
+                        .await
+                        {
+                            return (context_name, Err(e));
                         }
                     }
                     let mut result = process_tests(
@@ -1720,17 +1850,23 @@ pub async fn create_tests(
                     .await;
                     if let Err(ref e) = result {
                         if is_rate_limit_error(e) {
-                            if let Some(ref limiter) = rate_limiter_clone {
-                                eprintln!(
-                                    "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
-                                    context_name
-                                );
-                                sleep(limiter.retry_delay()).await;
-                                limiter.back_off().await;
-                                if let Some(ref tlimiter) = token_limiter_clone {
-                                    tlimiter.acquire_tokens(estimated).await;
+                            if prepare_rate_limit_retry(
+                                &context_name,
+                                estimated,
+                                token_limiter_clone.as_ref(),
+                                rate_limiter_clone.as_ref(),
+                            )
+                            .await
+                            {
+                                if let Err(e) = acquire_request_capacity(
+                                    token_limiter_clone.as_ref(),
+                                    rate_limiter_clone.as_ref(),
+                                    estimated,
+                                )
+                                .await
+                                {
+                                    return (context_name, Err(e));
                                 }
-                                limiter.acquire().await;
                                 result = process_tests(
                                     &executor_clone,
                                     &context_content,
@@ -1773,12 +1909,12 @@ pub async fn create_tests(
                     if config.verbose {
                         println!("Processing context: {}", context_name);
                     }
-                    if let Some(ref limiter) = token_limiter {
-                        limiter.acquire_tokens(estimated).await;
-                    }
-                    if let Some(ref limiter) = rate_limiter {
-                        limiter.acquire().await;
-                    }
+                    acquire_request_capacity(
+                        token_limiter.as_ref(),
+                        rate_limiter.as_ref(),
+                        estimated,
+                    )
+                    .await?;
                 }
                 let mut result = process_tests(
                     &executor,
@@ -1791,17 +1927,20 @@ pub async fn create_tests(
                 .await;
                 if let Err(ref e) = result {
                     if is_rate_limit_error(e) {
-                        if let Some(ref limiter) = rate_limiter {
-                            eprintln!(
-                                "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
-                                context_name
-                            );
-                            sleep(limiter.retry_delay()).await;
-                            limiter.back_off().await;
-                            if let Some(ref tlimiter) = token_limiter {
-                                tlimiter.acquire_tokens(estimated).await;
-                            }
-                            limiter.acquire().await;
+                        if prepare_rate_limit_retry(
+                            &context_name,
+                            estimated,
+                            token_limiter.as_ref(),
+                            rate_limiter.as_ref(),
+                        )
+                        .await
+                        {
+                            acquire_request_capacity(
+                                token_limiter.as_ref(),
+                                rate_limiter.as_ref(),
+                                estimated,
+                            )
+                            .await?;
                             result = process_tests(
                                 &executor,
                                 &context_content,
@@ -3016,10 +3155,12 @@ fn to_pascal_case_title(s: &str) -> Option<String> {
     }
 }
 
-fn validate_generated_rust_layout(project_root: &Path) -> Result<()> {
+/// Returns Ok(None) when validation passes, Ok(Some(issues)) when there are layout issues (warning),
+/// or Err for I/O errors.
+fn validate_generated_rust_layout(project_root: &Path) -> Result<Option<Vec<String>>> {
     let src_dir = project_root.join("src");
     if !src_dir.exists() {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut issues = Vec::new();
@@ -3072,14 +3213,10 @@ fn validate_generated_rust_layout(project_root: &Path) -> Result<()> {
     }
 
     if issues.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
-    let mut msg = String::from("Generated implementation layout validation failed:\n");
-    for issue in issues {
-        msg.push_str(&format!("  - {}\n", issue));
-    }
-    anyhow::bail!(msg.trim_end().to_string())
+    Ok(Some(issues))
 }
 
 fn validate_mod_exports(mod_file: &Path, issues: &mut Vec<String>) -> Result<()> {

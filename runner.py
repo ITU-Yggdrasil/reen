@@ -58,8 +58,26 @@ def ensure_venv():
 ensure_venv()
 
 
+def _resolve_max_output_tokens(
+    request_value: Optional[int], env_var: str, default: int
+) -> int:
+    """Resolve max output tokens from request, env, or default."""
+    if request_value is not None:
+        return max(1, int(request_value))
+    env_value = os.environ.get(env_var)
+    if env_value:
+        try:
+            return max(1, int(env_value))
+        except ValueError:
+            pass
+    return default
+
+
 def execute_with_anthropic(
-    model: str, system_content: str, user_content: str
+    model: str,
+    system_content: str,
+    user_content: str,
+    max_output_tokens: Optional[int] = None,
 ) -> str:
     """Execute using Anthropic's Claude API with prompt caching."""
     try:
@@ -72,14 +90,24 @@ def execute_with_anthropic(
         raise RuntimeError("ANTHROPIC_API_KEY environment variable not set")
 
     client = anthropic.Anthropic(api_key=api_key)
-
-    message = client.messages.create(
-        model=model,
-        max_tokens=8096,
-        cache_control={"type": "ephemeral"},
-        system=system_content,
-        messages=[{"role": "user", "content": user_content}],
+    max_tokens = _resolve_max_output_tokens(
+        max_output_tokens, "ANTHROPIC_MAX_OUTPUT_TOKENS", 8096
     )
+
+    try:
+        message = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            cache_control={"type": "ephemeral"},
+            system=system_content,
+            messages=[{"role": "user", "content": user_content}],
+        )
+    except Exception as e:
+        status_code = getattr(e, "status_code", None)
+        detail = str(e)
+        if status_code == 429 or "rate limit" in detail.lower():
+            raise RuntimeError(f"Anthropic rate limit exceeded (429): {detail}") from e
+        raise
 
     return message.content[0].text
 
@@ -276,8 +304,8 @@ def determine_provider(model: str) -> tuple:
 
 def _normalize_request(
     request: Dict[str, Any]
-) -> Tuple[str, str, Optional[str]]:
-    """Normalize request to (system_content, user_content, agent_name).
+) -> Tuple[str, str, Optional[str], Optional[int]]:
+    """Normalize request to (system_content, user_content, agent_name, max_output_tokens).
     Supports split format (static_prompt + variable_prompt) and legacy (system_prompt).
     """
     model = request.get("model")
@@ -285,23 +313,25 @@ def _normalize_request(
     variable_prompt = request.get("variable_prompt")
     system_prompt = request.get("system_prompt")
     agent_name = request.get("agent_name")
+    max_output_tokens = request.get("max_output_tokens")
 
     if static_prompt is not None and variable_prompt is not None:
-        return (static_prompt, variable_prompt, agent_name)
+        return (static_prompt, variable_prompt, agent_name, max_output_tokens)
     if system_prompt is not None:
         return (
             system_prompt,
             "Please complete the task described in the system prompt.",
             agent_name,
+            max_output_tokens,
         )
-    return ("", "", agent_name)
+    return ("", "", agent_name, max_output_tokens)
 
 
 def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a model request and return the result."""
     try:
         model = request.get("model")
-        system_content, user_content, agent_name = _normalize_request(request)
+        system_content, user_content, agent_name, max_output_tokens = _normalize_request(request)
 
         if not model:
             return {
@@ -316,7 +346,9 @@ def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
 
         provider, model_name = determine_provider(model)
         if provider == "anthropic":
-            output = execute_with_anthropic(model_name, system_content, user_content)
+            output = execute_with_anthropic(
+                model_name, system_content, user_content, max_output_tokens
+            )
         elif provider == "ollama":
             output = execute_with_ollama(model_name, system_content, user_content)
         elif provider == "openai":
