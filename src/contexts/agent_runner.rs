@@ -91,10 +91,41 @@ impl From<ExecutionError> for AgentRunnerError {
     }
 }
 
+/// Template format for agent specifications (from registry, before population)
+#[derive(Debug, Clone)]
+pub enum AgentSpecificationTemplate {
+    /// Legacy: single template with placeholders (populated as whole)
+    Legacy(String),
+    /// Cache-optimized: static instructions + variable section with placeholders
+    Split {
+        static_prompt: String,
+        variable_prompt: String,
+    },
+}
+
+impl AgentSpecificationTemplate {
+    /// Returns a canonical string for cache key/hash purposes.
+    /// For legacy: the full template. For split: static + variable (unpopulated).
+    pub fn canonical_for_cache(&self) -> String {
+        match self {
+            AgentSpecificationTemplate::Legacy(s) => s.clone(),
+            AgentSpecificationTemplate::Split {
+                static_prompt,
+                variable_prompt,
+            } => format!("{}\n{}", static_prompt, variable_prompt),
+        }
+    }
+}
+
 /// A populated agent specification ready for execution
 #[derive(Debug, Clone)]
 pub struct AgentSpecification {
-    pub system_prompt: String,
+    /// Legacy: full populated prompt (when split format not used)
+    pub system_prompt: Option<String>,
+    /// Cache-optimized: static instructions (system message)
+    pub static_prompt: Option<String>,
+    /// Cache-optimized: populated variable content (user message)
+    pub variable_prompt: Option<String>,
 }
 
 /// The result of executing an agent
@@ -112,8 +143,9 @@ pub struct Model {
 
 /// Trait for loading agent specifications by name
 pub trait AgentRegistry {
-    /// Load an agent specification template by agent name
-    fn get_specification(&self, agent_name: &str) -> Result<String, PopulateError>;
+    /// Load an agent specification template by agent name.
+    /// Returns either a legacy full template or a split (static + variable) template.
+    fn get_specification(&self, agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError>;
 }
 
 /// Trait for resolving execution models by agent name
@@ -169,13 +201,27 @@ where
         // Load the specification template from the registry
         let template = self.agent_registry.get_specification(&self.agent)?;
 
-        // For now, we implement basic placeholder replacement
-        // A full implementation would need a proper template engine
-        let populated = self.replace_placeholders(&template)?;
-
-        Ok(AgentSpecification {
-            system_prompt: populated,
-        })
+        match &template {
+            AgentSpecificationTemplate::Legacy(t) => {
+                let populated = self.replace_placeholders(t)?;
+                Ok(AgentSpecification {
+                    system_prompt: Some(populated),
+                    static_prompt: None,
+                    variable_prompt: None,
+                })
+            }
+            AgentSpecificationTemplate::Split {
+                static_prompt,
+                variable_prompt,
+            } => {
+                let populated = self.replace_placeholders(variable_prompt)?;
+                Ok(AgentSpecification {
+                    system_prompt: None,
+                    static_prompt: Some(static_prompt.clone()),
+                    variable_prompt: Some(populated),
+                })
+            }
+        }
     }
 
     /// Role method: agent.execute
@@ -211,11 +257,28 @@ where
             ExecutionError::PythonRunnerError(format!("Failed to write embedded runner: {}", e))
         })?;
 
-        // Prepare the request JSON
-        let request = serde_json::json!({
-            "model": model.name,
-            "system_prompt": specification.system_prompt
-        });
+        // Prepare the request JSON (split format for cache optimization, legacy fallback)
+        let request = if let (Some(static_p), Some(variable_p)) = (
+            &specification.static_prompt,
+            &specification.variable_prompt,
+        ) {
+            serde_json::json!({
+                "model": model.name,
+                "static_prompt": static_p,
+                "variable_prompt": variable_p,
+                "agent_name": self.agent,
+            })
+        } else if let Some(system_p) = &specification.system_prompt {
+            serde_json::json!({
+                "model": model.name,
+                "system_prompt": system_p,
+            })
+        } else {
+            return Err(ExecutionError::PythonRunnerError(
+                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
+                    .to_string(),
+            ));
+        };
 
         let request_json = serde_json::to_string(&request).map_err(|e| {
             ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
@@ -354,8 +417,9 @@ where
     pub fn is_cache_hit(&self) -> Result<bool, AgentRunnerError> {
         let agent_template = self.agent_registry.get_specification(&self.agent)?;
         let model = self.agent_model_registry.get_model(&self.agent)?;
-        let cache_key = self.generate_cache_key(&agent_template);
-        let cache = self.get_cached_artefact(&agent_template, &model.name)?;
+        let canonical = agent_template.canonical_for_cache();
+        let cache_key = self.generate_cache_key(&canonical);
+        let cache = self.get_cached_artefact(&canonical, &model.name)?;
         Ok(cache.get(&cache_key).is_some())
     }
 
@@ -486,10 +550,11 @@ where
         let model = self.agent_model_registry.get_model(&self.agent)?;
 
         // Step 3: Generate cache key based on agent instructions + input
-        let cache_key = self.generate_cache_key(&agent_template);
+        let canonical = agent_template.canonical_for_cache();
+        let cache_key = self.generate_cache_key(&canonical);
 
         // Step 4: Get cache instance (folder based on hash(instructions + model))
-        let cache = self.get_cached_artefact(&agent_template, &model.name)?;
+        let cache = self.get_cached_artefact(&canonical, &model.name)?;
 
         // Step 5: Check cache for existing result
         if let Some(cached_value) = cache.get(&cache_key) {
@@ -545,8 +610,11 @@ mod tests {
     struct TestRegistry;
 
     impl AgentRegistry for TestRegistry {
-        fn get_specification(&self, agent_name: &str) -> Result<String, PopulateError> {
-            Ok(format!("Test specification for {}", agent_name))
+        fn get_specification(&self, agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
+            Ok(AgentSpecificationTemplate::Legacy(format!(
+                "Test specification for {}",
+                agent_name
+            )))
         }
     }
 
@@ -563,9 +631,11 @@ mod tests {
     struct MissingPlaceholderRegistry;
 
     impl AgentRegistry for MissingPlaceholderRegistry {
-        fn get_specification(&self, _agent_name: &str) -> Result<String, PopulateError> {
+        fn get_specification(&self, _agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
             // This would fail during populate() on a cache miss.
-            Ok("This will fail: {{input.required_field}}".to_string())
+            Ok(AgentSpecificationTemplate::Legacy(
+                "This will fail: {{input.required_field}}".to_string(),
+            ))
         }
     }
 
@@ -637,12 +707,13 @@ mod tests {
         let template = registry
             .get_specification(&agent_name)
             .expect("template should load");
+        let canonical = template.canonical_for_cache();
 
         let runner = AgentRunner::new(agent_name, input, registry, model_registry);
-        let cache_key = runner.generate_cache_key(&template);
-        let instructions_model_hash = runner.generate_instructions_model_hash(&template, "test-model");
+        let cache_key = runner.generate_cache_key(&canonical);
+        let instructions_model_hash = runner.generate_instructions_model_hash(&canonical, "test-model");
         let cache = runner
-            .get_cached_artefact(&template, "test-model")
+            .get_cached_artefact(&canonical, "test-model")
             .expect("cache should initialize");
         let cache_dir = PathBuf::from(".reen").join(&instructions_model_hash);
         let cache_path = cache_dir.join(format!("{}.cache", cache_key));

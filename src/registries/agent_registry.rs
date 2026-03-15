@@ -1,5 +1,7 @@
 use super::agent_spec_resolver::candidate_agent_spec_filenames;
-use crate::contexts::{AgentModelRegistry, AgentRegistry, ExecutionError, PopulateError};
+use crate::contexts::{
+    AgentModelRegistry, AgentRegistry, AgentSpecificationTemplate, ExecutionError, PopulateError,
+};
 use crate::registries::{embedded_agent_spec, FileAgentModelRegistry};
 
 /// File-based implementation of AgentRegistry
@@ -18,7 +20,7 @@ impl FileAgentRegistry {
 }
 
 impl AgentRegistry for FileAgentRegistry {
-    fn get_specification(&self, agent_name: &str) -> Result<String, PopulateError> {
+    fn get_specification(&self, agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
         let model_name = FileAgentModelRegistry::new(None, None, None)
             .get_model(agent_name)
             .map(|model| model.name)
@@ -40,14 +42,14 @@ impl AgentRegistry for FileAgentRegistry {
             return Err(PopulateError::AgentNotFound(agent_name.to_string()));
         };
 
-        // Extract the system_prompt from the YAML.
-        // This is a simple extraction - could use a proper YAML parser.
-        extract_system_prompt(agent_content)
+        // Extract the specification from the YAML (split or legacy format)
+        extract_specification(agent_content)
     }
 }
 
-/// Extracts the system_prompt field from a YAML agent specification
-fn extract_system_prompt(yaml_content: &str) -> Result<String, PopulateError> {
+/// Extracts the agent specification from YAML.
+/// Prefers static_prompt + variable_prompt (cache-optimized); falls back to system_prompt (legacy).
+fn extract_specification(yaml_content: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
     use yaml_rust::YamlLoader;
 
     let docs = YamlLoader::load_from_str(yaml_content)
@@ -61,12 +63,23 @@ fn extract_system_prompt(yaml_content: &str) -> Result<String, PopulateError> {
 
     let doc = &docs[0];
 
-    // Extract the system_prompt field
+    // Prefer split format (cache-optimized) when both static_prompt and variable_prompt present
+    let static_p = doc["static_prompt"].as_str();
+    let variable_p = doc["variable_prompt"].as_str();
+    if let (Some(static_prompt), Some(variable_prompt)) = (static_p, variable_p) {
+        return Ok(AgentSpecificationTemplate::Split {
+            static_prompt: static_prompt.to_string(),
+            variable_prompt: variable_prompt.to_string(),
+        });
+    }
+
+    // Fall back to legacy system_prompt
     if let Some(system_prompt) = doc["system_prompt"].as_str() {
-        Ok(system_prompt.to_string())
+        Ok(AgentSpecificationTemplate::Legacy(system_prompt.to_string()))
     } else {
         Err(PopulateError::InvalidSpecification(
-            "No system_prompt field found in agent specification".to_string(),
+            "No system_prompt or (static_prompt + variable_prompt) found in agent specification"
+                .to_string(),
         ))
     }
 }
@@ -74,9 +87,10 @@ fn extract_system_prompt(yaml_content: &str) -> Result<String, PopulateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contexts::AgentSpecificationTemplate;
 
     #[test]
-    fn test_extract_system_prompt() {
+    fn test_extract_specification_legacy() {
         let yaml = r#"
 name: test_agent
 description: Test agent
@@ -85,39 +99,65 @@ system_prompt: |
   It has multiple lines.
 "#;
 
-        let result = extract_system_prompt(yaml);
+        let result = extract_specification(yaml);
         assert!(result.is_ok());
-        let prompt = result.unwrap();
-        assert!(prompt.contains("This is a test prompt"));
+        let template = result.unwrap();
+        let canonical = template.canonical_for_cache();
+        assert!(canonical.contains("This is a test prompt"));
     }
 
     #[test]
-    fn test_extract_system_prompt_missing() {
+    fn test_extract_specification_split() {
+        let yaml = r#"
+name: test_agent
+description: Test agent
+static_prompt: |
+  Static instructions here.
+variable_prompt: |
+  Variable {{input.foo}} here.
+"#;
+
+        let result = extract_specification(yaml);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            AgentSpecificationTemplate::Split {
+                static_prompt,
+                variable_prompt,
+            } => {
+                assert!(static_prompt.contains("Static instructions"));
+                assert!(variable_prompt.contains("{{input.foo}}"));
+            }
+            _ => panic!("expected Split format"),
+        }
+    }
+
+    #[test]
+    fn test_extract_specification_missing() {
         let yaml = r#"
 name: test_agent
 description: Test agent
 "#;
 
-        let result = extract_system_prompt(yaml);
+        let result = extract_specification(yaml);
         assert!(result.is_err());
     }
 
     #[test]
     fn loads_embedded_agent_specification() {
         let registry = FileAgentRegistry::new(None);
-        let output = registry
+        let template = registry
             .get_specification("create_implementation")
             .expect("embedded spec should load");
-        assert!(output.contains("code implementation agent"));
+        assert!(template.canonical_for_cache().contains("code implementation agent"));
     }
 
     #[test]
     fn falls_back_to_default_embedded_spec_for_variant_model() {
         let registry = FileAgentRegistry::new(None);
-        let output = registry
+        let template = registry
             .get_specification("create_implementation")
             .expect("spec load");
-        assert!(output.contains("Strict Specification Compliance"));
+        assert!(template.canonical_for_cache().contains("Strict Specification Compliance"));
     }
 
     #[test]

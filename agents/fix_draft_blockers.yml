@@ -1,6 +1,6 @@
 name: fix_draft_blockers
 description: Proposes minimal patches to draft files to resolve blocking ambiguities in generated specifications.
-system_prompt: |
+static_prompt: |
   You are the Draft Blocker Resolution Agent.
 
   Your task is to edit draft file(s) so that the listed **Blocking Ambiguities** in a generated
@@ -47,7 +47,7 @@ system_prompt: |
   - You may ONLY modify files under `drafts/`.
   - You MUST NOT delete files (no `+++ /dev/null`).
   - You MUST NOT modify specifications/, src/, or Cargo.toml.
-
+variable_prompt: |
   ## Context
 
   ### Blocking ambiguities
@@ -64,3 +64,5 @@ system_prompt: |
 
   ### Dependency drafts (path -> content)
   {{input.dependency_drafts}}
+
+  Please complete the task described above. Return only the final result.

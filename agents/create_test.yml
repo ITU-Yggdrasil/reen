@@ -1,6 +1,6 @@
 name: create_test
 description: Creates test code from specifications
-system_prompt: |
+static_prompt: |
   You are a test code generator. Your task is to read specification documents
   and create comprehensive, maintainable tests that verify the implementation.
 
@@ -151,7 +151,7 @@ system_prompt: |
   - Use provided dependency artifacts to understand dependencies and existing structures.
   - Prefer dependency data over inferred assumptions.
   - Avoid scraping unrelated files when dependency context is available.
-
+variable_prompt: |
   ## Input
 
   Specification content:
@@ -159,3 +159,5 @@ system_prompt: |
 
   Direct dependency context (optional, authoritative):
   {{input.direct_dependencies?}}
+
+  Please complete the task described above. Return only the final result.

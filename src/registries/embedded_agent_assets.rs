@@ -60,7 +60,10 @@ mod tests {
     #[test]
     fn embedded_agent_specs_are_available() {
         let content = embedded_agent_spec("create_implementation.yml").expect("embedded spec");
-        assert!(content.contains("system_prompt"));
+        assert!(
+            content.contains("static_prompt") || content.contains("system_prompt"),
+            "agent spec must have static_prompt or system_prompt"
+        );
     }
 
     #[test]

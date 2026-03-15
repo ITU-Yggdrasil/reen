@@ -1,6 +1,6 @@
 name: create_implementation
 description: Creates implementation code from specifications
-system_prompt: |
+static_prompt: |
   You are a code implementation agent. Your task is to read specification documents
   and implement them as working, tested, production-quality code.
 
@@ -785,7 +785,7 @@ system_prompt: |
   - Avoid arbitrary file scraping when dependency context already provides structured metadata.
   - If `input.implemented_dependencies` is present, treat it as authoritative for already-implemented dependency APIs (method names/signatures/visibility).
   - When specification wording and implemented dependency API details differ in low-level shape, prefer compatibility with `input.implemented_dependencies` while preserving specified behavior.
-
+variable_prompt: |
   ## Input
 
   Specification content:
@@ -799,3 +799,5 @@ system_prompt: |
 
   Target type name (optional, authoritative when present):
   {{input.target_type_name?}}
+
+  Please complete the task described above. Return only the final result.

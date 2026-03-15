@@ -2637,7 +2637,7 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
 
     for agent_name in agents {
         let instructions = match agent_registry.get_specification(agent_name) {
-            Ok(s) => s,
+            Ok(template) => template.canonical_for_cache(),
             Err(e) => {
                 if config.verbose {
                     eprintln!(
@@ -2791,7 +2791,7 @@ fn clear_single_agent_cache_entry(
     config: &Config,
 ) -> Result<bool> {
     let instructions = match agent_registry.get_specification(agent_name) {
-        Ok(s) => s,
+        Ok(template) => template.canonical_for_cache(),
         Err(e) => {
             if config.verbose {
                 eprintln!(

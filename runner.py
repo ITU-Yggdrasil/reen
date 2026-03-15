@@ -6,12 +6,13 @@ This script receives agent execution requests via stdin and returns results via 
 It supports multiple LLM providers through a unified interface.
 """
 
+import hashlib
 import json
 import sys
 import os
 import socket
 from urllib.parse import urlparse
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 # Resolve the starting directory. When the script is embedded in the reen binary
 # and written to a temp file, REEN_PROJECT_DIR tells us where to start looking.
@@ -57,8 +58,10 @@ def ensure_venv():
 ensure_venv()
 
 
-def execute_with_anthropic(model: str, system_prompt: str) -> str:
-    """Execute using Anthropic's Claude API."""
+def execute_with_anthropic(
+    model: str, system_content: str, user_content: str
+) -> str:
+    """Execute using Anthropic's Claude API with prompt caching."""
     try:
         import anthropic
     except ImportError:
@@ -73,16 +76,17 @@ def execute_with_anthropic(model: str, system_prompt: str) -> str:
     message = client.messages.create(
         model=model,
         max_tokens=8096,
-        system=system_prompt,
-        messages=[
-            {"role": "user", "content": "Please complete the task described in the system prompt."}
-        ]
+        cache_control={"type": "ephemeral"},
+        system=system_content,
+        messages=[{"role": "user", "content": user_content}],
     )
 
     return message.content[0].text
 
 
-def execute_with_ollama(model: str, system_prompt: str) -> str:
+def execute_with_ollama(
+    model: str, system_content: str, user_content: str
+) -> str:
     """Execute using Ollama's local API."""
     try:
         import ollama
@@ -93,23 +97,22 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
     # Default to localhost:11434 for local Ollama instances
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     client = ollama.Client(host=base_url)
-    
+
     # Extract model name (handle format like "qwen2.5:7b" or "ollama:qwen2.5:7b")
     # Models in models.yml are like "qwen2.5:7b" which is the correct format for Ollama
     model_name = model
-    
+
     # Remove "ollama:" prefix if present
     if model_name.startswith("ollama:"):
         model_name = model_name[7:]
-
 
     # The model name format "qwen2.5:7b" is correct for Ollama (model:tag)
     response = client.chat(
         model=model_name,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Please complete the task described in the system prompt."}
-        ]
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ],
     )
 
     first_output = response["message"]["content"]
@@ -127,7 +130,7 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
                 {
                     "role": "user",
                     "content": (
-                        f"{system_prompt}\n\n"
+                        f"{system_content}\n\n{user_content}\n\n"
                         "Please complete the task described above. "
                         "Return only the final result."
                     ),
@@ -139,8 +142,28 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
     return first_output
 
 
-def execute_with_openai(model: str, system_prompt: str) -> str:
-    """Execute using OpenAI's API."""
+def _openai_prompt_cache_key(agent_name: str, static_prompt: str) -> str:
+    """Generate stable prompt_cache_key for OpenAI cache routing."""
+    short_hash = hashlib.sha256(static_prompt.encode()).hexdigest()[:16]
+    return f"reen:{agent_name}:{short_hash}"
+
+
+def _openai_supports_extended_cache(model: str) -> bool:
+    """Check if model supports 24h prompt cache retention."""
+    model_lower = model.lower()
+    return any(
+        x in model_lower
+        for x in ["gpt-4.1", "gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.4", "gp5-5.1"]
+    )
+
+
+def execute_with_openai(
+    model: str,
+    system_content: str,
+    user_content: str,
+    agent_name: Optional[str] = None,
+) -> str:
+    """Execute using OpenAI's API with prompt caching."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -173,18 +196,28 @@ def execute_with_openai(model: str, system_prompt: str) -> str:
 
     client = OpenAI(**client_kwargs)
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Please complete the task described in the system prompt."}
-        ]
-    )
+    create_kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ],
+    }
+    if agent_name and len(system_content) >= 256:
+        create_kwargs["prompt_cache_key"] = _openai_prompt_cache_key(
+            agent_name, system_content
+        )
+    if _openai_supports_extended_cache(model):
+        create_kwargs["prompt_cache_retention"] = "24h"
+
+    response = client.chat.completions.create(**create_kwargs)
 
     return response.choices[0].message.content
 
 
-def execute_with_mistral(model: str, system_prompt: str) -> str:
+def execute_with_mistral(
+    model: str, system_content: str, user_content: str
+) -> str:
     """Execute using Mistral's API (OpenAI-compatible)."""
     try:
         from openai import OpenAI
@@ -209,9 +242,9 @@ def execute_with_mistral(model: str, system_prompt: str) -> str:
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "Please complete the task described in the system prompt."}
-        ]
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ],
     )
 
     return response.choices[0].message.content
@@ -241,42 +274,72 @@ def determine_provider(model: str) -> tuple:
         return "ollama", model
 
 
+def _normalize_request(
+    request: Dict[str, Any]
+) -> Tuple[str, str, Optional[str]]:
+    """Normalize request to (system_content, user_content, agent_name).
+    Supports split format (static_prompt + variable_prompt) and legacy (system_prompt).
+    """
+    model = request.get("model")
+    static_prompt = request.get("static_prompt")
+    variable_prompt = request.get("variable_prompt")
+    system_prompt = request.get("system_prompt")
+    agent_name = request.get("agent_name")
+
+    if static_prompt is not None and variable_prompt is not None:
+        return (static_prompt, variable_prompt, agent_name)
+    if system_prompt is not None:
+        return (
+            system_prompt,
+            "Please complete the task described in the system prompt.",
+            agent_name,
+        )
+    return ("", "", agent_name)
+
+
 def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a model request and return the result."""
     try:
         model = request.get("model")
-        system_prompt = request.get("system_prompt")
+        system_content, user_content, agent_name = _normalize_request(request)
 
-        if not model or not system_prompt:
+        if not model:
             return {
                 "success": False,
-                "error": "Missing required fields: model and system_prompt"
+                "error": "Missing required field: model",
+            }
+        if not system_content or not user_content:
+            return {
+                "success": False,
+                "error": "Missing required fields: (system_prompt) or (static_prompt + variable_prompt)",
             }
 
         provider, model_name = determine_provider(model)
         if provider == "anthropic":
-            output = execute_with_anthropic(model_name, system_prompt)
+            output = execute_with_anthropic(model_name, system_content, user_content)
         elif provider == "ollama":
-            output = execute_with_ollama(model_name, system_prompt)
+            output = execute_with_ollama(model_name, system_content, user_content)
         elif provider == "openai":
-            output = execute_with_openai(model_name, system_prompt)
+            output = execute_with_openai(
+                model_name, system_content, user_content, agent_name
+            )
         elif provider == "mistral":
-            output = execute_with_mistral(model_name, system_prompt)
+            output = execute_with_mistral(model_name, system_content, user_content)
         else:
             return {
                 "success": False,
-                "error": f"Unknown provider: {provider}"
+                "error": f"Unknown provider: {provider}",
             }
 
         return {
             "success": True,
-            "output": output
+            "output": output,
         }
 
     except Exception as e:
         return {
             "success": False,
-            "error": format_exception(e)
+            "error": format_exception(e),
         }
 
 

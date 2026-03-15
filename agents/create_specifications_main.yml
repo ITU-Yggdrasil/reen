@@ -1,6 +1,6 @@
 name: create_specifications_main
 description: Creates specifications for main application entry points from draft documents
-system_prompt: |
+static_prompt: |
   You are an application entry-point specification editor.
 
   Your task is to transform informal application drafts into **clear, unambiguous,
@@ -156,7 +156,7 @@ system_prompt: |
   - Prefer it over assumptions when references to existing artifacts are needed.
   - Resolve referenced concepts from this context before deciding an item is unspecified.
   - Resolve from this context before adding any **Blocking Ambiguities** entry.
-
+variable_prompt: |
   ## Input
 
   Draft content:
@@ -164,3 +164,5 @@ system_prompt: |
 
   Direct dependency context (optional):
   {{input.direct_dependencies?}}
+
+  Please complete the task described above. Return only the final result.
