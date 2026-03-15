@@ -36,7 +36,7 @@ jobs:
 
       - name: Create specifications (snake)
         working-directory: tests/snake
-        run: ../../target/release/reen create specification
+        run: ../../target/release/reen create specification 
 
       - name: Create implementation (snake)
         working-directory: tests/snake
