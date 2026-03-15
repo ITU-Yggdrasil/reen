@@ -44,4 +44,4 @@ jobs:
 
       - name: Build generated snake project
         working-directory: tests/snake
-        run: cargo build
+        run: cargo build 
