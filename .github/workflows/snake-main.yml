@@ -40,7 +40,7 @@ jobs:
 
       - name: Create implementation (snake)
         working-directory: tests/snake
-        run: ../../target/release/reen create implementation
+        run: ../../target/release/reen create --token-limit 30000 implementation
 
       - name: Build generated snake project
         working-directory: tests/snake
