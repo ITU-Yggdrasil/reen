@@ -16,6 +16,6 @@ create_test:
 resolve_compilation_errors:
   model: qwen2.5:7b # gpt-5
   parallel: false
-review_draft_errors:
-  model: qwen2.5:7b # gpt-5
+fix_draft_blockers:
+  model: qwen2.5:7b
   parallel: false

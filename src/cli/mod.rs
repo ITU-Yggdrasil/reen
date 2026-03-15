@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::env;
+use std::future::Future;
+use std::pin::Pin;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -19,7 +21,7 @@ mod project_structure;
 mod rate_limiter;
 mod token_limiter;
 
-use agent_executor::AgentExecutor;
+use agent_executor::{AgentExecutor, AgentResponse};
 use rate_limiter::RateLimiter;
 use token_limiter::{estimate_request_tokens, TokenLimiter};
 use dependency_graph::{
@@ -29,6 +31,7 @@ use progress::ProgressIndicator;
 use project_structure::{
     analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
 };
+use compilation_fix::apply_draft_patches;
 use reen::build_tracker::{BuildTracker, Stage};
 use reen::contexts::{AgentModelRegistry, AgentRegistry};
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
@@ -70,6 +73,7 @@ pub fn resolve_token_limit(cli_arg: Option<f64>) -> Option<f64> {
 /// Controls which draft categories are included when resolving input files.
 /// When both fields are false, all categories are included (no filter).
 /// When one or both are true, only the selected categories are included.
+#[derive(Clone, Copy)]
 pub struct CategoryFilter {
     pub contexts: bool,
     pub data: bool,
@@ -123,6 +127,20 @@ impl CategoryFilter {
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
 
+/// Outcome of processing a single draft for specification creation.
+#[derive(Debug)]
+pub enum ProcessSpecOutcome {
+    Success,
+    BlockingAmbiguities {
+        draft_file: PathBuf,
+        draft_name: String,
+        draft_content: String,
+        spec_content: String,
+        actionable: Vec<String>,
+        additional_context: HashMap<String, serde_json::Value>,
+    },
+}
+
 /// Returns true if the error indicates a 429 rate limit response.
 fn is_rate_limit_error(e: &anyhow::Error) -> bool {
     let s = e.to_string();
@@ -139,11 +157,42 @@ pub async fn create_specification(
     filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
+    fix: bool,
+    max_fix_attempts: usize,
     config: &Config,
 ) -> Result<()> {
+    create_specification_inner(
+        names,
+        clear_cache,
+        filter,
+        rate_limit,
+        token_limit,
+        fix,
+        max_fix_attempts,
+        0,
+        config,
+    )
+    .await
+}
+
+
+fn create_specification_inner(
+    names: Vec<String>,
+    clear_cache: bool,
+    filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    fix: bool,
+    max_fix_attempts: usize,
+    fix_attempt: usize,
+    config: &Config,
+) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+    let filter = *filter;
+    let config = *config;
+    Box::pin(async move {
     let names_provided = !names.is_empty();
     let names_for_clear = names.clone();
-    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", filter)?;
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &filter)?;
 
     if draft_files.is_empty() {
         println!("No draft files found to process");
@@ -151,7 +200,7 @@ pub async fn create_specification(
     }
 
     let dependency_roots =
-        select_dependency_roots(draft_files, DRAFTS_DIR, names_provided, filter)?;
+        select_dependency_roots(draft_files, DRAFTS_DIR, names_provided, &filter)?;
     let expanded_draft_files =
         expand_with_transitive_dependencies(dependency_roots, DRAFTS_DIR, None)?;
     let filtered_draft_files = if filter.is_active() {
@@ -167,7 +216,7 @@ pub async fn create_specification(
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
     if clear_cache {
-        clear_tracker_stage(&mut tracker, Stage::Specification, &names_for_clear, config)?;
+        clear_tracker_stage(&mut tracker, Stage::Specification, &names_for_clear, &config)?;
     }
 
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
@@ -200,7 +249,7 @@ pub async fn create_specification(
             if !executors.contains_key(&agent_name) {
                 executors.insert(
                     agent_name.clone(),
-                    Arc::new(AgentExecutor::new(&agent_name, config)?),
+                    Arc::new(AgentExecutor::new(&agent_name, &config)?),
                 );
             }
             let executor = executors
@@ -269,7 +318,7 @@ pub async fn create_specification(
                         progress.start_item(&draft_name, Some(estimated));
                     }
 
-                    let cfg = *config;
+                    let cfg = config;
                     let executor_clone = executor.clone();
                     let rate_limiter_clone = rate_limiter.clone();
                     let token_limiter_clone = token_limiter.clone();
@@ -330,7 +379,7 @@ pub async fn create_specification(
                     let (draft_name, draft_file, output_path, dependency_fingerprint, result) =
                         task.await?;
                     match result {
-                        Ok(_) => {
+                        Ok(ProcessSpecOutcome::Success) => {
                             tracker.record(
                                 Stage::Specification,
                                 &draft_name,
@@ -345,9 +394,39 @@ pub async fn create_specification(
                                 println!("✓ Successfully created specification for {}", draft_name);
                             }
                         }
+                        Ok(ProcessSpecOutcome::BlockingAmbiguities {
+                            draft_file: ba_draft_file,
+                            draft_name: ba_draft_name,
+                            draft_content: ba_draft_content,
+                            spec_content: ba_spec_content,
+                            actionable: ba_actionable,
+                            additional_context: ba_context,
+                        }) => {
+                            progress.complete_item(&draft_name, false);
+                            if fix && fix_attempt < max_fix_attempts {
+                                return try_fix_and_retry(
+                                    &ba_draft_file,
+                                    &ba_draft_name,
+                                    &ba_draft_content,
+                                    &ba_spec_content,
+                                    &ba_actionable,
+                                    ba_context,
+                                    fix_attempt,
+                                    max_fix_attempts,
+                                    &filter,
+                                    rate_limit,
+                                    token_limit,
+                                    &config,
+                                )
+                                .await;
+                            }
+                            eprintln!("✗ Blocking ambiguities (use --fix to auto-fix drafts)");
+                            anyhow::bail!("generated specification contains blocking ambiguities");
+                        }
                         Err(e) => {
                             progress.complete_item(&draft_name, false);
                             eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+                            anyhow::bail!("{}", e);
                         }
                     }
                 }
@@ -409,7 +488,7 @@ pub async fn create_specification(
                         &draft_content,
                         &draft_file,
                         &draft_name,
-                        config,
+                        &config,
                         dependency_context.clone(),
                     )
                     .await;
@@ -431,7 +510,7 @@ pub async fn create_specification(
                                     &draft_content,
                                     &draft_file,
                                     &draft_name,
-                                    config,
+                                    &config,
                                     dependency_context,
                                 )
                                 .await;
@@ -439,7 +518,7 @@ pub async fn create_specification(
                         }
                     }
                     match result {
-                        Ok(_) => {
+                        Ok(ProcessSpecOutcome::Success) => {
                             tracker.record(
                                 Stage::Specification,
                                 &draft_name,
@@ -454,9 +533,39 @@ pub async fn create_specification(
                                 println!("✓ Successfully created specification for {}", draft_name);
                             }
                         }
+                        Ok(ProcessSpecOutcome::BlockingAmbiguities {
+                            draft_file: ba_draft_file,
+                            draft_name: ba_draft_name,
+                            draft_content: ba_draft_content,
+                            spec_content: ba_spec_content,
+                            actionable: ba_actionable,
+                            additional_context: ba_context,
+                        }) => {
+                            progress.complete_item(&draft_name, false);
+                            if fix && fix_attempt < max_fix_attempts {
+                                return try_fix_and_retry(
+                                    &ba_draft_file,
+                                    &ba_draft_name,
+                                    &ba_draft_content,
+                                    &ba_spec_content,
+                                    &ba_actionable,
+                                    ba_context,
+                                    fix_attempt,
+                                    max_fix_attempts,
+                                    &filter,
+                                    rate_limit,
+                                    token_limit,
+                                    &config,
+                                )
+                                .await;
+                            }
+                            eprintln!("✗ Blocking ambiguities (use --fix to auto-fix drafts)");
+                            anyhow::bail!("generated specification contains blocking ambiguities");
+                        }
                         Err(e) => {
                             progress.complete_item(&draft_name, false);
                             eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+                            anyhow::bail!("{}", e);
                         }
                     }
                 }
@@ -474,6 +583,7 @@ pub async fn create_specification(
     }
 
     Ok(())
+    })
 }
 
 pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result<()> {
@@ -703,159 +813,10 @@ async fn review_issues_with_agent(
     fix_options: ReviewFixOptions,
     config: &Config,
 ) -> Result<()> {
-    let executor = AgentExecutor::new("review_draft_errors", config)?;
-    let mut suggestions: Vec<ReviewSuggestion> = Vec::new();
-
-    for issue in issues {
-        let targets = resolve_review_targets(&issue.origin_draft_path, &issue.error_section)?;
-        let mut emitted_source_header = false;
-
-        for target in targets {
-            let draft_content = fs::read_to_string(&target.draft_path).with_context(|| {
-                format!("Failed to read draft file: {}", target.draft_path.display())
-            })?;
-
-            let mut additional_context = HashMap::new();
-            additional_context.insert("stage".to_string(), json!(stage));
-            additional_context.insert(
-                "error_source".to_string(),
-                json!(issue.error_source.display().to_string()),
-            );
-            additional_context.insert("error_section".to_string(), json!(issue.error_section));
-            additional_context.insert("fix_mode".to_string(), json!(fix_options.fix));
-            additional_context.insert(
-                "target_draft".to_string(),
-                json!(target.draft_path.display().to_string()),
-            );
-            additional_context.insert(
-                "ownership_reason".to_string(),
-                json!(target.ownership_reason.clone()),
-            );
-            additional_context.insert(
-                "draft_sections".to_string(),
-                json!(extract_draft_section_names(&draft_content)),
-            );
-            additional_context.insert(
-                "style_constraints".to_string(),
-                json!(
-                    "Use specification style. Prefer concise requirement bullets. Avoid implementation details."
-                ),
-            );
-
-            let response = executor
-                .execute_with_context(&draft_content, additional_context)
-                .await?;
-            let output = match response {
-                agent_executor::AgentResponse::Final(s) => s,
-                agent_executor::AgentResponse::Questions(q) => q,
-            };
-
-            if fix_options.fix {
-                let deltas = parse_review_delta_envelope(&output)?;
-                for delta in deltas.changes {
-                    suggestions.push(ReviewSuggestion {
-                        draft_path: target.draft_path.clone(),
-                        delta,
-                        error_source: issue.error_source.clone(),
-                        ownership_reason: target.ownership_reason.clone(),
-                    });
-                }
-            } else {
-                if !emitted_source_header {
-                    eprintln!("\u{001b}[31m{}\u{001b}[0m", issue.error_source.display());
-                    emitted_source_header = true;
-                }
-                println!(
-                    "  target: {} ({})",
-                    target.draft_path.display(),
-                    target.ownership_reason
-                );
-                println!("\u{001b}[32m{}\u{001b}[0m", output.trim());
-            }
-        }
-    }
-
-    if !fix_options.fix {
-        return Ok(());
-    }
-    if !fix_options.file_filters.is_empty() {
-        suggestions.retain(|suggestion| {
-            suggestion_matches_file_filter(&suggestion.draft_path, &fix_options.file_filters)
-        });
-    }
-    if suggestions.is_empty() {
-        if fix_options.file_filters.is_empty() {
-            println!("No suggestions generated for --fix");
-        } else {
-            println!("No suggestions matched --file filters");
-        }
-        return Ok(());
-    }
-
-    let selected_indices = select_suggestions(&suggestions, fix_options)?;
-    if selected_indices.is_empty() {
-        println!("No suggestions applied");
-        return Ok(());
-    }
-
-    let mut grouped: BTreeMap<PathBuf, Vec<ReviewDelta>> = BTreeMap::new();
-    for idx in selected_indices {
-        if let Some(s) = suggestions.get(idx) {
-            grouped
-                .entry(s.draft_path.clone())
-                .or_default()
-                .push(s.delta.clone());
-        }
-    }
-
-    let mut change_report: BTreeMap<PathBuf, Vec<AppliedReviewChange>> = BTreeMap::new();
-    let mut rejected = Vec::<RejectedSuggestion>::new();
-    for (path, deltas) in grouped {
-        let draft_content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read draft file: {}", path.display()))?;
-        let (applied, rejected_for_file) =
-            apply_review_deltas(&path, &draft_content, deltas, config.dry_run)?;
-        if !applied.is_empty() {
-            change_report.insert(path.clone(), applied);
-        }
-        rejected.extend(
-            rejected_for_file
-                .into_iter()
-                .map(|(delta, reason)| RejectedSuggestion {
-                    draft_path: path.clone(),
-                    reason,
-                    delta,
-                }),
-        );
-    }
-
-    for (path, changes) in &change_report {
-        println!("{}", path.display());
-        for change in changes {
-            if let Some(style_intent) = &change.style_intent {
-                println!(
-                    "  - {} [{}]: {} ({})",
-                    change.section, change.change_type, change.preview, style_intent
-                );
-            } else {
-                println!(
-                    "  - {} [{}]: {}",
-                    change.section, change.change_type, change.preview
-                );
-            }
-        }
-    }
-    for item in rejected {
-        println!(
-            "rejected: {} [{} {}] - {}",
-            item.draft_path.display(),
-            item.delta.section,
-            item.delta.change_type,
-            item.reason
-        );
-    }
-
-    Ok(())
+    let _ = (stage, issues, fix_options, config);
+    anyhow::bail!(
+        "The review agent has been removed. The `review` workflow is no longer available."
+    );
 }
 
 fn resolve_review_targets(
@@ -1344,15 +1305,15 @@ async fn process_specification(
     draft_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
-) -> Result<()> {
+) -> Result<ProcessSpecOutcome> {
     if config.dry_run {
         println!("[DRY RUN] Would create specification for: {}", draft_name);
-        return Ok(());
+        return Ok(ProcessSpecOutcome::Success);
     }
 
     // Use conversational execution to handle questions
     let spec_content = executor
-        .execute_with_conversation_with_seed(&draft_content, draft_name, additional_context)
+        .execute_with_conversation_with_seed(&draft_content, draft_name, additional_context.clone())
         .await?;
 
     // Determine output path preserving folder structure
@@ -1360,10 +1321,11 @@ async fn process_specification(
         determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
     let mut has_blocking_ambiguities = false;
+    let mut actionable = Vec::new();
 
     // Report Blocking Ambiguities immediately if present in generated spec
     if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-        let actionable = extract_actionable_blocking_bullets(&blocking);
+        actionable = extract_actionable_blocking_bullets(&blocking);
         if !actionable.is_empty() {
             has_blocking_ambiguities = true;
             eprintln!("error[spec:blocking]:");
@@ -1374,7 +1336,7 @@ async fn process_specification(
                 draft_name
             );
             eprintln!();
-            for bullet in actionable {
+            for bullet in &actionable {
                 eprintln!("  {}", bullet);
             }
             eprintln!();
@@ -1386,13 +1348,140 @@ async fn process_specification(
         fs::create_dir_all(parent).context("Failed to create specification output directory")?;
     }
 
-    fs::write(&output_path, spec_content).context("Failed to write specification file")?;
+    fs::write(&output_path, &spec_content).context("Failed to write specification file")?;
 
     if has_blocking_ambiguities {
-        anyhow::bail!("generated specification contains blocking ambiguities");
+        return Ok(ProcessSpecOutcome::BlockingAmbiguities {
+            draft_file: draft_file.to_path_buf(),
+            draft_name: draft_name.to_string(),
+            draft_content: draft_content.to_string(),
+            spec_content,
+            actionable,
+            additional_context,
+        });
     }
 
-    Ok(())
+    Ok(ProcessSpecOutcome::Success)
+}
+
+fn build_dependency_drafts_from_context(
+    context: &HashMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    let closure = context
+        .get("dependency_closure")
+        .or_else(|| context.get("direct_dependencies"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut map = serde_json::Map::new();
+    for item in closure {
+        if let Some(obj) = item.as_object() {
+            let path = obj.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let content = obj.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            if !path.is_empty() && path.starts_with("drafts/") {
+                map.insert(path.to_string(), serde_json::Value::String(content.to_string()));
+            }
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+async fn try_fix_and_retry(
+    draft_file: &Path,
+    draft_name: &str,
+    draft_content: &str,
+    spec_content: &str,
+    actionable: &[String],
+    additional_context: HashMap<String, serde_json::Value>,
+    fix_attempt: usize,
+    max_fix_attempts: usize,
+    filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    config: &Config,
+) -> Result<()> {
+    let dependency_drafts = build_dependency_drafts_from_context(&additional_context);
+
+    let mut fix_context = HashMap::new();
+    fix_context.insert(
+        "blocking_ambiguities".to_string(),
+        serde_json::Value::String(actionable.join("\n")),
+    );
+    fix_context.insert(
+        "failed_draft_path".to_string(),
+        serde_json::Value::String(draft_file.display().to_string()),
+    );
+    fix_context.insert(
+        "failed_draft_content".to_string(),
+        serde_json::Value::String(draft_content.to_string()),
+    );
+    fix_context.insert(
+        "failed_spec_content".to_string(),
+        serde_json::Value::String(spec_content.to_string()),
+    );
+    fix_context.insert(
+        "dependency_drafts".to_string(),
+        serde_json::Value::String(
+            serde_json::to_string_pretty(&dependency_drafts).unwrap_or_else(|_| "{}".to_string()),
+        ),
+    );
+
+    let fix_executor = Arc::new(AgentExecutor::new("fix_draft_blockers", config)?);
+    let agent_response = fix_executor
+        .execute_with_context("", fix_context)
+        .await
+        .context("Failed to execute fix_draft_blockers agent")?;
+
+    let patch_output = match agent_response {
+        AgentResponse::Final(s) => s,
+        AgentResponse::Questions(q) => {
+            anyhow::bail!(
+                "Fix agent requested clarification; cannot auto-fix. Output: {}",
+                q
+            );
+        }
+    };
+
+    let project_root = Path::new(".");
+    let patched_paths =
+        apply_draft_patches(project_root, &patch_output).context("Failed to apply draft patches")?;
+
+    let mut affected_names: HashSet<String> = patched_paths
+        .iter()
+        .filter_map(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .map(String::from)
+        })
+        .collect();
+    affected_names.insert(draft_name.to_string());
+
+    if config.verbose {
+        println!(
+            "✓ Applied fix patches to {} draft(s); retrying (attempt {}/{})",
+            patched_paths.len(),
+            fix_attempt + 1,
+            max_fix_attempts
+        );
+    }
+
+    let affected_names_vec: Vec<String> = affected_names.into_iter().collect();
+
+    let mut tracker = BuildTracker::load()?;
+    clear_tracker_stage(&mut tracker, Stage::Specification, &affected_names_vec, config)?;
+
+    create_specification_inner(
+        affected_names_vec,
+        true,
+        filter,
+        rate_limit,
+        token_limit,
+        true,
+        max_fix_attempts,
+        fix_attempt + 1,
+        config,
+    )
+    .await
 }
 
 pub async fn create_implementation(

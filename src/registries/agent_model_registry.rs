@@ -269,7 +269,7 @@ mod tests {
             "create_implementation:\n  model: qwen2.5:7b\n  parallel: false",
             "create_test:\n  model: qwen2.5:7b\n  parallel: false",
             "resolve_compilation_errors:\n  model: qwen2.5:7b\n  parallel: false",
-            "review_draft_errors:\n  model: qwen2.5:7b\n  parallel: false",
+            "fix_draft_blockers:\n  model: qwen2.5:7b\n  parallel: false",
         ]
         .join("\n")
     }
@@ -283,7 +283,7 @@ create_test: gpt-4
 create_specifications_context: gpt-4
 create_specifications_main: gpt-4
 resolve_compilation_errors: gpt-4
-review_draft_errors: gpt-4
+fix_draft_blockers: gpt-4
 "#;
 
         let result = parse_registry(yaml, "default", false);
@@ -321,7 +321,7 @@ create_specifications_main:
 resolve_compilation_errors:
   model: gpt-4
   parallel: false
-review_draft_errors:
+fix_draft_blockers:
   model: gpt-4
   parallel: false
 "#;
@@ -358,7 +358,7 @@ review_draft_errors:
         let model = registry
             .get_model("create_implementation")
             .expect("embedded default registry should resolve model");
-        assert_eq!(model.name, "mistral/codestral-latest");
+        assert_eq!(model.name, "openai/gpt-5");
     }
 
     #[test]

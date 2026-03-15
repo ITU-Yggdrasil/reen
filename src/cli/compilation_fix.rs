@@ -136,7 +136,7 @@ pub async fn ensure_compiles_with_auto_fix(
 
         fs::write(attempt_dir.join("proposed.patch"), &patch_text).ok();
 
-        let extracted = extract_unified_diff(&patch_text)
+        let extracted = extract_unified_diff_from_agent_output(&patch_text)
             .context("Resolver output did not contain a unified diff starting with 'diff --git'")?;
 
         let guardrail = check_guardrails(project_root, &extracted)?;
@@ -422,7 +422,7 @@ fn build_agent_context(
     Ok(ctx)
 }
 
-fn extract_unified_diff(text: &str) -> Option<String> {
+fn extract_unified_diff_from_agent_output(text: &str) -> Option<String> {
     if let Some(idx) = text.find("diff --git ") {
         return Some(text[idx..].trim().to_string());
     }
@@ -1057,6 +1057,38 @@ fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
             .with_context(|| format!("Failed to write {}", target_full.display()))?;
     }
     Ok(diff.trim().to_string())
+}
+
+/// Applies unified diff patches that target only drafts/ files.
+/// Returns the list of patched file paths (relative to project_root).
+pub fn apply_draft_patches(project_root: &Path, agent_output: &str) -> Result<Vec<PathBuf>> {
+    let diff = extract_unified_diff_from_agent_output(agent_output).ok_or_else(|| {
+        anyhow::anyhow!("Fix agent output did not contain a unified diff starting with 'diff --git'")
+    })?;
+    let patches = parse_unified_diff(&diff)?;
+    let mut patched = Vec::new();
+    for fp in &patches {
+        let target = fp
+            .new_path
+            .as_deref()
+            .or(fp.old_path.as_deref())
+            .unwrap_or("");
+        if target.is_empty() {
+            anyhow::bail!("Patch contains empty path");
+        }
+        if target.starts_with('/') || target.contains("..") {
+            anyhow::bail!("Blocked path (outside repo): {}", target);
+        }
+        if !target.starts_with("drafts/") {
+            anyhow::bail!("Patch must target drafts/ only, got: {}", target);
+        }
+        if fp.is_deletion {
+            anyhow::bail!("File deletion is not allowed: {}", target);
+        }
+        patched.push(PathBuf::from(target));
+    }
+    apply_unified_diff(project_root, &diff)?;
+    Ok(patched)
 }
 
 fn split_lines_preserve_empty(s: &str) -> Vec<String> {

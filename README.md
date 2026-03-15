@@ -64,7 +64,15 @@ reen create specification
 
 # Process specific drafts
 reen create specification app agent_runner
+
+# Auto-fix drafts when blocking ambiguities are detected
+reen create specification --fix
+
+# Limit fix attempts (default: 3)
+reen create specification --fix --max-fix-attempts 5
 ```
+
+When `--fix` is used and the specification agent reports blocking ambiguities, a new agent (`fix_draft_blockers`) is invoked to propose patches to draft files. Blockers in one draft may require fixes in a dependency draft (e.g. an underspecified data draft can cause blockers in a context spec that depends on it). Patches are applied and specification creation retries until blockers are resolved or the max attempt limit is reached.
 
 ### Create Implementation
 
@@ -172,6 +180,8 @@ create_implementation:
   model: openai/gpt-5
 create_test:
   model: ollama/qwen2.5:7b
+fix_draft_blockers:
+  model: mistral/mistral-large-latest
 ```
 
 Supported providers: **OpenAI**, **Anthropic**, **Mistral**, and **Ollama** (local).

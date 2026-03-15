@@ -122,6 +122,19 @@ enum CreateCommands {
     Specification {
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
+
+        #[arg(
+            long,
+            help = "When blocking ambiguities are detected, invoke agent to fix drafts and retry"
+        )]
+        fix: bool,
+
+        #[arg(
+            long,
+            default_value_t = 3,
+            help = "Max fix attempts per draft when --fix is used"
+        )]
+        max_fix_attempts: u32,
     },
 
     #[command(about = "Create implementation from context files")]
@@ -311,13 +324,19 @@ async fn main() -> Result<()> {
             let rate_limit = cli::resolve_rate_limit(create_args.rate_limit);
             let token_limit = cli::resolve_token_limit(create_args.token_limit);
             match create_args.command {
-                CreateCommands::Specification { names } => {
+                CreateCommands::Specification {
+                    names,
+                    fix,
+                    max_fix_attempts,
+                } => {
                     cli::create_specification(
                         names,
                         create_args.clear_cache,
                         &category_filter,
                         rate_limit,
                         token_limit,
+                        fix,
+                        max_fix_attempts as usize,
                         &config,
                     )
                     .await?;

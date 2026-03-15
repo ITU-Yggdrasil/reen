@@ -27,7 +27,9 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
         "resolve_compilation_errors.yml" => {
             Some(include_str!("../../agents/resolve_compilation_errors.yml"))
         }
-        "review_draft_errors.yml" => Some(include_str!("../../agents/review_draft_errors.yml")),
+        "fix_draft_blockers.yml" => {
+            Some(include_str!("../../agents/fix_draft_blockers.yml"))
+        }
         _ => None,
     }
 }
@@ -41,7 +43,7 @@ pub fn embedded_expected_agent_names() -> &'static [&'static str] {
         "create_implementation",
         "create_test",
         "resolve_compilation_errors",
-        "review_draft_errors",
+        "fix_draft_blockers",
     ]
 }
 

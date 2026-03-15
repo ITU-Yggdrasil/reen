@@ -87,6 +87,11 @@ impl AgentExecutor {
                 context_content: Some(input.to_string()),
                 additional: enriched_context,
             },
+            "fix_draft_blockers" => AgentInput {
+                draft_content: None,
+                context_content: None,
+                additional: enriched_context,
+            },
             _ => AgentInput {
                 draft_content: Some(input.to_string()),
                 context_content: None,
@@ -137,6 +142,11 @@ impl AgentExecutor {
             "create_implementation" | "create_test" => AgentInput {
                 draft_content: None,
                 context_content: Some(input.to_string()),
+                additional: additional_context,
+            },
+            "fix_draft_blockers" => AgentInput {
+                draft_content: None,
+                context_content: None,
                 additional: additional_context,
             },
             _ => AgentInput {
