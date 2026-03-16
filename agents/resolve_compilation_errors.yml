@@ -9,11 +9,16 @@ static_prompt: |
   - Change only what is necessary.
 
   ## Inputs you will receive (authoritative)
-  - Compiler output (stdout/stderr)
-  - Parsed diagnostics (file/line/col + codes when available)
-  - Snapshots of relevant source files and key dependency files
+  - Compiler output (stdout/stderr, possibly truncated to first N errors)
+  - Parsed diagnostics (file/line/col + codes when available; may be a subset)
+  - File snapshots: content may be truncated (snippets around error locations, or first N lines).
+    Line numbers in snippets are approximate. The fix may be in a different file than the error
+    (e.g. add missing `use` or definition in the importing file or in a shared module).
   - Relevant specification markdown for impacted modules (intent)
   - Recent change context (files generated/updated in this run)
+
+  ## Scope
+  - Propose fixes only for the errors provided. If you cannot fix all, fix what you can and note the rest.
 
   ## Guardrails (STRICT)
   You MUST NOT:

@@ -4,6 +4,7 @@ use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -11,7 +12,42 @@ use std::sync::OnceLock;
 
 use super::agent_executor::{AgentExecutor, AgentResponse};
 use super::project_structure::ProjectInfo;
+use super::token_limiter::estimate_request_tokens;
 use super::Config;
+
+/// Configuration for compilation fix context size, read from env vars:
+/// - REEN_COMPILE_FIX_MAX_ERRORS (default 10): max errors per agent round
+/// - REEN_COMPILE_FIX_MAX_TOKENS (default 120000): token budget for context
+/// - REEN_COMPILE_FIX_SNIPPET_LINES (default 20): lines around each error span
+/// - REEN_COMPILE_FIX_MAX_FILES (default 20): max files to include
+fn compile_fix_config() -> CompileFixConfig {
+    CompileFixConfig {
+        max_errors: env::var("REEN_COMPILE_FIX_MAX_ERRORS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10),
+        max_tokens: env::var("REEN_COMPILE_FIX_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120_000),
+        snippet_lines: env::var("REEN_COMPILE_FIX_SNIPPET_LINES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20),
+        max_files: env::var("REEN_COMPILE_FIX_MAX_FILES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CompileFixConfig {
+    max_errors: usize,
+    max_tokens: usize,
+    snippet_lines: usize,
+    max_files: usize,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagnosticSpan {
@@ -67,6 +103,8 @@ pub async fn ensure_compiles_with_auto_fix(
         max_attempts, session_dir_display
     );
 
+    let cfg = compile_fix_config();
+
     for attempt in 1..=max_attempts {
         let attempt_dir = session_dir.join(format!("attempt_{}", attempt));
         fs::create_dir_all(&attempt_dir)
@@ -74,42 +112,83 @@ pub async fn ensure_compiles_with_auto_fix(
 
         write_attempt_compile_output(&attempt_dir, &output)?;
 
-        let diagnostics = parse_rustc_diagnostics(&output.stderr);
-        let relevant_paths = collect_relevant_paths(
-            project_root,
-            &diagnostics,
-            &output.stderr,
-            recent_generated_files,
-        )?;
+        let all_diagnostics = parse_rustc_diagnostics(&output.stderr);
+        let mut max_paths = Some(cfg.max_files);
+        let mut snippet_lines = cfg.snippet_lines;
+        let mut max_errors_used = cfg.max_errors;
+        let mut include_specs = true;
 
-        let files_json = snapshot_files_json(project_root, &relevant_paths)?;
-        let specs_json = snapshot_specs_json(project_root, &relevant_paths)?;
+        let additional_context = loop {
+            let diagnostics =
+                prioritize_and_cap_diagnostics(&all_diagnostics, max_errors_used);
+            let truncated_stderr = truncate_stderr_for_diagnostics(&output.stderr, &diagnostics);
 
-        let additional_context = build_agent_context(
-            &output,
-            &diagnostics,
-            &files_json,
-            &specs_json,
-            recent_generated_files,
-            project_info,
-        )?;
+            let relevant_paths = collect_relevant_paths(
+                project_root,
+                &diagnostics,
+                &output.stderr,
+                recent_generated_files,
+                max_paths,
+            )?;
 
-        fs::write(
-            attempt_dir.join("diagnostics.json"),
-            serde_json::to_string_pretty(&diagnostics).unwrap_or_else(|_| "[]".to_string()),
-        )
-        .ok();
-        fs::write(
-            attempt_dir.join("context_files.json"),
-            serde_json::to_string_pretty(&files_json).unwrap_or_else(|_| "{}".to_string()),
-        )
-        .ok();
-        if !specs_json.is_empty() {
-            fs::write(
-                attempt_dir.join("context_specs.json"),
-                serde_json::to_string_pretty(&specs_json).unwrap_or_else(|_| "{}".to_string()),
-            )
-            .ok();
+            let files_json = snapshot_files_json_snippets(
+                project_root,
+                &relevant_paths,
+                &diagnostics,
+                snippet_lines,
+            )?;
+            let specs_json = if include_specs {
+                snapshot_specs_json(project_root, &relevant_paths)?
+            } else {
+                BTreeMap::new()
+            };
+
+            let ctx = build_agent_context(
+                &output,
+                &truncated_stderr,
+                &diagnostics,
+                &files_json,
+                &specs_json,
+                recent_generated_files,
+                project_info,
+            )?;
+
+            let estimated = estimate_request_tokens(
+                "Compilation failed; propose minimal fix patch.",
+                &ctx,
+            );
+            if estimated <= cfg.max_tokens {
+                break ctx;
+            }
+            if max_errors_used > 3 {
+                max_errors_used = max_errors_used / 2;
+            } else if snippet_lines > 5 {
+                snippet_lines = snippet_lines / 2;
+            } else if include_specs {
+                include_specs = false;
+            } else if max_paths.map(|m| m > 5).unwrap_or(false) {
+                max_paths = max_paths.map(|m| m / 2);
+            } else {
+                anyhow::bail!(
+                    "Compilation fix context exceeds token budget ({} > {}). \
+                     Try REEN_COMPILE_FIX_MAX_TOKENS or fix errors manually. Logs: {}",
+                    estimated,
+                    cfg.max_tokens,
+                    attempt_dir.display()
+                );
+            }
+        };
+
+        if let Some(serde_json::Value::String(s)) = additional_context.get("diagnostics_json") {
+            fs::write(attempt_dir.join("diagnostics.json"), s).ok();
+        }
+        if let Some(serde_json::Value::String(s)) = additional_context.get("files_json") {
+            fs::write(attempt_dir.join("context_files.json"), s).ok();
+        }
+        if let Some(serde_json::Value::String(s)) = additional_context.get("specs_json") {
+            if !s.is_empty() && s != "null" {
+                fs::write(attempt_dir.join("context_specs.json"), s).ok();
+            }
         }
 
         let executor = AgentExecutor::new("resolve_compilation_errors", config)
@@ -250,24 +329,180 @@ fn parse_rustc_diagnostics(stderr: &str) -> Vec<DiagnosticSpan> {
     spans
 }
 
+/// Error codes that often cause cascading errors; prioritize these first.
+const ROOT_CAUSE_ERROR_CODES: &[&str] = &["E0412", "E0433", "E0583", "E0407", "E0405"];
+
+/// File path priority: root/mod files before leaf modules.
+fn file_priority(path: &str) -> u8 {
+    if path == "src/lib.rs" || path == "src/main.rs" {
+        0
+    } else if path.ends_with("/mod.rs") {
+        1
+    } else {
+        2
+    }
+}
+
+fn prioritize_and_cap_diagnostics(
+    diagnostics: &[DiagnosticSpan],
+    max_errors: usize,
+) -> Vec<DiagnosticSpan> {
+    if diagnostics.len() <= max_errors {
+        return diagnostics.to_vec();
+    }
+    let mut indexed: Vec<(usize, &DiagnosticSpan)> = diagnostics.iter().enumerate().collect();
+    indexed.sort_by(|(i_a, a), (i_b, b)| {
+        let code_pri_a = a
+            .code
+            .as_ref()
+            .map(|c| {
+                if ROOT_CAUSE_ERROR_CODES.contains(&c.as_str()) {
+                    0
+                } else {
+                    1
+                }
+            })
+            .unwrap_or(1);
+        let code_pri_b = b
+            .code
+            .as_ref()
+            .map(|c| {
+                if ROOT_CAUSE_ERROR_CODES.contains(&c.as_str()) {
+                    0
+                } else {
+                    1
+                }
+            })
+            .unwrap_or(1);
+        code_pri_a
+            .cmp(&code_pri_b)
+            .then_with(|| file_priority(&a.file).cmp(&file_priority(&b.file)))
+            .then_with(|| i_a.cmp(i_b))
+    });
+    indexed
+        .into_iter()
+        .take(max_errors)
+        .map(|(_, d)| d.clone())
+        .collect()
+}
+
+/// Truncates stderr to keep only error blocks matching the prioritized diagnostics.
+fn truncate_stderr_for_diagnostics(
+    stderr: &str,
+    diagnostics: &[DiagnosticSpan],
+) -> String {
+    if diagnostics.is_empty() {
+        return stderr.to_string();
+    }
+    let diagnostic_set: HashSet<(String, u32)> = diagnostics
+        .iter()
+        .map(|d| (d.file.clone(), d.line))
+        .collect();
+    let re_span = Regex::new(r"(?m)^\s*-->\s+([^\s:][^:]*):(\d+):(\d+)\s*$").ok();
+    let re_error = Regex::new(r"(?m)^\s*error\[(E\d+)\]:").ok();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current_block = String::new();
+    let mut block_matches = false;
+    let mut in_block = false;
+
+    for line in stderr.lines() {
+        let is_error_start = re_error.as_ref().map_or(false, |r| r.is_match(line));
+        let is_span = re_span.as_ref().map_or(false, |r| r.is_match(line));
+
+        if is_error_start {
+            if in_block && block_matches {
+                blocks.push(current_block.clone());
+            }
+            current_block = format!("{}\n", line);
+            in_block = true;
+            block_matches = false;
+        } else if in_block {
+            current_block.push_str(line);
+            current_block.push('\n');
+            if is_span {
+                if let Some(re) = &re_span {
+                    if let Some(cap) = re.captures(line) {
+                        let file = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+                        let line_no = cap
+                            .get(2)
+                            .and_then(|m| m.as_str().parse::<u32>().ok())
+                            .unwrap_or(0);
+                        if diagnostic_set.contains(&(file, line_no)) {
+                            block_matches = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if in_block && block_matches {
+        blocks.push(current_block);
+    } else if blocks.is_empty() {
+        return stderr.to_string();
+    }
+    blocks.join("")
+}
+
+/// Extracts paths from `mod` lines in Rust source (best-effort).
+/// For `mod foo;` we add parent/foo.rs and parent/foo/mod.rs.
+fn extract_imports_from_file(content: &str, current_file_rel: &str) -> Vec<String> {
+    let re_mod = Regex::new(r"\bmod\s+([a-zA-Z0-9_]+)\s*;").ok();
+    let mut out: Vec<String> = Vec::new();
+    let parent = Path::new(current_file_rel)
+        .parent()
+        .unwrap_or(Path::new("."));
+    for line in content.lines() {
+        if let Some(re) = &re_mod {
+            if let Some(cap) = re.captures(line) {
+                if let Some(m) = cap.get(1) {
+                    let module = m.as_str();
+                    let sibling = parent.join(format!("{}.rs", module));
+                    out.push(sibling.to_string_lossy().to_string());
+                    let submod = parent.join(module).join("mod.rs");
+                    out.push(submod.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    out.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
 fn collect_relevant_paths(
     project_root: &Path,
     diagnostics: &[DiagnosticSpan],
     stderr: &str,
     recent_generated_files: &[PathBuf],
+    max_paths: Option<usize>,
 ) -> Result<Vec<PathBuf>> {
     let mut paths: HashSet<PathBuf> = HashSet::new();
+    let diagnostic_files: HashSet<String> = diagnostics
+        .iter()
+        .map(|d| d.file.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let recent_set: HashSet<String> = recent_generated_files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(project_root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
 
-    // Always include Cargo.toml and src/lib.rs if present.
-    for always in [
-        "Cargo.toml",
-        "src/lib.rs",
-        "src/contexts/mod.rs",
-        "src/data/mod.rs",
-    ] {
-        let p = project_root.join(always);
-        if p.exists() {
-            paths.insert(p);
+    // Cargo.toml always (small, needed for deps).
+    let cargo = project_root.join("Cargo.toml");
+    if cargo.exists() {
+        paths.insert(cargo);
+    }
+
+    // Only include lib.rs, mod.rs if in diagnostics or recent.
+    for candidate in ["src/lib.rs", "src/main.rs", "src/contexts/mod.rs", "src/data/mod.rs"] {
+        if diagnostic_files.contains(candidate) || recent_set.contains(candidate) {
+            let p = project_root.join(candidate);
+            if p.exists() {
+                paths.insert(p);
+            }
         }
     }
 
@@ -306,11 +541,64 @@ fn collect_relevant_paths(
         }
     }
 
+    // Import-based: for files with errors, parse use/mod and add dependencies.
+    for path in paths.clone() {
+        let rel = path
+            .strip_prefix(project_root)
+            .unwrap_or(&path)
+            .to_string_lossy();
+        if !rel.ends_with(".rs") {
+            continue;
+        }
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        for dep in extract_imports_from_file(&content, &rel) {
+            let full = project_root.join(&dep);
+            if full.exists() {
+                paths.insert(full);
+            }
+        }
+    }
+
     let mut out: Vec<PathBuf> = paths.into_iter().collect();
     out.sort();
+
+    if let Some(max) = max_paths {
+        if out.len() > max {
+            let diagnostic_paths: HashSet<PathBuf> = diagnostics
+                .iter()
+                .filter_map(|d| {
+                    let p = project_root.join(d.file.trim());
+                    if p.exists() {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let recent_paths: HashSet<PathBuf> = recent_generated_files
+                .iter()
+                .map(|p| {
+                    if p.is_absolute() {
+                        p.clone()
+                    } else {
+                        project_root.join(p)
+                    }
+                })
+                .filter(|p| p.exists())
+                .collect();
+            let priority: HashSet<PathBuf> = diagnostic_paths.union(&recent_paths).cloned().collect();
+            out.sort_by(|a, b| {
+                let a_pri = priority.contains(a);
+                let b_pri = priority.contains(b);
+                b_pri.cmp(&a_pri).then_with(|| a.cmp(b))
+            });
+            out.truncate(max);
+        }
+    }
     Ok(out)
 }
 
+#[allow(dead_code)]
 fn snapshot_files_json(project_root: &Path, paths: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     for p in paths {
@@ -325,6 +613,99 @@ fn snapshot_files_json(project_root: &Path, paths: &[PathBuf]) -> Result<BTreeMa
         let content =
             fs::read_to_string(p).with_context(|| format!("Failed to read {}", p.display()))?;
         map.insert(rel, content);
+    }
+    Ok(map)
+}
+
+const SMALL_FILE_LINE_THRESHOLD: usize = 100;
+const HEAD_LINES_FOR_NON_ERROR_FILE: usize = 50;
+
+/// Snapshot files as snippets: around error spans for files with diagnostics,
+/// first N lines for others. Small files and Cargo.toml get full content.
+fn snapshot_files_json_snippets(
+    project_root: &Path,
+    paths: &[PathBuf],
+    diagnostics: &[DiagnosticSpan],
+    snippet_lines: usize,
+) -> Result<BTreeMap<String, String>> {
+    let diagnostics_by_file: HashMap<String, Vec<u32>> = diagnostics.iter().fold(
+        HashMap::new(),
+        |mut acc, d| {
+            if !d.file.trim().is_empty() {
+                acc.entry(d.file.trim().to_string())
+                    .or_default()
+                    .push(d.line);
+            }
+            acc
+        },
+    );
+
+    let mut map = BTreeMap::new();
+    for p in paths {
+        if !p.exists() || p.is_dir() {
+            continue;
+        }
+        let rel = p
+            .strip_prefix(project_root)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .to_string();
+        let content =
+            fs::read_to_string(p).with_context(|| format!("Failed to read {}", p.display()))?;
+        let lines: Vec<&str> = content.lines().collect();
+        let line_count = lines.len();
+
+        let snippet = if rel == "Cargo.toml" || line_count <= SMALL_FILE_LINE_THRESHOLD {
+            content
+        } else if let Some(error_lines) = diagnostics_by_file.get(&rel) {
+            let mut ranges: Vec<(usize, usize)> = error_lines
+                .iter()
+                .map(|&ln| {
+                    let ln_usize = ln as usize;
+                    let start = ln_usize.saturating_sub(snippet_lines + 1);
+                    let end = (ln_usize + snippet_lines).min(line_count);
+                    (start, end)
+                })
+                .collect();
+            ranges.sort_by_key(|(a, _)| *a);
+            let mut merged: Vec<(usize, usize)> = Vec::new();
+            for (start, end) in ranges {
+                if let Some(last) = merged.last_mut() {
+                    if start <= last.1 + 1 {
+                        last.1 = last.1.max(end);
+                    } else {
+                        merged.push((start, end));
+                    }
+                } else {
+                    merged.push((start, end));
+                }
+            }
+            let mut result = String::new();
+            for (start, end) in merged {
+                let end = end.min(line_count);
+                for (i, line) in lines.iter().enumerate().take(end).skip(start) {
+                    result.push_str(&format!("{:4} | {}\n", i + 1, line));
+                }
+                if !result.ends_with('\n') {
+                    result.push('\n');
+                }
+            }
+            if result.is_empty() {
+                content
+            } else {
+                format!("(snippet around error lines)\n{}", result)
+            }
+        } else {
+            let take = HEAD_LINES_FOR_NON_ERROR_FILE.min(line_count);
+            let head: String = lines
+                .iter()
+                .take(take)
+                .enumerate()
+                .map(|(i, l)| format!("{:4} | {}\n", i + 1, l))
+                .collect();
+            format!("(first {} lines)\n{}", take, head)
+        };
+        map.insert(rel, snippet);
     }
     Ok(map)
 }
@@ -387,6 +768,7 @@ fn map_src_to_spec(src_rel: &str) -> Option<String> {
 
 fn build_agent_context(
     output: &CompilationOutput,
+    truncated_stderr: &str,
     diagnostics: &[DiagnosticSpan],
     files_json: &BTreeMap<String, String>,
     specs_json: &BTreeMap<String, String>,
@@ -395,7 +777,7 @@ fn build_agent_context(
 ) -> Result<HashMap<String, serde_json::Value>> {
     let mut ctx = HashMap::new();
     ctx.insert("compiler_stdout".to_string(), json!(output.stdout));
-    ctx.insert("compiler_stderr".to_string(), json!(output.stderr));
+    ctx.insert("compiler_stderr".to_string(), json!(truncated_stderr));
     ctx.insert(
         "diagnostics_json".to_string(),
         json!(serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())),
