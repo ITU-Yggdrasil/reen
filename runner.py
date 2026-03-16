@@ -159,6 +159,17 @@ def _extract_message_text(message: Dict[str, Any]) -> str:
     return "".join(text_parts)
 
 
+def _parse_jsonl_results(payload: str) -> List[Dict[str, Any]]:
+    """Parse Anthropic batch results returned as JSONL."""
+    items: List[Dict[str, Any]] = []
+    for line in payload.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        items.append(json.loads(line))
+    return items
+
+
 def execute_batch_with_anthropic(batch_requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Execute independent requests via Anthropic Message Batches."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -215,13 +226,27 @@ def execute_batch_with_anthropic(batch_requests: List[Dict[str, Any]]) -> List[D
             raise RuntimeError("Anthropic batch polling timed out")
         time.sleep(poll_interval)
 
-    results_payload, _ = _anthropic_http_json(
-        f"/v1/messages/batches/{batch_id}/results", api_key
+    results_url = status_payload.get("results_url")
+    if not results_url:
+        raise RuntimeError(
+            f"Anthropic batch finished without results_url: {status_payload}"
+        )
+
+    request = urllib.request.Request(
+        results_url,
+        method="GET",
+        headers=_anthropic_headers(api_key),
     )
-    if isinstance(results_payload, dict):
-        result_items = results_payload.get("data") or results_payload.get("results") or []
-    else:
-        result_items = results_payload
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            result_items = _parse_jsonl_results(
+                response.read().decode("utf-8", errors="replace")
+            )
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Anthropic batch results download failed with HTTP {e.code}: {detail}"
+        ) from e
 
     outputs: List[Dict[str, Any]] = []
     for item in result_items:

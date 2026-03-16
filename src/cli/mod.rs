@@ -1323,18 +1323,28 @@ pub async fn create_implementation(
                     match executor.execute_batch(batch_request) {
                         Ok(outputs) => {
                             for item in batch_items {
-                                let result = outputs
-                                    .get(&item.context_name)
-                                    .cloned()
-                                    .ok_or_else(|| anyhow::anyhow!("Missing batch output"))
-                                    .and_then(|output| {
-                                        finalize_implementation_output(
-                                            &item.context_file,
-                                            &item.context_name,
-                                            &cfg,
-                                            output,
-                                        )
-                                    });
+                                let result = if let Some(output) = outputs.get(&item.context_name).cloned() {
+                                    finalize_implementation_output(
+                                        &item.context_file,
+                                        &item.context_name,
+                                        &cfg,
+                                        output,
+                                    )
+                                } else {
+                                    eprintln!(
+                                        "Batch execution returned no output for {}; falling back to sequential execution for that item.",
+                                        item.context_name
+                                    );
+                                    process_implementation(
+                                        &executor,
+                                        &item.context_content,
+                                        &item.context_file,
+                                        &item.context_name,
+                                        &cfg,
+                                        item.dependency_context.clone(),
+                                    )
+                                    .await
+                                };
                                 batch_results.push((
                                     item.context_name,
                                     item.context_file,
