@@ -82,7 +82,13 @@ def execute_with_anthropic(
     user_content: str,
     max_output_tokens: Optional[int] = None,
 ) -> str:
-    """Execute using Anthropic's Claude API with prompt caching."""
+    """Execute using Anthropic's Claude API with prompt caching.
+
+    Uses explicit cache breakpoint on the system block so the static instructions
+    are cached and the variable user content is not. Top-level cache_control
+    would place the breakpoint on the last block (user message), which varies
+    per request and prevents cache hits.
+    """
     try:
         import anthropic
     except ImportError:
@@ -97,12 +103,23 @@ def execute_with_anthropic(
         max_output_tokens, "ANTHROPIC_MAX_OUTPUT_TOKENS", 8096
     )
 
+    # Pass system as array with explicit cache_control on the block.
+    # This caches only the static system content; user_content (variable) stays
+    # after the breakpoint. Top-level cache_control would breakpoint on the
+    # user message, causing every request to have a different cache key.
+    system_blocks = [
+        {
+            "type": "text",
+            "text": system_content,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+
     try:
         message = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            cache_control={"type": "ephemeral"},
-            system=system_content,
+            system=system_blocks,
             messages=[{"role": "user", "content": user_content}],
         )
     except Exception as e:
@@ -185,6 +202,14 @@ def execute_batch_with_anthropic(batch_requests: List[Dict[str, Any]]) -> List[D
         if not custom_id or not model:
             raise RuntimeError("Batch request missing custom_id or model")
         _, model_name = determine_provider(model)
+        # Use explicit cache breakpoint on system block (same as execute_with_anthropic)
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system_content,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
         requests_payload.append(
             {
                 "custom_id": custom_id,
@@ -193,7 +218,7 @@ def execute_batch_with_anthropic(batch_requests: List[Dict[str, Any]]) -> List[D
                     "max_tokens": _resolve_max_output_tokens(
                         max_output_tokens, "ANTHROPIC_MAX_OUTPUT_TOKENS", 8096
                     ),
-                    "system": system_content,
+                    "system": system_blocks,
                     "messages": [{"role": "user", "content": user_content}],
                 },
             }
