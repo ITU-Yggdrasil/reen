@@ -13,7 +13,7 @@ create_specifications_main:
 create_implementation:
   model: claude-sonnet-4-6
   parallel: true
-  batch: true
+  batch: false
 create_test:
   model: claude-sonnet-4-6
   parallel: false
