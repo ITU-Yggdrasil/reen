@@ -36,6 +36,7 @@ pub fn resolve_registry_path() -> PathBuf {
 pub struct AgentConfig {
     pub model: String,
     pub parallel: bool,
+    pub batch: bool,
 }
 
 /// File-based implementation of AgentModelRegistry
@@ -89,6 +90,15 @@ impl FileAgentModelRegistry {
             .get(agent_name)
             .ok_or_else(|| ExecutionError::ModelNotFound(agent_name.to_string()))?;
         Ok(config.parallel)
+    }
+
+    /// Checks if an agent can use provider batch execution.
+    pub fn can_use_batch(&self, agent_name: &str) -> Result<bool, ExecutionError> {
+        let registry = self.load_registry()?;
+        let config = registry
+            .get(agent_name)
+            .ok_or_else(|| ExecutionError::ModelNotFound(agent_name.to_string()))?;
+        Ok(config.batch)
     }
 
     /// Path to the registry file (for diagnostics).
@@ -163,7 +173,7 @@ fn parse_token_limit(yaml_content: &str) -> Option<f64> {
 }
 
 /// Parses the YAML registry file into a HashMap
-/// Supports both old format (string) and new format (object with model and parallel)
+/// Supports both old format (string) and new format (object with model/parallel/batch)
 fn parse_registry(
     yaml_content: &str,
     default_model: &str,
@@ -196,9 +206,10 @@ fn parse_registry(
                     AgentConfig {
                         model: v_str.to_string(),
                         parallel: default_parallel,
+                        batch: false,
                     }
                 } else if let Some(v_hash) = value.as_hash() {
-                    // New format: object with model and parallel
+                    // New format: object with model, parallel, and optional batch
                     let model = v_hash
                         .get(&yaml_rust::Yaml::String("model".to_string()))
                         .and_then(|v| v.as_str())
@@ -210,12 +221,22 @@ fn parse_registry(
                         .and_then(|v| v.as_bool())
                         .unwrap_or(default_parallel);
 
-                    AgentConfig { model, parallel }
+                    let batch = v_hash
+                        .get(&yaml_rust::Yaml::String("batch".to_string()))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    AgentConfig {
+                        model,
+                        parallel,
+                        batch,
+                    }
                 } else {
                     // Fallback to defaults
                     AgentConfig {
                         model: default_model.to_string(),
                         parallel: default_parallel,
+                        batch: false,
                     }
                 };
 
@@ -263,13 +284,13 @@ mod tests {
 
     fn complete_registry_yaml() -> String {
         [
-            "create_specifications_data:\n  model: qwen2.5:7b\n  parallel: false",
-            "create_specifications_context:\n  model: qwen2.5:7b\n  parallel: false",
-            "create_specifications_main:\n  model: qwen2.5:7b\n  parallel: false",
-            "create_implementation:\n  model: qwen2.5:7b\n  parallel: false",
-            "create_test:\n  model: qwen2.5:7b\n  parallel: false",
-            "resolve_compilation_errors:\n  model: qwen2.5:7b\n  parallel: false",
-            "fix_draft_blockers:\n  model: qwen2.5:7b\n  parallel: false",
+            "create_specifications_data:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
+            "create_specifications_context:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
+            "create_specifications_main:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
+            "create_implementation:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
+            "create_test:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
+            "resolve_compilation_errors:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
+            "fix_draft_blockers:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
         ]
         .join("\n")
     }
@@ -298,6 +319,10 @@ fix_draft_blockers: gpt-4
             registry.get("create_implementation").map(|c| &c.model),
             Some(&"claude-3-opus".to_string())
         );
+        assert_eq!(
+            registry.get("create_specifications_data").map(|c| c.batch),
+            Some(false)
+        );
     }
 
     #[test]
@@ -306,6 +331,7 @@ fix_draft_blockers: gpt-4
 create_specifications_data:
   model: gpt-4
   parallel: true
+  batch: true
 create_implementation:
   model: claude-3-opus
   parallel: false
@@ -333,10 +359,12 @@ fix_draft_blockers:
         let spec_config = registry.get("create_specifications_data").unwrap();
         assert_eq!(spec_config.model, "gpt-4");
         assert_eq!(spec_config.parallel, true);
+        assert_eq!(spec_config.batch, true);
 
         let impl_config = registry.get("create_implementation").unwrap();
         assert_eq!(impl_config.model, "claude-3-opus");
         assert_eq!(impl_config.parallel, false);
+        assert_eq!(impl_config.batch, false);
     }
 
     #[test]

@@ -4,5 +4,6 @@ mod file_cache;
 pub use agent_runner::{
     AgentModelRegistry, AgentRegistry, AgentRunner, AgentRunnerError, AgentSpecification,
     AgentSpecificationTemplate, ExecutionError, ExecutionResult, Model, PopulateError,
+    PreparedExecution, PreparedExecutionState,
 };
 pub use file_cache::FileCache;

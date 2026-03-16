@@ -149,6 +149,26 @@ pub struct ExecutionResult {
     pub cached: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedExecution {
+    pub request: serde_json::Value,
+    pub cache_key: String,
+    pub cache: FileCache,
+    pub estimated_input_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum PreparedExecutionState {
+    Cached(String),
+    Ready(PreparedExecution),
+}
+
+impl PreparedExecution {
+    pub fn store_output(&self, output: &str) {
+        self.cache.set(&self.cache_key, output);
+    }
+}
+
 /// A model that can execute an agent
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -272,27 +292,7 @@ where
         })?;
 
         // Prepare the request JSON (split format for cache optimization, legacy fallback)
-        let request = if let (Some(static_p), Some(variable_p)) = (
-            &specification.static_prompt,
-            &specification.variable_prompt,
-        ) {
-            serde_json::json!({
-                "model": model.name,
-                "static_prompt": static_p,
-                "variable_prompt": variable_p,
-                "agent_name": self.agent,
-            })
-        } else if let Some(system_p) = &specification.system_prompt {
-            serde_json::json!({
-                "model": model.name,
-                "system_prompt": system_p,
-            })
-        } else {
-            return Err(ExecutionError::PythonRunnerError(
-                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
-                    .to_string(),
-            ));
-        };
+        let request = self.build_request_json(specification, model)?;
 
         let request_json = serde_json::to_string(&request).map_err(|e| {
             ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
@@ -364,6 +364,34 @@ where
             output: output_text,
             cached: false,
         })
+    }
+
+    fn build_request_json(
+        &self,
+        specification: &AgentSpecification,
+        model: &Model,
+    ) -> Result<serde_json::Value, ExecutionError> {
+        if let (Some(static_p), Some(variable_p)) = (
+            &specification.static_prompt,
+            &specification.variable_prompt,
+        ) {
+            Ok(serde_json::json!({
+                "model": model.name,
+                "static_prompt": static_p,
+                "variable_prompt": variable_p,
+                "agent_name": self.agent,
+            }))
+        } else if let Some(system_p) = &specification.system_prompt {
+            Ok(serde_json::json!({
+                "model": model.name,
+                "system_prompt": system_p,
+            }))
+        } else {
+            Err(ExecutionError::PythonRunnerError(
+                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
+                    .to_string(),
+            ))
+        }
     }
 
     /// Generates a hash of agent instructions + model name for folder structure
@@ -458,6 +486,32 @@ where
         };
 
         Ok(estimate + REQUEST_OVERHEAD_TOKENS)
+    }
+
+    /// Prepares a Python-runner request and cache metadata without executing it.
+    pub fn prepare_execution(self) -> Result<PreparedExecutionState, AgentRunnerError> {
+        let agent_template = self
+            .agent_registry
+            .get_specification(&self.agent)
+            .map_err(AgentRunnerError::Populate)?;
+        let model = self.agent_model_registry.get_model(&self.agent)?;
+        let canonical = agent_template.canonical_for_cache();
+        let cache_key = self.generate_cache_key(&canonical);
+        let cache = self.get_cached_artefact(&canonical, &model.name)?;
+        if let Some(cached_value) = cache.get(&cache_key) {
+            return Ok(PreparedExecutionState::Cached(cached_value));
+        }
+
+        let specification = self.populate()?;
+        let request = self.build_request_json(&specification, &model)?;
+        let estimated_input_tokens = self.estimate_input_tokens()?;
+
+        Ok(PreparedExecutionState::Ready(PreparedExecution {
+            request,
+            cache_key,
+            cache,
+            estimated_input_tokens,
+        }))
     }
 
     /// Role method: cache.get_cached_artefact

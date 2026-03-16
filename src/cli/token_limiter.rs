@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+use std::collections::VecDeque;
 
 /// Approximate tokens per word (typical for English text).
 const TOKENS_PER_WORD: f64 = 1.3;
@@ -48,10 +49,13 @@ pub struct TokenLimiter {
 }
 
 struct TokenLimiterInner {
-    tokens_available: f64,
     max_tokens: f64,
-    refill_per_sec: f64,
-    last_refill: Instant,
+    requests: VecDeque<TokenReservation>,
+}
+
+struct TokenReservation {
+    timestamp: Instant,
+    tokens: f64,
 }
 
 impl TokenLimiter {
@@ -62,23 +66,42 @@ impl TokenLimiter {
             tokens_per_minute > 0.0,
             "tokens_per_minute must be positive"
         );
-        let refill_per_sec = tokens_per_minute / 60.0;
         Self {
             inner: Arc::new(Mutex::new(TokenLimiterInner {
-                tokens_available: tokens_per_minute,
                 max_tokens: tokens_per_minute,
-                refill_per_sec,
-                last_refill: Instant::now(),
+                requests: VecDeque::new(),
             })),
         }
     }
 
-    /// Refills the bucket based on elapsed time since last refill.
-    fn refill(inner: &mut TokenLimiterInner) {
-        let elapsed = inner.last_refill.elapsed();
-        inner.tokens_available += inner.refill_per_sec * elapsed.as_secs_f64();
-        inner.tokens_available = inner.tokens_available.min(inner.max_tokens);
-        inner.last_refill = Instant::now();
+    fn prune_expired(inner: &mut TokenLimiterInner, now: Instant) {
+        while let Some(front) = inner.requests.front() {
+            if now.duration_since(front.timestamp) < Duration::from_secs(60) {
+                break;
+            }
+            inner.requests.pop_front();
+        }
+    }
+
+    fn used_tokens(inner: &TokenLimiterInner) -> f64 {
+        inner.requests.iter().map(|entry| entry.tokens).sum()
+    }
+
+    fn wait_time_for(inner: &TokenLimiterInner, estimated_f: f64, now: Instant) -> Duration {
+        let mut used = Self::used_tokens(inner);
+        if used + estimated_f <= inner.max_tokens {
+            return Duration::from_secs(0);
+        }
+
+        for entry in &inner.requests {
+            used -= entry.tokens;
+            if used + estimated_f <= inner.max_tokens {
+                let expires_at = entry.timestamp + Duration::from_secs(60);
+                return expires_at.saturating_duration_since(now);
+            }
+        }
+
+        Duration::from_secs(60)
     }
 
     /// Waits until the bucket has at least `estimated` tokens, then consumes them.
@@ -91,13 +114,16 @@ impl TokenLimiter {
         loop {
             let wait_duration = {
                 let mut inner = self.inner.lock().await;
-                Self::refill(&mut inner);
-                if inner.tokens_available >= estimated_f {
-                    inner.tokens_available -= estimated_f;
+                let now = Instant::now();
+                Self::prune_expired(&mut inner, now);
+                if Self::used_tokens(&inner) + estimated_f <= inner.max_tokens {
+                    inner.requests.push_back(TokenReservation {
+                        timestamp: now,
+                        tokens: estimated_f,
+                    });
                     break;
                 }
-                let deficit = estimated_f - inner.tokens_available;
-                Duration::from_secs_f64(deficit / inner.refill_per_sec)
+                Self::wait_time_for(&inner, estimated_f, now)
             };
             sleep(wait_duration).await;
         }
@@ -112,10 +138,16 @@ impl TokenLimiter {
 
     /// Returns a conservative retry delay after a token-based 429.
     pub async fn retry_delay(&self, estimated: usize) -> Duration {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
+        let now = Instant::now();
+        Self::prune_expired(&mut inner, now);
         let estimate = estimated.max(1) as f64;
-        let refill_wait = estimate / inner.refill_per_sec;
-        Duration::from_secs_f64(refill_wait.max(60.0))
+        let wait = Self::wait_time_for(&inner, estimate, now);
+        if wait.is_zero() {
+            Duration::from_secs(1)
+        } else {
+            wait
+        }
     }
 }
 

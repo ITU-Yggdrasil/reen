@@ -140,6 +140,16 @@ pub enum ProcessSpecOutcome {
     },
 }
 
+struct PreparedImplementationBatchItem {
+    context_name: String,
+    context_file: PathBuf,
+    output_path: PathBuf,
+    dependency_fingerprint: String,
+    dependency_context: HashMap<String, serde_json::Value>,
+    context_content: String,
+    prepared: reen::contexts::PreparedExecution,
+}
+
 /// Returns true if the error indicates a 429 rate limit response.
 fn is_rate_limit_error(e: &anyhow::Error) -> bool {
     let s = e.to_string();
@@ -208,6 +218,117 @@ async fn prepare_rate_limit_retry(
         waited = true;
     }
     waited
+}
+
+fn compact_dependency_entries(
+    value: &serde_json::Value,
+    content_limit: usize,
+    max_entries: usize,
+) -> serde_json::Value {
+    let Some(entries) = value.as_array() else {
+        return value.clone();
+    };
+    let compacted = entries
+        .iter()
+        .take(max_entries)
+        .map(|entry| {
+            let Some(obj) = entry.as_object() else {
+                return entry.clone();
+            };
+            let mut out = serde_json::Map::new();
+            for key in ["name", "path", "spec_path", "sha256"] {
+                if let Some(v) = obj.get(key) {
+                    out.insert(key.to_string(), v.clone());
+                }
+            }
+            if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
+                let truncated = if content.chars().count() > content_limit {
+                    format!(
+                        "{}\n...[truncated by reen]",
+                        content.chars().take(content_limit).collect::<String>()
+                    )
+                } else {
+                    content.to_string()
+                };
+                out.insert("content".to_string(), serde_json::Value::String(truncated));
+            }
+            serde_json::Value::Object(out)
+        })
+        .collect::<Vec<_>>();
+    serde_json::Value::Array(compacted)
+}
+
+fn build_context_variants(
+    base_context: &HashMap<String, serde_json::Value>,
+) -> Vec<HashMap<String, serde_json::Value>> {
+    let mut variants = vec![base_context.clone()];
+
+    if base_context.contains_key("implemented_dependencies") {
+        let mut without_impl = base_context.clone();
+        without_impl.remove("implemented_dependencies");
+        variants.push(without_impl);
+    }
+
+    if let Some(direct_only) = base_context.get("direct_dependencies_only") {
+        let mut direct_only_ctx = base_context.clone();
+        direct_only_ctx.insert("direct_dependencies".to_string(), direct_only.clone());
+        direct_only_ctx.insert("dependency_closure".to_string(), direct_only.clone());
+        direct_only_ctx.insert("mcp_context".to_string(), direct_only.clone());
+        variants.push(direct_only_ctx.clone());
+
+        let mut no_impl = direct_only_ctx;
+        no_impl.remove("implemented_dependencies");
+        variants.push(no_impl);
+    }
+
+    let compact_sources = [
+        ("direct_dependencies", 1200usize, 8usize),
+        ("dependency_closure", 1200usize, 8usize),
+        ("mcp_context", 1200usize, 8usize),
+        ("implemented_dependencies", 800usize, 6usize),
+    ];
+    let mut compact = base_context.clone();
+    let mut changed = false;
+    for (key, content_limit, max_entries) in compact_sources {
+        if let Some(value) = compact.get(key).cloned() {
+            compact.insert(
+                key.to_string(),
+                compact_dependency_entries(&value, content_limit, max_entries),
+            );
+            changed = true;
+        }
+    }
+    if changed {
+        variants.push(compact);
+    }
+
+    variants
+}
+
+fn fit_context_to_token_limit(
+    executor: &AgentExecutor,
+    input: &str,
+    base_context: HashMap<String, serde_json::Value>,
+    token_limit: Option<f64>,
+) -> Result<(HashMap<String, serde_json::Value>, usize)> {
+    let estimated = estimate_agent_request_tokens(executor, input, &base_context);
+    let Some(limit) = token_limit else {
+        return Ok((base_context, estimated));
+    };
+    if estimated as f64 <= limit {
+        return Ok((base_context, estimated));
+    }
+
+    for candidate in build_context_variants(&base_context) {
+        let candidate_estimate = estimate_agent_request_tokens(executor, input, &candidate);
+        if candidate_estimate as f64 <= limit {
+            return Ok((candidate, candidate_estimate));
+        }
+    }
+
+    anyhow::bail!(
+        "Estimated request size ({estimated} input tokens) exceeds configured token limit and could not be reduced automatically."
+    )
 }
 
 pub async fn create_specification(
@@ -367,8 +488,12 @@ fn create_specification_inner(
                     };
 
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
-                    let estimated =
-                        estimate_agent_request_tokens(&executor, &draft_content, &dependency_context);
+                    let (dependency_context, estimated) = fit_context_to_token_limit(
+                        &executor,
+                        &draft_content,
+                        dependency_context,
+                        token_limit,
+                    )?;
                     let cache_hit = executor
                         .is_cache_hit(&draft_content, dependency_context.clone())
                         .unwrap_or(false);
@@ -549,8 +674,12 @@ fn create_specification_inner(
 
                     let dependency_context = build_dependency_context(&node)?;
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
-                    let estimated =
-                        estimate_agent_request_tokens(&executor, &draft_content, &dependency_context);
+                    let (dependency_context, estimated) = fit_context_to_token_limit(
+                        &executor,
+                        &draft_content,
+                        dependency_context,
+                        token_limit,
+                    )?;
                     let cache_hit = executor
                         .is_cache_hit(&draft_content, dependency_context.clone())
                         .unwrap_or(false);
@@ -754,6 +883,23 @@ async fn process_specification(
     let spec_content = executor
         .execute_with_conversation_with_seed(&draft_content, draft_name, additional_context.clone())
         .await?;
+
+    finalize_specification_output(
+        draft_content,
+        draft_file,
+        draft_name,
+        spec_content,
+        additional_context,
+    )
+}
+
+fn finalize_specification_output(
+    draft_content: &str,
+    draft_file: &Path,
+    draft_name: &str,
+    spec_content: String,
+    additional_context: HashMap<String, serde_json::Value>,
+) -> Result<ProcessSpecOutcome> {
 
     // Determine output path preserving folder structure
     let output_path =
@@ -1075,11 +1221,12 @@ pub async fn create_implementation(
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
-            let estimated = estimate_agent_request_tokens(
+            let (dependency_context, estimated) = fit_context_to_token_limit(
                 &executor,
                 &context_content,
-                &dependency_context,
-            );
+                dependency_context,
+                token_limit,
+            )?;
             let cache_hit = executor
                 .is_cache_hit(&context_content, dependency_context.clone())
                 .unwrap_or(false);
@@ -1100,128 +1247,284 @@ pub async fn create_implementation(
                 println!("Parallel execution enabled for create_implementation");
             }
             let cfg = *config;
-            let mut tasks = Vec::new();
-            for (
-                context_file,
-                context_name,
-                output_path,
-                dependency_fingerprint,
-                dependency_context,
-                context_content,
-                estimated,
-                cache_hit,
-            ) in runnable
-            {
-                if cache_hit {
-                    progress.start_item_cached(&context_name);
-                } else {
-                    progress.start_item(&context_name, Some(estimated));
-                }
-                let executor_clone = executor.clone();
-                let rate_limiter_clone = rate_limiter.clone();
-                let token_limiter_clone = token_limiter.clone();
-                tasks.push(tokio::task::spawn(async move {
-                    if !cache_hit {
-                        if let Err(e) = acquire_request_capacity(
-                            token_limiter_clone.as_ref(),
-                            rate_limiter_clone.as_ref(),
-                            estimated,
+            let use_batch = executor.can_use_batch().unwrap_or(false);
+            if use_batch {
+                let mut batch_items: Vec<PreparedImplementationBatchItem> = Vec::new();
+                let mut batch_results: Vec<(String, PathBuf, PathBuf, String, Result<()>)> = Vec::new();
+
+                for (
+                    context_file,
+                    context_name,
+                    output_path,
+                    dependency_fingerprint,
+                    dependency_context,
+                    context_content,
+                    estimated,
+                    cache_hit,
+                ) in runnable
+                {
+                    if cache_hit {
+                        progress.start_item_cached(&context_name);
+                        let result = process_implementation(
+                            &executor,
+                            &context_content,
+                            &context_file,
+                            &context_name,
+                            &cfg,
+                            dependency_context,
                         )
-                        .await
-                        {
-                            return (
+                        .await;
+                        batch_results.push((
+                            context_name,
+                            context_file,
+                            output_path,
+                            dependency_fingerprint,
+                            result,
+                        ));
+                        continue;
+                    }
+
+                    progress.start_item(&context_name, Some(estimated));
+                    match executor.prepare_execution(&context_content, dependency_context.clone())? {
+                        reen::contexts::PreparedExecutionState::Cached(output) => {
+                            let result = finalize_implementation_output(
+                                &context_file,
+                                &context_name,
+                                &cfg,
+                                output,
+                            );
+                            batch_results.push((
                                 context_name,
                                 context_file,
                                 output_path,
                                 dependency_fingerprint,
-                                Err(e),
-                            );
+                                result,
+                            ));
+                        }
+                        reen::contexts::PreparedExecutionState::Ready(prepared) => {
+                            batch_items.push(PreparedImplementationBatchItem {
+                                context_name,
+                                context_file,
+                                output_path,
+                                dependency_fingerprint,
+                                dependency_context,
+                                context_content,
+                                prepared,
+                            });
                         }
                     }
-                    let mut result = process_implementation(
-                        &executor_clone,
-                        &context_content,
-                        &context_file,
-                        &context_name,
-                        &cfg,
-                        dependency_context.clone(),
-                    )
-                    .await;
-                    if let Err(ref e) = result {
-                        if is_rate_limit_error(e) {
-                            if prepare_rate_limit_retry(
-                                &context_name,
-                                estimated,
-                                token_limiter_clone.as_ref(),
-                                rate_limiter_clone.as_ref(),
-                            )
-                            .await
-                            {
-                                if let Err(e) = acquire_request_capacity(
-                                    token_limiter_clone.as_ref(),
-                                    rate_limiter_clone.as_ref(),
-                                    estimated,
-                                )
-                                .await
-                                {
-                                    return (
-                                        context_name,
-                                        context_file,
-                                        output_path,
-                                        dependency_fingerprint,
-                                        Err(e),
-                                    );
-                                }
-                                result = process_implementation(
-                                    &executor_clone,
-                                    &context_content,
-                                    &context_file,
-                                    &context_name,
+                }
+
+                if !batch_items.is_empty() {
+                    let batch_request = batch_items
+                        .iter()
+                        .map(|item| (item.context_name.clone(), item.prepared.clone()))
+                        .collect::<Vec<_>>();
+                    match executor.execute_batch(batch_request) {
+                        Ok(outputs) => {
+                            for item in batch_items {
+                                let result = outputs
+                                    .get(&item.context_name)
+                                    .cloned()
+                                    .ok_or_else(|| anyhow::anyhow!("Missing batch output"))
+                                    .and_then(|output| {
+                                        finalize_implementation_output(
+                                            &item.context_file,
+                                            &item.context_name,
+                                            &cfg,
+                                            output,
+                                        )
+                                    });
+                                batch_results.push((
+                                    item.context_name,
+                                    item.context_file,
+                                    item.output_path,
+                                    item.dependency_fingerprint,
+                                    result,
+                                ));
+                            }
+                        }
+                        Err(batch_error) => {
+                            eprintln!(
+                                "Batch execution failed for create_implementation; falling back to sequential execution: {}",
+                                batch_error
+                            );
+                            for item in batch_items {
+                                let result = process_implementation(
+                                    &executor,
+                                    &item.context_content,
+                                    &item.context_file,
+                                    &item.context_name,
                                     &cfg,
-                                    dependency_context,
+                                    item.dependency_context,
                                 )
                                 .await;
+                                batch_results.push((
+                                    item.context_name,
+                                    item.context_file,
+                                    item.output_path,
+                                    item.dependency_fingerprint,
+                                    result,
+                                ));
                             }
                         }
                     }
-                    (
-                        context_name,
-                        context_file,
-                        output_path,
-                        dependency_fingerprint,
-                        result,
-                    )
-                }));
-            }
-            for task in tasks {
-                let (context_name, context_file, output_path, dependency_fingerprint, result) =
-                    task.await?;
-                match result {
-                    Ok(_) => {
-                        tracker.record(
-                            Stage::Implementation,
-                            &context_name,
-                            &context_file,
-                            &output_path,
-                            &dependency_fingerprint,
-                        )?;
-                        updated_count += 1;
-                        updated_in_run.insert(context_name.clone());
-                        recent_generated_files.push(output_path.clone());
-                        progress.complete_item(&context_name, true);
-                        if config.verbose {
-                            println!("✓ Successfully created implementation for {}", context_name);
+                }
+
+                for (context_name, context_file, output_path, dependency_fingerprint, result) in batch_results {
+                    match result {
+                        Ok(_) => {
+                            tracker.record(
+                                Stage::Implementation,
+                                &context_name,
+                                &context_file,
+                                &output_path,
+                                &dependency_fingerprint,
+                            )?;
+                            updated_count += 1;
+                            updated_in_run.insert(context_name.clone());
+                            recent_generated_files.push(output_path.clone());
+                            progress.complete_item(&context_name, true);
+                            if config.verbose {
+                                println!("✓ Successfully created implementation for {}", context_name);
+                            }
+                        }
+                        Err(e) => {
+                            if e.to_string().contains("unfinished specification") {
+                                had_unspecified = true;
+                            }
+                            progress.complete_item(&context_name, false);
+                            eprintln!(
+                                "✗ Failed to create implementation for {}: {}",
+                                context_name, e
+                            );
                         }
                     }
-                    Err(e) => {
-                        if e.to_string().contains("unfinished specification") {
-                            had_unspecified = true;
+                }
+            } else {
+                let mut tasks = Vec::new();
+                for (
+                    context_file,
+                    context_name,
+                    output_path,
+                    dependency_fingerprint,
+                    dependency_context,
+                    context_content,
+                    estimated,
+                    cache_hit,
+                ) in runnable
+                {
+                    if cache_hit {
+                        progress.start_item_cached(&context_name);
+                    } else {
+                        progress.start_item(&context_name, Some(estimated));
+                    }
+                    let executor_clone = executor.clone();
+                    let rate_limiter_clone = rate_limiter.clone();
+                    let token_limiter_clone = token_limiter.clone();
+                    tasks.push(tokio::task::spawn(async move {
+                        if !cache_hit {
+                            if let Err(e) = acquire_request_capacity(
+                                token_limiter_clone.as_ref(),
+                                rate_limiter_clone.as_ref(),
+                                estimated,
+                            )
+                            .await
+                            {
+                                return (
+                                    context_name,
+                                    context_file,
+                                    output_path,
+                                    dependency_fingerprint,
+                                    Err(e),
+                                );
+                            }
                         }
-                        progress.complete_item(&context_name, false);
-                        eprintln!(
-                            "✗ Failed to create implementation for {}: {}",
-                            context_name, e
-                        );
+                        let mut result = process_implementation(
+                            &executor_clone,
+                            &context_content,
+                            &context_file,
+                            &context_name,
+                            &cfg,
+                            dependency_context.clone(),
+                        )
+                        .await;
+                        if let Err(ref e) = result {
+                            if is_rate_limit_error(e) {
+                                if prepare_rate_limit_retry(
+                                    &context_name,
+                                    estimated,
+                                    token_limiter_clone.as_ref(),
+                                    rate_limiter_clone.as_ref(),
+                                )
+                                .await
+                                {
+                                    if let Err(e) = acquire_request_capacity(
+                                        token_limiter_clone.as_ref(),
+                                        rate_limiter_clone.as_ref(),
+                                        estimated,
+                                    )
+                                    .await
+                                    {
+                                        return (
+                                            context_name,
+                                            context_file,
+                                            output_path,
+                                            dependency_fingerprint,
+                                            Err(e),
+                                        );
+                                    }
+                                    result = process_implementation(
+                                        &executor_clone,
+                                        &context_content,
+                                        &context_file,
+                                        &context_name,
+                                        &cfg,
+                                        dependency_context,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        (
+                            context_name,
+                            context_file,
+                            output_path,
+                            dependency_fingerprint,
+                            result,
+                        )
+                    }));
+                }
+                for task in tasks {
+                    let (context_name, context_file, output_path, dependency_fingerprint, result) =
+                        task.await?;
+                    match result {
+                        Ok(_) => {
+                            tracker.record(
+                                Stage::Implementation,
+                                &context_name,
+                                &context_file,
+                                &output_path,
+                                &dependency_fingerprint,
+                            )?;
+                            updated_count += 1;
+                            updated_in_run.insert(context_name.clone());
+                            recent_generated_files.push(output_path.clone());
+                            progress.complete_item(&context_name, true);
+                            if config.verbose {
+                                println!("✓ Successfully created implementation for {}", context_name);
+                            }
+                        }
+                        Err(e) => {
+                            if e.to_string().contains("unfinished specification") {
+                                had_unspecified = true;
+                            }
+                            progress.complete_item(&context_name, false);
+                            eprintln!(
+                                "✗ Failed to create implementation for {}: {}",
+                                context_name, e
+                            );
+                        }
                     }
                 }
             }
@@ -1383,6 +1686,16 @@ async fn process_implementation(
     let impl_result = executor
         .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
         .await?;
+
+    finalize_implementation_output(context_file, context_name, config, impl_result)
+}
+
+fn finalize_implementation_output(
+    context_file: &Path,
+    context_name: &str,
+    config: &Config,
+    impl_result: String,
+) -> Result<()> {
 
     // Extract code from the agent output and write to file
     // The agent output may contain markdown code blocks or raw code
@@ -1794,11 +2107,12 @@ pub async fn create_tests(
             let context_name = node.name.clone();
             let dependency_context = build_dependency_context(&node)?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
-            let estimated = estimate_agent_request_tokens(
+            let (dependency_context, estimated) = fit_context_to_token_limit(
                 &executor,
                 &context_content,
-                &dependency_context,
-            );
+                dependency_context,
+                token_limit,
+            )?;
             let cache_hit = executor
                 .is_cache_hit(&context_content, dependency_context.clone())
                 .unwrap_or(false);

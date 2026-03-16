@@ -1,21 +1,28 @@
 create_specifications_data:
   model: claude-sonnet-4-6
   parallel: true
+  batch: false
 create_specifications_context:
   model: claude-sonnet-4-6
   parallel: true
+  batch: false
 create_specifications_main:
   model: claude-sonnet-4-6
   parallel: true
+  batch: false
 create_implementation:
   model: claude-sonnet-4-6
   parallel: true
+  batch: true
 create_test:
   model: claude-sonnet-4-6
   parallel: false
+  batch: false
 resolve_compilation_errors:
   model: claude-sonnet-4-6
   parallel: false
+  batch: false
 fix_draft_blockers:
   model: claude-sonnet-4-6
   parallel: false
+  batch: false

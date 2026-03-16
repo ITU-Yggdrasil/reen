@@ -11,8 +11,11 @@ import json
 import sys
 import os
 import socket
+import time
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 # Resolve the starting directory. When the script is embedded in the reen binary
 # and written to a temp file, REEN_PROJECT_DIR tells us where to start looking.
@@ -110,6 +113,134 @@ def execute_with_anthropic(
         raise
 
     return message.content[0].text
+
+
+def _anthropic_headers(api_key: str) -> Dict[str, str]:
+    return {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+
+def _anthropic_http_json(
+    path: str,
+    api_key: str,
+    method: str = "GET",
+    body: Optional[Dict[str, Any]] = None,
+) -> Tuple[Any, Dict[str, Any]]:
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    url = f"{base_url.rstrip('/')}{path}"
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers=_anthropic_headers(api_key),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            payload = response.read().decode("utf-8")
+            parsed = json.loads(payload) if payload else {}
+            return parsed, dict(response.headers)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Anthropic HTTP error {e.code} for {path}: {detail}"
+        ) from e
+
+
+def _extract_message_text(message: Dict[str, Any]) -> str:
+    parts = message.get("content") or []
+    text_parts: List[str] = []
+    for part in parts:
+        if isinstance(part, dict) and part.get("type") == "text":
+            text_parts.append(part.get("text", ""))
+    return "".join(text_parts)
+
+
+def execute_batch_with_anthropic(batch_requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Execute independent requests via Anthropic Message Batches."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY environment variable not set")
+
+    requests_payload: List[Dict[str, Any]] = []
+    for item in batch_requests:
+        custom_id = item.get("custom_id")
+        request = item.get("request") or {}
+        model = request.get("model")
+        system_content, user_content, _, max_output_tokens = _normalize_request(request)
+        if not custom_id or not model:
+            raise RuntimeError("Batch request missing custom_id or model")
+        _, model_name = determine_provider(model)
+        requests_payload.append(
+            {
+                "custom_id": custom_id,
+                "params": {
+                    "model": model_name,
+                    "max_tokens": _resolve_max_output_tokens(
+                        max_output_tokens, "ANTHROPIC_MAX_OUTPUT_TOKENS", 8096
+                    ),
+                    "system": system_content,
+                    "messages": [{"role": "user", "content": user_content}],
+                },
+            }
+        )
+
+    batch, _ = _anthropic_http_json(
+        "/v1/messages/batches",
+        api_key,
+        method="POST",
+        body={"requests": requests_payload},
+    )
+    batch_id = batch.get("id")
+    if not batch_id:
+        raise RuntimeError(f"Anthropic batch response missing id: {batch}")
+
+    poll_interval = float(os.environ.get("ANTHROPIC_BATCH_POLL_INTERVAL_SECONDS", "5"))
+    timeout_seconds = float(os.environ.get("ANTHROPIC_BATCH_TIMEOUT_SECONDS", "1800"))
+    deadline = time.time() + timeout_seconds
+
+    while True:
+        status_payload, _ = _anthropic_http_json(
+            f"/v1/messages/batches/{batch_id}", api_key
+        )
+        processing_status = status_payload.get("processing_status")
+        if processing_status == "ended":
+            break
+        if processing_status in {"canceled", "canceling", "expired", "failed"}:
+            raise RuntimeError(f"Anthropic batch failed with status '{processing_status}'")
+        if time.time() >= deadline:
+            raise RuntimeError("Anthropic batch polling timed out")
+        time.sleep(poll_interval)
+
+    results_payload, _ = _anthropic_http_json(
+        f"/v1/messages/batches/{batch_id}/results", api_key
+    )
+    if isinstance(results_payload, dict):
+        result_items = results_payload.get("data") or results_payload.get("results") or []
+    else:
+        result_items = results_payload
+
+    outputs: List[Dict[str, Any]] = []
+    for item in result_items:
+        custom_id = item.get("custom_id")
+        result = item.get("result") or {}
+        result_type = result.get("type")
+        if result_type == "succeeded":
+            message = result.get("message") or {}
+            outputs.append(
+                {
+                    "custom_id": custom_id,
+                    "output": _extract_message_text(message),
+                }
+            )
+        else:
+            error = result.get("error") or item.get("error") or result
+            raise RuntimeError(f"Anthropic batch item '{custom_id}' failed: {error}")
+
+    return outputs
 
 
 def execute_with_ollama(
@@ -330,6 +461,35 @@ def _normalize_request(
 def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
     """Execute a model request and return the result."""
     try:
+        if request.get("batch_requests") is not None:
+            batch_requests = request.get("batch_requests") or []
+            if not batch_requests:
+                return {"success": True, "outputs": []}
+
+            first_request = batch_requests[0].get("request") or {}
+            first_model = first_request.get("model")
+            if not first_model:
+                return {"success": False, "error": "Batch request missing model"}
+            provider, _ = determine_provider(first_model)
+
+            if provider == "anthropic":
+                outputs = execute_batch_with_anthropic(batch_requests)
+            else:
+                outputs = []
+                for batch_item in batch_requests:
+                    custom_id = batch_item.get("custom_id")
+                    single_result = execute_model(batch_item.get("request") or {})
+                    if not single_result.get("success"):
+                        return single_result
+                    outputs.append(
+                        {
+                            "custom_id": custom_id,
+                            "output": single_result.get("output", ""),
+                        }
+                    )
+
+            return {"success": True, "outputs": outputs}
+
         model = request.get("model")
         system_content, user_content, agent_name, max_output_tokens = _normalize_request(request)
 
