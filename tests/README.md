@@ -108,7 +108,7 @@ The e2e test verifies:
 
 A successful test run should show:
 - ✓ All specifications created
-- ✓ Implementation files generated in `src/contexts/`
+- ✓ Implementation files generated in `src/contexts/` and `src/data/` (including nested folders when used)
 - ✓ Code compiles without errors
 - ✓ Transfer test passes (100 transferred from A to B)
 
@@ -147,6 +147,10 @@ cargo test
 ls -la src/contexts/
 cat src/contexts/account.rs
 cat src/contexts/money_transfer.rs
+
+# Nested folders are also supported, for example:
+ls -la src/contexts/ui/
+cat src/contexts/ui/terminal_renderer.rs
 ```
 
 ## Understanding the Test Case
@@ -201,7 +205,8 @@ Check that:
 
 ### "Compilation failed"
 The generated code may need manual adjustments. Check:
-- `src/contexts/` for the generated implementation
+- `src/contexts/` and `src/data/` for the generated implementation
+- Nested subfolders if your drafts/specifications use them
 - Compiler error messages for specific issues
 
 ### Tests timeout
@@ -212,7 +217,7 @@ LLM API calls can be slow. The test may take several minutes to complete.
 After a successful test run:
 
 1. Examine the generated specifications in `contexts/`
-2. Review the implementation in `src/contexts/`
+2. Review the implementation in `src/contexts/` and `src/data/`
 3. Check the generated tests in `tests/`
 4. Modify the drafts and re-run to see how reen handles changes
 

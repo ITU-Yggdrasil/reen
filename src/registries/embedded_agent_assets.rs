@@ -22,14 +22,15 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
         "create_specifications_main.yml" => {
             Some(include_str!("../../agents/create_specifications_main.yml"))
         }
+        "create_specifications_external_api.yml" => Some(include_str!(
+            "../../agents/create_specifications_external_api.yml"
+        )),
         "create_implementation.yml" => Some(include_str!("../../agents/create_implementation.yml")),
         "create_test.yml" => Some(include_str!("../../agents/create_test.yml")),
         "resolve_compilation_errors.yml" => {
             Some(include_str!("../../agents/resolve_compilation_errors.yml"))
         }
-        "fix_draft_blockers.yml" => {
-            Some(include_str!("../../agents/fix_draft_blockers.yml"))
-        }
+        "fix_draft_blockers.yml" => Some(include_str!("../../agents/fix_draft_blockers.yml")),
         _ => None,
     }
 }
@@ -40,6 +41,7 @@ pub fn embedded_expected_agent_names() -> &'static [&'static str] {
         "create_specifications_data",
         "create_specifications_context",
         "create_specifications_main",
+        "create_specifications_external_api",
         "create_implementation",
         "create_test",
         "resolve_compilation_errors",

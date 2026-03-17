@@ -4,7 +4,7 @@ This document explains how to properly organize Rust modules when implementing s
 
 ## The Problem
 
-When you create implementation files in subdirectories like `src/contexts/`, Rust needs to know about them. Without proper module declaration, you'll get:
+When you create implementation files in subdirectories like `src/contexts/` or nested folders such as `src/contexts/ui/`, Rust needs to know about them. Without proper module declaration, you'll get:
 
 ```
 error[E0583]: file not found for module `contexts`
@@ -28,7 +28,10 @@ src/
 ├── contexts/
 │   ├── mod.rs              ← REQUIRED!
 │   ├── account.rs
-│   └── money_transfer.rs
+│   ├── money_transfer.rs
+│   └── ui/
+│       ├── mod.rs          ← REQUIRED!
+│       └── terminal_renderer.rs
 └── types/
     ├── mod.rs              ← REQUIRED!
     └── ledger.rs
@@ -47,10 +50,20 @@ The `mod.rs` file has two jobs:
 // 1. Declare modules (one for each .rs file)
 mod account;
 mod money_transfer;
+mod ui;
 
 // 2. Re-export public types
 pub use account::Account;
 pub use money_transfer::{MoneyTransfer, TransferError};
+pub use ui::*;
+```
+
+#### Example: src/contexts/ui/mod.rs
+
+```rust
+mod terminal_renderer;
+
+pub use terminal_renderer::TerminalRenderer;
 ```
 
 #### Example: src/types/mod.rs
@@ -225,7 +238,7 @@ Before completing implementation:
 
 ## Summary
 
-**Simple Rule**: Creating files in `src/subdirectory/`? Create `src/subdirectory/mod.rs` first!
+**Simple Rule**: Creating files in `src/subdirectory/`? Create `src/subdirectory/mod.rs` first. Creating files in nested folders? Create `mod.rs` at every level.
 
 **mod.rs Template**:
 ```rust

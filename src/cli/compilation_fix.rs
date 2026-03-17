@@ -119,8 +119,7 @@ pub async fn ensure_compiles_with_auto_fix(
         let mut include_specs = true;
 
         let additional_context = loop {
-            let diagnostics =
-                prioritize_and_cap_diagnostics(&all_diagnostics, max_errors_used);
+            let diagnostics = prioritize_and_cap_diagnostics(&all_diagnostics, max_errors_used);
             let truncated_stderr = truncate_stderr_for_diagnostics(&output.stderr, &diagnostics);
 
             let relevant_paths = collect_relevant_paths(
@@ -153,10 +152,8 @@ pub async fn ensure_compiles_with_auto_fix(
                 project_info,
             )?;
 
-            let estimated = estimate_request_tokens(
-                "Compilation failed; propose minimal fix patch.",
-                &ctx,
-            );
+            let estimated =
+                estimate_request_tokens("Compilation failed; propose minimal fix patch.", &ctx);
             if estimated <= cfg.max_tokens {
                 break ctx;
             }
@@ -387,10 +384,7 @@ fn prioritize_and_cap_diagnostics(
 }
 
 /// Truncates stderr to keep only error blocks matching the prioritized diagnostics.
-fn truncate_stderr_for_diagnostics(
-    stderr: &str,
-    diagnostics: &[DiagnosticSpan],
-) -> String {
+fn truncate_stderr_for_diagnostics(stderr: &str, diagnostics: &[DiagnosticSpan]) -> String {
     if diagnostics.is_empty() {
         return stderr.to_string();
     }
@@ -497,7 +491,12 @@ fn collect_relevant_paths(
     }
 
     // Only include lib.rs, mod.rs if in diagnostics or recent.
-    for candidate in ["src/lib.rs", "src/main.rs", "src/contexts/mod.rs", "src/data/mod.rs"] {
+    for candidate in [
+        "src/lib.rs",
+        "src/main.rs",
+        "src/contexts/mod.rs",
+        "src/data/mod.rs",
+    ] {
         if diagnostic_files.contains(candidate) || recent_set.contains(candidate) {
             let p = project_root.join(candidate);
             if p.exists() {
@@ -586,7 +585,8 @@ fn collect_relevant_paths(
                 })
                 .filter(|p| p.exists())
                 .collect();
-            let priority: HashSet<PathBuf> = diagnostic_paths.union(&recent_paths).cloned().collect();
+            let priority: HashSet<PathBuf> =
+                diagnostic_paths.union(&recent_paths).cloned().collect();
             out.sort_by(|a, b| {
                 let a_pri = priority.contains(a);
                 let b_pri = priority.contains(b);
@@ -628,17 +628,15 @@ fn snapshot_files_json_snippets(
     diagnostics: &[DiagnosticSpan],
     snippet_lines: usize,
 ) -> Result<BTreeMap<String, String>> {
-    let diagnostics_by_file: HashMap<String, Vec<u32>> = diagnostics.iter().fold(
-        HashMap::new(),
-        |mut acc, d| {
+    let diagnostics_by_file: HashMap<String, Vec<u32>> =
+        diagnostics.iter().fold(HashMap::new(), |mut acc, d| {
             if !d.file.trim().is_empty() {
                 acc.entry(d.file.trim().to_string())
                     .or_default()
                     .push(d.line);
             }
             acc
-        },
-    );
+        });
 
     let mut map = BTreeMap::new();
     for p in paths {
@@ -746,7 +744,9 @@ fn snapshot_specs_json(
 fn map_src_to_spec(src_rel: &str) -> Option<String> {
     // Best-effort mapping. This is intentionally conservative.
     // src/contexts/x.rs -> specifications/contexts/x.md
+    // src/contexts/ui/x.rs -> specifications/contexts/ui/x.md
     // src/data/x.rs -> specifications/data/x.md
+    // src/data/payments/x.rs -> specifications/data/payments/x.md
     // src/main.rs -> specifications/app.md
     if let Some(stem) = src_rel
         .strip_prefix("src/contexts/")
@@ -1445,7 +1445,9 @@ fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
 /// Returns the list of patched file paths (relative to project_root).
 pub fn apply_draft_patches(project_root: &Path, agent_output: &str) -> Result<Vec<PathBuf>> {
     let diff = extract_unified_diff_from_agent_output(agent_output).ok_or_else(|| {
-        anyhow::anyhow!("Fix agent output did not contain a unified diff starting with 'diff --git'")
+        anyhow::anyhow!(
+            "Fix agent output did not contain a unified diff starting with 'diff --git'"
+        )
     })?;
     let patches = parse_unified_diff(&diff)?;
     let mut patched = Vec::new();
@@ -1609,4 +1611,25 @@ fn find_hunk_start(lines: &[String], pattern: &[&str], preferred: usize) -> Opti
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_src_to_spec;
+
+    #[test]
+    fn map_src_to_spec_supports_nested_context_paths() {
+        assert_eq!(
+            map_src_to_spec("src/contexts/ui/terminal_renderer.rs"),
+            Some("specifications/contexts/ui/terminal_renderer.md".to_string())
+        );
+    }
+
+    #[test]
+    fn map_src_to_spec_supports_nested_data_paths() {
+        assert_eq!(
+            map_src_to_spec("src/data/payments/ledger_entry.rs"),
+            Some("specifications/data/payments/ledger_entry.md".to_string())
+        );
+    }
 }

@@ -3,11 +3,11 @@
 //! Uses a token bucket with continuous refill to keep throughput stable.
 //! Token count is approximated from text (word count and character-based heuristics).
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use std::collections::VecDeque;
 
 /// Approximate tokens per word (typical for English text).
 const TOKENS_PER_WORD: f64 = 1.3;

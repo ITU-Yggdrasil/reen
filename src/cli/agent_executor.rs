@@ -11,8 +11,8 @@ use reen::contexts::{
     AgentModelRegistry, AgentRunner, AgentRunnerError, PreparedExecution, PreparedExecutionState,
 };
 use reen::registries::{
-    candidate_agent_spec_filenames, embedded_agent_spec, embedded_runner_py, FileAgentModelRegistry,
-    FileAgentRegistry,
+    candidate_agent_spec_filenames, embedded_agent_spec, embedded_runner_py,
+    FileAgentModelRegistry, FileAgentRegistry,
 };
 
 use super::Config;
@@ -20,10 +20,91 @@ use super::Config;
 /// Input structure for agent execution
 #[derive(Serialize)]
 struct AgentInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
     draft_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    openapi_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation_urls: Option<Vec<String>>,
     #[serde(flatten)]
     additional: HashMap<String, serde_json::Value>,
+}
+
+fn json_value_to_string(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn json_value_to_string_vec(value: serde_json::Value) -> Option<Vec<String>> {
+    match value {
+        serde_json::Value::Array(items) => {
+            let values = items
+                .into_iter()
+                .filter_map(json_value_to_string)
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                None
+            } else {
+                Some(values)
+            }
+        }
+        serde_json::Value::String(s) => Some(vec![s]),
+        serde_json::Value::Null => None,
+        other => Some(vec![other.to_string()]),
+    }
+}
+
+fn build_agent_input(
+    agent_name: &str,
+    input: &str,
+    mut additional_context: HashMap<String, serde_json::Value>,
+) -> AgentInput {
+    let openapi_content = additional_context
+        .remove("openapi_content")
+        .and_then(json_value_to_string);
+    let documentation_urls = additional_context
+        .remove("documentation_urls")
+        .and_then(json_value_to_string_vec);
+
+    match agent_name {
+        "create_specifications"
+        | "create_specifications_context"
+        | "create_specifications_data"
+        | "create_specifications_main"
+        | "create_specifications_external_api" => AgentInput {
+            draft_content: Some(input.to_string()),
+            context_content: None,
+            openapi_content,
+            documentation_urls,
+            additional: additional_context,
+        },
+        "create_implementation" | "create_test" => AgentInput {
+            draft_content: None,
+            context_content: Some(input.to_string()),
+            openapi_content: None,
+            documentation_urls: None,
+            additional: additional_context,
+        },
+        "fix_draft_blockers" => AgentInput {
+            draft_content: None,
+            context_content: None,
+            openapi_content,
+            documentation_urls,
+            additional: additional_context,
+        },
+        _ => AgentInput {
+            draft_content: Some(input.to_string()),
+            context_content: None,
+            openapi_content,
+            documentation_urls,
+            additional: additional_context,
+        },
+    }
 }
 
 /// Response types from agent execution
@@ -82,34 +163,7 @@ impl AgentExecutor {
             println!("Executing agent: {}", self.agent_name);
         }
 
-        let enriched_context = additional_context;
-
-        // Prepare input based on agent type
-        let agent_input = match self.agent_name.as_str() {
-            "create_specifications"
-            | "create_specifications_context"
-            | "create_specifications_data"
-            | "create_specifications_main" => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: enriched_context,
-            },
-            "create_implementation" | "create_test" => AgentInput {
-                draft_content: None,
-                context_content: Some(input.to_string()),
-                additional: enriched_context,
-            },
-            "fix_draft_blockers" => AgentInput {
-                draft_content: None,
-                context_content: None,
-                additional: enriched_context,
-            },
-            _ => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: enriched_context,
-            },
-        };
+        let agent_input = build_agent_input(&self.agent_name, input, additional_context);
 
         // Create and run the AgentRunner
         let runner = AgentRunner::new(
@@ -142,31 +196,7 @@ impl AgentExecutor {
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
     ) -> Result<bool> {
-        let agent_input = match self.agent_name.as_str() {
-            "create_specifications"
-            | "create_specifications_context"
-            | "create_specifications_data"
-            | "create_specifications_main" => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: additional_context,
-            },
-            "create_implementation" | "create_test" => AgentInput {
-                draft_content: None,
-                context_content: Some(input.to_string()),
-                additional: additional_context,
-            },
-            "fix_draft_blockers" => AgentInput {
-                draft_content: None,
-                context_content: None,
-                additional: additional_context,
-            },
-            _ => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: additional_context,
-            },
-        };
+        let agent_input = build_agent_input(&self.agent_name, input, additional_context);
 
         let runner = AgentRunner::new(
             self.agent_name.clone(),
@@ -191,31 +221,7 @@ impl AgentExecutor {
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
     ) -> Result<usize> {
-        let agent_input = match self.agent_name.as_str() {
-            "create_specifications"
-            | "create_specifications_context"
-            | "create_specifications_data"
-            | "create_specifications_main" => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: additional_context,
-            },
-            "create_implementation" | "create_test" => AgentInput {
-                draft_content: None,
-                context_content: Some(input.to_string()),
-                additional: additional_context,
-            },
-            "fix_draft_blockers" => AgentInput {
-                draft_content: None,
-                context_content: None,
-                additional: additional_context,
-            },
-            _ => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: additional_context,
-            },
-        };
+        let agent_input = build_agent_input(&self.agent_name, input, additional_context);
 
         let runner = AgentRunner::new(
             self.agent_name.clone(),
@@ -240,31 +246,7 @@ impl AgentExecutor {
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
     ) -> Result<PreparedExecutionState> {
-        let agent_input = match self.agent_name.as_str() {
-            "create_specifications"
-            | "create_specifications_context"
-            | "create_specifications_data"
-            | "create_specifications_main" => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: additional_context,
-            },
-            "create_implementation" | "create_test" => AgentInput {
-                draft_content: None,
-                context_content: Some(input.to_string()),
-                additional: additional_context,
-            },
-            "fix_draft_blockers" => AgentInput {
-                draft_content: None,
-                context_content: None,
-                additional: additional_context,
-            },
-            _ => AgentInput {
-                draft_content: Some(input.to_string()),
-                context_content: None,
-                additional: additional_context,
-            },
-        };
+        let agent_input = build_agent_input(&self.agent_name, input, additional_context);
 
         let runner = AgentRunner::new(
             self.agent_name.clone(),
@@ -313,7 +295,10 @@ impl AgentExecutor {
 
         let mut child = Command::new("python3")
             .arg(&runner_path)
-            .env("REEN_PROJECT_DIR", std::env::current_dir().unwrap_or_default())
+            .env(
+                "REEN_PROJECT_DIR",
+                std::env::current_dir().unwrap_or_default(),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -342,8 +327,8 @@ impl AgentExecutor {
 
         let response_json =
             String::from_utf8(output.stdout).context("Invalid UTF-8 in Python batch response")?;
-        let response: serde_json::Value =
-            serde_json::from_str(&response_json).context("Failed to parse Python batch response")?;
+        let response: serde_json::Value = serde_json::from_str(&response_json)
+            .context("Failed to parse Python batch response")?;
 
         if !response["success"].as_bool().unwrap_or(false) {
             let error = response["error"].as_str().unwrap_or("Unknown batch error");

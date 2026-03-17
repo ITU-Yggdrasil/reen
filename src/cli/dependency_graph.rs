@@ -137,11 +137,8 @@ impl ExecutionNode {
                 sha256,
             });
 
-            let from_category = categorize_artifact(
-                &path,
-                &primary_root_path,
-                fallback_root_path.as_deref(),
-            );
+            let from_category =
+                categorize_artifact(&path, &primary_root_path, fallback_root_path.as_deref());
 
             let canonicals =
                 extract_dependency_canonicals(&content, &primary_index, &fallback_index);
@@ -262,11 +259,13 @@ fn categorize_artifact(
     .unwrap_or(path);
 
     // `app.md` is only the top-level app when it is directly under the root.
-    if rel.file_name()
+    if rel
+        .file_name()
         .and_then(|s| s.to_str())
         .map(|s| s.eq_ignore_ascii_case("app.md"))
         .unwrap_or(false)
-        && rel.parent()
+        && rel
+            .parent()
             .map(|p| p.as_os_str().is_empty())
             .unwrap_or(false)
     {
@@ -279,7 +278,7 @@ fn categorize_artifact(
         .and_then(|c| c.as_os_str().to_str())
         .unwrap_or("");
     match first {
-        "contexts" => ArtifactCategory::Contexts,
+        "contexts" | "external_apis" => ArtifactCategory::Contexts,
         "data" => ArtifactCategory::Data,
         _ => ArtifactCategory::Other,
     }
@@ -290,7 +289,9 @@ fn dependency_allowed(from: ArtifactCategory, to: ArtifactCategory) -> bool {
         // Architectural rule: data is pure and cannot depend on contexts or app.
         ArtifactCategory::Data => matches!(to, ArtifactCategory::Data),
         // Contexts may depend on data and other contexts, but never on the app entrypoint.
-        ArtifactCategory::Contexts => matches!(to, ArtifactCategory::Contexts | ArtifactCategory::Data),
+        ArtifactCategory::Contexts => {
+            matches!(to, ArtifactCategory::Contexts | ArtifactCategory::Data)
+        }
         // The app entrypoint can depend on contexts and data.
         ArtifactCategory::App => matches!(to, ArtifactCategory::Contexts | ArtifactCategory::Data),
         ArtifactCategory::Other => true,
@@ -904,9 +905,12 @@ mod tests {
         fs::write(&game_loop, "tick").expect("write");
         fs::write(&app, "start").expect("write");
 
-        let levels =
-            build_execution_plan(vec![amount.clone()], drafts.to_str().unwrap_or("drafts"), None)
-                .expect("plan");
+        let levels = build_execution_plan(
+            vec![amount.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
         let closure = levels[0][0]
             .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
             .expect("closure");
@@ -929,9 +933,12 @@ mod tests {
         fs::write(&game_loop, "The App drives the loop").expect("write");
         fs::write(&app, "Depends on: game_loop").expect("write");
 
-        let levels =
-            build_execution_plan(vec![game_loop.clone()], drafts.to_str().unwrap_or("drafts"), None)
-                .expect("plan");
+        let levels = build_execution_plan(
+            vec![game_loop.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
         let closure = levels[0][0]
             .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
             .expect("closure");

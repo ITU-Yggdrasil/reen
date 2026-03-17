@@ -342,12 +342,25 @@ static_prompt: |
 
   **When creating files in subdirectories, you MUST create a `mod.rs` file**:
 
+  Nested sub-folders are allowed under both `src/contexts/` and `src/data/`.
+  Mirror the specification structure exactly.
+  Examples:
+  - `specifications/contexts/ui/terminal_renderer.md` -> `src/contexts/ui/terminal_renderer.rs`
+  - `specifications/data/payments/ledger_entry.md` -> `src/data/payments/ledger_entry.rs`
+
   1. **If you create `src/contexts/account.rs`**:
      - Also create/update `src/contexts/mod.rs`
      - Add: `mod account;` to make it visible
      - Add: `pub use account::Account;` to export it
 
-  2. **Example `src/contexts/mod.rs`**:
+  2. **If you create `src/contexts/ui/terminal_renderer.rs`**:
+     - Also create/update `src/contexts/mod.rs`
+     - Add: `mod ui;`
+     - Also create/update `src/contexts/ui/mod.rs`
+     - Add: `mod terminal_renderer;`
+     - Re-export public items from the nearest `mod.rs` files
+
+  3. **Example `src/contexts/mod.rs`**:
      ```rust
      mod account;           // Declares the account module
      mod money_transfer;    // Declares the money_transfer module
@@ -356,15 +369,27 @@ static_prompt: |
      pub use money_transfer::MoneyTransfer;       // Re-exports MoneyTransfer
      ```
 
-  3. **Why this is needed**:
+  4. **Example nested modules**:
+     ```rust
+     // src/contexts/mod.rs
+     mod ui;
+     pub use ui::*;
+
+     // src/contexts/ui/mod.rs
+     mod terminal_renderer;
+     pub use terminal_renderer::TerminalRenderer;
+     ```
+
+  5. **Why this is needed**:
      - Rust requires either `contexts.rs` OR `contexts/mod.rs`
      - Without it, you get: "file not found for module `contexts`"
      - The `mod.rs` file declares and exports all modules in that directory
 
-  4. **Always check**:
+  6. **Always check**:
      - Does `src/contexts/` exist? → Create `src/contexts/mod.rs`
+     - Does a nested directory exist, such as `src/contexts/ui/`? → Create/update `src/contexts/ui/mod.rs`
      - Does `src/types/` exist? → Create `src/types/mod.rs`
-     - Adding new file? → Update the corresponding `mod.rs`
+     - Adding new file? → Update the corresponding `mod.rs` at every level
 
   ### CRITICAL: Rust Module Visibility and Imports (MANDATORY)
 
@@ -717,7 +742,9 @@ static_prompt: |
 
   The system automatically determines the output file based on the specification location:
   - `specifications/data/X.md` → `src/data/X.rs` (your output goes here)
+  - `specifications/data/group/X.md` → `src/data/group/X.rs` (your output goes here)
   - `specifications/contexts/X.md` → `src/contexts/X.rs` (your output goes here)
+  - `specifications/contexts/group/X.md` → `src/contexts/group/X.rs` (your output goes here)
   - `specifications/app.md` → `src/main.rs` (your output goes here)
 
   The Cargo.toml and src/lib.rs are managed separately. You ONLY generate the code for the specific .rs file.
@@ -780,21 +807,24 @@ static_prompt: |
   If `input.direct_dependencies` is present, it is authoritative project context.
 
   You MUST:
+  - Treat `input.direct_dependencies` as an authoritative dependency manifest.
   - Prefer provided dependency artifacts over inference.
   - Reuse existing definitions from dependency context instead of creating duplicates.
+  - If dependency lookup tools are available, fetch only the specific dependency artifacts you need instead of pulling everything eagerly.
   - Avoid arbitrary file scraping when dependency context already provides structured metadata.
-  - If `input.implemented_dependencies` is present, treat it as authoritative for already-implemented dependency APIs (method names/signatures/visibility).
-  - When specification wording and implemented dependency API details differ in low-level shape, prefer compatibility with `input.implemented_dependencies` while preserving specified behavior.
+  - If `input.implemented_dependencies` is present, treat it as an authoritative manifest for already-implemented dependency APIs.
+  - When implemented-dependency lookup tools are available, fetch only the source files you need before deciding an API shape.
+  - When specification wording and implemented dependency API details differ in low-level shape, prefer compatibility with fetched `input.implemented_dependencies` artifacts while preserving specified behavior.
 variable_prompt: |
   ## Input
 
   Specification content:
   {{input.context_content}}
 
-  Direct dependency context (optional, authoritative):
+  Dependency manifest (optional, authoritative):
   {{input.direct_dependencies?}}
 
-  Implemented dependency source context (optional, authoritative for existing APIs):
+  Implemented dependency source manifest (optional, authoritative for existing APIs):
   {{input.implemented_dependencies?}}
 
   Target type name (optional, authoritative when present):

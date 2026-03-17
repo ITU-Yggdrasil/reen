@@ -179,7 +179,10 @@ pub struct Model {
 pub trait AgentRegistry {
     /// Load an agent specification template by agent name.
     /// Returns either a legacy full template or a split (static + variable) template.
-    fn get_specification(&self, agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError>;
+    fn get_specification(
+        &self,
+        agent_name: &str,
+    ) -> Result<AgentSpecificationTemplate, PopulateError>;
 }
 
 /// Trait for resolving execution models by agent name
@@ -303,7 +306,10 @@ where
         // even though it runs from a temp location.
         let mut child = Command::new("python3")
             .arg(&runner_path)
-            .env("REEN_PROJECT_DIR", std::env::current_dir().unwrap_or_default())
+            .env(
+                "REEN_PROJECT_DIR",
+                std::env::current_dir().unwrap_or_default(),
+            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -366,32 +372,120 @@ where
         })
     }
 
+    fn build_tooling_json(
+        &self,
+    ) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), ExecutionError> {
+        let input_value = serde_json::to_value(&self.input).map_err(|e| {
+            ExecutionError::PythonRunnerError(format!("Failed to serialize tool context: {}", e))
+        })?;
+        let mut tools = Vec::new();
+        let mut tool_context = serde_json::Map::new();
+
+        if let Some(dependency_tool_context) = input_value.get("dependency_tool_context") {
+            tools.push(serde_json::json!({
+                "name": "fetch_dependency_artifacts",
+                "description": "Fetch the full content for one or more dependency artifacts listed in the dependency manifest.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Exact artifact paths from the dependency manifest."
+                        }
+                    },
+                    "required": ["paths"]
+                }
+            }));
+            tool_context.insert(
+                "dependency_tool_context".to_string(),
+                dependency_tool_context.clone(),
+            );
+        }
+
+        if self.agent == "create_specifications_external_api" {
+            let documentation_urls = input_value
+                .get("documentation_urls")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if !documentation_urls.is_empty() {
+                tools.push(serde_json::json!({
+                    "name": "fetch_documentation",
+                    "description": "Fetch and extract relevant sections from an external API documentation page.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "One of the documentation URLs provided in the draft input."
+                            },
+                            "section_hint": {
+                                "type": "string",
+                                "description": "Short hint describing the relevant section to extract, for example authentication or pagination.",
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                }));
+                tool_context.insert(
+                    "documentation_urls".to_string(),
+                    serde_json::json!(documentation_urls),
+                );
+            }
+        }
+
+        if tools.is_empty() {
+            Ok((None, None))
+        } else {
+            Ok((
+                Some(serde_json::Value::Array(tools)),
+                Some(serde_json::Value::Object(tool_context)),
+            ))
+        }
+    }
+
     fn build_request_json(
         &self,
         specification: &AgentSpecification,
         model: &Model,
     ) -> Result<serde_json::Value, ExecutionError> {
-        if let (Some(static_p), Some(variable_p)) = (
-            &specification.static_prompt,
-            &specification.variable_prompt,
-        ) {
-            Ok(serde_json::json!({
+        let (tools, tool_context) = self.build_tooling_json()?;
+        let mut request = if let (Some(static_p), Some(variable_p)) =
+            (&specification.static_prompt, &specification.variable_prompt)
+        {
+            serde_json::json!({
                 "model": model.name,
                 "static_prompt": static_p,
                 "variable_prompt": variable_p,
                 "agent_name": self.agent,
-            }))
+            })
         } else if let Some(system_p) = &specification.system_prompt {
-            Ok(serde_json::json!({
+            serde_json::json!({
                 "model": model.name,
                 "system_prompt": system_p,
-            }))
+            })
         } else {
-            Err(ExecutionError::PythonRunnerError(
+            return Err(ExecutionError::PythonRunnerError(
                 "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
                     .to_string(),
-            ))
+            ));
+        };
+
+        if let Some(tools) = tools {
+            request["tools"] = tools;
         }
+        if let Some(tool_context) = tool_context {
+            request["tool_context"] = tool_context;
+        }
+
+        Ok(request)
     }
 
     /// Generates a hash of agent instructions + model name for folder structure
@@ -698,10 +792,18 @@ mod tests {
         location: NestedData,
     }
 
+    #[derive(Serialize)]
+    struct ToolingInput {
+        dependency_tool_context: serde_json::Value,
+    }
+
     struct TestRegistry;
 
     impl AgentRegistry for TestRegistry {
-        fn get_specification(&self, agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
+        fn get_specification(
+            &self,
+            agent_name: &str,
+        ) -> Result<AgentSpecificationTemplate, PopulateError> {
             Ok(AgentSpecificationTemplate::Legacy(format!(
                 "Test specification for {}",
                 agent_name
@@ -722,7 +824,10 @@ mod tests {
     struct MissingPlaceholderRegistry;
 
     impl AgentRegistry for MissingPlaceholderRegistry {
-        fn get_specification(&self, _agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
+        fn get_specification(
+            &self,
+            _agent_name: &str,
+        ) -> Result<AgentSpecificationTemplate, PopulateError> {
             // This would fail during populate() on a cache miss.
             Ok(AgentSpecificationTemplate::Legacy(
                 "This will fail: {{input.required_field}}".to_string(),
@@ -802,7 +907,8 @@ mod tests {
 
         let runner = AgentRunner::new(agent_name, input, registry, model_registry);
         let cache_key = runner.generate_cache_key(&canonical);
-        let instructions_model_hash = runner.generate_instructions_model_hash(&canonical, "test-model");
+        let instructions_model_hash =
+            runner.generate_instructions_model_hash(&canonical, "test-model");
         let cache = runner
             .get_cached_artefact(&canonical, "test-model")
             .expect("cache should initialize");
@@ -951,5 +1057,50 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Frank lives in Paris, France");
+    }
+
+    #[test]
+    fn build_tooling_json_includes_dependency_lookup_tool_when_present() {
+        let input = ToolingInput {
+            dependency_tool_context: serde_json::json!({
+                "dependency_artifacts": [
+                    {
+                        "name": "amount",
+                        "path": "drafts/data/amount.md",
+                        "content": "Amount content"
+                    }
+                ]
+            }),
+        };
+        let runner = AgentRunner::new(
+            "create_implementation".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let (tools, tool_context) = runner.build_tooling_json().expect("tooling");
+        let tools = tools.expect("dependency lookup tool should be present");
+        let tool_names = tools
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(tool_names.contains(&"fetch_dependency_artifacts"));
+        assert_eq!(
+            tool_context
+                .and_then(|value| value.get("dependency_tool_context").cloned())
+                .expect("dependency tool context"),
+            serde_json::json!({
+                "dependency_artifacts": [
+                    {
+                        "name": "amount",
+                        "path": "drafts/data/amount.md",
+                        "content": "Amount content"
+                    }
+                ]
+            })
+        );
     }
 }

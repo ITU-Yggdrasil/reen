@@ -7,6 +7,7 @@ It supports multiple LLM providers through a unified interface.
 """
 
 import hashlib
+import re
 import json
 import sys
 import os
@@ -76,19 +77,290 @@ def _resolve_max_output_tokens(
     return default
 
 
+def _coerce_tool_arguments(arguments: Any) -> Dict[str, Any]:
+    if arguments is None:
+        return {}
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        if not arguments.strip():
+            return {}
+        return json.loads(arguments)
+    raise RuntimeError(f"Unsupported tool argument payload: {type(arguments).__name__}")
+
+
+def _convert_tools_for_openai(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    converted: List[Dict[str, Any]] = []
+    for tool in tools or []:
+        if tool.get("type") == "function":
+            converted.append(tool)
+            continue
+        converted.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.get("name"),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+        )
+    return converted
+
+
+def _split_markdown_sections(markdown_text: str) -> List[Tuple[str, str]]:
+    sections: List[Tuple[str, str]] = []
+    current_title = "Document"
+    current_lines: List[str] = []
+
+    for line in markdown_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            if current_lines:
+                body = "\n".join(current_lines).strip()
+                if body:
+                    sections.append((current_title, body))
+            current_title = stripped.lstrip("#").strip() or current_title
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    if current_lines:
+        body = "\n".join(current_lines).strip()
+        if body:
+            sections.append((current_title, body))
+
+    return sections
+
+
+def _select_relevant_markdown(markdown_text: str, section_hint: Optional[str], max_chars: int = 12000) -> str:
+    markdown_text = (markdown_text or "").strip()
+    if not markdown_text:
+        return ""
+
+    if not section_hint:
+        return markdown_text[:max_chars]
+
+    terms = [term for term in re.findall(r"[a-z0-9]+", section_hint.lower()) if len(term) >= 3]
+    if not terms:
+        return markdown_text[:max_chars]
+
+    sections = _split_markdown_sections(markdown_text)
+    if not sections:
+        return markdown_text[:max_chars]
+
+    scored: List[Tuple[int, int, str]] = []
+    for idx, (title, body) in enumerate(sections):
+        haystack = f"{title}\n{body}".lower()
+        score = sum(haystack.count(term) for term in terms)
+        if any(term in title.lower() for term in terms):
+            score += 5
+        if score > 0:
+            scored.append((score, idx, body))
+
+    if not scored:
+        return markdown_text[:max_chars]
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    chosen: List[str] = []
+    size = 0
+    for _, _, body in scored:
+        snippet = body[: max_chars - size]
+        if not snippet:
+            break
+        chosen.append(snippet)
+        size += len(snippet) + 2
+        if size >= max_chars:
+            break
+
+    return "\n\n".join(chosen)[:max_chars]
+
+
+def _execute_tool_call(
+    tool_name: str, arguments: Dict[str, Any], tool_context: Optional[Dict[str, Any]] = None
+) -> str:
+    tool_context = tool_context or {}
+
+    if tool_name == "fetch_dependency_artifacts":
+        paths = arguments.get("paths")
+        if isinstance(paths, str):
+            paths = [paths]
+        if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+            raise RuntimeError("fetch_dependency_artifacts requires a string array 'paths'")
+
+        dependency_context = tool_context.get("dependency_tool_context") or {}
+        dependency_artifacts = dependency_context.get("dependency_artifacts") or []
+        implemented_artifacts = dependency_context.get("implemented_dependency_artifacts") or []
+        artifact_index: Dict[str, Dict[str, Any]] = {}
+        for artifact in dependency_artifacts:
+            if isinstance(artifact, dict):
+                path = artifact.get("path")
+                if isinstance(path, str) and path:
+                    artifact_index[path] = artifact
+        for artifact in implemented_artifacts:
+            if isinstance(artifact, dict):
+                path = artifact.get("path")
+                if isinstance(path, str) and path:
+                    artifact_index[path] = artifact
+
+        found = []
+        missing = []
+        for path in paths:
+            artifact = artifact_index.get(path)
+            if artifact is None:
+                missing.append(path)
+            else:
+                found.append(artifact)
+
+        return json.dumps(
+            {
+                "artifacts": found,
+                "missing_paths": missing,
+            },
+            ensure_ascii=False,
+        )
+
+    if tool_name != "fetch_documentation":
+        raise RuntimeError(f"Unknown tool call: {tool_name}")
+
+    url = arguments.get("url")
+    if not url or not isinstance(url, str):
+        raise RuntimeError("fetch_documentation requires a string 'url'")
+
+    allowed_urls = tool_context.get("documentation_urls") or []
+    if allowed_urls and url not in allowed_urls:
+        raise RuntimeError(f"Documentation URL not allowed by draft context: {url}")
+
+    try:
+        import trafilatura
+    except ImportError:
+        raise RuntimeError("trafilatura package not installed. Run: pip install trafilatura")
+
+    downloaded = trafilatura.fetch_url(url)
+    if not downloaded:
+        raise RuntimeError(f"Failed to fetch documentation URL: {url}")
+
+    extracted = trafilatura.extract(downloaded, output_format="markdown", include_links=True)
+    if not extracted:
+        extracted = trafilatura.extract(downloaded)
+    if not extracted:
+        raise RuntimeError(f"Failed to extract documentation content from: {url}")
+
+    section_hint = arguments.get("section_hint")
+    relevant = _select_relevant_markdown(extracted, section_hint)
+    return json.dumps(
+        {
+            "url": url,
+            "section_hint": section_hint,
+            "content": relevant,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _anthropic_text_from_message(message: Any) -> str:
+    parts = []
+    for block in getattr(message, "content", []) or []:
+        if getattr(block, "type", None) == "text":
+            parts.append(getattr(block, "text", ""))
+    return "".join(parts)
+
+
+def _anthropic_message_to_blocks(message: Any) -> List[Dict[str, Any]]:
+    blocks: List[Dict[str, Any]] = []
+    for block in getattr(message, "content", []) or []:
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
+            blocks.append({"type": "text", "text": getattr(block, "text", "")})
+        elif block_type == "tool_use":
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": getattr(block, "id", ""),
+                    "name": getattr(block, "name", ""),
+                    "input": getattr(block, "input", {}),
+                }
+            )
+    return blocks
+
+
+def _execute_openai_compatible(
+    client: Any,
+    model: str,
+    system_content: str,
+    user_content: str,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
+    agent_name: Optional[str] = None,
+    use_prompt_cache: bool = False,
+) -> str:
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
+    ]
+    openai_tools = _convert_tools_for_openai(tools)
+
+    while True:
+        create_kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+        }
+        if openai_tools:
+            create_kwargs["tools"] = openai_tools
+            create_kwargs["tool_choice"] = "auto"
+        if use_prompt_cache and agent_name and len(system_content) >= 256:
+            create_kwargs["prompt_cache_key"] = _openai_prompt_cache_key(
+                agent_name, system_content
+            )
+        if use_prompt_cache and _openai_supports_extended_cache(model):
+            create_kwargs["prompt_cache_retention"] = "24h"
+
+        response = client.chat.completions.create(**create_kwargs)
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or []
+
+        if not openai_tools or not tool_calls:
+            return message.content or ""
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        },
+                    }
+                    for tool_call in tool_calls
+                ],
+            }
+        )
+
+        for tool_call in tool_calls:
+            arguments = _coerce_tool_arguments(tool_call.function.arguments)
+            result = _execute_tool_call(tool_call.function.name, arguments, tool_context)
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result,
+                }
+            )
+
+
 def execute_with_anthropic(
     model: str,
     system_content: str,
     user_content: str,
     max_output_tokens: Optional[int] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Execute using Anthropic's Claude API with prompt caching.
-
-    Uses explicit cache breakpoint on the system block so the static instructions
-    are cached and the variable user content is not. Top-level cache_control
-    would place the breakpoint on the last block (user message), which varies
-    per request and prevents cache hits.
-    """
+    """Execute using Anthropic's Claude API with optional native tool calling."""
     try:
         import anthropic
     except ImportError:
@@ -103,10 +375,6 @@ def execute_with_anthropic(
         max_output_tokens, "ANTHROPIC_MAX_OUTPUT_TOKENS", 8096
     )
 
-    # Pass system as array with explicit cache_control on the block.
-    # This caches only the static system content; user_content (variable) stays
-    # after the breakpoint. Top-level cache_control would breakpoint on the
-    # user message, causing every request to have a different cache key.
     system_blocks = [
         {
             "type": "text",
@@ -114,22 +382,47 @@ def execute_with_anthropic(
             "cache_control": {"type": "ephemeral"},
         }
     ]
+    messages: List[Dict[str, Any]] = [{"role": "user", "content": user_content}]
 
-    try:
-        message = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system_blocks,
-            messages=[{"role": "user", "content": user_content}],
-        )
-    except Exception as e:
-        status_code = getattr(e, "status_code", None)
-        detail = str(e)
-        if status_code == 429 or "rate limit" in detail.lower():
-            raise RuntimeError(f"Anthropic rate limit exceeded (429): {detail}") from e
-        raise
+    while True:
+        create_kwargs: Dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system_blocks,
+            "messages": messages,
+        }
+        if tools:
+            create_kwargs["tools"] = tools
 
-    return message.content[0].text
+        try:
+            message = client.messages.create(**create_kwargs)
+        except Exception as e:
+            status_code = getattr(e, "status_code", None)
+            detail = str(e)
+            if status_code == 429 or "rate limit" in detail.lower():
+                raise RuntimeError(f"Anthropic rate limit exceeded (429): {detail}") from e
+            raise
+
+        tool_uses = [
+            block
+            for block in getattr(message, "content", []) or []
+            if getattr(block, "type", None) == "tool_use"
+        ]
+        if not tools or not tool_uses:
+            return _anthropic_text_from_message(message)
+
+        messages.append({"role": "assistant", "content": _anthropic_message_to_blocks(message)})
+        tool_results = []
+        for tool_use in tool_uses:
+            result = _execute_tool_call(tool_use.name, tool_use.input, tool_context)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": result,
+                }
+            )
+        messages.append({"role": "user", "content": tool_results})
 
 
 def _anthropic_headers(api_key: str) -> Dict[str, str]:
@@ -198,7 +491,7 @@ def execute_batch_with_anthropic(batch_requests: List[Dict[str, Any]]) -> List[D
         custom_id = item.get("custom_id")
         request = item.get("request") or {}
         model = request.get("model")
-        system_content, user_content, _, max_output_tokens = _normalize_request(request)
+        system_content, user_content, agent_name, max_output_tokens, tools, tool_context = _normalize_request(request)
         if not custom_id or not model:
             raise RuntimeError("Batch request missing custom_id or model")
         _, model_name = determine_provider(model)
@@ -371,8 +664,10 @@ def execute_with_openai(
     system_content: str,
     user_content: str,
     agent_name: Optional[str] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Execute using OpenAI's API with prompt caching."""
+    """Execute using OpenAI's API with optional native tool calling."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -393,7 +688,6 @@ def execute_with_openai(
     if base_url:
         client_kwargs["base_url"] = base_url
 
-    # Validate DNS resolution before request to produce actionable failures.
     endpoint = base_url if base_url else "https://api.openai.com/v1"
     parsed = urlparse(endpoint)
     host = parsed.hostname
@@ -404,30 +698,26 @@ def execute_with_openai(
             raise RuntimeError(f"DNS resolution failed for OpenAI host '{host}': {e}")
 
     client = OpenAI(**client_kwargs)
-
-    create_kwargs: Dict[str, Any] = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ],
-    }
-    if agent_name and len(system_content) >= 256:
-        create_kwargs["prompt_cache_key"] = _openai_prompt_cache_key(
-            agent_name, system_content
-        )
-    if _openai_supports_extended_cache(model):
-        create_kwargs["prompt_cache_retention"] = "24h"
-
-    response = client.chat.completions.create(**create_kwargs)
-
-    return response.choices[0].message.content
+    return _execute_openai_compatible(
+        client,
+        model,
+        system_content,
+        user_content,
+        tools=tools,
+        tool_context=tool_context,
+        agent_name=agent_name,
+        use_prompt_cache=True,
+    )
 
 
 def execute_with_mistral(
-    model: str, system_content: str, user_content: str
+    model: str,
+    system_content: str,
+    user_content: str,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Execute using Mistral's API (OpenAI-compatible)."""
+    """Execute using Mistral's API (OpenAI-compatible), with optional tool calling."""
     try:
         from openai import OpenAI
     except ImportError:
@@ -447,16 +737,15 @@ def execute_with_mistral(
         timeout=timeout,
         max_retries=max_retries,
     )
-
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ],
+    return _execute_openai_compatible(
+        client,
+        model,
+        system_content,
+        user_content,
+        tools=tools,
+        tool_context=tool_context,
+        use_prompt_cache=False,
     )
-
-    return response.choices[0].message.content
 
 
 def determine_provider(model: str) -> tuple:
@@ -485,27 +774,35 @@ def determine_provider(model: str) -> tuple:
 
 def _normalize_request(
     request: Dict[str, Any]
-) -> Tuple[str, str, Optional[str], Optional[int]]:
-    """Normalize request to (system_content, user_content, agent_name, max_output_tokens).
-    Supports split format (static_prompt + variable_prompt) and legacy (system_prompt).
-    """
-    model = request.get("model")
+) -> Tuple[str, str, Optional[str], Optional[int], Optional[List[Dict[str, Any]]], Optional[Dict[str, Any]]]:
+    """Normalize request to common execution inputs."""
     static_prompt = request.get("static_prompt")
     variable_prompt = request.get("variable_prompt")
     system_prompt = request.get("system_prompt")
     agent_name = request.get("agent_name")
     max_output_tokens = request.get("max_output_tokens")
+    tools = request.get("tools")
+    tool_context = request.get("tool_context")
 
     if static_prompt is not None and variable_prompt is not None:
-        return (static_prompt, variable_prompt, agent_name, max_output_tokens)
+        return (
+            static_prompt,
+            variable_prompt,
+            agent_name,
+            max_output_tokens,
+            tools,
+            tool_context,
+        )
     if system_prompt is not None:
         return (
             system_prompt,
             "Please complete the task described in the system prompt.",
             agent_name,
             max_output_tokens,
+            tools,
+            tool_context,
         )
-    return ("", "", agent_name, max_output_tokens)
+    return ("", "", agent_name, max_output_tokens, tools, tool_context)
 
 
 def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -541,7 +838,7 @@ def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
             return {"success": True, "outputs": outputs}
 
         model = request.get("model")
-        system_content, user_content, agent_name, max_output_tokens = _normalize_request(request)
+        system_content, user_content, agent_name, max_output_tokens, tools, tool_context = _normalize_request(request)
 
         if not model:
             return {
@@ -557,16 +854,32 @@ def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
         provider, model_name = determine_provider(model)
         if provider == "anthropic":
             output = execute_with_anthropic(
-                model_name, system_content, user_content, max_output_tokens
+                model_name,
+                system_content,
+                user_content,
+                max_output_tokens,
+                tools=tools,
+                tool_context=tool_context,
             )
         elif provider == "ollama":
             output = execute_with_ollama(model_name, system_content, user_content)
         elif provider == "openai":
             output = execute_with_openai(
-                model_name, system_content, user_content, agent_name
+                model_name,
+                system_content,
+                user_content,
+                agent_name,
+                tools=tools,
+                tool_context=tool_context,
             )
         elif provider == "mistral":
-            output = execute_with_mistral(model_name, system_content, user_content)
+            output = execute_with_mistral(
+                model_name,
+                system_content,
+                user_content,
+                tools=tools,
+                tool_context=tool_context,
+            )
         else:
             return {
                 "success": False,

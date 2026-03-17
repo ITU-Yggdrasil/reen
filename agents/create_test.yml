@@ -148,8 +148,10 @@ static_prompt: |
   If `input.direct_dependencies` is present, it is authoritative project context.
 
   You MUST:
+  - Treat `input.direct_dependencies` as an authoritative dependency manifest.
   - Use provided dependency artifacts to understand dependencies and existing structures.
   - Prefer dependency data over inferred assumptions.
+  - If dependency lookup tools are available, fetch only the specific dependency artifacts you need.
   - Avoid scraping unrelated files when dependency context is available.
 variable_prompt: |
   ## Input
@@ -157,7 +159,7 @@ variable_prompt: |
   Specification content:
   {{input.context_content}}
 
-  Direct dependency context (optional, authoritative):
+  Dependency manifest (optional, authoritative):
   {{input.direct_dependencies?}}
 
   Please complete the task described above. Return only the final result.

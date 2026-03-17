@@ -1,6 +1,6 @@
+use super::embedded_agent_assets::embedded_expected_agent_names;
 use crate::contexts::{AgentModelRegistry, ExecutionError, Model};
 use crate::registries::embedded_default_model_registry;
-use super::embedded_agent_assets::embedded_expected_agent_names;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -284,15 +284,43 @@ mod tests {
 
     fn complete_registry_yaml() -> String {
         [
-            "create_specifications_data:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
-            "create_specifications_context:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
-            "create_specifications_main:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
-            "create_implementation:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
-            "create_test:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
-            "resolve_compilation_errors:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
-            "fix_draft_blockers:\n  model: qwen2.5:7b\n  parallel: false\n  batch: false",
+            "create_specifications_data:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
+            "create_specifications_context:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
+            "create_specifications_main:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
+            "create_specifications_external_api:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
+            "create_implementation:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
+            "create_test:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
+            "resolve_compilation_errors:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
+            "fix_draft_blockers:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
         ]
-        .join("\n")
+        .join(
+            "
+",
+        )
     }
 
     #[test]
@@ -303,6 +331,7 @@ create_implementation: claude-3-opus
 create_test: gpt-4
 create_specifications_context: gpt-4
 create_specifications_main: gpt-4
+create_specifications_external_api: gpt-4
 resolve_compilation_errors: gpt-4
 fix_draft_blockers: gpt-4
 "#;
@@ -342,6 +371,9 @@ create_specifications_context:
   model: gpt-4
   parallel: true
 create_specifications_main:
+  model: gpt-4
+  parallel: true
+create_specifications_external_api:
   model: gpt-4
   parallel: true
 resolve_compilation_errors:

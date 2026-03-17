@@ -20,7 +20,10 @@ impl FileAgentRegistry {
 }
 
 impl AgentRegistry for FileAgentRegistry {
-    fn get_specification(&self, agent_name: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
+    fn get_specification(
+        &self,
+        agent_name: &str,
+    ) -> Result<AgentSpecificationTemplate, PopulateError> {
         let model_name = FileAgentModelRegistry::new(None, None, None)
             .get_model(agent_name)
             .map(|model| model.name)
@@ -75,7 +78,9 @@ fn extract_specification(yaml_content: &str) -> Result<AgentSpecificationTemplat
 
     // Fall back to legacy system_prompt
     if let Some(system_prompt) = doc["system_prompt"].as_str() {
-        Ok(AgentSpecificationTemplate::Legacy(system_prompt.to_string()))
+        Ok(AgentSpecificationTemplate::Legacy(
+            system_prompt.to_string(),
+        ))
     } else {
         Err(PopulateError::InvalidSpecification(
             "No system_prompt or (static_prompt + variable_prompt) found in agent specification"
@@ -148,7 +153,9 @@ description: Test agent
         let template = registry
             .get_specification("create_implementation")
             .expect("embedded spec should load");
-        assert!(template.canonical_for_cache().contains("code implementation agent"));
+        assert!(template
+            .canonical_for_cache()
+            .contains("code implementation agent"));
     }
 
     #[test]
@@ -157,7 +164,9 @@ description: Test agent
         let template = registry
             .get_specification("create_implementation")
             .expect("spec load");
-        assert!(template.canonical_for_cache().contains("Strict Specification Compliance"));
+        assert!(template
+            .canonical_for_cache()
+            .contains("Strict Specification Compliance"));
     }
 
     #[test]
