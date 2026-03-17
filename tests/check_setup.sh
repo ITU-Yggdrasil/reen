@@ -63,82 +63,13 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
-# Check if runner.py exists
-if [ -f "runner.py" ]; then
-    echo -e "${GREEN}✓${NC} Python runner (runner.py) exists"
-    if [ -x "runner.py" ]; then
-        echo -e "${GREEN}✓${NC} Python runner is executable"
-    else
-        echo -e "${YELLOW}⚠${NC} Python runner is not executable (run: chmod +x runner.py)"
-        WARNINGS=$((WARNINGS + 1))
-    fi
+# Check Rust toolchain
+if command -v cargo &> /dev/null; then
+    CARGO_VERSION=$(cargo --version)
+    echo -e "${GREEN}✓${NC} Cargo installed: $CARGO_VERSION"
 else
-    echo -e "${RED}✗${NC} Python runner (runner.py) not found"
+    echo -e "${RED}✗${NC} cargo not found"
     ERRORS=$((ERRORS + 1))
-fi
-
-# Check if requirements.txt exists
-if [ -f "requirements.txt" ]; then
-    echo -e "${GREEN}✓${NC} requirements.txt exists"
-else
-    echo -e "${RED}✗${NC} requirements.txt not found"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# Check Python 3
-if command -v python3 &> /dev/null; then
-    PYTHON_VERSION=$(python3 --version)
-    echo -e "${GREEN}✓${NC} Python 3 installed: $PYTHON_VERSION"
-else
-    echo -e "${RED}✗${NC} Python 3 not found"
-    ERRORS=$((ERRORS + 1))
-fi
-
-# Check Python virtual environment
-echo ""
-echo "Checking Python virtual environment..."
-
-if [ -d ".venv" ]; then
-    echo -e "${GREEN}✓${NC} Virtual environment (.venv) exists"
-    VENV_PYTHON=".venv/bin/python3"
-    if [ -f "$VENV_PYTHON" ]; then
-        echo -e "${GREEN}✓${NC} Virtual environment Python executable found"
-        PYTHON_CMD="$VENV_PYTHON"
-    else
-        echo -e "${YELLOW}⚠${NC} Virtual environment Python executable not found"
-        PYTHON_CMD="python3"
-        WARNINGS=$((WARNINGS + 1))
-    fi
-else
-    echo -e "${YELLOW}⚠${NC} Virtual environment (.venv) not found (run: ./setup_venv.sh)"
-    PYTHON_CMD="python3"
-    WARNINGS=$((WARNINGS + 1))
-fi
-
-# Check Python packages
-echo ""
-echo "Checking Python dependencies..."
-
-# Check for Ollama (recommended/default)
-if $PYTHON_CMD -c "import ollama" 2>/dev/null; then
-    echo -e "${GREEN}✓${NC} ollama package installed"
-else
-    echo -e "${YELLOW}⚠${NC} ollama package not installed (run: ./setup_venv.sh)"
-    WARNINGS=$((WARNINGS + 1))
-fi
-
-# Check for Anthropic (optional)
-if $PYTHON_CMD -c "import anthropic" 2>/dev/null; then
-    echo -e "${GREEN}✓${NC} anthropic package installed"
-else
-    echo -e "${YELLOW}⚠${NC} anthropic package not installed (optional, only needed for Claude models)"
-fi
-
-# Check for OpenAI (optional)
-if $PYTHON_CMD -c "import openai" 2>/dev/null; then
-    echo -e "${GREEN}✓${NC} openai package installed"
-else
-    echo -e "${YELLOW}⚠${NC} openai package not installed (optional, only needed for OpenAI models)"
 fi
 
 # Check API keys
@@ -177,10 +108,10 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
-if [ -f "agents/create_specifications.yml" ]; then
-    echo -e "${GREEN}✓${NC} create_specifications agent exists"
+if [ -f "agents/create_specifications_data.yml" ]; then
+    echo -e "${GREEN}✓${NC} create_specifications_data agent exists"
 else
-    echo -e "${RED}✗${NC} create_specifications agent not found"
+    echo -e "${RED}✗${NC} create_specifications_data agent not found"
     ERRORS=$((ERRORS + 1))
 fi
 
@@ -229,7 +160,7 @@ if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
 elif [ $ERRORS -eq 0 ]; then
     echo -e "${YELLOW}⚠ Setup complete with $WARNINGS warning(s)${NC}"
     echo ""
-    echo "You can run the test, but some features may not work:"
+    echo "You can run the test, but some provider features may not work:"
     echo "  ./tests/e2e_money_transfer_test.sh"
 else
     echo -e "${RED}✗ Setup incomplete: $ERRORS error(s), $WARNINGS warning(s)${NC}"

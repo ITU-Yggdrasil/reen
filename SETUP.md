@@ -5,29 +5,8 @@
 ### 1. Rust
 Ensure you have Rust installed. If not, install from [rustup.rs](https://rustup.rs/)
 
-### 2. Python 3
-You need Python 3.7 or later installed.
-
-### 3. Python Dependencies
-Set up a Python virtual environment and install dependencies:
-
-```bash
-./setup_venv.sh
-```
-
-This script will:
-- Create a virtual environment in `.venv/` (if it doesn't exist)
-- Install all required packages from `requirements.txt`
-- Make them available for `runner.py`
-
-Alternatively, you can install manually:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate         # source is not required on windows.
-pip install -r requirements.txt
-```
-
-**Note** The `runner.py` script will automatically detect and use the `.venv` virtual environment if it exists, so you don't need to manually activate it.
+### 2. Environment Variables
+Reen loads provider credentials from your shell environment or a `.env` file in the project tree.
 
 ## LLM Provider Setup
 
@@ -149,14 +128,9 @@ When a 429 rate limit error occurs and a rate limit is configured, reen will wai
 Test that everything is set up correctly:
 
 ```bash
-# Build the project
 cargo build
-
-# Check that the Python runner works with Ollama
-echo '{"model": "qwen2.5:7b", "system_prompt": "Say hello"}' | python3 runner.py
+cargo test
 ```
-
-You should see a JSON response with success=true and output containing a greeting.
 
 ## Usage
 

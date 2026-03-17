@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dev
+      - experiments
 
 jobs:
   snake-main:
@@ -19,14 +20,6 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
 
       - name: Build reen
         run: cargo build --release

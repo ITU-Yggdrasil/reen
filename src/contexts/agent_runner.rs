@@ -54,7 +54,7 @@ impl std::error::Error for PopulateError {}
 pub enum ExecutionError {
     ModelNotFound(String),
     ExecutionFailed(String),
-    PythonRunnerError(String),
+    RunnerError(String),
 }
 
 impl fmt::Display for ExecutionError {
@@ -66,8 +66,8 @@ impl fmt::Display for ExecutionError {
             ExecutionError::ExecutionFailed(details) => {
                 write!(f, "Agent execution failed: {}", details)
             }
-            ExecutionError::PythonRunnerError(details) => {
-                write!(f, "Failed to communicate with Python runner: {}", details)
+            ExecutionError::RunnerError(details) => {
+                write!(f, "Failed to execute model runner: {}", details)
             }
         }
     }
@@ -264,7 +264,7 @@ where
     /// Role method: agent.execute
     ///
     /// Executes the agent using the populated specification and resolved model.
-    /// Can execute in Rust or via Python runner using stdio.
+    /// Executes through the native Rust model runner.
     ///
     /// Note: This is a single-shot execution. For conversational agents,
     /// the conversation handling is managed at a higher level (in agent_executor.rs)
@@ -274,97 +274,18 @@ where
         specification: &AgentSpecification,
         model: &Model,
     ) -> Result<ExecutionResult, ExecutionError> {
-        // Execute via Python runner using stdio
-        self.execute_via_python(specification, model)
+        self.execute_via_rust(specification, model)
     }
 
-    /// Executes the agent via Python runner using stdio communication
-    fn execute_via_python(
+    /// Executes the agent via the native Rust model runner.
+    fn execute_via_rust(
         &self,
         specification: &AgentSpecification,
         model: &Model,
     ) -> Result<ExecutionResult, ExecutionError> {
-        use crate::registries::embedded_runner_py;
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        // Write the embedded runner script to a temp file
-        let runner_path = std::env::temp_dir().join("reen_runner.py");
-        std::fs::write(&runner_path, embedded_runner_py()).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to write embedded runner: {}", e))
-        })?;
-
-        // Prepare the request JSON (split format for cache optimization, legacy fallback)
         let request = self.build_request_json(specification, model)?;
-
-        let request_json = serde_json::to_string(&request).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
-        })?;
-
-        // Spawn the Python runner from the embedded temp file.
-        // Pass the current working directory so the script can find .env and .venv
-        // even though it runs from a temp location.
-        let mut child = Command::new("python3")
-            .arg(&runner_path)
-            .env(
-                "REEN_PROJECT_DIR",
-                std::env::current_dir().unwrap_or_default(),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                ExecutionError::PythonRunnerError(format!("Failed to spawn Python runner: {}", e))
-            })?;
-
-        // Write the request to stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(request_json.as_bytes()).map_err(|e| {
-                ExecutionError::PythonRunnerError(format!(
-                    "Failed to write to Python runner stdin: {}",
-                    e
-                ))
-            })?;
-        }
-
-        // Wait for the process to complete and capture output
-        let output = child.wait_with_output().map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to read Python runner output: {}", e))
-        })?;
-
-        // Check if the process succeeded
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(ExecutionError::PythonRunnerError(format!(
-                "Python runner failed. Stdout: {} Stderr: {}",
-                stdout, stderr
-            )));
-        }
-
-        // Parse the response JSON
-        let response_json = String::from_utf8(output.stdout).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Invalid UTF-8 in response: {}", e))
-        })?;
-
-        let response: serde_json::Value = serde_json::from_str(&response_json).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to parse response JSON: {}", e))
-        })?;
-
-        // Check if execution was successful
-        if !response["success"].as_bool().unwrap_or(false) {
-            let error = response["error"].as_str().unwrap_or("Unknown error");
-            return Err(ExecutionError::ExecutionFailed(error.to_string()));
-        }
-
-        // Extract the output
-        let output_text = response["output"]
-            .as_str()
-            .ok_or_else(|| ExecutionError::PythonRunnerError("No output in response".to_string()))?
-            .to_string();
-
-        let _ = std::fs::remove_file(&runner_path);
+        let output_text = crate::contexts::execute_native_request(&request)
+            .map_err(ExecutionError::RunnerError)?;
 
         Ok(ExecutionResult {
             output: output_text,
@@ -376,7 +297,7 @@ where
         &self,
     ) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), ExecutionError> {
         let input_value = serde_json::to_value(&self.input).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to serialize tool context: {}", e))
+            ExecutionError::RunnerError(format!("Failed to serialize tool context: {}", e))
         })?;
         let mut tools = Vec::new();
         let mut tool_context = serde_json::Map::new();
@@ -472,7 +393,7 @@ where
                 "system_prompt": system_p,
             })
         } else {
-            return Err(ExecutionError::PythonRunnerError(
+            return Err(ExecutionError::RunnerError(
                 "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
                     .to_string(),
             ));
@@ -582,7 +503,7 @@ where
         Ok(estimate + REQUEST_OVERHEAD_TOKENS)
     }
 
-    /// Prepares a Python-runner request and cache metadata without executing it.
+    /// Prepares a native-runner request and cache metadata without executing it.
     pub fn prepare_execution(self) -> Result<PreparedExecutionState, AgentRunnerError> {
         let agent_template = self
             .agent_registry

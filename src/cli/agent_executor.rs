@@ -3,16 +3,14 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
 
 use reen::contexts::{
-    AgentModelRegistry, AgentRunner, AgentRunnerError, PreparedExecution, PreparedExecutionState,
+    execute_native_request, AgentModelRegistry, AgentRunner, AgentRunnerError, PreparedExecution,
+    PreparedExecutionState,
 };
 use reen::registries::{
-    candidate_agent_spec_filenames, embedded_agent_spec, embedded_runner_py,
-    FileAgentModelRegistry, FileAgentRegistry,
+    candidate_agent_spec_filenames, embedded_agent_spec, FileAgentModelRegistry, FileAgentRegistry,
 };
 
 use super::Config;
@@ -265,7 +263,7 @@ impl AgentExecutor {
         })
     }
 
-    /// Executes a batch of prepared requests in a single Python runner process.
+    /// Executes prepared requests sequentially via the native Rust runner.
     pub fn execute_batch(
         &self,
         prepared: Vec<(String, PreparedExecution)>,
@@ -273,86 +271,14 @@ impl AgentExecutor {
         if prepared.is_empty() {
             return Ok(HashMap::new());
         }
-
-        let runner_path = std::env::temp_dir().join("reen_runner.py");
-        fs::write(&runner_path, embedded_runner_py())
-            .context("Failed to write embedded Python runner")?;
-
-        let batch_requests = prepared
-            .iter()
-            .map(|(custom_id, item)| {
-                serde_json::json!({
-                    "custom_id": custom_id,
-                    "request": item.request,
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let request_json = serde_json::to_string(&serde_json::json!({
-            "batch_requests": batch_requests
-        }))
-        .context("Failed to serialize batch request")?;
-
-        let mut child = Command::new("python3")
-            .arg(&runner_path)
-            .env(
-                "REEN_PROJECT_DIR",
-                std::env::current_dir().unwrap_or_default(),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to spawn Python runner")?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(request_json.as_bytes())
-                .context("Failed to write batch request to Python runner stdin")?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .context("Failed to read Python runner batch output")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!(
-                "Python runner batch failed. Stdout: {} Stderr: {}",
-                stdout,
-                stderr
-            );
-        }
-
-        let response_json =
-            String::from_utf8(output.stdout).context("Invalid UTF-8 in Python batch response")?;
-        let response: serde_json::Value = serde_json::from_str(&response_json)
-            .context("Failed to parse Python batch response")?;
-
-        if !response["success"].as_bool().unwrap_or(false) {
-            let error = response["error"].as_str().unwrap_or("Unknown batch error");
-            anyhow::bail!("{}", error);
-        }
-
-        let outputs = response["outputs"]
-            .as_array()
-            .context("Batch response missing outputs")?;
         let mut results = HashMap::new();
-        for item in outputs {
-            let custom_id = item["custom_id"]
-                .as_str()
-                .context("Batch output missing custom_id")?;
-            let output = item["output"]
-                .as_str()
-                .context("Batch output missing output")?;
-            results.insert(custom_id.to_string(), output.to_string());
-        }
 
         for (custom_id, item) in prepared {
-            if let Some(output) = results.get(&custom_id) {
-                item.store_output(output);
-            }
+            let output = execute_native_request(&item.request).map_err(|error| {
+                anyhow::anyhow!("Native runner failed for batch item '{custom_id}': {error}")
+            })?;
+            item.store_output(&output);
+            results.insert(custom_id, output);
         }
 
         Ok(results)

@@ -1,7 +1,6 @@
 .git
 .gitignore
 target
-.venv
 .env
 .reen
 tests

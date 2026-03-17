@@ -31,19 +31,14 @@ reen/
 
 ### Quick Start
 
-1. Install Python dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-2. Set your API key(s) for your chosen provider:
+1. Set your API key(s) for your chosen provider:
 ```bash
 export OPENAI_API_KEY='your-api-key-here'
 export ANTHROPIC_API_KEY='your-api-key-here'
 export MISTRAL_API_KEY='your-api-key-here'
 ```
 
-3. Build the project:
+2. Build the project:
 ```bash
 cargo build --release
 ```
@@ -225,7 +220,7 @@ Generated specifications use markdown with a specific structure:
 
 ## Language Choice
 
-While Rust is the default, agents can choose other languages for specific tasks. For example, Python might be used for model interaction. This is specified in the draft or determined by the agent.
+Rust is the default implementation target for this project. Agents can still generate other languages for downstream projects when a draft explicitly calls for them.
 
 ## Error Handling
 

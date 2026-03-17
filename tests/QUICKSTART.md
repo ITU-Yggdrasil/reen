@@ -4,9 +4,9 @@ This guide will help you run the money transfer end-to-end test in 3 simple step
 
 ## Prerequisites
 
-1. **Install Python dependencies**:
+1. **Build reen**:
    ```bash
-   pip install anthropic openai
+   cargo build --release
    ```
 
 2. **Set API key** (choose one):
@@ -106,8 +106,8 @@ Final balance B: 600
 
 ## Troubleshooting
 
-### "Python runner failed"
-- Make sure you installed the Python packages: `pip install anthropic openai`
+### "Native runner failed"
+- Rebuild the binary: `cargo build --release`
 - Check that your API key is set: `echo $ANTHROPIC_API_KEY`
 
 ### "Agent not found"

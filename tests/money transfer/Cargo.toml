@@ -16,6 +16,10 @@ sha2 = "0.10"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+[dev-dependencies]
+cucumber = "0.22.1"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+
 [features]
 default = ["account", "money_transfer"]
 account = []

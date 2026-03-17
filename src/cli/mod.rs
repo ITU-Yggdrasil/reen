@@ -152,6 +152,19 @@ struct PreparedImplementationBatchItem {
     prepared: reen::contexts::PreparedExecution,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BddTestPaths {
+    feature_path: PathBuf,
+    steps_path: PathBuf,
+    runner_path: PathBuf,
+    runner_test_name: String,
+}
+
+const BDD_CUCUMBER_VERSION: &str = "0.22.1";
+const BDD_TOKIO_SPEC: &str = r#"{ version = "1.40", features = ["macros", "rt-multi-thread"] }"#;
+const BDD_TEST_TARGETS_START: &str = "# reen:bdd-tests:start";
+const BDD_TEST_TARGETS_END: &str = "# reen:bdd-tests:end";
+
 /// Returns true if the error indicates a 429 rate limit response.
 fn is_rate_limit_error(e: &anyhow::Error) -> bool {
     let s = e.to_string();
@@ -2190,7 +2203,8 @@ pub async fn create_tests(
         for node in level_nodes {
             let context_file = node.input_path.clone();
             let context_name = node.name.clone();
-            let dependency_context = build_dependency_context(&node)?;
+            let mut dependency_context = build_dependency_context(&node)?;
+            augment_test_generation_context(&context_file, &mut dependency_context)?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
             let (dependency_context, estimated) = fit_context_to_token_limit(
                 &executor,
@@ -2388,6 +2402,9 @@ pub async fn create_tests(
     }
 
     progress.finish();
+    if !config.dry_run {
+        sync_bdd_cargo_support(config)?;
+    }
     if had_unspecified {
         anyhow::bail!("Unfinished specifications were detected. Aborting.");
     } else {
@@ -2593,7 +2610,8 @@ fn clear_stage_agent_cache_entries_by_name(
                         node.input_path.display()
                     )
                 })?;
-                let additional = build_dependency_context(&node)?;
+                let mut additional = build_dependency_context(&node)?;
+                augment_test_generation_context(&node.input_path, &mut additional)?;
                 candidates.push((
                     "create_test".to_string(),
                     CacheAgentInput {
@@ -2706,20 +2724,133 @@ async fn process_tests(
         anyhow::bail!("unfinished specification");
     }
 
+    let test_paths = determine_bdd_test_paths(context_file, SPECIFICATIONS_DIR)?;
+
     if config.dry_run {
-        println!("[DRY RUN] Would create tests for: {}", context_name);
+        println!(
+            "[DRY RUN] Would create BDD tests for {}: {}, {}, {}",
+            context_name,
+            test_paths.feature_path.display(),
+            test_paths.steps_path.display(),
+            test_paths.runner_path.display()
+        );
         return Ok(());
     }
 
-    // Use conversational execution to handle questions
     let test_result = executor
         .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
         .await?;
 
-    if config.verbose {
-        println!("Test creation result: {}", test_result);
+    finalize_test_output(context_name, &test_paths, config, &test_result)
+}
+
+fn finalize_test_output(
+    context_name: &str,
+    test_paths: &BddTestPaths,
+    config: &Config,
+    test_result: &str,
+) -> Result<()> {
+    let artifacts = parse_generated_files(test_result)?;
+    let expected_paths = HashSet::from([
+        test_paths.feature_path.clone(),
+        test_paths.steps_path.clone(),
+        test_paths.runner_path.clone(),
+    ]);
+    let actual_paths: HashSet<PathBuf> = artifacts.iter().map(|artifact| artifact.0.clone()).collect();
+
+    if actual_paths != expected_paths {
+        let expected = expected_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let actual = actual_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "Generated BDD artifacts for '{}' did not match expected paths. Expected [{}], got [{}].",
+            context_name,
+            expected,
+            actual
+        );
     }
 
+    for (path, content) in artifacts {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create BDD output directory {}", parent.display()))?;
+        }
+        fs::write(&path, content)
+            .with_context(|| format!("Failed to write generated BDD artifact {}", path.display()))?;
+        if config.verbose {
+            println!("✓ Written BDD artifact: {}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_generated_files(output: &str) -> Result<Vec<(PathBuf, String)>> {
+    let re = regex::Regex::new(r#"(?s)<file path="([^"]+)">\n?(.*?)\n?</file>"#)
+        .context("Failed to compile BDD artifact parser regex")?;
+    let mut files = Vec::new();
+
+    for captures in re.captures_iter(output) {
+        let path = captures
+            .get(1)
+            .map(|m| PathBuf::from(m.as_str()))
+            .context("Generated BDD artifact missing path")?;
+        let raw = captures
+            .get(2)
+            .map(|m| m.as_str())
+            .context("Generated BDD artifact missing content")?;
+        let trimmed_start = raw.strip_prefix('\n').unwrap_or(raw);
+        let content = trimmed_start.strip_suffix('\n').unwrap_or(trimmed_start).to_string();
+        files.push((path, content));
+    }
+
+    if files.is_empty() {
+        anyhow::bail!(
+            "Generated BDD test output did not contain any <file path=\"...\"> blocks"
+        );
+    }
+
+    let mut unique_paths = HashSet::new();
+    for (path, _) in &files {
+        if !unique_paths.insert(path.clone()) {
+            anyhow::bail!("Generated BDD output contained duplicate file path {}", path.display());
+        }
+    }
+
+    Ok(files)
+}
+
+fn augment_test_generation_context(
+    context_file: &Path,
+    additional_context: &mut HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    let test_paths = determine_bdd_test_paths(context_file, SPECIFICATIONS_DIR)?;
+    additional_context.insert(
+        "feature_output_path".to_string(),
+        json!(test_paths.feature_path.to_string_lossy().to_string()),
+    );
+    additional_context.insert(
+        "steps_output_path".to_string(),
+        json!(test_paths.steps_path.to_string_lossy().to_string()),
+    );
+    additional_context.insert(
+        "runner_output_path".to_string(),
+        json!(test_paths.runner_path.to_string_lossy().to_string()),
+    );
+    additional_context.insert(
+        "runner_test_name".to_string(),
+        json!(test_paths.runner_test_name),
+    );
+    if let Some(target_type_name) = infer_target_type_name(context_file)? {
+        additional_context.insert("target_type_name".to_string(), json!(target_type_name));
+    }
     Ok(())
 }
 
@@ -3246,21 +3377,22 @@ fn clear_test_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
 
     for spec_file in spec_files {
         found += 1;
-        let Some(stem) = spec_file.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        candidates.push(PathBuf::from("tests").join(format!("{}.rs", stem)));
-        candidates.push(PathBuf::from("tests").join(format!("{}_test.rs", stem)));
-        candidates.push(PathBuf::from("tests/generated").join(format!("{}.rs", stem)));
-        candidates.push(PathBuf::from("tests/generated").join(format!("{}_test.rs", stem)));
+        let test_paths = determine_bdd_test_paths(&spec_file, SPECIFICATIONS_DIR)?;
+        candidates.push(test_paths.feature_path);
+        candidates.push(test_paths.steps_path);
+        candidates.push(test_paths.runner_path);
     }
 
     let mut removed = 0usize;
+    let mut parent_dirs = Vec::new();
     for file in candidates {
         if file.exists() {
             if config.dry_run {
                 println!("[DRY RUN] Would remove {}", file.display());
             } else {
+                if let Some(parent) = file.parent() {
+                    parent_dirs.push(parent.to_path_buf());
+                }
                 fs::remove_file(&file)
                     .with_context(|| format!("Failed to remove {}", file.display()))?;
                 removed += 1;
@@ -3275,7 +3407,14 @@ fn clear_test_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
             println!("[DRY RUN] Would remove {} test artifact file(s)", removed);
         }
     } else {
-        remove_dir_if_empty(Path::new("tests/generated"))?;
+        sync_bdd_cargo_support(config)?;
+        parent_dirs.sort();
+        parent_dirs.dedup();
+        for dir in parent_dirs {
+            if dir.starts_with(Path::new("tests/features")) || dir.starts_with(Path::new("tests/steps")) {
+                remove_empty_dirs_upward(&dir, Path::new("tests"))?;
+            }
+        }
         if removed == 0 {
             println!("No matching test artifacts found");
         } else {
@@ -3743,6 +3882,234 @@ fn to_pascal_case_title(s: &str) -> Option<String> {
     }
 }
 
+fn relative_specification_path(context_file: &Path, specifications_dir: &str) -> Result<PathBuf> {
+    let context_path = context_file.to_path_buf();
+    let specifications_path = PathBuf::from(specifications_dir);
+
+    let relative_path = match context_path.strip_prefix(&specifications_path) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => {
+            let context_components: Vec<_> = context_path.components().collect();
+            let specifications_components: Vec<_> = specifications_path.components().collect();
+
+            if context_components.len() > specifications_components.len()
+                && context_components
+                    .iter()
+                    .zip(specifications_components.iter())
+                    .all(|(a, b)| a == b)
+            {
+                PathBuf::from_iter(
+                    context_components
+                        .iter()
+                        .skip(specifications_components.len()),
+                )
+            } else {
+                let context_str = context_file.to_str().unwrap_or("");
+                let specifications_str = specifications_dir;
+                if context_str.starts_with(specifications_str) {
+                    let rel_str = &context_str[specifications_str.len()..].trim_start_matches('/');
+                    PathBuf::from(rel_str)
+                } else {
+                    context_path
+                        .file_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_default()
+                }
+            }
+        }
+    };
+
+    Ok(relative_path)
+}
+
+fn determine_bdd_test_paths(context_file: &Path, specifications_dir: &str) -> Result<BddTestPaths> {
+    let relative_path = relative_specification_path(context_file, specifications_dir)?;
+    let file_stem = relative_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .context("Invalid specification filename")?;
+
+    let mut feature_relative = relative_path.clone();
+    feature_relative.set_extension("feature");
+
+    let mut steps_relative = relative_path.clone();
+    steps_relative.set_file_name(format!("{}_steps.rs", file_stem.to_ascii_lowercase()));
+
+    let runner_slug = relative_path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(|part| {
+            part.chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() {
+                        ch.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+        .trim_end_matches("_md")
+        .to_string();
+    let runner_test_name = format!("bdd_{}", runner_slug);
+
+    Ok(BddTestPaths {
+        feature_path: PathBuf::from("tests/features").join(feature_relative),
+        steps_path: PathBuf::from("tests/steps").join(steps_relative),
+        runner_path: PathBuf::from("tests").join(format!("{}.rs", runner_test_name)),
+        runner_test_name,
+    })
+}
+
+fn sync_bdd_cargo_support(config: &Config) -> Result<()> {
+    let cargo_toml = PathBuf::from("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Ok(());
+    }
+
+    let mut runner_paths = Vec::new();
+    collect_bdd_runner_paths(Path::new("tests"), &mut runner_paths)?;
+    runner_paths.sort();
+    runner_paths.dedup();
+
+    let content = fs::read_to_string(&cargo_toml)
+        .with_context(|| format!("Failed to read {}", cargo_toml.display()))?;
+    let content = ensure_dev_dependency_entry(&content, "cucumber", &format!("\"{}\"", BDD_CUCUMBER_VERSION));
+    let content = ensure_dev_dependency_entry(&content, "tokio", BDD_TOKIO_SPEC);
+    let content = sync_managed_block(
+        &content,
+        BDD_TEST_TARGETS_START,
+        BDD_TEST_TARGETS_END,
+        &render_bdd_test_targets(&runner_paths),
+    );
+    fs::write(&cargo_toml, content)
+        .with_context(|| format!("Failed to update {}", cargo_toml.display()))?;
+
+    if config.verbose {
+        println!("✓ Synchronized Cargo.toml for {} BDD runner(s)", runner_paths.len());
+    }
+
+    Ok(())
+}
+
+fn collect_bdd_runner_paths(dir: &Path, runner_paths: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() || !dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_bdd_runner_paths(&path, runner_paths)?;
+            continue;
+        }
+        let is_runner = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|name| name.starts_with("bdd_") && name.ends_with(".rs"))
+            .unwrap_or(false);
+        if is_runner {
+            runner_paths.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn ensure_dev_dependency_entry(content: &str, name: &str, spec: &str) -> String {
+    let mut lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
+    let section_idx = lines
+        .iter()
+        .position(|line| line.trim() == "[dev-dependencies]");
+
+    match section_idx {
+        Some(idx) => {
+            let section_end = lines
+                .iter()
+                .enumerate()
+                .skip(idx + 1)
+                .find(|(_, line)| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with('[') && trimmed.ends_with(']')
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(lines.len());
+            let new_line = format!("{name} = {spec}");
+            if let Some(existing_idx) = (idx + 1..section_end).find(|line_idx| {
+                lines[*line_idx]
+                    .split('=')
+                    .next()
+                    .map(|candidate| candidate.trim() == name)
+                    .unwrap_or(false)
+            }) {
+                lines[existing_idx] = new_line;
+            } else {
+                lines.insert(section_end, new_line);
+            }
+        }
+        None => {
+            if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("[dev-dependencies]".to_string());
+            lines.push(format!("{name} = {spec}"));
+        }
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn render_bdd_test_targets(runner_paths: &[PathBuf]) -> String {
+    runner_paths
+        .iter()
+        .filter_map(|path| {
+            let test_name = path.file_stem()?.to_str()?;
+            Some(format!(
+                "[[test]]\nname = \"{}\"\npath = \"{}\"\nharness = false",
+                test_name,
+                path.to_string_lossy()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn sync_managed_block(content: &str, start_marker: &str, end_marker: &str, body: &str) -> String {
+    let replacement = if body.trim().is_empty() {
+        format!("{start_marker}\n{end_marker}")
+    } else {
+        format!("{start_marker}\n{body}\n{end_marker}")
+    };
+
+    match (content.find(start_marker), content.find(end_marker)) {
+        (Some(start), Some(end)) if start <= end => {
+            let end_idx = end + end_marker.len();
+            let mut updated = String::new();
+            updated.push_str(&content[..start]);
+            if !updated.ends_with('\n') && !updated.is_empty() {
+                updated.push('\n');
+            }
+            updated.push_str(&replacement);
+            updated.push_str(&content[end_idx..]);
+            if !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated
+        }
+        _ => {
+            let mut updated = content.trim_end().to_string();
+            if !updated.is_empty() {
+                updated.push_str("\n\n");
+            }
+            updated.push_str(&replacement);
+            updated.push('\n');
+            updated
+        }
+    }
+}
+
 /// Determines the implementation output path preserving folder structure
 ///
 /// Maps:
@@ -3753,47 +4120,7 @@ fn determine_implementation_output_path(
     context_file: &Path,
     specifications_dir: &str,
 ) -> Result<PathBuf> {
-    let context_path = context_file.to_path_buf();
-    let specifications_path = PathBuf::from(specifications_dir);
-
-    // Get relative path from specifications directory by comparing components
-    let relative_path = match context_path.strip_prefix(&specifications_path) {
-        Ok(rel) => rel.to_path_buf(),
-        Err(_) => {
-            // If strip_prefix fails, try component-based approach
-            let context_components: Vec<_> = context_path.components().collect();
-            let specifications_components: Vec<_> = specifications_path.components().collect();
-
-            // Check if context_path starts with specifications_path components
-            if context_components.len() > specifications_components.len()
-                && context_components
-                    .iter()
-                    .zip(specifications_components.iter())
-                    .all(|(a, b)| a == b)
-            {
-                // Build path from remaining components
-                PathBuf::from_iter(
-                    context_components
-                        .iter()
-                        .skip(specifications_components.len()),
-                )
-            } else {
-                // Use string-based fallback
-                let context_str = context_file.to_str().unwrap_or("");
-                let specifications_str = specifications_dir;
-                if context_str.starts_with(specifications_str) {
-                    let rel_str = &context_str[specifications_str.len()..].trim_start_matches('/');
-                    PathBuf::from(rel_str)
-                } else {
-                    // Just use the filename
-                    context_path
-                        .file_name()
-                        .map(|n| PathBuf::from(n))
-                        .unwrap_or_else(|| PathBuf::from(""))
-                }
-            }
-        }
-    };
+    let relative_path = relative_specification_path(context_file, specifications_dir)?;
 
     let file_stem = relative_path
         .file_stem()
@@ -3845,10 +4172,12 @@ fn generated_project_structure_paths(project_info: &ProjectInfo) -> Vec<PathBuf>
 mod tests {
     use super::{
         build_dependency_drafts_from_context, build_dependency_manifest,
-        build_implemented_dependency_manifest, determine_draft_input_path,
-        determine_implementation_output_path, determine_specification_output_path,
+        build_implemented_dependency_manifest, determine_bdd_test_paths,
+        determine_draft_input_path, determine_implementation_output_path,
+        determine_specification_output_path, ensure_dev_dependency_entry,
         extract_actionable_blocking_bullets, extract_compile_error_message,
-        generated_project_structure_paths, resolve_input_files, CategoryFilter,
+        generated_project_structure_paths, parse_generated_files, resolve_input_files,
+        sync_managed_block, CategoryFilter, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -4038,6 +4367,72 @@ Problem:
         assert!(paths.contains(&PathBuf::from("src/contexts/account.rs")));
         assert!(paths.contains(&PathBuf::from("src/contexts/ui/mod.rs")));
         assert!(paths.contains(&PathBuf::from("src/contexts/ui/terminal_renderer.rs")));
+    }
+
+    #[test]
+    fn determine_bdd_test_paths_preserves_feature_hierarchy() {
+        let paths = determine_bdd_test_paths(
+            Path::new("specifications/contexts/ui/terminal_renderer.md"),
+            "specifications",
+        )
+        .expect("bdd test paths");
+        assert_eq!(
+            paths.feature_path,
+            PathBuf::from("tests/features/contexts/ui/terminal_renderer.feature")
+        );
+        assert_eq!(
+            paths.steps_path,
+            PathBuf::from("tests/steps/contexts/ui/terminal_renderer_steps.rs")
+        );
+        assert_eq!(paths.runner_path, PathBuf::from("tests/bdd_contexts_ui_terminal_renderer.rs"));
+        assert_eq!(paths.runner_test_name, "bdd_contexts_ui_terminal_renderer");
+    }
+
+    #[test]
+    fn parse_generated_files_reads_xml_style_blocks() {
+        let output = r#"<file path="tests/features/account.feature">
+Feature: Account
+
+  Scenario: Open an account
+    Given an account exists
+</file>
+<file path="tests/steps/account_steps.rs">
+use super::GeneratedWorld;
+</file>
+<file path="tests/bdd_account.rs">
+fn main() {}
+</file>"#;
+
+        let files = parse_generated_files(output).expect("parse generated files");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].0, PathBuf::from("tests/features/account.feature"));
+        assert!(files[0].1.contains("Feature: Account"));
+        assert_eq!(files[1].0, PathBuf::from("tests/steps/account_steps.rs"));
+        assert_eq!(files[2].0, PathBuf::from("tests/bdd_account.rs"));
+    }
+
+    #[test]
+    fn cargo_support_helpers_insert_dev_deps_and_managed_targets() {
+        let content = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+        let updated = ensure_dev_dependency_entry(content, "cucumber", "\"0.22.1\"");
+        let updated = ensure_dev_dependency_entry(
+            &updated,
+            "tokio",
+            r#"{ version = "1.40", features = ["macros", "rt-multi-thread"] }"#,
+        );
+        let updated = sync_managed_block(
+            &updated,
+            BDD_TEST_TARGETS_START,
+            BDD_TEST_TARGETS_END,
+            "[[test]]\nname = \"bdd_account\"\npath = \"tests/bdd_account.rs\"\nharness = false",
+        );
+
+        assert!(updated.contains("[dev-dependencies]"));
+        assert!(updated.contains("cucumber = \"0.22.1\""));
+        assert!(updated.contains("tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"));
+        assert!(updated.contains(BDD_TEST_TARGETS_START));
+        assert!(updated.contains("name = \"bdd_account\""));
+        assert!(updated.contains(BDD_TEST_TARGETS_END));
     }
 
     #[test]

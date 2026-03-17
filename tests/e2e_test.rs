@@ -44,9 +44,8 @@ fn e2e_money_transfer() {
     // Step 2: Create specifications
     println!("\n=== Step 2: Creating specifications ===");
 
-    // Ensure contexts directory exists
-    let contexts_dir = test_dir.join("contexts");
-    fs::create_dir_all(&contexts_dir).expect("Failed to create contexts directory");
+    let specs_dir = test_dir.join("specifications").join("contexts");
+    fs::create_dir_all(&specs_dir).expect("Failed to create specifications directory");
 
     let spec_status = Command::new(&reen_bin)
         .arg("create")
@@ -59,11 +58,11 @@ fn e2e_money_transfer() {
 
     // Verify specifications exist
     assert!(
-        contexts_dir.join("account.md").exists(),
+        specs_dir.join("account.md").exists(),
         "account.md specification not created"
     );
     assert!(
-        contexts_dir.join("money_transfer.md").exists(),
+        specs_dir.join("money_transfer.md").exists(),
         "money_transfer.md specification not created"
     );
     println!("✓ Specifications created");
@@ -89,17 +88,39 @@ fn e2e_money_transfer() {
     println!("✓ Implementation created");
 
     // Step 4: Create tests
-    //println!("\n=== Step 4: Creating tests ===");
+    println!("\n=== Step 4: Creating BDD tests ===");
 
-    //let tests_status = Command::new(&reen_bin)
-    //    .arg("create")
-    //    .arg("tests")
-    //    .current_dir(&test_dir)
-    //    .status()
-    //    .expect("Failed to run reen create tests");
+    let tests_status = Command::new(&reen_bin)
+        .arg("create")
+        .arg("tests")
+        .current_dir(&test_dir)
+        .status()
+        .expect("Failed to run reen create tests");
 
-    //assert!(tests_status.success(), "Failed to create tests");
-    //println!("✓ Tests created");
+    assert!(tests_status.success(), "Failed to create tests");
+    assert!(
+        test_dir
+            .join("tests")
+            .join("features")
+            .join("contexts")
+            .join("account.feature")
+            .exists(),
+        "account.feature not created"
+    );
+    assert!(
+        test_dir
+            .join("tests")
+            .join("steps")
+            .join("contexts")
+            .join("account_steps.rs")
+            .exists(),
+        "account_steps.rs not created"
+    );
+    assert!(
+        test_dir.join("tests").join("bdd_contexts_account.rs").exists(),
+        "bdd_contexts_account.rs not created"
+    );
+    println!("✓ BDD tests created");
 
     // Step 5: Compile the generated code
     println!("\n=== Step 5: Compiling generated code ===");
@@ -133,19 +154,18 @@ fn e2e_money_transfer() {
         );
     }
 
-    // Note: We don't assert success here because the generated tests might need refinement
     if test_output.status.success() {
         println!("✓ Generated tests passed");
     } else {
-        println!("⚠ Some generated tests failed (this may be expected)");
+        panic!("Generated BDD tests failed");
     }
 
     println!("\n=== E2E Test Complete ===");
     println!("✓ Successfully executed full reen workflow:");
     println!("  - Drafts → Specifications");
     println!("  - Specifications → Implementation");
-    println!("  - Specifications → Tests");
-    println!("  - Generated code compiles");
+    println!("  - Specifications → BDD tests");
+    println!("  - Generated code compiles and tests run");
 }
 
 #[test]

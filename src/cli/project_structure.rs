@@ -300,6 +300,12 @@ pub fn generate_cargo_toml(project_info: &ProjectInfo, output_dir: &Path) -> Res
         }
     }
 
+    content.push_str(
+        "\n[dev-dependencies]\n\
+         cucumber = \"0.22.1\"\n\
+         tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }\n",
+    );
+
     // Add features for context modules. All context features are enabled by default.
     let mut context_features: Vec<String> = project_info
         .modules
@@ -530,5 +536,23 @@ mod tests {
         assert!(project_info.modules.contains_key("contexts"));
         assert!(project_info.modules.contains_key("contexts/ui"));
         assert!(project_info.modules.contains_key("contexts/ui/widgets"));
+    }
+
+    #[test]
+    fn generated_cargo_toml_includes_bdd_dev_dependencies() {
+        let root = std::env::temp_dir().join("reen_project_structure_bdd");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut project_info = ProjectInfo::default();
+        project_info.package_name = "demo".to_string();
+        generate_cargo_toml(&project_info, &root).expect("generate cargo toml");
+
+        let cargo_toml = fs::read_to_string(root.join("Cargo.toml")).expect("read cargo toml");
+        assert!(cargo_toml.contains("[dev-dependencies]"));
+        assert!(cargo_toml.contains("cucumber = \"0.22.1\""));
+        assert!(cargo_toml.contains("tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }
