@@ -768,6 +768,7 @@ async fn try_fix_and_retry(
 
 pub async fn create_implementation(
     names: Vec<String>,
+    fix: bool,
     max_compile_fix_attempts: usize,
     clear_cache: bool,
     filter: &CategoryFilter,
@@ -1311,15 +1312,19 @@ pub async fn create_implementation(
         }
     }
 
-    // Automatic compile + bounded auto-fix loop to restore build validity.
-    compilation_fix::ensure_compiles_with_auto_fix(
-        config,
-        max_compile_fix_attempts,
-        Path::new("."),
-        &project_info,
-        &recent_generated_files,
-    )
-    .await?;
+    // Always compile after generation. Auto-fix is opt-in via --fix.
+    if fix {
+        compilation_fix::ensure_compiles_with_auto_fix(
+            config,
+            max_compile_fix_attempts,
+            Path::new("."),
+            &project_info,
+            &recent_generated_files,
+        )
+        .await?;
+    } else {
+        cargo_commands::compile(config).await?;
+    }
 
     // Save tracker
     tracker.save()?;

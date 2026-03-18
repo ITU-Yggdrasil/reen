@@ -145,8 +145,14 @@ enum CreateCommands {
     Implementation {
         #[arg(
             long,
+            help = "When compilation fails after code generation, invoke the automatic compilation-fix loop"
+        )]
+        fix: bool,
+
+        #[arg(
+            long,
             default_value_t = 3,
-            help = "Maximum automatic compilation-fix attempts after code generation"
+            help = "Maximum automatic compilation-fix attempts when --fix is used"
         )]
         max_compile_fix_attempts: u32,
 
@@ -244,11 +250,13 @@ async fn main() -> Result<()> {
                     .await?;
                 }
                 CreateCommands::Implementation {
+                    fix,
                     max_compile_fix_attempts,
                     names,
                 } => {
                     cli::create_implementation(
                         names,
+                        fix,
                         max_compile_fix_attempts as usize,
                         create_args.clear_cache,
                         &category_filter,
