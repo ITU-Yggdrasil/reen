@@ -1,3 +1,5 @@
+# Active registry profile loaded at runtime and embedded into the binary at build time.
+# Swap this file explicitly when you want a different provider preset.
 create_specifications_data:
   model: mistral/mistral-large-latest
   parallel: false

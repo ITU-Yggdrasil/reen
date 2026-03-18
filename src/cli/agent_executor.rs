@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use reen::contexts::{
-    execute_native_request, AgentModelRegistry, AgentRunner, AgentRunnerError, PreparedExecution,
+use reen::execution::{
+    build_agent_input, execute_native_request_with_metadata, output_contains_questions,
+    AgentModelRegistry, AgentRunner, AgentRunnerError, NativeExecutionControl, PreparedExecution,
     PreparedExecutionState,
 };
 use reen::registries::{
@@ -14,96 +14,6 @@ use reen::registries::{
 };
 
 use super::Config;
-
-/// Input structure for agent execution
-#[derive(Serialize)]
-struct AgentInput {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    draft_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    context_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    openapi_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    documentation_urls: Option<Vec<String>>,
-    #[serde(flatten)]
-    additional: HashMap<String, serde_json::Value>,
-}
-
-fn json_value_to_string(value: serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::String(s) => Some(s),
-        serde_json::Value::Null => None,
-        other => Some(other.to_string()),
-    }
-}
-
-fn json_value_to_string_vec(value: serde_json::Value) -> Option<Vec<String>> {
-    match value {
-        serde_json::Value::Array(items) => {
-            let values = items
-                .into_iter()
-                .filter_map(json_value_to_string)
-                .collect::<Vec<_>>();
-            if values.is_empty() {
-                None
-            } else {
-                Some(values)
-            }
-        }
-        serde_json::Value::String(s) => Some(vec![s]),
-        serde_json::Value::Null => None,
-        other => Some(vec![other.to_string()]),
-    }
-}
-
-fn build_agent_input(
-    agent_name: &str,
-    input: &str,
-    mut additional_context: HashMap<String, serde_json::Value>,
-) -> AgentInput {
-    let openapi_content = additional_context
-        .remove("openapi_content")
-        .and_then(json_value_to_string);
-    let documentation_urls = additional_context
-        .remove("documentation_urls")
-        .and_then(json_value_to_string_vec);
-
-    match agent_name {
-        "create_specifications"
-        | "create_specifications_context"
-        | "create_specifications_data"
-        | "create_specifications_main"
-        | "create_specifications_external_api" => AgentInput {
-            draft_content: Some(input.to_string()),
-            context_content: None,
-            openapi_content,
-            documentation_urls,
-            additional: additional_context,
-        },
-        "create_implementation" | "create_test" => AgentInput {
-            draft_content: None,
-            context_content: Some(input.to_string()),
-            openapi_content: None,
-            documentation_urls: None,
-            additional: additional_context,
-        },
-        "fix_draft_blockers" => AgentInput {
-            draft_content: None,
-            context_content: None,
-            openapi_content,
-            documentation_urls,
-            additional: additional_context,
-        },
-        _ => AgentInput {
-            draft_content: Some(input.to_string()),
-            context_content: None,
-            openapi_content,
-            documentation_urls,
-            additional: additional_context,
-        },
-    }
-}
 
 /// Response types from agent execution
 pub enum AgentResponse {
@@ -151,37 +61,48 @@ impl AgentExecutor {
         &self.model_registry
     }
 
-    /// Executes the agent with additional context (for conversational interactions)
-    pub async fn execute_with_context(
+    fn runner(
         &self,
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
-    ) -> Result<AgentResponse> {
-        if self.verbose {
-            println!("Executing agent: {}", self.agent_name);
-        }
-
+    ) -> AgentRunner<reen::execution::AgentInput, FileAgentRegistry, FileAgentModelRegistry> {
         let agent_input = build_agent_input(&self.agent_name, input, additional_context);
-
-        // Create and run the AgentRunner
-        let runner = AgentRunner::new(
+        AgentRunner::new(
             self.agent_name.clone(),
             agent_input,
             self.agent_registry.clone(),
             self.model_registry.clone(),
-        );
+        )
+    }
 
-        let result = runner.run().map_err(|e| match e {
+    fn map_runner_error(error: AgentRunnerError) -> anyhow::Error {
+        match error {
             AgentRunnerError::Populate(populate_err) => {
                 anyhow::anyhow!("Failed to populate agent: {}", populate_err)
             }
             AgentRunnerError::Execution(exec_err) => {
                 anyhow::anyhow!("Failed to execute agent: {}", exec_err)
             }
-        })?;
+        }
+    }
 
-        // Check if the result contains questions
-        if self.contains_questions(&result.output) {
+    /// Executes the agent with additional context (for conversational interactions)
+    pub async fn execute_with_context(
+        &self,
+        input: &str,
+        additional_context: HashMap<String, serde_json::Value>,
+        execution_control: Option<&dyn NativeExecutionControl>,
+    ) -> Result<AgentResponse> {
+        if self.verbose {
+            println!("Executing agent: {}", self.agent_name);
+        }
+
+        let result = self
+            .runner(input, additional_context)
+            .run_with_control(execution_control)
+            .map_err(Self::map_runner_error)?;
+
+        if output_contains_questions(&result.output) {
             Ok(AgentResponse::Questions(result.output))
         } else {
             Ok(AgentResponse::Final(result.output))
@@ -194,23 +115,9 @@ impl AgentExecutor {
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
     ) -> Result<bool> {
-        let agent_input = build_agent_input(&self.agent_name, input, additional_context);
-
-        let runner = AgentRunner::new(
-            self.agent_name.clone(),
-            agent_input,
-            self.agent_registry.clone(),
-            self.model_registry.clone(),
-        );
-
-        runner.is_cache_hit().map_err(|e| match e {
-            AgentRunnerError::Populate(populate_err) => {
-                anyhow::anyhow!("Failed to populate agent: {}", populate_err)
-            }
-            AgentRunnerError::Execution(exec_err) => {
-                anyhow::anyhow!("Failed to execute agent: {}", exec_err)
-            }
-        })
+        self.runner(input, additional_context)
+            .is_cache_hit()
+            .map_err(Self::map_runner_error)
     }
 
     /// Estimates the populated request input tokens for this agent invocation.
@@ -219,23 +126,9 @@ impl AgentExecutor {
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
     ) -> Result<usize> {
-        let agent_input = build_agent_input(&self.agent_name, input, additional_context);
-
-        let runner = AgentRunner::new(
-            self.agent_name.clone(),
-            agent_input,
-            self.agent_registry.clone(),
-            self.model_registry.clone(),
-        );
-
-        runner.estimate_input_tokens().map_err(|e| match e {
-            AgentRunnerError::Populate(populate_err) => {
-                anyhow::anyhow!("Failed to populate agent: {}", populate_err)
-            }
-            AgentRunnerError::Execution(exec_err) => {
-                anyhow::anyhow!("Failed to execute agent: {}", exec_err)
-            }
-        })
+        self.runner(input, additional_context)
+            .estimate_input_tokens()
+            .map_err(Self::map_runner_error)
     }
 
     /// Prepares a request and cache metadata without executing the model.
@@ -244,29 +137,16 @@ impl AgentExecutor {
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
     ) -> Result<PreparedExecutionState> {
-        let agent_input = build_agent_input(&self.agent_name, input, additional_context);
-
-        let runner = AgentRunner::new(
-            self.agent_name.clone(),
-            agent_input,
-            self.agent_registry.clone(),
-            self.model_registry.clone(),
-        );
-
-        runner.prepare_execution().map_err(|e| match e {
-            AgentRunnerError::Populate(populate_err) => {
-                anyhow::anyhow!("Failed to populate agent: {}", populate_err)
-            }
-            AgentRunnerError::Execution(exec_err) => {
-                anyhow::anyhow!("Failed to execute agent: {}", exec_err)
-            }
-        })
+        self.runner(input, additional_context)
+            .prepare_execution()
+            .map_err(Self::map_runner_error)
     }
 
     /// Executes prepared requests sequentially via the native Rust runner.
     pub fn execute_batch(
         &self,
         prepared: Vec<(String, PreparedExecution)>,
+        execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<HashMap<String, String>> {
         if prepared.is_empty() {
             return Ok(HashMap::new());
@@ -274,28 +154,16 @@ impl AgentExecutor {
         let mut results = HashMap::new();
 
         for (custom_id, item) in prepared {
-            let output = execute_native_request(&item.request).map_err(|error| {
-                anyhow::anyhow!("Native runner failed for batch item '{custom_id}': {error}")
-            })?;
+            let output = execute_native_request_with_metadata(&item.request, execution_control)
+                .map(|result| result.output)
+                .map_err(|error| {
+                    anyhow::anyhow!("Native runner failed for batch item '{custom_id}': {error}")
+                })?;
             item.store_output(&output);
             results.insert(custom_id, output);
         }
 
         Ok(results)
-    }
-
-    /// Detects if the agent output contains questions
-    fn contains_questions(&self, output: &str) -> bool {
-        // Simple heuristic: check for question markers
-        // A more sophisticated implementation might parse structured output
-        let question_markers = ["?", "## Questions", "# Questions", "**Questions**"];
-
-        question_markers
-            .iter()
-            .any(|marker| output.contains(marker))
-            && (output.contains("clarification")
-                || output.contains("answer")
-                || output.contains("question"))
     }
 
     /// Handles the full conversational loop with question/answer cycles and caller-provided seed context
@@ -304,6 +172,7 @@ impl AgentExecutor {
         input: &str,
         context_name: &str,
         mut context: HashMap<String, serde_json::Value>,
+        execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<String> {
         let mut conversation_round = 0;
 
@@ -314,7 +183,10 @@ impl AgentExecutor {
                 println!("Conversation round: {}", conversation_round);
             }
 
-            match self.execute_with_context(input, context.clone()).await? {
+            match self
+                .execute_with_context(input, context.clone(), execution_control)
+                .await?
+            {
                 AgentResponse::Final(result) => {
                     return Ok(result);
                 }

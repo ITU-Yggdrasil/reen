@@ -1,3 +1,5 @@
+# Preset profile: Mistral-first defaults.
+# Activate by copying this file over `agent_model_registry.yml` before building.
 # Maximum API requests per second (optional). Can also be set via --rate-limit or REEN_RATE_LIMIT.
 rate_limit: 2
 

@@ -1,3 +1,5 @@
+# Preset profile: OpenAI-first defaults.
+# Activate by copying this file over `agent_model_registry.yml` before building.
 create_specifications_data:
   model: gpt-5 # qwen2.5:7b
   parallel: true

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 /// Limits the rate of operations to at most `requests_per_second` per second.
 /// Call `acquire()` before each operation to throttle.
@@ -34,13 +34,12 @@ impl RateLimiter {
         }
     }
 
-    /// Waits until the minimum interval has passed since the last acquire, then returns.
-    /// Call this before each API request.
-    pub async fn acquire(&self) {
-        let mut inner = self.inner.lock().await;
+    /// Blocking variant of `acquire` for synchronous execution paths.
+    pub fn acquire_blocking(&self) {
+        let mut inner = self.inner.blocking_lock();
         let elapsed = inner.last_request.elapsed();
         if elapsed < inner.min_interval {
-            sleep(inner.min_interval - elapsed).await;
+            std::thread::sleep(inner.min_interval - elapsed);
         }
         inner.last_request = Instant::now();
     }

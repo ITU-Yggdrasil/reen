@@ -62,5 +62,4 @@ mod tests {
             "agent spec must have static_prompt or system_prompt"
         );
     }
-
 }

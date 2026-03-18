@@ -1,23 +1,11 @@
-use crate::contexts::FileCache;
-use crate::data::Cache;
+use crate::execution::{
+    estimate_tokens, Cache, FileCache, NativeExecutionControl, NativeExecutionMetadata,
+    REQUEST_OVERHEAD_TOKENS,
+};
 use serde::Serialize;
 use serde_json;
 use sha2::{Digest, Sha256};
 use std::fmt;
-
-const TOKENS_PER_WORD: f64 = 1.3;
-const CHARS_PER_TOKEN: usize = 4;
-
-fn estimate_tokens(text: &str) -> usize {
-    if text.is_empty() {
-        return 1;
-    }
-    let word_count = text.split_whitespace().count();
-    let char_count = text.chars().count();
-    let by_words = (word_count as f64 * TOKENS_PER_WORD).ceil() as usize;
-    let by_chars = char_count.div_ceil(CHARS_PER_TOKEN);
-    by_words.max(by_chars).max(1)
-}
 
 /// Errors that can occur during agent population
 #[derive(Debug)]
@@ -147,6 +135,7 @@ pub struct AgentSpecification {
 pub struct ExecutionResult {
     pub output: String,
     pub cached: bool,
+    pub usage: Option<NativeExecutionMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -273,8 +262,9 @@ where
         &self,
         specification: &AgentSpecification,
         model: &Model,
+        execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<ExecutionResult, ExecutionError> {
-        self.execute_via_rust(specification, model)
+        self.execute_via_rust(specification, model, execution_control)
     }
 
     /// Executes the agent via the native Rust model runner.
@@ -282,14 +272,17 @@ where
         &self,
         specification: &AgentSpecification,
         model: &Model,
+        execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<ExecutionResult, ExecutionError> {
         let request = self.build_request_json(specification, model)?;
-        let output_text = crate::contexts::execute_native_request(&request)
-            .map_err(ExecutionError::RunnerError)?;
+        let native_result =
+            crate::execution::execute_native_request_with_metadata(&request, execution_control)
+                .map_err(ExecutionError::RunnerError)?;
 
         Ok(ExecutionResult {
-            output: output_text,
+            output: native_result.output,
             cached: false,
+            usage: Some(native_result.metadata),
         })
     }
 
@@ -483,7 +476,6 @@ where
     /// Estimates the populated input token count for the request that would be sent.
     pub fn estimate_input_tokens(&self) -> Result<usize, AgentRunnerError> {
         const LEGACY_USER_PROMPT: &str = "Please complete the task described in the system prompt.";
-        const REQUEST_OVERHEAD_TOKENS: usize = 256;
 
         let specification = self.populate()?;
         let estimate = if let (Some(static_prompt), Some(variable_prompt)) = (
@@ -644,7 +636,10 @@ where
     ///
     /// Activates the agent by orchestrating the complete execution lifecycle
     /// with persistent caching.
-    pub fn run(self) -> Result<ExecutionResult, AgentRunnerError> {
+    pub fn run_with_control(
+        self,
+        execution_control: Option<&dyn NativeExecutionControl>,
+    ) -> Result<ExecutionResult, AgentRunnerError> {
         // Step 1: Load agent template (instructions) before populating
         // This is needed to generate the cache folder hash
         let agent_template = self
@@ -668,6 +663,7 @@ where
             return Ok(ExecutionResult {
                 output: cached_value,
                 cached: true,
+                usage: None,
             });
         }
 
@@ -676,7 +672,7 @@ where
         let specification = self.populate()?;
 
         // Step 7: Execute the agent
-        let result = self.execute(&specification, &model)?;
+        let result = self.execute(&specification, &model, execution_control)?;
 
         // Step 8: Store result in cache.
         // This must be synchronous: CLI invocations are often short-lived, and
@@ -685,6 +681,14 @@ where
         cache.set(&cache_key, &cache_value);
 
         Ok(result)
+    }
+
+    /// Public function: run
+    ///
+    /// Activates the agent by orchestrating the complete execution lifecycle
+    /// with persistent caching.
+    pub fn run(self) -> Result<ExecutionResult, AgentRunnerError> {
+        self.run_with_control(None)
     }
 }
 
@@ -841,6 +845,7 @@ mod tests {
         let result = runner.run().expect("cache hit should return successfully");
         assert_eq!(result.output, "cached-output");
         assert!(result.cached);
+        assert!(result.usage.is_none());
 
         let _ = fs::remove_file(cache_path);
         let _ = fs::remove_dir(cache_dir);

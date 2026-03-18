@@ -8,34 +8,33 @@ use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::Command;
 use std::sync::Arc;
-use tokio::time::sleep;
 
 mod agent_executor;
+mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
 mod openapi_fetcher;
+mod pipeline_context;
 mod progress;
 mod project_structure;
 mod rate_limiter;
-mod token_limiter;
+mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
 use compilation_fix::apply_draft_patches;
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };
-use openapi_fetcher::{is_external_api_draft_path, load_openapi_content, parse_external_api_draft};
+use pipeline_context::{build_specification_context, fit_context_to_token_limit};
 use progress::ProgressIndicator;
 use project_structure::{
     analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
 };
-use rate_limiter::RateLimiter;
 use reen::build_tracker::{BuildTracker, Stage};
-use reen::contexts::{AgentModelRegistry, AgentRegistry};
+use reen::execution::{AgentModelRegistry, AgentRegistry, NativeExecutionControl};
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
-use token_limiter::{estimate_request_tokens, TokenLimiter};
+use stage_runner::{run_stage_items, CliExecutionControl, ExecutionResources, StageItem};
 
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -149,7 +148,7 @@ struct PreparedImplementationBatchItem {
     dependency_fingerprint: String,
     dependency_context: HashMap<String, serde_json::Value>,
     context_content: String,
-    prepared: reen::contexts::PreparedExecution,
+    prepared: reen::execution::PreparedExecution,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -164,227 +163,6 @@ const BDD_CUCUMBER_VERSION: &str = "0.22.1";
 const BDD_TOKIO_SPEC: &str = r#"{ version = "1.40", features = ["macros", "rt-multi-thread"] }"#;
 const BDD_TEST_TARGETS_START: &str = "# reen:bdd-tests:start";
 const BDD_TEST_TARGETS_END: &str = "# reen:bdd-tests:end";
-
-/// Returns true if the error indicates a 429 rate limit response.
-fn is_rate_limit_error(e: &anyhow::Error) -> bool {
-    let s = e.to_string();
-    let lower = s.to_lowercase();
-    s.contains("429")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
-        || lower.contains("ratelimit")
-}
-
-fn estimate_agent_request_tokens(
-    executor: &AgentExecutor,
-    input: &str,
-    additional_context: &HashMap<String, serde_json::Value>,
-) -> usize {
-    executor
-        .estimate_request_tokens(input, additional_context.clone())
-        .unwrap_or_else(|_| estimate_request_tokens(input, additional_context))
-}
-
-async fn acquire_request_capacity(
-    token_limiter: Option<&Arc<TokenLimiter>>,
-    rate_limiter: Option<&Arc<RateLimiter>>,
-    estimated: usize,
-) -> Result<()> {
-    if let Some(limiter) = token_limiter {
-        if limiter.exceeds_limit(estimated).await {
-            anyhow::bail!(
-                "Estimated request size ({estimated} input tokens) exceeds configured --token-limit/REEN_TOKEN_LIMIT budget for a single minute. Reduce prompt size or raise the token limit."
-            );
-        }
-        limiter.acquire_tokens(estimated).await;
-    }
-    if let Some(limiter) = rate_limiter {
-        limiter.acquire().await;
-    }
-    Ok(())
-}
-
-async fn prepare_rate_limit_retry(
-    item_name: &str,
-    estimated: usize,
-    token_limiter: Option<&Arc<TokenLimiter>>,
-    rate_limiter: Option<&Arc<RateLimiter>>,
-) -> bool {
-    let mut waited = false;
-    if let Some(limiter) = token_limiter {
-        let delay = limiter.retry_delay(estimated).await;
-        eprintln!(
-            "Rate limit (429) exceeded for {}, waiting {}s before retrying...",
-            item_name,
-            delay.as_secs()
-        );
-        sleep(delay).await;
-        waited = true;
-    }
-    if let Some(limiter) = rate_limiter {
-        if !waited {
-            eprintln!(
-                "Rate limit (429) exceeded for {}, waiting and retrying with slower rate...",
-                item_name
-            );
-            sleep(limiter.retry_delay()).await;
-        }
-        limiter.back_off().await;
-        waited = true;
-    }
-    waited
-}
-
-fn compact_dependency_entries(
-    value: &serde_json::Value,
-    content_limit: usize,
-    max_entries: usize,
-) -> serde_json::Value {
-    let Some(entries) = value.as_array() else {
-        return value.clone();
-    };
-    let compacted = entries
-        .iter()
-        .take(max_entries)
-        .map(|entry| {
-            let Some(obj) = entry.as_object() else {
-                return entry.clone();
-            };
-            let mut out = serde_json::Map::new();
-            for key in ["name", "path", "spec_path", "sha256"] {
-                if let Some(v) = obj.get(key) {
-                    out.insert(key.to_string(), v.clone());
-                }
-            }
-            if let Some(content) = obj.get("content").and_then(|v| v.as_str()) {
-                let truncated = if content.chars().count() > content_limit {
-                    format!(
-                        "{}\n...[truncated by reen]",
-                        content.chars().take(content_limit).collect::<String>()
-                    )
-                } else {
-                    content.to_string()
-                };
-                out.insert("content".to_string(), serde_json::Value::String(truncated));
-            }
-            serde_json::Value::Object(out)
-        })
-        .collect::<Vec<_>>();
-    serde_json::Value::Array(compacted)
-}
-
-fn build_context_variants(
-    base_context: &HashMap<String, serde_json::Value>,
-) -> Vec<HashMap<String, serde_json::Value>> {
-    let mut variants = vec![base_context.clone()];
-
-    if base_context.contains_key("implemented_dependencies") {
-        let mut without_impl = base_context.clone();
-        without_impl.remove("implemented_dependencies");
-        variants.push(without_impl);
-    }
-
-    if let Some(direct_only) = base_context.get("direct_dependencies_only") {
-        let mut direct_only_ctx = base_context.clone();
-        direct_only_ctx.insert("direct_dependencies".to_string(), direct_only.clone());
-        direct_only_ctx.insert("dependency_closure".to_string(), direct_only.clone());
-        direct_only_ctx.insert("mcp_context".to_string(), direct_only.clone());
-        variants.push(direct_only_ctx.clone());
-
-        let mut no_impl = direct_only_ctx;
-        no_impl.remove("implemented_dependencies");
-        variants.push(no_impl);
-    }
-
-    if let Some(openapi_content) = base_context.get("openapi_content").and_then(|v| v.as_str()) {
-        let mut compact_openapi = base_context.clone();
-        let truncated = if openapi_content.chars().count() > 12000 {
-            format!(
-                "{}
-...[truncated OpenAPI by reen]",
-                openapi_content.chars().take(12000).collect::<String>()
-            )
-        } else {
-            openapi_content.to_string()
-        };
-        compact_openapi.insert("openapi_content".to_string(), json!(truncated));
-        variants.push(compact_openapi);
-    }
-
-    let compact_sources = [
-        ("direct_dependencies", 1200usize, 8usize),
-        ("dependency_closure", 1200usize, 8usize),
-        ("mcp_context", 1200usize, 8usize),
-        ("implemented_dependencies", 800usize, 6usize),
-    ];
-    let mut compact = base_context.clone();
-    let mut changed = false;
-    for (key, content_limit, max_entries) in compact_sources {
-        if let Some(value) = compact.get(key).cloned() {
-            compact.insert(
-                key.to_string(),
-                compact_dependency_entries(&value, content_limit, max_entries),
-            );
-            changed = true;
-        }
-    }
-    if changed {
-        variants.push(compact);
-    }
-
-    variants
-}
-
-fn build_specification_context(
-    draft_file: &Path,
-    draft_content: &str,
-    mut context: HashMap<String, serde_json::Value>,
-) -> Result<HashMap<String, serde_json::Value>> {
-    if !is_external_api_draft_path(draft_file, DRAFTS_DIR) {
-        return Ok(context);
-    }
-
-    let metadata = parse_external_api_draft(draft_content);
-    let openapi_content = load_openapi_content(draft_file, &metadata)?;
-    context.insert("openapi_content".to_string(), json!(openapi_content));
-    if !metadata.documentation_urls.is_empty() {
-        context.insert(
-            "documentation_urls".to_string(),
-            json!(metadata.documentation_urls),
-        );
-    }
-    if !metadata.endpoint_scope.is_empty() {
-        context.insert("openapi_scope".to_string(), json!(metadata.endpoint_scope));
-    }
-
-    Ok(context)
-}
-
-fn fit_context_to_token_limit(
-    executor: &AgentExecutor,
-    input: &str,
-    base_context: HashMap<String, serde_json::Value>,
-    token_limit: Option<f64>,
-) -> Result<(HashMap<String, serde_json::Value>, usize)> {
-    let estimated = estimate_agent_request_tokens(executor, input, &base_context);
-    let Some(limit) = token_limit else {
-        return Ok((base_context, estimated));
-    };
-    if estimated as f64 <= limit {
-        return Ok((base_context, estimated));
-    }
-
-    for candidate in build_context_variants(&base_context) {
-        let candidate_estimate = estimate_agent_request_tokens(executor, input, &candidate);
-        if candidate_estimate as f64 <= limit {
-            return Ok((candidate, candidate_estimate));
-        }
-    }
-
-    anyhow::bail!(
-        "Estimated request size ({estimated} input tokens) exceeds configured token limit and could not be reduced automatically."
-    )
-}
 
 pub async fn create_specification(
     names: Vec<String>,
@@ -461,8 +239,7 @@ fn create_specification_inner(
         let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
         println!("Creating specifications for {} draft(s)", total_count);
 
-        let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
-        let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
+        let resources = ExecutionResources::new(rate_limit, token_limit);
 
         let mut progress = ProgressIndicator::new(total_count);
         let mut updated_count = 0;
@@ -496,379 +273,181 @@ fn create_specification_inner(
                     .cloned()
                     .context("missing specification executor")?;
                 let can_parallel = executor.can_run_parallel().unwrap_or(false);
+                if can_parallel && config.verbose {
+                    println!("Parallel execution enabled for {}", agent_name);
+                }
 
-                if can_parallel {
-                    if config.verbose {
-                        println!("Parallel execution enabled for {}", agent_name);
-                    }
-                    let mut tasks = Vec::new();
-                    for node in nodes {
-                        let draft_file = node.input_path.clone();
-                        let draft_name = node.name.clone();
-                        let dependency_invalidated = node
-                            .direct_dependency_names()
-                            .iter()
-                            .any(|dep_name| updated_in_run.contains(dep_name));
-                        let dependency_fingerprint =
-                            dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
-                        let output_path = determine_specification_output_path(
+                let mut stage_items = Vec::new();
+                for node in nodes {
+                    let draft_file = node.input_path.clone();
+                    let draft_name = node.name.clone();
+                    let dependency_invalidated = node
+                        .direct_dependency_names()
+                        .iter()
+                        .any(|dep_name| updated_in_run.contains(dep_name));
+                    let dependency_fingerprint =
+                        dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
+                    let output_path = determine_specification_output_path(
+                        &draft_file,
+                        DRAFTS_DIR,
+                        SPECIFICATIONS_DIR,
+                    )?;
+
+                    let needs_update = if dependency_invalidated {
+                        true
+                    } else {
+                        tracker.needs_update(
+                            Stage::Specification,
+                            &draft_name,
                             &draft_file,
-                            DRAFTS_DIR,
-                            SPECIFICATIONS_DIR,
-                        )?;
+                            &output_path,
+                            &dependency_fingerprint,
+                        )?
+                    };
+                    if !needs_update {
+                        progress.start_item_up_to_date(&draft_name);
+                        if config.verbose {
+                            println!("⊚ Skipping {} (up to date)", draft_name);
+                        }
+                        progress.complete_item(&draft_name, true);
+                        continue;
+                    }
 
-                        let needs_update = if dependency_invalidated {
-                            true
-                        } else {
-                            tracker.needs_update(
-                                Stage::Specification,
-                                &draft_name,
-                                &draft_file,
-                                &output_path,
-                                &dependency_fingerprint,
-                            )?
-                        };
-                        if !needs_update {
-                            progress.start_item_up_to_date(&draft_name);
-                            if config.verbose {
-                                println!("⊚ Skipping {} (up to date)", draft_name);
-                            }
-                            progress.complete_item(&draft_name, true);
+                    let dependency_context = match build_dependency_context(&node) {
+                        Ok(context) => context,
+                        Err(e) => {
+                            progress.complete_item(&draft_name, false);
+                            eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
                             continue;
                         }
+                    };
 
-                        let dependency_context = match build_dependency_context(&node) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                progress.complete_item(&draft_name, false);
-                                eprintln!(
-                                    "✗ Failed to create specification for {}: {}",
-                                    draft_name, e
-                                );
-                                continue;
-                            }
-                        };
-
-                        let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
-                        let dependency_context = build_specification_context(
-                            &draft_file,
-                            &draft_content,
+                    let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
+                    let dependency_context = build_specification_context(
+                        &draft_file,
+                        &draft_content,
+                        dependency_context,
+                    )?;
+                    let (dependency_context, estimated) = fit_context_to_token_limit(
+                        &executor,
+                        &draft_content,
+                        dependency_context,
+                        token_limit,
+                    )?;
+                    let cache_hit = executor
+                        .is_cache_hit(&draft_content, dependency_context.clone())
+                        .unwrap_or(false);
+                    stage_items.push(StageItem {
+                        name: draft_name.clone(),
+                        estimated,
+                        cache_hit,
+                        payload: (
+                            draft_file,
+                            draft_name,
+                            output_path,
+                            dependency_fingerprint,
+                            draft_content,
                             dependency_context,
-                        )?;
-                        let (dependency_context, estimated) = fit_context_to_token_limit(
-                            &executor,
-                            &draft_content,
-                            dependency_context,
-                            token_limit,
-                        )?;
-                        let cache_hit = executor
-                            .is_cache_hit(&draft_content, dependency_context.clone())
-                            .unwrap_or(false);
-                        if cache_hit {
-                            progress.start_item_cached(&draft_name);
-                        } else {
-                            progress.start_item(&draft_name, Some(estimated));
-                        }
+                        ),
+                    });
+                }
 
-                        let cfg = config;
-                        let executor_clone = executor.clone();
-                        let rate_limiter_clone = rate_limiter.clone();
-                        let token_limiter_clone = token_limiter.clone();
-                        tasks.push(tokio::task::spawn(async move {
-                            if !cache_hit {
-                                if let Err(e) = acquire_request_capacity(
-                                    token_limiter_clone.as_ref(),
-                                    rate_limiter_clone.as_ref(),
-                                    estimated,
-                                )
-                                .await
-                                {
-                                    return (
-                                        draft_name,
-                                        draft_file,
-                                        output_path,
-                                        dependency_fingerprint,
-                                        Err(e),
-                                    );
-                                }
-                            }
-                            let mut result = process_specification(
-                                &executor_clone,
+                let cfg = config;
+                let executor_clone = executor.clone();
+                let results = run_stage_items(
+                    stage_items,
+                    can_parallel,
+                    &mut progress,
+                    &resources,
+                    &config,
+                    move |(
+                        draft_file,
+                        draft_name,
+                        output_path,
+                        dependency_fingerprint,
+                        draft_content,
+                        dependency_context,
+                    ),
+                          execution_control| {
+                        let executor = executor_clone.clone();
+                        async move {
+                            let result = process_specification(
+                                &executor,
                                 &draft_content,
                                 &draft_file,
                                 &draft_name,
                                 &cfg,
-                                dependency_context.clone(),
+                                dependency_context,
+                                execution_control,
                             )
-                            .await;
-                            if let Err(ref e) = result {
-                                if is_rate_limit_error(e) {
-                                    if prepare_rate_limit_retry(
-                                        &draft_name,
-                                        estimated,
-                                        token_limiter_clone.as_ref(),
-                                        rate_limiter_clone.as_ref(),
-                                    )
-                                    .await
-                                    {
-                                        if let Err(e) = acquire_request_capacity(
-                                            token_limiter_clone.as_ref(),
-                                            rate_limiter_clone.as_ref(),
-                                            estimated,
-                                        )
-                                        .await
-                                        {
-                                            return (
-                                                draft_name,
-                                                draft_file,
-                                                output_path,
-                                                dependency_fingerprint,
-                                                Err(e),
-                                            );
-                                        }
-                                        result = process_specification(
-                                            &executor_clone,
-                                            &draft_content,
-                                            &draft_file,
-                                            &draft_name,
-                                            &cfg,
-                                            dependency_context,
-                                        )
-                                        .await;
-                                    }
-                                }
-                            }
-                            (
-                                draft_name,
-                                draft_file,
-                                output_path,
-                                dependency_fingerprint,
-                                result,
-                            )
-                        }));
-                    }
-
-                    for task in tasks {
-                        let (draft_name, draft_file, output_path, dependency_fingerprint, result) =
-                            task.await?;
-                        match result {
-                            Ok(ProcessSpecOutcome::Success) => {
-                                tracker.record(
-                                    Stage::Specification,
-                                    &draft_name,
-                                    &draft_file,
-                                    &output_path,
-                                    &dependency_fingerprint,
-                                )?;
-                                updated_count += 1;
-                                updated_in_run.insert(draft_name.clone());
-                                progress.complete_item(&draft_name, true);
-                                if config.verbose {
-                                    println!(
-                                        "✓ Successfully created specification for {}",
-                                        draft_name
-                                    );
-                                }
-                            }
-                            Ok(ProcessSpecOutcome::BlockingAmbiguities {
-                                draft_file: ba_draft_file,
-                                draft_name: ba_draft_name,
-                                draft_content: ba_draft_content,
-                                spec_content: ba_spec_content,
-                                actionable: ba_actionable,
-                                additional_context: ba_context,
-                            }) => {
-                                progress.complete_item(&draft_name, false);
-                                if fix && fix_attempt < max_fix_attempts {
-                                    return try_fix_and_retry(
-                                        &ba_draft_file,
-                                        &ba_draft_name,
-                                        &ba_draft_content,
-                                        &ba_spec_content,
-                                        &ba_actionable,
-                                        ba_context,
-                                        fix_attempt,
-                                        max_fix_attempts,
-                                        &filter,
-                                        rate_limit,
-                                        token_limit,
-                                        &config,
-                                    )
-                                    .await;
-                                }
-                                eprintln!("✗ Blocking ambiguities (use --fix to auto-fix drafts)");
-                                anyhow::bail!(
-                                    "generated specification contains blocking ambiguities"
-                                );
-                            }
-                            Err(e) => {
-                                progress.complete_item(&draft_name, false);
-                                eprintln!(
-                                    "✗ Failed to create specification for {}: {}",
-                                    draft_name, e
-                                );
-                                anyhow::bail!("{}", e);
-                            }
+                            .await?;
+                            Ok((draft_file, output_path, dependency_fingerprint, result))
                         }
-                    }
-                } else {
-                    for node in nodes {
-                        let draft_file = node.input_path.clone();
-                        let draft_name = node.name.clone();
-                        let dependency_invalidated = node
-                            .direct_dependency_names()
-                            .iter()
-                            .any(|dep_name| updated_in_run.contains(dep_name));
-                        let dependency_fingerprint =
-                            dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
-                        let output_path = determine_specification_output_path(
-                            &draft_file,
-                            DRAFTS_DIR,
-                            SPECIFICATIONS_DIR,
-                        )?;
+                    },
+                )
+                .await?;
 
-                        let needs_update = if dependency_invalidated {
-                            true
-                        } else {
-                            tracker.needs_update(
+                for (draft_name, result) in results {
+                    match result {
+                        Ok((
+                            draft_file,
+                            output_path,
+                            dependency_fingerprint,
+                            ProcessSpecOutcome::Success,
+                        )) => {
+                            tracker.record(
                                 Stage::Specification,
                                 &draft_name,
                                 &draft_file,
                                 &output_path,
                                 &dependency_fingerprint,
-                            )?
-                        };
-                        if !needs_update {
-                            progress.start_item_up_to_date(&draft_name);
-                            if config.verbose {
-                                println!("⊚ Skipping {} (up to date)", draft_name);
-                            }
+                            )?;
+                            updated_count += 1;
+                            updated_in_run.insert(draft_name.clone());
                             progress.complete_item(&draft_name, true);
-                            continue;
-                        }
-
-                        let dependency_context = build_dependency_context(&node)?;
-                        let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
-                        let dependency_context = build_specification_context(
-                            &draft_file,
-                            &draft_content,
-                            dependency_context,
-                        )?;
-                        let (dependency_context, estimated) = fit_context_to_token_limit(
-                            &executor,
-                            &draft_content,
-                            dependency_context,
-                            token_limit,
-                        )?;
-                        let cache_hit = executor
-                            .is_cache_hit(&draft_content, dependency_context.clone())
-                            .unwrap_or(false);
-                        if cache_hit {
-                            progress.start_item_cached(&draft_name);
-                        } else {
-                            progress.start_item(&draft_name, Some(estimated));
-                            acquire_request_capacity(
-                                token_limiter.as_ref(),
-                                rate_limiter.as_ref(),
-                                estimated,
-                            )
-                            .await?;
-                        }
-                        let mut result = process_specification(
-                            &executor,
-                            &draft_content,
-                            &draft_file,
-                            &draft_name,
-                            &config,
-                            dependency_context.clone(),
-                        )
-                        .await;
-                        if let Err(ref e) = result {
-                            if is_rate_limit_error(e) {
-                                if prepare_rate_limit_retry(
-                                    &draft_name,
-                                    estimated,
-                                    token_limiter.as_ref(),
-                                    rate_limiter.as_ref(),
-                                )
-                                .await
-                                {
-                                    acquire_request_capacity(
-                                        token_limiter.as_ref(),
-                                        rate_limiter.as_ref(),
-                                        estimated,
-                                    )
-                                    .await?;
-                                    result = process_specification(
-                                        &executor,
-                                        &draft_content,
-                                        &draft_file,
-                                        &draft_name,
-                                        &config,
-                                        dependency_context,
-                                    )
-                                    .await;
-                                }
+                            if config.verbose {
+                                println!("✓ Successfully created specification for {}", draft_name);
                             }
                         }
-                        match result {
-                            Ok(ProcessSpecOutcome::Success) => {
-                                tracker.record(
-                                    Stage::Specification,
-                                    &draft_name,
-                                    &draft_file,
-                                    &output_path,
-                                    &dependency_fingerprint,
-                                )?;
-                                updated_count += 1;
-                                updated_in_run.insert(draft_name.clone());
-                                progress.complete_item(&draft_name, true);
-                                if config.verbose {
-                                    println!(
-                                        "✓ Successfully created specification for {}",
-                                        draft_name
-                                    );
-                                }
-                            }
-                            Ok(ProcessSpecOutcome::BlockingAmbiguities {
+                        Ok((
+                            _draft_file,
+                            _output_path,
+                            _dependency_fingerprint,
+                            ProcessSpecOutcome::BlockingAmbiguities {
                                 draft_file: ba_draft_file,
                                 draft_name: ba_draft_name,
                                 draft_content: ba_draft_content,
                                 spec_content: ba_spec_content,
                                 actionable: ba_actionable,
                                 additional_context: ba_context,
-                            }) => {
-                                progress.complete_item(&draft_name, false);
-                                if fix && fix_attempt < max_fix_attempts {
-                                    return try_fix_and_retry(
-                                        &ba_draft_file,
-                                        &ba_draft_name,
-                                        &ba_draft_content,
-                                        &ba_spec_content,
-                                        &ba_actionable,
-                                        ba_context,
-                                        fix_attempt,
-                                        max_fix_attempts,
-                                        &filter,
-                                        rate_limit,
-                                        token_limit,
-                                        &config,
-                                    )
-                                    .await;
-                                }
-                                eprintln!("✗ Blocking ambiguities (use --fix to auto-fix drafts)");
-                                anyhow::bail!(
-                                    "generated specification contains blocking ambiguities"
-                                );
+                            },
+                        )) => {
+                            progress.complete_item(&draft_name, false);
+                            if fix && fix_attempt < max_fix_attempts {
+                                return try_fix_and_retry(
+                                    &ba_draft_file,
+                                    &ba_draft_name,
+                                    &ba_draft_content,
+                                    &ba_spec_content,
+                                    &ba_actionable,
+                                    ba_context,
+                                    fix_attempt,
+                                    max_fix_attempts,
+                                    &filter,
+                                    rate_limit,
+                                    token_limit,
+                                    &config,
+                                    resources.execution_control.clone(),
+                                )
+                                .await;
                             }
-                            Err(e) => {
-                                progress.complete_item(&draft_name, false);
-                                eprintln!(
-                                    "✗ Failed to create specification for {}: {}",
-                                    draft_name, e
-                                );
-                                anyhow::bail!("{}", e);
-                            }
+                            eprintln!("✗ Blocking ambiguities (use --fix to auto-fix drafts)");
+                            anyhow::bail!("generated specification contains blocking ambiguities");
+                        }
+                        Err(e) => {
+                            progress.complete_item(&draft_name, false);
+                            eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+                            anyhow::bail!("{}", e);
                         }
                     }
                 }
@@ -961,6 +540,7 @@ async fn process_specification(
     draft_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
+    execution_control: Option<CliExecutionControl>,
 ) -> Result<ProcessSpecOutcome> {
     if config.dry_run {
         println!("[DRY RUN] Would create specification for: {}", draft_name);
@@ -969,7 +549,14 @@ async fn process_specification(
 
     // Use conversational execution to handle questions
     let spec_content = executor
-        .execute_with_conversation_with_seed(&draft_content, draft_name, additional_context.clone())
+        .execute_with_conversation_with_seed(
+            &draft_content,
+            draft_name,
+            additional_context.clone(),
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
         .await?;
 
     finalize_specification_output(
@@ -1085,6 +672,7 @@ async fn try_fix_and_retry(
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
     config: &Config,
+    execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
     let dependency_drafts = build_dependency_drafts_from_context(&additional_context);
 
@@ -1114,7 +702,13 @@ async fn try_fix_and_retry(
 
     let fix_executor = Arc::new(AgentExecutor::new("fix_draft_blockers", config)?);
     let agent_response = fix_executor
-        .execute_with_context("", fix_context)
+        .execute_with_context(
+            "",
+            fix_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
         .await
         .context("Failed to execute fix_draft_blockers agent")?;
 
@@ -1253,8 +847,7 @@ pub async fn create_implementation(
         );
     }
 
-    let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
-    let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
+    let resources = ExecutionResources::new(rate_limit, token_limit);
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
@@ -1366,6 +959,7 @@ pub async fn create_implementation(
                             &context_name,
                             &cfg,
                             dependency_context,
+                            resources.execution_control.clone(),
                         )
                         .await;
                         batch_results.push((
@@ -1382,7 +976,7 @@ pub async fn create_implementation(
                     match executor
                         .prepare_execution(&context_content, dependency_context.clone())?
                     {
-                        reen::contexts::PreparedExecutionState::Cached(output) => {
+                        reen::execution::PreparedExecutionState::Cached(output) => {
                             let result = finalize_implementation_output(
                                 &context_file,
                                 &context_name,
@@ -1397,7 +991,7 @@ pub async fn create_implementation(
                                 result,
                             ));
                         }
-                        reen::contexts::PreparedExecutionState::Ready(prepared) => {
+                        reen::execution::PreparedExecutionState::Ready(prepared) => {
                             batch_items.push(PreparedImplementationBatchItem {
                                 context_name,
                                 context_file,
@@ -1416,7 +1010,13 @@ pub async fn create_implementation(
                         .iter()
                         .map(|item| (item.context_name.clone(), item.prepared.clone()))
                         .collect::<Vec<_>>();
-                    match executor.execute_batch(batch_request) {
+                    match executor.execute_batch(
+                        batch_request,
+                        resources
+                            .execution_control
+                            .as_ref()
+                            .map(|control| control as &dyn NativeExecutionControl),
+                    ) {
                         Ok(outputs) => {
                             for item in batch_items {
                                 let result = if let Some(output) =
@@ -1440,6 +1040,7 @@ pub async fn create_implementation(
                                         &item.context_name,
                                         &cfg,
                                         item.dependency_context.clone(),
+                                        resources.execution_control.clone(),
                                     )
                                     .await
                                 };
@@ -1465,6 +1066,7 @@ pub async fn create_implementation(
                                     &item.context_name,
                                     &cfg,
                                     item.dependency_context,
+                                    resources.execution_control.clone(),
                                 )
                                 .await;
                                 batch_results.push((
@@ -1515,104 +1117,71 @@ pub async fn create_implementation(
                     }
                 }
             } else {
-                let mut tasks = Vec::new();
-                for (
-                    context_file,
-                    context_name,
-                    output_path,
-                    dependency_fingerprint,
-                    dependency_context,
-                    context_content,
-                    estimated,
-                    cache_hit,
-                ) in runnable
-                {
-                    if cache_hit {
-                        progress.start_item_cached(&context_name);
-                    } else {
-                        progress.start_item(&context_name, Some(estimated));
-                    }
-                    let executor_clone = executor.clone();
-                    let rate_limiter_clone = rate_limiter.clone();
-                    let token_limiter_clone = token_limiter.clone();
-                    tasks.push(tokio::task::spawn(async move {
-                        if !cache_hit {
-                            if let Err(e) = acquire_request_capacity(
-                                token_limiter_clone.as_ref(),
-                                rate_limiter_clone.as_ref(),
-                                estimated,
-                            )
-                            .await
-                            {
-                                return (
-                                    context_name,
-                                    context_file,
-                                    output_path,
-                                    dependency_fingerprint,
-                                    Err(e),
-                                );
-                            }
-                        }
-                        let mut result = process_implementation(
-                            &executor_clone,
-                            &context_content,
-                            &context_file,
-                            &context_name,
-                            &cfg,
-                            dependency_context.clone(),
-                        )
-                        .await;
-                        if let Err(ref e) = result {
-                            if is_rate_limit_error(e) {
-                                if prepare_rate_limit_retry(
-                                    &context_name,
-                                    estimated,
-                                    token_limiter_clone.as_ref(),
-                                    rate_limiter_clone.as_ref(),
-                                )
-                                .await
-                                {
-                                    if let Err(e) = acquire_request_capacity(
-                                        token_limiter_clone.as_ref(),
-                                        rate_limiter_clone.as_ref(),
-                                        estimated,
-                                    )
-                                    .await
-                                    {
-                                        return (
-                                            context_name,
-                                            context_file,
-                                            output_path,
-                                            dependency_fingerprint,
-                                            Err(e),
-                                        );
-                                    }
-                                    result = process_implementation(
-                                        &executor_clone,
-                                        &context_content,
-                                        &context_file,
-                                        &context_name,
-                                        &cfg,
-                                        dependency_context,
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-                        (
-                            context_name,
+                let stage_items = runnable
+                    .into_iter()
+                    .map(
+                        |(
                             context_file,
+                            context_name,
                             output_path,
                             dependency_fingerprint,
-                            result,
-                        )
-                    }));
-                }
-                for task in tasks {
-                    let (context_name, context_file, output_path, dependency_fingerprint, result) =
-                        task.await?;
+                            dependency_context,
+                            context_content,
+                            estimated,
+                            cache_hit,
+                        )| StageItem {
+                            name: context_name.clone(),
+                            estimated,
+                            cache_hit,
+                            payload: (
+                                context_file,
+                                context_name,
+                                output_path,
+                                dependency_fingerprint,
+                                dependency_context,
+                                context_content,
+                            ),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+
+                let executor_clone = executor.clone();
+                let results = run_stage_items(
+                    stage_items,
+                    true,
+                    &mut progress,
+                    &resources,
+                    config,
+                    move |(
+                        context_file,
+                        context_name,
+                        output_path,
+                        dependency_fingerprint,
+                        dependency_context,
+                        context_content,
+                    ),
+                          execution_control| {
+                        let executor = executor_clone.clone();
+                        async move {
+                            process_implementation(
+                                &executor,
+                                &context_content,
+                                &context_file,
+                                &context_name,
+                                &cfg,
+                                dependency_context,
+                                execution_control,
+                            )
+                            .await?;
+                            Ok((context_file, output_path, dependency_fingerprint))
+                        }
+                    },
+                )
+                .await?;
+
+                for (context_name, result) in results {
                     match result {
-                        Ok(_) => {
+                        Ok((context_file, output_path, dependency_fingerprint)) => {
                             tracker.record(
                                 Stage::Implementation,
                                 &context_name,
@@ -1645,70 +1214,72 @@ pub async fn create_implementation(
                 }
             }
         } else {
-            for (
-                context_file,
-                context_name,
-                output_path,
-                dependency_fingerprint,
-                dependency_context,
-                context_content,
-                estimated,
-                cache_hit,
-            ) in runnable
-            {
-                if cache_hit {
-                    progress.start_item_cached(&context_name);
-                } else {
-                    progress.start_item(&context_name, Some(estimated));
-                    if config.verbose {
-                        println!("Processing context: {}", context_name);
-                    }
-                    acquire_request_capacity(
-                        token_limiter.as_ref(),
-                        rate_limiter.as_ref(),
+            let stage_items = runnable
+                .into_iter()
+                .map(
+                    |(
+                        context_file,
+                        context_name,
+                        output_path,
+                        dependency_fingerprint,
+                        dependency_context,
+                        context_content,
                         estimated,
-                    )
-                    .await?;
-                }
-                let mut result = process_implementation(
-                    &executor,
-                    &context_content,
-                    &context_file,
-                    &context_name,
-                    config,
-                    dependency_context.clone(),
+                        cache_hit,
+                    )| StageItem {
+                        name: context_name.clone(),
+                        estimated,
+                        cache_hit,
+                        payload: (
+                            context_file,
+                            context_name,
+                            output_path,
+                            dependency_fingerprint,
+                            dependency_context,
+                            context_content,
+                        ),
+                    },
                 )
-                .await;
-                if let Err(ref e) = result {
-                    if is_rate_limit_error(e) {
-                        if prepare_rate_limit_retry(
+                .collect::<Vec<_>>();
+
+            let executor_clone = executor.clone();
+            let cfg = *config;
+            let results = run_stage_items(
+                stage_items,
+                false,
+                &mut progress,
+                &resources,
+                config,
+                move |(
+                    context_file,
+                    context_name,
+                    output_path,
+                    dependency_fingerprint,
+                    dependency_context,
+                    context_content,
+                ),
+                      execution_control| {
+                    let executor = executor_clone.clone();
+                    async move {
+                        process_implementation(
+                            &executor,
+                            &context_content,
+                            &context_file,
                             &context_name,
-                            estimated,
-                            token_limiter.as_ref(),
-                            rate_limiter.as_ref(),
+                            &cfg,
+                            dependency_context,
+                            execution_control,
                         )
-                        .await
-                        {
-                            acquire_request_capacity(
-                                token_limiter.as_ref(),
-                                rate_limiter.as_ref(),
-                                estimated,
-                            )
-                            .await?;
-                            result = process_implementation(
-                                &executor,
-                                &context_content,
-                                &context_file,
-                                &context_name,
-                                config,
-                                dependency_context,
-                            )
-                            .await;
-                        }
+                        .await?;
+                        Ok((context_file, output_path, dependency_fingerprint))
                     }
-                }
+                },
+            )
+            .await?;
+
+            for (context_name, result) in results {
                 match result {
-                    Ok(_) => {
+                    Ok((context_file, output_path, dependency_fingerprint)) => {
                         tracker.record(
                             Stage::Implementation,
                             &context_name,
@@ -1772,6 +1343,7 @@ async fn process_implementation(
     context_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
+    execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
     if has_unfinished_specification(context_file, context_name, "implementation")? {
         anyhow::bail!("unfinished specification");
@@ -1787,7 +1359,14 @@ async fn process_implementation(
 
     // Use conversational execution to handle questions
     let impl_result = executor
-        .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
+        .execute_with_conversation_with_seed(
+            &context_content,
+            context_name,
+            additional_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
         .await?;
 
     finalize_implementation_output(context_file, context_name, config, impl_result)
@@ -2185,8 +1764,7 @@ pub async fn create_tests(
     let executor = Arc::new(AgentExecutor::new("create_test", config)?);
     let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
-    let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
-    let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
+    let resources = ExecutionResources::new(rate_limit, token_limit);
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut had_unspecified = false;
@@ -2215,187 +1793,63 @@ pub async fn create_tests(
             let cache_hit = executor
                 .is_cache_hit(&context_content, dependency_context.clone())
                 .unwrap_or(false);
-            runnable.push((
-                context_file,
-                context_name,
-                dependency_context,
-                context_content,
+            runnable.push(StageItem {
+                name: context_name.clone(),
                 estimated,
                 cache_hit,
-            ));
+                payload: (
+                    context_file,
+                    context_name.clone(),
+                    dependency_context,
+                    context_content,
+                ),
+            });
         }
 
-        if can_parallel {
-            if config.verbose {
-                println!("Parallel execution enabled for create_test");
-            }
-            let cfg = *config;
-            let mut tasks = Vec::new();
-            for (
-                context_file,
-                context_name,
-                dependency_context,
-                context_content,
-                estimated,
-                cache_hit,
-            ) in runnable
-            {
-                if cache_hit {
-                    progress.start_item_cached(&context_name);
-                } else {
-                    progress.start_item(&context_name, Some(estimated));
-                }
-                let executor_clone = executor.clone();
-                let rate_limiter_clone = rate_limiter.clone();
-                let token_limiter_clone = token_limiter.clone();
-                tasks.push(tokio::task::spawn(async move {
-                    if !cache_hit {
-                        if let Err(e) = acquire_request_capacity(
-                            token_limiter_clone.as_ref(),
-                            rate_limiter_clone.as_ref(),
-                            estimated,
-                        )
-                        .await
-                        {
-                            return (context_name, Err(e));
-                        }
-                    }
-                    let mut result = process_tests(
-                        &executor_clone,
+        if can_parallel && config.verbose {
+            println!("Parallel execution enabled for create_test");
+        }
+        let cfg = *config;
+        let executor_clone = executor.clone();
+        let results = run_stage_items(
+            runnable,
+            can_parallel,
+            &mut progress,
+            &resources,
+            config,
+            move |(context_file, context_name, dependency_context, context_content),
+                  execution_control| {
+                let executor = executor_clone.clone();
+                async move {
+                    process_tests(
+                        &executor,
                         &context_content,
                         &context_file,
                         &context_name,
                         &cfg,
-                        dependency_context.clone(),
+                        dependency_context,
+                        execution_control,
                     )
-                    .await;
-                    if let Err(ref e) = result {
-                        if is_rate_limit_error(e) {
-                            if prepare_rate_limit_retry(
-                                &context_name,
-                                estimated,
-                                token_limiter_clone.as_ref(),
-                                rate_limiter_clone.as_ref(),
-                            )
-                            .await
-                            {
-                                if let Err(e) = acquire_request_capacity(
-                                    token_limiter_clone.as_ref(),
-                                    rate_limiter_clone.as_ref(),
-                                    estimated,
-                                )
-                                .await
-                                {
-                                    return (context_name, Err(e));
-                                }
-                                result = process_tests(
-                                    &executor_clone,
-                                    &context_content,
-                                    &context_file,
-                                    &context_name,
-                                    &cfg,
-                                    dependency_context,
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                    (context_name, result)
-                }));
-            }
-            for task in tasks {
-                let (context_name, result) = task.await?;
-                match result {
-                    Ok(_) => {
-                        progress.complete_item(&context_name, true);
-                        if config.verbose {
-                            println!("✓ Successfully created tests for {}", context_name);
-                        }
-                    }
-                    Err(e) => {
-                        if e.to_string().contains("unfinished specification") {
-                            had_unspecified = true;
-                        }
-                        progress.complete_item(&context_name, false);
-                        eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
-                    }
+                    .await
                 }
-            }
-        } else {
-            for (
-                context_file,
-                context_name,
-                dependency_context,
-                context_content,
-                estimated,
-                cache_hit,
-            ) in runnable
-            {
-                if cache_hit {
-                    progress.start_item_cached(&context_name);
-                } else {
-                    progress.start_item(&context_name, Some(estimated));
+            },
+        )
+        .await?;
+
+        for (context_name, result) in results {
+            match result {
+                Ok(_) => {
+                    progress.complete_item(&context_name, true);
                     if config.verbose {
-                        println!("Processing context: {}", context_name);
-                    }
-                    acquire_request_capacity(
-                        token_limiter.as_ref(),
-                        rate_limiter.as_ref(),
-                        estimated,
-                    )
-                    .await?;
-                }
-                let mut result = process_tests(
-                    &executor,
-                    &context_content,
-                    &context_file,
-                    &context_name,
-                    config,
-                    dependency_context.clone(),
-                )
-                .await;
-                if let Err(ref e) = result {
-                    if is_rate_limit_error(e) {
-                        if prepare_rate_limit_retry(
-                            &context_name,
-                            estimated,
-                            token_limiter.as_ref(),
-                            rate_limiter.as_ref(),
-                        )
-                        .await
-                        {
-                            acquire_request_capacity(
-                                token_limiter.as_ref(),
-                                rate_limiter.as_ref(),
-                                estimated,
-                            )
-                            .await?;
-                            result = process_tests(
-                                &executor,
-                                &context_content,
-                                &context_file,
-                                &context_name,
-                                config,
-                                dependency_context,
-                            )
-                            .await;
-                        }
+                        println!("✓ Successfully created tests for {}", context_name);
                     }
                 }
-                match result {
-                    Ok(_) => {
-                        progress.complete_item(&context_name, true);
-                        if config.verbose {
-                            println!("✓ Successfully created tests for {}", context_name);
-                        }
+                Err(e) => {
+                    if e.to_string().contains("unfinished specification") {
+                        had_unspecified = true;
                     }
-                    Err(e) => {
-                        if e.to_string().contains("unfinished specification") {
-                            had_unspecified = true;
-                        }
-                        progress.complete_item(&context_name, false);
-                        eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
-                    }
+                    progress.complete_item(&context_name, false);
+                    eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
                 }
             }
         }
@@ -2719,6 +2173,7 @@ async fn process_tests(
     context_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
+    execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
     if has_unfinished_specification(context_file, context_name, "tests")? {
         anyhow::bail!("unfinished specification");
@@ -2738,7 +2193,14 @@ async fn process_tests(
     }
 
     let test_result = executor
-        .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
+        .execute_with_conversation_with_seed(
+            &context_content,
+            context_name,
+            additional_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
         .await?;
 
     finalize_test_output(context_name, &test_paths, config, &test_result)
@@ -2756,7 +2218,10 @@ fn finalize_test_output(
         test_paths.steps_path.clone(),
         test_paths.runner_path.clone(),
     ]);
-    let actual_paths: HashSet<PathBuf> = artifacts.iter().map(|artifact| artifact.0.clone()).collect();
+    let actual_paths: HashSet<PathBuf> = artifacts
+        .iter()
+        .map(|artifact| artifact.0.clone())
+        .collect();
 
     if actual_paths != expected_paths {
         let expected = expected_paths
@@ -2779,11 +2244,13 @@ fn finalize_test_output(
 
     for (path, content) in artifacts {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create BDD output directory {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create BDD output directory {}", parent.display())
+            })?;
         }
-        fs::write(&path, content)
-            .with_context(|| format!("Failed to write generated BDD artifact {}", path.display()))?;
+        fs::write(&path, content).with_context(|| {
+            format!("Failed to write generated BDD artifact {}", path.display())
+        })?;
         if config.verbose {
             println!("✓ Written BDD artifact: {}", path.display());
         }
@@ -2807,20 +2274,24 @@ fn parse_generated_files(output: &str) -> Result<Vec<(PathBuf, String)>> {
             .map(|m| m.as_str())
             .context("Generated BDD artifact missing content")?;
         let trimmed_start = raw.strip_prefix('\n').unwrap_or(raw);
-        let content = trimmed_start.strip_suffix('\n').unwrap_or(trimmed_start).to_string();
+        let content = trimmed_start
+            .strip_suffix('\n')
+            .unwrap_or(trimmed_start)
+            .to_string();
         files.push((path, content));
     }
 
     if files.is_empty() {
-        anyhow::bail!(
-            "Generated BDD test output did not contain any <file path=\"...\"> blocks"
-        );
+        anyhow::bail!("Generated BDD test output did not contain any <file path=\"...\"> blocks");
     }
 
     let mut unique_paths = HashSet::new();
     for (path, _) in &files {
         if !unique_paths.insert(path.clone()) {
-            anyhow::bail!("Generated BDD output contained duplicate file path {}", path.display());
+            anyhow::bail!(
+                "Generated BDD output contained duplicate file path {}",
+                path.display()
+            );
         }
     }
 
@@ -3068,141 +2539,19 @@ fn build_implemented_dependency_context(
 }
 
 pub async fn compile(config: &Config) -> Result<()> {
-    println!("Compiling project with cargo build...");
-
-    if config.dry_run {
-        println!("[DRY RUN] Would run: cargo build");
-        return Ok(());
-    }
-
-    let output = Command::new("cargo")
-        .arg("build")
-        .output()
-        .context("Failed to execute cargo build")?;
-
-    if config.verbose || !output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        println!("✓ Build successful");
-        Ok(())
-    } else {
-        anyhow::bail!("Build failed");
-    }
+    cargo_commands::compile(config).await
 }
 
 pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()> {
-    println!(
-        "Attempting to restore compilation (max_attempts={})...",
-        max_compile_fix_attempts
-    );
-
-    if config.dry_run {
-        println!("[DRY RUN] Would run compilation-fix loop");
-        return Ok(());
-    }
-
-    let project_root = Path::new(".");
-    let spec_dir = PathBuf::from(SPECIFICATIONS_DIR);
-    let drafts_dir = PathBuf::from(DRAFTS_DIR);
-
-    let project_info = if spec_dir.exists() && spec_dir.is_dir() {
-        analyze_specifications(&spec_dir, Some(&drafts_dir))
-            .context("Failed to analyze specifications for fix loop")?
-    } else {
-        // If specs are missing, still allow the loop to run from compiler diagnostics alone.
-        ProjectInfo::default()
-    };
-
-    let mut recent_files: Vec<PathBuf> = Vec::new();
-    for p in [
-        PathBuf::from("Cargo.toml"),
-        PathBuf::from("src/lib.rs"),
-        PathBuf::from("src/main.rs"),
-        PathBuf::from("src/contexts/mod.rs"),
-        PathBuf::from("src/data/mod.rs"),
-    ] {
-        if p.exists() {
-            recent_files.push(p);
-        }
-    }
-
-    compilation_fix::ensure_compiles_with_auto_fix(
-        config,
-        max_compile_fix_attempts,
-        project_root,
-        &project_info,
-        &recent_files,
-    )
-    .await
+    cargo_commands::fix(max_compile_fix_attempts, config).await
 }
 
 pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
-    println!("Building and running project with cargo run...");
-
-    if config.dry_run {
-        let args_str = if args.is_empty() {
-            String::new()
-        } else {
-            format!(" -- {}", args.join(" "))
-        };
-        println!("[DRY RUN] Would run: cargo run{}", args_str);
-        return Ok(());
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.arg("run");
-
-    // Add separator and arguments if any were provided
-    if !args.is_empty() {
-        cmd.arg("--");
-        cmd.args(&args);
-    }
-
-    let output = cmd.output().context("Failed to execute cargo run")?;
-
-    if config.verbose || !output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        // Don't print success message if not verbose, as cargo run already shows output
-        if config.verbose {
-            println!("✓ Run successful");
-        }
-        Ok(())
-    } else {
-        anyhow::bail!("Run failed");
-    }
+    cargo_commands::run(args, config).await
 }
 
 pub async fn test(config: &Config) -> Result<()> {
-    println!("Testing project with cargo test...");
-
-    if config.dry_run {
-        println!("[DRY RUN] Would run: cargo test");
-        return Ok(());
-    }
-
-    let output = Command::new("cargo")
-        .arg("test")
-        .output()
-        .context("Failed to execute cargo test")?;
-
-    if config.verbose || !output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        println!("✓ Tests passed");
-        Ok(())
-    } else {
-        anyhow::bail!("Tests failed");
-    }
+    cargo_commands::test(config).await
 }
 
 pub async fn clear_cache(target: &str, names: Vec<String>, config: &Config) -> Result<()> {
@@ -3411,7 +2760,9 @@ fn clear_test_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
         parent_dirs.sort();
         parent_dirs.dedup();
         for dir in parent_dirs {
-            if dir.starts_with(Path::new("tests/features")) || dir.starts_with(Path::new("tests/steps")) {
+            if dir.starts_with(Path::new("tests/features"))
+                || dir.starts_with(Path::new("tests/steps"))
+            {
                 remove_empty_dirs_upward(&dir, Path::new("tests"))?;
             }
         }
@@ -3976,7 +3327,11 @@ fn sync_bdd_cargo_support(config: &Config) -> Result<()> {
 
     let content = fs::read_to_string(&cargo_toml)
         .with_context(|| format!("Failed to read {}", cargo_toml.display()))?;
-    let content = ensure_dev_dependency_entry(&content, "cucumber", &format!("\"{}\"", BDD_CUCUMBER_VERSION));
+    let content = ensure_dev_dependency_entry(
+        &content,
+        "cucumber",
+        &format!("\"{}\"", BDD_CUCUMBER_VERSION),
+    );
     let content = ensure_dev_dependency_entry(&content, "tokio", BDD_TOKIO_SPEC);
     let content = sync_managed_block(
         &content,
@@ -3988,7 +3343,10 @@ fn sync_bdd_cargo_support(config: &Config) -> Result<()> {
         .with_context(|| format!("Failed to update {}", cargo_toml.display()))?;
 
     if config.verbose {
-        println!("✓ Synchronized Cargo.toml for {} BDD runner(s)", runner_paths.len());
+        println!(
+            "✓ Synchronized Cargo.toml for {} BDD runner(s)",
+            runner_paths.len()
+        );
     }
 
     Ok(())
@@ -4384,7 +3742,10 @@ Problem:
             paths.steps_path,
             PathBuf::from("tests/steps/contexts/ui/terminal_renderer_steps.rs")
         );
-        assert_eq!(paths.runner_path, PathBuf::from("tests/bdd_contexts_ui_terminal_renderer.rs"));
+        assert_eq!(
+            paths.runner_path,
+            PathBuf::from("tests/bdd_contexts_ui_terminal_renderer.rs")
+        );
         assert_eq!(paths.runner_test_name, "bdd_contexts_ui_terminal_renderer");
     }
 
@@ -4429,7 +3790,9 @@ fn main() {}
 
         assert!(updated.contains("[dev-dependencies]"));
         assert!(updated.contains("cucumber = \"0.22.1\""));
-        assert!(updated.contains("tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"));
+        assert!(updated.contains(
+            "tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"
+        ));
         assert!(updated.contains(BDD_TEST_TARGETS_START));
         assert!(updated.contains("name = \"bdd_account\""));
         assert!(updated.contains(BDD_TEST_TARGETS_END));

@@ -551,7 +551,9 @@ mod tests {
         let cargo_toml = fs::read_to_string(root.join("Cargo.toml")).expect("read cargo toml");
         assert!(cargo_toml.contains("[dev-dependencies]"));
         assert!(cargo_toml.contains("cucumber = \"0.22.1\""));
-        assert!(cargo_toml.contains("tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"));
+        assert!(cargo_toml.contains(
+            "tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"
+        ));
 
         let _ = fs::remove_dir_all(root);
     }

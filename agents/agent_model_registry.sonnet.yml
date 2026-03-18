@@ -1,3 +1,5 @@
+# Preset profile: Anthropic Sonnet defaults.
+# Activate by copying this file over `agent_model_registry.yml` before building.
 create_specifications_data:
   model: claude-sonnet-4-6
   parallel: true

@@ -1,3 +1,5 @@
+# Preset profile: local / Ollama-first defaults.
+# Activate by copying this file over `agent_model_registry.yml` before building.
 create_specifications_data:
   model: qwen2.5:7b # gpt-5 # qwen2.5:7b
   parallel: false

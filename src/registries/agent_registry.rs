@@ -1,5 +1,5 @@
 use super::agent_spec_resolver::candidate_agent_spec_filenames;
-use crate::contexts::{
+use crate::execution::{
     AgentModelRegistry, AgentRegistry, AgentSpecificationTemplate, ExecutionError, PopulateError,
 };
 use crate::registries::{embedded_agent_spec, FileAgentModelRegistry};
@@ -92,7 +92,7 @@ fn extract_specification(yaml_content: &str) -> Result<AgentSpecificationTemplat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contexts::AgentSpecificationTemplate;
+    use crate::execution::AgentSpecificationTemplate;
 
     #[test]
     fn test_extract_specification_legacy() {

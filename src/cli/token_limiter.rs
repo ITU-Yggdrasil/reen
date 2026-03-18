@@ -7,14 +7,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
+use tokio::time::Duration;
 
 /// Approximate tokens per word (typical for English text).
-const TOKENS_PER_WORD: f64 = 1.3;
+pub const TOKENS_PER_WORD: f64 = 1.3;
 /// Fallback: characters per token (conservative for code/markdown).
-const CHARS_PER_TOKEN: usize = 4;
+pub const CHARS_PER_TOKEN: usize = 4;
 /// Overhead for provider-specific message framing.
-const REQUEST_OVERHEAD_TOKENS: usize = 256;
+pub const REQUEST_OVERHEAD_TOKENS: usize = 256;
 
 /// Estimates token count for text using word count and character-based heuristics.
 /// Conservative to avoid exceeding provider limits.
@@ -104,16 +104,15 @@ impl TokenLimiter {
         Duration::from_secs(60)
     }
 
-    /// Waits until the bucket has at least `estimated` tokens, then consumes them.
-    /// Call this before each API request with the estimated token count.
-    pub async fn acquire_tokens(&self, estimated: usize) {
+    /// Blocking variant of `acquire_tokens` for synchronous execution paths.
+    pub fn acquire_tokens_blocking(&self, estimated: usize) {
         if estimated == 0 {
             return;
         }
         let estimated_f = estimated as f64;
         loop {
             let wait_duration = {
-                let mut inner = self.inner.lock().await;
+                let mut inner = self.inner.blocking_lock();
                 let now = Instant::now();
                 Self::prune_expired(&mut inner, now);
                 if Self::used_tokens(&inner) + estimated_f <= inner.max_tokens {
@@ -125,7 +124,7 @@ impl TokenLimiter {
                 }
                 Self::wait_time_for(&inner, estimated_f, now)
             };
-            sleep(wait_duration).await;
+            std::thread::sleep(wait_duration);
         }
     }
 
@@ -133,6 +132,12 @@ impl TokenLimiter {
     /// per-minute budget and therefore cannot be reliably scheduled.
     pub async fn exceeds_limit(&self, estimated: usize) -> bool {
         let inner = self.inner.lock().await;
+        estimated as f64 > inner.max_tokens
+    }
+
+    /// Blocking variant of `exceeds_limit` for synchronous execution paths.
+    pub fn exceeds_limit_blocking(&self, estimated: usize) -> bool {
+        let inner = self.inner.blocking_lock();
         estimated as f64 > inner.max_tokens
     }
 
@@ -148,6 +153,20 @@ impl TokenLimiter {
         } else {
             wait
         }
+    }
+
+    /// Adds already-consumed tokens to the rolling window.
+    pub fn add_tokens_blocking(&self, tokens: usize) {
+        if tokens == 0 {
+            return;
+        }
+        let mut inner = self.inner.blocking_lock();
+        let now = Instant::now();
+        Self::prune_expired(&mut inner, now);
+        inner.requests.push_back(TokenReservation {
+            timestamp: now,
+            tokens: tokens as f64,
+        });
     }
 }
 

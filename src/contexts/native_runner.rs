@@ -8,11 +8,53 @@ use std::io::Cursor;
 use std::sync::Once;
 use std::time::Duration;
 
+use crate::execution::estimate_tokens;
+
 static DOTENV_INIT: Once = Once::new();
 
 const LEGACY_USER_PROMPT: &str = "Please complete the task described in the system prompt.";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRequestStep {
+    pub provider: String,
+    pub model: String,
+    pub estimated_input_tokens: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeStepUsage {
+    pub provider: String,
+    pub model: String,
+    pub estimated_input_tokens: usize,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeExecutionMetadata {
+    pub steps: Vec<NativeStepUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeExecutionResult {
+    pub output: String,
+    pub metadata: NativeExecutionMetadata,
+}
+
+pub trait NativeExecutionControl: Send + Sync {
+    fn before_model_request(&self, step: &NativeRequestStep) -> Result<(), String>;
+    fn after_model_response(&self, usage: &NativeStepUsage);
+}
+
 pub fn execute_request(request: &Value) -> Result<String, String> {
+    execute_request_with_metadata(request, None).map(|result| result.output)
+}
+
+pub fn execute_request_with_metadata(
+    request: &Value,
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<NativeExecutionResult, String> {
     ensure_dotenv_loaded();
 
     let normalized = normalize_request(request)?;
@@ -20,32 +62,40 @@ pub fn execute_request(request: &Value) -> Result<String, String> {
 
     match provider.as_str() {
         "anthropic" => execute_with_anthropic(
+            &provider,
             &model_name,
             &normalized.system_content,
             &normalized.user_content,
             normalized.max_output_tokens,
             normalized.tools.as_deref(),
             normalized.tool_context.as_ref(),
+            execution_control,
         ),
         "ollama" => execute_with_ollama(
+            &provider,
             &model_name,
             &normalized.system_content,
             &normalized.user_content,
+            execution_control,
         ),
         "openai" => execute_with_openai(
+            &provider,
             &model_name,
             &normalized.system_content,
             &normalized.user_content,
             normalized.agent_name.as_deref(),
             normalized.tools.as_deref(),
             normalized.tool_context.as_ref(),
+            execution_control,
         ),
         "mistral" => execute_with_mistral(
+            &provider,
             &model_name,
             &normalized.system_content,
             &normalized.user_content,
             normalized.tools.as_deref(),
             normalized.tool_context.as_ref(),
+            execution_control,
         ),
         _ => Err(format!("Unknown provider: {provider}")),
     }
@@ -171,23 +221,123 @@ fn resolve_max_output_tokens(request_value: Option<u64>, env_var: &str, default:
     default
 }
 
+fn estimate_json_tokens(value: &Value) -> usize {
+    estimate_tokens(&serde_json::to_string(value).unwrap_or_default())
+}
+
+fn openai_usage_from_response(
+    provider: &str,
+    model: &str,
+    estimated_input_tokens: usize,
+    response: &Value,
+) -> NativeStepUsage {
+    let usage = response.get("usage");
+    let input_tokens = usage
+        .and_then(|value| value.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .and_then(|value| value.get("input_tokens"))
+                .and_then(Value::as_u64)
+        });
+    let output_tokens = usage
+        .and_then(|value| value.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            usage
+                .and_then(|value| value.get("output_tokens"))
+                .and_then(Value::as_u64)
+        });
+    let total_tokens = usage
+        .and_then(|value| value.get("total_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| match (input_tokens, output_tokens) {
+            (Some(input), Some(output)) => Some(input + output),
+            _ => None,
+        });
+
+    NativeStepUsage {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        estimated_input_tokens,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    }
+}
+
+fn anthropic_usage_from_response(
+    provider: &str,
+    model: &str,
+    estimated_input_tokens: usize,
+    response: &Value,
+) -> NativeStepUsage {
+    let usage = response.get("usage");
+    let input_tokens = usage
+        .and_then(|value| value.get("input_tokens"))
+        .and_then(Value::as_u64);
+    let output_tokens = usage
+        .and_then(|value| value.get("output_tokens"))
+        .and_then(Value::as_u64);
+    let total_tokens = match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => Some(input + output),
+        _ => None,
+    };
+
+    NativeStepUsage {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        estimated_input_tokens,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    }
+}
+
+fn ollama_usage_from_response(
+    provider: &str,
+    model: &str,
+    estimated_input_tokens: usize,
+    response: &Value,
+) -> NativeStepUsage {
+    let input_tokens = response.get("prompt_eval_count").and_then(Value::as_u64);
+    let output_tokens = response.get("eval_count").and_then(Value::as_u64);
+    let total_tokens = match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => Some(input + output),
+        _ => None,
+    };
+
+    NativeStepUsage {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        estimated_input_tokens,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    }
+}
+
 fn execute_with_openai(
+    provider: &str,
     model: &str,
     system_content: &str,
     user_content: &str,
     agent_name: Option<&str>,
     tools: Option<&[Value]>,
     tool_context: Option<&Value>,
-) -> Result<String, String> {
-    let api_key =
-        env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY environment variable not set".to_string())?;
-    let base_url = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<NativeExecutionResult, String> {
+    let api_key = env::var("OPENAI_API_KEY")
+        .map_err(|_| "OPENAI_API_KEY environment variable not set".to_string())?;
+    let base_url =
+        env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
     let timeout = env::var("OPENAI_TIMEOUT_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(180);
 
     execute_openai_compatible(
+        provider,
         &build_client(timeout)?,
         &format!("{}/chat/completions", base_url.trim_end_matches('/')),
         &api_key,
@@ -198,18 +348,21 @@ fn execute_with_openai(
         tool_context,
         agent_name,
         true,
+        execution_control,
     )
 }
 
 fn execute_with_mistral(
+    provider: &str,
     model: &str,
     system_content: &str,
     user_content: &str,
     tools: Option<&[Value]>,
     tool_context: Option<&Value>,
-) -> Result<String, String> {
-    let api_key =
-        env::var("MISTRAL_API_KEY").map_err(|_| "MISTRAL_API_KEY environment variable not set".to_string())?;
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<NativeExecutionResult, String> {
+    let api_key = env::var("MISTRAL_API_KEY")
+        .map_err(|_| "MISTRAL_API_KEY environment variable not set".to_string())?;
     let base_url =
         env::var("MISTRAL_BASE_URL").unwrap_or_else(|_| "https://api.mistral.ai/v1".to_string());
     let timeout = env::var("MISTRAL_TIMEOUT_SECONDS")
@@ -218,6 +371,7 @@ fn execute_with_mistral(
         .unwrap_or(180);
 
     execute_openai_compatible(
+        provider,
         &build_client(timeout)?,
         &format!("{}/chat/completions", base_url.trim_end_matches('/')),
         &api_key,
@@ -228,10 +382,12 @@ fn execute_with_mistral(
         tool_context,
         None,
         false,
+        execution_control,
     )
 }
 
 fn execute_openai_compatible(
+    provider: &str,
     client: &Client,
     endpoint: &str,
     api_key: &str,
@@ -242,12 +398,43 @@ fn execute_openai_compatible(
     tool_context: Option<&Value>,
     agent_name: Option<&str>,
     use_prompt_cache: bool,
-) -> Result<String, String> {
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<NativeExecutionResult, String> {
+    execute_openai_compatible_with_dispatch(
+        provider,
+        model,
+        system_content,
+        user_content,
+        tools,
+        tool_context,
+        agent_name,
+        use_prompt_cache,
+        execution_control,
+        |body| post_json_bearer(client, endpoint, api_key, body),
+    )
+}
+
+fn execute_openai_compatible_with_dispatch<F>(
+    provider: &str,
+    model: &str,
+    system_content: &str,
+    user_content: &str,
+    tools: Option<&[Value]>,
+    tool_context: Option<&Value>,
+    agent_name: Option<&str>,
+    use_prompt_cache: bool,
+    execution_control: Option<&dyn NativeExecutionControl>,
+    mut dispatch: F,
+) -> Result<NativeExecutionResult, String>
+where
+    F: FnMut(&Value) -> Result<Value, String>,
+{
     let mut messages = vec![
         json!({"role": "system", "content": system_content}),
         json!({"role": "user", "content": user_content}),
     ];
     let openai_tools = convert_tools_for_openai(tools);
+    let mut metadata = NativeExecutionMetadata::default();
 
     loop {
         let mut body = json!({
@@ -268,10 +455,24 @@ fn execute_openai_compatible(
             }
         }
 
-        let response = post_json_bearer(client, endpoint, api_key, &body)?;
-        let message = response
-            .pointer("/choices/0/message")
-            .ok_or_else(|| format!("OpenAI-compatible response missing choices[0].message: {response}"))?;
+        let step = NativeRequestStep {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            estimated_input_tokens: estimate_json_tokens(&body),
+        };
+        if let Some(control) = execution_control {
+            control.before_model_request(&step)?;
+        }
+        let response = dispatch(&body)?;
+        let usage =
+            openai_usage_from_response(provider, model, step.estimated_input_tokens, &response);
+        if let Some(control) = execution_control {
+            control.after_model_response(&usage);
+        }
+        metadata.steps.push(usage);
+        let message = response.pointer("/choices/0/message").ok_or_else(|| {
+            format!("OpenAI-compatible response missing choices[0].message: {response}")
+        })?;
 
         let tool_calls = message
             .get("tool_calls")
@@ -279,7 +480,10 @@ fn execute_openai_compatible(
             .cloned()
             .unwrap_or_default();
         if openai_tools.is_empty() || tool_calls.is_empty() {
-            return Ok(extract_openai_message_content(message.get("content")));
+            return Ok(NativeExecutionResult {
+                output: extract_openai_message_content(message.get("content")),
+                metadata,
+            });
         }
 
         messages.push(json!({
@@ -293,13 +497,15 @@ fn execute_openai_compatible(
                 .get("id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| format!("OpenAI-compatible tool call missing id: {tool_call}"))?;
-            let function = tool_call
-                .get("function")
-                .ok_or_else(|| format!("OpenAI-compatible tool call missing function: {tool_call}"))?;
+            let function = tool_call.get("function").ok_or_else(|| {
+                format!("OpenAI-compatible tool call missing function: {tool_call}")
+            })?;
             let tool_name = function
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| format!("OpenAI-compatible tool call missing function name: {tool_call}"))?;
+                .ok_or_else(|| {
+                    format!("OpenAI-compatible tool call missing function name: {tool_call}")
+                })?;
             let arguments = coerce_tool_arguments(function.get("arguments"))?;
             let result = execute_tool_call(tool_name, &arguments, tool_context)?;
             messages.push(json!({
@@ -312,13 +518,15 @@ fn execute_openai_compatible(
 }
 
 fn execute_with_anthropic(
+    provider: &str,
     model: &str,
     system_content: &str,
     user_content: &str,
     max_output_tokens: Option<u64>,
     tools: Option<&[Value]>,
     tool_context: Option<&Value>,
-) -> Result<String, String> {
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<NativeExecutionResult, String> {
     let api_key = env::var("ANTHROPIC_API_KEY")
         .map_err(|_| "ANTHROPIC_API_KEY environment variable not set".to_string())?;
     let base_url =
@@ -332,7 +540,8 @@ fn execute_with_anthropic(
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-api-key",
-        HeaderValue::from_str(&api_key).map_err(|e| format!("Invalid ANTHROPIC_API_KEY header: {e}"))?,
+        HeaderValue::from_str(&api_key)
+            .map_err(|e| format!("Invalid ANTHROPIC_API_KEY header: {e}"))?,
     );
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -346,6 +555,7 @@ fn execute_with_anthropic(
         "role": "user",
         "content": user_content,
     })];
+    let mut metadata = NativeExecutionMetadata::default();
 
     loop {
         let mut body = json!({
@@ -358,12 +568,26 @@ fn execute_with_anthropic(
             body["tools"] = Value::Array(tools.to_vec());
         }
 
+        let step = NativeRequestStep {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            estimated_input_tokens: estimate_json_tokens(&body),
+        };
+        if let Some(control) = execution_control {
+            control.before_model_request(&step)?;
+        }
         let response = post_json_with_headers(
             &client,
             &format!("{}/v1/messages", base_url.trim_end_matches('/')),
             headers.clone(),
             &body,
         )?;
+        let usage =
+            anthropic_usage_from_response(provider, model, step.estimated_input_tokens, &response);
+        if let Some(control) = execution_control {
+            control.after_model_response(&usage);
+        }
+        metadata.steps.push(usage);
         let content = response
             .get("content")
             .and_then(Value::as_array)
@@ -376,7 +600,10 @@ fn execute_with_anthropic(
             .collect::<Vec<_>>();
 
         if tools.is_none() || tool_uses.is_empty() {
-            return Ok(anthropic_text_from_blocks(&content));
+            return Ok(NativeExecutionResult {
+                output: anthropic_text_from_blocks(&content),
+                metadata,
+            });
         }
 
         messages.push(json!({
@@ -411,10 +638,12 @@ fn execute_with_anthropic(
 }
 
 fn execute_with_ollama(
+    provider: &str,
     model: &str,
     system_content: &str,
     user_content: &str,
-) -> Result<String, String> {
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<NativeExecutionResult, String> {
     let base_url =
         env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://localhost:11434".to_string());
     let timeout = env::var("OLLAMA_TIMEOUT_SECONDS")
@@ -433,7 +662,28 @@ fn execute_with_ollama(
         ],
     });
     let endpoint = format!("{}/api/chat", base_url.trim_end_matches('/'));
+    let first_step = NativeRequestStep {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        estimated_input_tokens: estimate_json_tokens(&request_body),
+    };
+    if let Some(control) = execution_control {
+        control.before_model_request(&first_step)?;
+    }
     let response = post_json(&client, &endpoint, &request_body)?;
+    let mut metadata = NativeExecutionMetadata {
+        steps: vec![ollama_usage_from_response(
+            provider,
+            model,
+            first_step.estimated_input_tokens,
+            &response,
+        )],
+    };
+    if let Some(control) = execution_control {
+        if let Some(usage) = metadata.steps.last() {
+            control.after_model_response(usage);
+        }
+    }
     let first_output = response
         .pointer("/message/content")
         .and_then(Value::as_str)
@@ -450,7 +700,10 @@ fn execute_with_ollama(
     .iter()
     .any(|needle| lower.contains(needle));
     if !asks_for_prompt {
-        return Ok(first_output);
+        return Ok(NativeExecutionResult {
+            output: first_output,
+            metadata,
+        });
     }
 
     let fallback_body = json!({
@@ -463,12 +716,31 @@ fn execute_with_ollama(
             ),
         }],
     });
+    let fallback_step = NativeRequestStep {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        estimated_input_tokens: estimate_json_tokens(&fallback_body),
+    };
+    if let Some(control) = execution_control {
+        control.before_model_request(&fallback_step)?;
+    }
     let fallback = post_json(&client, &endpoint, &fallback_body)?;
-    fallback
+    let fallback_usage = ollama_usage_from_response(
+        provider,
+        model,
+        fallback_step.estimated_input_tokens,
+        &fallback,
+    );
+    if let Some(control) = execution_control {
+        control.after_model_response(&fallback_usage);
+    }
+    metadata.steps.push(fallback_usage);
+    let output = fallback
         .pointer("/message/content")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("Ollama fallback response missing message.content: {fallback}"))
+        .ok_or_else(|| format!("Ollama fallback response missing message.content: {fallback}"))?;
+    Ok(NativeExecutionResult { output, metadata })
 }
 
 fn build_client(timeout_seconds: u64) -> Result<Client, String> {
@@ -489,7 +761,12 @@ fn post_json(client: &Client, url: &str, body: &Value) -> Result<Value, String> 
     )
 }
 
-fn post_json_bearer(client: &Client, url: &str, api_key: &str, body: &Value) -> Result<Value, String> {
+fn post_json_bearer(
+    client: &Client,
+    url: &str,
+    api_key: &str,
+    body: &Value,
+) -> Result<Value, String> {
     decode_json_response(
         client
             .post(url)
@@ -558,7 +835,9 @@ fn extract_openai_message_content(content: Option<&Value>) -> String {
                 Value::String(text) => Some(text.clone()),
                 Value::Object(map) => {
                     if map.get("type").and_then(Value::as_str) == Some("text") {
-                        map.get("text").and_then(Value::as_str).map(ToOwned::to_owned)
+                        map.get("text")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned)
                     } else {
                         None
                     }
@@ -664,7 +943,10 @@ fn execute_fetch_documentation(
         .and_then(|value| value.get("documentation_urls"))
         .and_then(Value::as_array)
     {
-        let allowed = allowed_urls.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+        let allowed = allowed_urls
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
         if !allowed.is_empty() && !allowed.contains(&url) {
             return Err(format!(
                 "Documentation URL not allowed by draft context: {url}"
@@ -809,18 +1091,39 @@ fn openai_prompt_cache_key(agent_name: &str, static_prompt: &str) -> String {
 
 fn openai_supports_extended_cache(model: &str) -> bool {
     let model_lower = model.to_lowercase();
-    ["gpt-4.1", "gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.4", "gp5-5.1"]
-        .iter()
-        .any(|needle| model_lower.contains(needle))
+    [
+        "gpt-4.1", "gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.4", "gp5-5.1",
+    ]
+    .iter()
+    .any(|needle| model_lower.contains(needle))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         coerce_tool_arguments, determine_provider, execute_fetch_dependency_artifacts,
-        normalize_request, openai_prompt_cache_key, select_relevant_text,
+        execute_openai_compatible_with_dispatch, normalize_request, openai_prompt_cache_key,
+        select_relevant_text, NativeExecutionControl, NativeRequestStep, NativeStepUsage,
     };
     use serde_json::json;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingControl {
+        before_steps: Mutex<Vec<NativeRequestStep>>,
+        after_steps: Mutex<Vec<NativeStepUsage>>,
+    }
+
+    impl NativeExecutionControl for RecordingControl {
+        fn before_model_request(&self, step: &NativeRequestStep) -> Result<(), String> {
+            self.before_steps.lock().expect("lock").push(step.clone());
+            Ok(())
+        }
+
+        fn after_model_response(&self, usage: &NativeStepUsage) {
+            self.after_steps.lock().expect("lock").push(usage.clone());
+        }
+    }
 
     #[test]
     fn normalize_request_supports_split_prompts() {
@@ -834,7 +1137,10 @@ mod tests {
         let normalized = normalize_request(&request).expect("normalize request");
         assert_eq!(normalized.system_content, "system");
         assert_eq!(normalized.user_content, "user");
-        assert_eq!(normalized.agent_name.as_deref(), Some("create_implementation"));
+        assert_eq!(
+            normalized.agent_name.as_deref(),
+            Some("create_implementation")
+        );
     }
 
     #[test]
@@ -906,5 +1212,104 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
         let key = openai_prompt_cache_key("create_test", "static prompt");
         assert!(key.starts_with("reen:create_test:"));
         assert_eq!(key.len(), "reen:create_test:".len() + 16);
+    }
+
+    #[test]
+    fn openai_tool_loop_invokes_control_for_each_provider_step() {
+        let control = RecordingControl::default();
+        let tools = vec![json!({
+            "name": "fetch_dependency_artifacts",
+            "description": "Fetch dependency contents",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["paths"]
+            }
+        })];
+        let tool_context = json!({
+            "dependency_tool_context": {
+                "dependency_artifacts": [
+                    { "path": "src/a.rs", "content": "alpha" }
+                ]
+            }
+        });
+        let mut responses = vec![
+            json!({
+                "choices": [{
+                    "message": {
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "fetch_dependency_artifacts",
+                                "arguments": "{\"paths\":[\"src/a.rs\"]}"
+                            }
+                        }]
+                    }
+                }],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 14,
+                    "total_tokens": 134
+                }
+            }),
+            json!({
+                "choices": [{
+                    "message": {
+                        "content": "final answer"
+                    }
+                }],
+                "usage": {
+                    "prompt_tokens": 90,
+                    "completion_tokens": 11,
+                    "total_tokens": 101
+                }
+            }),
+        ]
+        .into_iter();
+
+        let result = execute_openai_compatible_with_dispatch(
+            "openai",
+            "gpt-5.4",
+            "system",
+            "user",
+            Some(&tools),
+            Some(&tool_context),
+            Some("create_implementation"),
+            true,
+            Some(&control),
+            |body| {
+                let message_count = body
+                    .get("messages")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or_default();
+                if message_count > 2 {
+                    assert!(body.to_string().contains("\"tool_call_id\":\"call_1\""));
+                }
+                responses
+                    .next()
+                    .ok_or_else(|| "missing fake response".to_string())
+            },
+        )
+        .expect("openai tool loop should succeed");
+
+        assert_eq!(result.output, "final answer");
+        assert_eq!(result.metadata.steps.len(), 2);
+        assert_eq!(
+            control.before_steps.lock().expect("lock").len(),
+            2,
+            "control should run before each provider request"
+        );
+        let after_steps = control.after_steps.lock().expect("lock");
+        assert_eq!(after_steps.len(), 2);
+        assert_eq!(after_steps[0].total_tokens, Some(134));
+        assert_eq!(after_steps[1].output_tokens, Some(11));
     }
 }

@@ -1,5 +1,5 @@
 use super::embedded_agent_assets::embedded_expected_agent_names;
-use crate::contexts::{AgentModelRegistry, ExecutionError, Model};
+use crate::execution::{AgentModelRegistry, ExecutionError, Model};
 use crate::registries::embedded_default_model_registry;
 use std::collections::HashMap;
 use std::fs;

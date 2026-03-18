@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use reen::execution::estimate_request_tokens;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
@@ -12,7 +13,6 @@ use std::sync::OnceLock;
 
 use super::agent_executor::{AgentExecutor, AgentResponse};
 use super::project_structure::ProjectInfo;
-use super::token_limiter::estimate_request_tokens;
 use super::Config;
 
 /// Configuration for compilation fix context size, read from env vars:
@@ -195,6 +195,7 @@ pub async fn ensure_compiles_with_auto_fix(
             .execute_with_context(
                 "Compilation failed; propose minimal fix patch.",
                 additional_context,
+                None,
             )
             .await
             .context("Failed to execute compilation error resolver agent")?;
@@ -494,6 +495,7 @@ fn collect_relevant_paths(
     for candidate in [
         "src/lib.rs",
         "src/main.rs",
+        "src/execution/mod.rs",
         "src/contexts/mod.rs",
         "src/data/mod.rs",
     ] {
