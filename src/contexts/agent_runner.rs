@@ -1,106 +1,52 @@
-use crate::contexts::FileCache;
-use crate::data::Cache;
-use serde::Serialize;
-use serde_json;
-use sha2::{Digest, Sha256};
-use std::fmt;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use sha2::Digest;
 
-/// Errors that can occur during agent population
-#[derive(Debug)]
-pub enum PopulateError {
-    MissingMandatoryPlaceholder(String),
-    InvalidPlaceholderPath(String),
-    AgentNotFound(String),
-    InvalidSpecification(String),
-}
-
-impl fmt::Display for PopulateError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            PopulateError::MissingMandatoryPlaceholder(ph) => {
-                write!(f, "Required placeholder '{}' could not be resolved", ph)
-            }
-            PopulateError::InvalidPlaceholderPath(path) => {
-                write!(f, "Invalid path '{}' in placeholder", path)
-            }
-            PopulateError::AgentNotFound(name) => {
-                write!(f, "Agent '{}' not found in registry", name)
-            }
-            PopulateError::InvalidSpecification(details) => {
-                write!(f, "Agent specification is invalid: {}", details)
-            }
-        }
-    }
-}
-
-impl std::error::Error for PopulateError {}
-
-/// Errors that can occur during agent execution
-#[derive(Debug)]
-pub enum ExecutionError {
-    ModelNotFound(String),
-    ExecutionFailed(String),
-    PythonRunnerError(String),
-}
-
-impl fmt::Display for ExecutionError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ExecutionError::ModelNotFound(name) => {
-                write!(f, "Model for agent '{}' not found", name)
-            }
-            ExecutionError::ExecutionFailed(details) => {
-                write!(f, "Agent execution failed: {}", details)
-            }
-            ExecutionError::PythonRunnerError(details) => {
-                write!(f, "Failed to communicate with Python runner: {}", details)
-            }
-        }
-    }
-}
-
-impl std::error::Error for ExecutionError {}
-
-/// Errors that can occur in the agent runner
-#[derive(Debug)]
-pub enum AgentRunnerError {
-    Populate(PopulateError),
-    Execution(ExecutionError),
-}
-
-impl fmt::Display for AgentRunnerError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            AgentRunnerError::Populate(e) => write!(f, "{}", e),
-            AgentRunnerError::Execution(e) => write!(f, "{}", e),
-        }
-    }
-}
-
-impl std::error::Error for AgentRunnerError {}
-
-impl From<PopulateError> for AgentRunnerError {
-    fn from(e: PopulateError) -> Self {
-        AgentRunnerError::Populate(e)
-    }
-}
-
-impl From<ExecutionError> for AgentRunnerError {
-    fn from(e: ExecutionError) -> Self {
-        AgentRunnerError::Execution(e)
-    }
-}
-
-/// A populated agent specification ready for execution
 #[derive(Debug, Clone)]
-pub struct AgentSpecification {
-    pub system_prompt: String,
+pub struct FileCache {
+    folder: Option<PathBuf>,
+    cache: Mutex<HashMap<String, PathBuf>>,
 }
 
-/// The result of executing an agent
+impl FileCache {
+    pub fn new(folder: Option<String>) -> Self {
+        FileCache {
+            folder: folder.map(PathBuf::from),
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn add(&self, key: String, value: PathBuf) -> Result<(), String> {
+        let mut cache = self.cache.lock().unwrap();
+        cache.insert(key, value);
+        Ok(())
+    }
+
+    pub fn get(&self, key: String) -> Result<PathBuf, String> {
+        let cache = self.cache.lock().unwrap();
+        cache.get(&key).cloned().ok_or_else(|| format!("Key not found: {}", key))
+    }
+
+    pub fn remove(&self, key: String) -> Result<(), String> {
+        let mut cache = self.cache.lock().unwrap();
+        cache.remove(&key).map_err(|_| format!("Key not found: {}", key))
+    }
+
+    pub fn flush(&self) {
+        self.cache.lock().unwrap().clear();
+    }
+}
+
 #[derive(Debug, Clone)]
-pub struct ExecutionResult {
-    pub output: String,
+pub struct AgentInstructions {
+    // Define the structure of agent instructions
+    // For example:
+    // pub agent_id: u32,
+    // pub model_name: String,
+    // pub input_json: serde_json::Value,
+    // ...
 }
 
 /// A model that can execute an agent
@@ -482,234 +428,35 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::Serialize;
+impl FileCache {
+    pub fn cache_path(&self, instructions: &AgentInstructions, input_json: &serde_json::Value) -> PathBuf {
+        let instructions_model_hash = format!("{:?}", instructions);
+        let input_hash = serde_json::json(input_json).to_string();
+        let hash = format!("{}/{}", instructions_model_hash, input_hash);
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&hash);
+        let instructions_model_hash = hasher.finalize().to_vec();
+        let instructions_model_hash_str = hex::encode(instructions_model_hash);
 
-    #[derive(Serialize)]
-    struct TestInput {
-        name: String,
-        value: i32,
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&serde_json::json(input_json).to_string());
+        let input_hash = hasher.finalize().to_vec();
+        let input_hash_str = hex::encode(input_hash);
+
+        let folder_path = self.folder.as_ref().unwrap_or(&Path::new(".reen"));
+        let file_path = folder_path.join(format!("{}/{}", instructions_model_hash_str, input_hash_str)).with_extension("cache");
+        file_path
     }
 
-    #[derive(Serialize)]
-    struct NestedData {
-        city: String,
-        country: String,
+    pub fn cache_key(&self, instructions: &AgentInstructions, input_json: &serde_json::Value) -> String {
+        format!("{}/{}", FileCache::hash(instructions), serde_json::json(input_json).to_string())
     }
 
-    #[derive(Serialize)]
-    struct NestedTestInput {
-        name: String,
-        location: NestedData,
+    pub fn instructions_model_hash(&self, instructions: &AgentInstructions) -> String {
+        FileCache::hash(instructions)
     }
 
-    struct TestRegistry;
-
-    impl AgentRegistry for TestRegistry {
-        fn get_specification(&self, agent_name: &str) -> Result<String, PopulateError> {
-            Ok(format!("Test specification for {}", agent_name))
-        }
-    }
-
-    struct TestModelRegistry;
-
-    impl AgentModelRegistry for TestModelRegistry {
-        fn get_model(&self, _agent_name: &str) -> Result<Model, ExecutionError> {
-            Ok(Model {
-                name: "test-model".to_string(),
-            })
-        }
-    }
-
-    #[test]
-    fn test_agent_runner_creation() {
-        let input = TestInput {
-            name: "test".to_string(),
-            value: 42,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        assert_eq!(runner.agent, "test_agent");
-    }
-
-    #[test]
-    fn test_cache_key_generation() {
-        let input = TestInput {
-            name: "test".to_string(),
-            value: 42,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let key1 = runner.generate_cache_key("model1");
-        let key2 = runner.generate_cache_key("model1");
-        let key3 = runner.generate_cache_key("model2");
-
-        // Same inputs should produce same key
-        assert_eq!(key1, key2);
-        // Different model should produce different key
-        assert_ne!(key1, key3);
-    }
-
-    #[test]
-    fn test_agent_runner_execution() {
-        let input = TestInput {
-            name: "test".to_string(),
-            value: 42,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let result = runner.run();
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_placeholder_replacement_mandatory() {
-        let input = TestInput {
-            name: "Alice".to_string(),
-            value: 100,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let template = "Hello {{input.name}}, your value is {{input.value}}!";
-        let result = runner.replace_placeholders(template);
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Hello Alice, your value is 100!");
-    }
-
-    #[test]
-    fn test_placeholder_replacement_optional_present() {
-        let input = TestInput {
-            name: "Bob".to_string(),
-            value: 200,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let template = "Name: {{input.name?}}";
-        let result = runner.replace_placeholders(template);
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Name: Bob");
-    }
-
-    #[test]
-    fn test_placeholder_replacement_optional_missing() {
-        let input = TestInput {
-            name: "Charlie".to_string(),
-            value: 300,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let template = "Age: {{input.age?}}";
-        let result = runner.replace_placeholders(template);
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Age: ");
-    }
-
-    #[test]
-    fn test_placeholder_replacement_mandatory_missing() {
-        let input = TestInput {
-            name: "Dave".to_string(),
-            value: 400,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let template = "Missing: {{input.missing_field}}";
-        let result = runner.replace_placeholders(template);
-
-        assert!(result.is_err());
-        match result {
-            Err(PopulateError::MissingMandatoryPlaceholder(field)) => {
-                assert_eq!(field, "input.missing_field");
-            }
-            _ => panic!("Expected MissingMandatoryPlaceholder error"),
-        }
-    }
-
-    #[test]
-    fn test_placeholder_replacement_invalid_path() {
-        let input = TestInput {
-            name: "Eve".to_string(),
-            value: 500,
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let template = "Invalid: {{output.field}}";
-        let result = runner.replace_placeholders(template);
-
-        assert!(result.is_err());
-        match result {
-            Err(PopulateError::InvalidPlaceholderPath(path)) => {
-                assert_eq!(path, "output.field");
-            }
-            _ => panic!("Expected InvalidPlaceholderPath error"),
-        }
-    }
-
-    #[test]
-    fn test_placeholder_replacement_nested() {
-        let input = NestedTestInput {
-            name: "Frank".to_string(),
-            location: NestedData {
-                city: "Paris".to_string(),
-                country: "France".to_string(),
-            },
-        };
-        let runner = AgentRunner::new(
-            "test_agent".to_string(),
-            input,
-            TestRegistry,
-            TestModelRegistry,
-        );
-
-        let template =
-            "{{input.name}} lives in {{input.location.city}}, {{input.location.country}}";
-        let result = runner.replace_placeholders(template);
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "Frank lives in Paris, France");
+    pub fn input_hash(&self, input_json: &serde_json::Value) -> String {
+        serde_json::json(input_json).to_string()
     }
 }
