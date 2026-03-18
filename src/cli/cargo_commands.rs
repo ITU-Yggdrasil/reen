@@ -4,7 +4,9 @@ use std::process::Command;
 
 use super::compilation_fix;
 use super::project_structure::{analyze_specifications, ProjectInfo};
+use super::stage_runner::ExecutionResources;
 use super::{Config, DRAFTS_DIR, SPECIFICATIONS_DIR};
+use reen::execution::NativeExecutionControl;
 
 pub async fn compile(config: &Config) -> Result<()> {
     println!("Compiling project with cargo build...");
@@ -66,12 +68,21 @@ pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()>
         }
     }
 
+    let resources = ExecutionResources::new(
+        super::resolve_rate_limit(None),
+        super::resolve_token_limit(None),
+    );
+
     compilation_fix::ensure_compiles_with_auto_fix(
         config,
         max_compile_fix_attempts,
         project_root,
         &project_info,
         &recent_files,
+        resources
+            .execution_control
+            .as_ref()
+            .map(|control| control as &dyn NativeExecutionControl),
     )
     .await
 }

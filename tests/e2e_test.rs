@@ -117,7 +117,10 @@ fn e2e_money_transfer() {
         "account_steps.rs not created"
     );
     assert!(
-        test_dir.join("tests").join("bdd_contexts_account.rs").exists(),
+        test_dir
+            .join("tests")
+            .join("bdd_contexts_account.rs")
+            .exists(),
         "bdd_contexts_account.rs not created"
     );
     println!("✓ BDD tests created");

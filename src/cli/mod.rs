@@ -23,10 +23,10 @@ mod rate_limiter;
 mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
-use patch_service::apply_draft_patches;
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };
+use patch_service::apply_draft_patches;
 use pipeline_context::{build_specification_context, fit_context_to_token_limit};
 use progress::ProgressIndicator;
 use project_structure::{
@@ -403,6 +403,7 @@ fn create_specification_inner(
                                 &output_path,
                                 &dependency_fingerprint,
                             )?;
+                            tracker.save()?;
                             updated_count += 1;
                             updated_in_run.insert(draft_name.clone());
                             progress.complete_item(&draft_name, true);
@@ -805,7 +806,10 @@ pub async fn create_implementation(
         select_dependency_roots(context_files, SPECIFICATIONS_DIR, names_provided, filter)?;
     let execution_levels = build_implementation_execution_plan(dependency_roots, filter)?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
-    println!("Creating implementation for {} context(s)", total_count);
+    println!(
+        "Creating implementation for {} specification(s)",
+        total_count
+    );
 
     // Step 1: Generate project structure (Cargo.toml, lib.rs, mod.rs files)
     if config.verbose {
@@ -1095,6 +1099,7 @@ pub async fn create_implementation(
                                 &output_path,
                                 &dependency_fingerprint,
                             )?;
+                            tracker.save()?;
                             updated_count += 1;
                             updated_in_run.insert(context_name.clone());
                             recent_generated_files.push(output_path.clone());
@@ -1191,6 +1196,7 @@ pub async fn create_implementation(
                                 &output_path,
                                 &dependency_fingerprint,
                             )?;
+                            tracker.save()?;
                             updated_count += 1;
                             updated_in_run.insert(context_name.clone());
                             recent_generated_files.push(output_path.clone());
@@ -1289,6 +1295,7 @@ pub async fn create_implementation(
                             &output_path,
                             &dependency_fingerprint,
                         )?;
+                        tracker.save()?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
                         recent_generated_files.push(output_path.clone());
@@ -1320,14 +1327,15 @@ pub async fn create_implementation(
             Path::new("."),
             &project_info,
             &recent_generated_files,
+            resources
+                .execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
         )
         .await?;
     } else {
         cargo_commands::compile(config).await?;
     }
-
-    // Save tracker
-    tracker.save()?;
 
     progress.finish();
 

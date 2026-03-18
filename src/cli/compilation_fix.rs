@@ -17,6 +17,7 @@ use super::patch_service::{
 };
 use super::project_structure::ProjectInfo;
 use super::Config;
+use reen::execution::NativeExecutionControl;
 
 /// Configuration for compilation fix context size, read from env vars:
 /// - REEN_COMPILE_FIX_MAX_ERRORS (default 10): max errors per agent round
@@ -86,6 +87,7 @@ pub async fn ensure_compiles_with_auto_fix(
     project_root: &Path,
     project_info: &ProjectInfo,
     recent_generated_files: &[PathBuf],
+    execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<()> {
     if config.dry_run {
         return Ok(());
@@ -198,7 +200,7 @@ pub async fn ensure_compiles_with_auto_fix(
             .execute_with_context(
                 "Compilation failed; propose minimal fix patch.",
                 additional_context,
-                None,
+                execution_control,
             )
             .await
             .context("Failed to execute compilation error resolver agent")?;
@@ -920,10 +922,13 @@ fn check_guardrails(project_root: &Path, diff: &str) -> Result<GuardrailReport> 
             }
         }
 
+        let allowed_public_methods = spec_declared_public_methods(project_root, &target);
+
         issues.extend(evaluate_public_api_changes(
             &target,
             &removed_pub_fns,
             &added_pub_fns,
+            &allowed_public_methods,
         ));
 
         // Also ensure target resolves within root when joined.
@@ -1076,7 +1081,97 @@ fn parse_pub_fn_signature(line: &str) -> Option<FnSig> {
     })
 }
 
-fn evaluate_public_api_changes(target: &str, removed: &[FnSig], added: &[FnSig]) -> Vec<String> {
+fn spec_declared_public_methods(project_root: &Path, target: &str) -> HashSet<String> {
+    let Some(spec_rel) = map_src_to_spec(target) else {
+        return HashSet::new();
+    };
+    let spec_path = project_root.join(spec_rel);
+    let Ok(spec_text) = fs::read_to_string(spec_path) else {
+        return HashSet::new();
+    };
+
+    let mut methods = HashSet::new();
+    for caps in spec_method_code_re().captures_iter(&spec_text) {
+        if let Some(name) = caps.get(1) {
+            methods.insert(name.as_str().to_string());
+        }
+    }
+    for caps in spec_method_bold_re().captures_iter(&spec_text) {
+        if let Some(name) = caps.get(1) {
+            methods.insert(name.as_str().to_string());
+        }
+    }
+    // Pull role methods from any spec section that matches the target stem, e.g. `### snake`.
+    if let Some(role_name) = target
+        .strip_prefix("src/data/")
+        .and_then(|s| s.strip_suffix(".rs"))
+        .and_then(|s| s.rsplit('/').next())
+        .map(|s| s.to_ascii_lowercase())
+    {
+        for spec in all_spec_files(project_root) {
+            if let Ok(spec_text) = fs::read_to_string(&spec) {
+                methods.extend(role_section_methods(&spec_text, &role_name));
+            }
+        }
+    }
+    methods
+}
+
+fn all_spec_files(project_root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_markdown_files(&project_root.join("specifications"), &mut out);
+    out
+}
+
+fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_markdown_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            out.push(path);
+        }
+    }
+}
+
+fn role_section_methods(spec_text: &str, role_name: &str) -> HashSet<String> {
+    let mut methods = HashSet::new();
+    let mut in_role_section = false;
+    for line in spec_text.lines() {
+        let trimmed = line.trim();
+        if let Some(heading) = trimmed.strip_prefix("### ") {
+            in_role_section = heading.trim().eq_ignore_ascii_case(role_name);
+            continue;
+        }
+        if in_role_section && trimmed.starts_with("## ") {
+            in_role_section = false;
+        }
+        if !in_role_section {
+            continue;
+        }
+        for caps in spec_method_bold_re().captures_iter(trimmed) {
+            if let Some(name) = caps.get(1) {
+                methods.insert(name.as_str().to_string());
+            }
+        }
+        for caps in spec_method_code_re().captures_iter(trimmed) {
+            if let Some(name) = caps.get(1) {
+                methods.insert(name.as_str().to_string());
+            }
+        }
+    }
+    methods
+}
+
+fn evaluate_public_api_changes(
+    target: &str,
+    removed: &[FnSig],
+    added: &[FnSig],
+    allowed_public_methods: &HashSet<String>,
+) -> Vec<String> {
     let mut issues = Vec::new();
 
     let mut removed_by_name: HashMap<&str, Vec<&FnSig>> = HashMap::new();
@@ -1113,8 +1208,9 @@ fn evaluate_public_api_changes(target: &str, removed: &[FnSig], added: &[FnSig])
                 ));
             }
             (None, Some(a)) => {
+                let allowed = is_allowed_new_public_method(a, allowed_public_methods);
                 // Allow adding getters; block setters and other public additions.
-                if !is_allowed_new_public_method(a) {
+                if !allowed {
                     issues.push(format!(
                         "{}: patch adds new public function `{}` outside allowed patterns (getter-only additions are allowed; setters are not).",
                         target, name
@@ -1137,7 +1233,10 @@ fn evaluate_public_api_changes(target: &str, removed: &[FnSig], added: &[FnSig])
     issues
 }
 
-fn is_allowed_new_public_method(sig: &FnSig) -> bool {
+fn is_allowed_new_public_method(sig: &FnSig, allowed_public_methods: &HashSet<String>) -> bool {
+    if is_spec_allowed_public_method_name(&sig.name, allowed_public_methods) {
+        return true;
+    }
     // Allowed:
     // - adding getters (no args except receiver, no mut receiver), and not a setter
     // - adding constructors: `new` / `try_new` (associated functions; no `self` receiver)
@@ -1157,6 +1256,38 @@ fn is_allowed_new_public_method(sig: &FnSig) -> bool {
 
     // Otherwise, allow only getter-shaped additions.
     sig.non_self_param_types.is_empty()
+}
+
+fn is_spec_allowed_public_method_name(
+    name: &str,
+    allowed_public_methods: &HashSet<String>,
+) -> bool {
+    if allowed_public_methods.contains(name) {
+        return true;
+    }
+    if let Some(raw_name) = name.strip_prefix("r#") {
+        return allowed_public_methods.contains(raw_name);
+    }
+    if let Some((base, _alias_suffix)) = name.split_once('_') {
+        if rust_keyword_names().contains(base) && allowed_public_methods.contains(base) {
+            return true;
+        }
+    }
+    false
+}
+
+fn rust_keyword_names() -> &'static HashSet<&'static str> {
+    static KEYWORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    KEYWORDS.get_or_init(|| {
+        HashSet::from([
+            "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+            "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+            "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+            "unsafe", "use", "where", "while", "async", "await", "dyn", "abstract", "become",
+            "box", "do", "final", "macro", "override", "priv", "try", "typeof", "unsized",
+            "virtual", "yield",
+        ])
+    })
 }
 
 fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
@@ -1242,9 +1373,27 @@ fn stub_macro_re() -> &'static Regex {
     })
 }
 
+fn spec_method_code_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`\n]*\))?`").expect("valid regex")
+    })
+}
+
+fn spec_method_bold_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\*\*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^*\n]*\))?\*\*").expect("valid regex")
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::map_src_to_spec;
+    use super::{check_guardrails, map_src_to_spec};
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn map_src_to_spec_supports_nested_context_paths() {
@@ -1260,5 +1409,157 @@ mod tests {
             map_src_to_spec("src/data/payments/ledger_entry.rs"),
             Some("specifications/data/payments/ledger_entry.md".to_string())
         );
+    }
+
+    #[test]
+    fn check_guardrails_allows_public_methods_declared_in_spec() {
+        let root = make_temp_test_dir("compile_fix_guardrail_spec_allow");
+        let src = root.join("src/data/gamestate.rs");
+        let spec = root.join("specifications/data/gamestate.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameState;\nimpl GameState {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "## Functionalities\n- **place_food**: takes Some(food) or None and returns a new GameState\n- **increment_score**: takes a positive whole number\n",
+        )
+        .expect("write spec");
+
+        let diff = r#"diff --git a/src/data/gamestate.rs b/src/data/gamestate.rs
+--- a/src/data/gamestate.rs
++++ b/src/data/gamestate.rs
+@@ -1,3 +1,9 @@
+ pub struct GameState;
+ impl GameState {
+     pub fn new() -> Self { Self }
++    pub fn place_food(&self) -> Self { Self }
++    pub fn increment_score(&self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(Self) }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_blocks_public_methods_missing_from_spec() {
+        let root = make_temp_test_dir("compile_fix_guardrail_spec_block");
+        let src = root.join("src/contexts/game_loop.rs");
+        let spec = root.join("specifications/contexts/game_loop.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameLoopContext;\nimpl GameLoopContext {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "## Functionalities\n- **current_board**: returns the current board\n",
+        )
+        .expect("write spec");
+
+        let diff = r#"diff --git a/src/contexts/game_loop.rs b/src/contexts/game_loop.rs
+--- a/src/contexts/game_loop.rs
++++ b/src/contexts/game_loop.rs
+@@ -1,3 +1,8 @@
+ pub struct GameLoopContext;
+ impl GameLoopContext {
+     pub fn new() -> Self { Self }
++    pub fn tick(mut self) -> Option<Self> { Some(self) }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(!report.ok);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("patch adds new public function `tick`")),
+            "issues: {:?}",
+            report.issues
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_keyword_safe_alias_from_spec() {
+        let root = make_temp_test_dir("compile_fix_guardrail_keyword_alias");
+        let src = root.join("src/data/snake.rs");
+        let snake_spec = root.join("specifications/data/snake.md");
+        let game_loop_spec = root.join("specifications/contexts/game_loop.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(snake_spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::create_dir_all(game_loop_spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct Snake;\nimpl Snake {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &snake_spec,
+            "# Snake\n\n## Functionalities\n- **new**: Constructs a Snake\n",
+        )
+        .expect("write snake spec");
+        fs::write(
+            &game_loop_spec,
+            "### snake\n| Method | Description |\n|---|---|\n| **move(grow)** | Moves to next(). |\n",
+        )
+        .expect("write game loop spec");
+
+        let diff = r#"diff --git a/src/data/snake.rs b/src/data/snake.rs
+--- a/src/data/snake.rs
++++ b/src/data/snake.rs
+@@ -1,3 +1,4 @@
+ pub struct Snake;
+ impl Snake {
+     pub fn new() -> Self { Self }
++    pub fn move_snake(mut self, grow: bool) -> Self { let _ = grow; self }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn keyword_alias_rule_only_applies_to_keywords() {
+        let allowed = HashSet::from(["move".to_string(), "type".to_string(), "score".to_string()]);
+
+        assert!(super::is_spec_allowed_public_method_name(
+            "move_snake",
+            &allowed
+        ));
+        assert!(super::is_spec_allowed_public_method_name(
+            "type_name",
+            &allowed
+        ));
+        assert!(super::is_spec_allowed_public_method_name(
+            "r#move", &allowed
+        ));
+        assert!(!super::is_spec_allowed_public_method_name(
+            "score_value",
+            &allowed
+        ));
+    }
+
+    fn make_temp_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}_{}", prefix, nanos));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 }

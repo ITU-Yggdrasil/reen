@@ -358,7 +358,11 @@ fn hunk_preimage_pattern_for_lines(lines: &[HunkLine]) -> Vec<&str> {
     pattern
 }
 
-fn find_hunk_application(lines: &[String], hunk: &Hunk, expected_start: usize) -> Option<(usize, usize, usize)> {
+fn find_hunk_application(
+    lines: &[String],
+    hunk: &Hunk,
+    expected_start: usize,
+) -> Option<(usize, usize, usize)> {
     let leading_context = hunk
         .lines
         .iter()
@@ -694,6 +698,274 @@ diff --git a/src/b.rs b/src/b.rs
             fs::read_to_string(&file_b).expect("read b"),
             "one\ntwo\nthree\n"
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn apply_unified_diff_handles_compile_fix_full_file_replacement() {
+        let root = make_temp_test_dir("patch_service_compile_fix_replace");
+        let file = root.join("src/contexts/game_loop.rs");
+        fs::create_dir_all(file.parent().expect("parent")).expect("create dir");
+        fs::write(
+            &file,
+            r#"fn snake_head(&self) -> Position {
+    self.snake.body()[0]
+}
+
+fn snake_set_direction(&self, new_direction: Direction) -> Snake {
+    // Apply steering rules
+    let current = *self.snake.direction();
+    if current == new_direction || current.is_opposite(new_direction) {
+        return self.snake.clone();
+    }
+    Snake::new(self.snake.body().to_vec(), new_direction).unwrap()
+}
+
+fn snake_next(&self) -> Position {
+    let head = self.snake_head();
+    match self.snake.direction() {
+        Direction::Up => Position::new(head.x(), head.y() + 1),
+        Direction::Down => Position::new(head.x(), head.y() - 1),
+        Direction::Right => Position::new(head.x() + 1, head.y()),
+        Direction::Left => Position::new(head.x() - 1, head.y()),
+    }
+}
+
+fn snake_move(&self, grow: bool) -> Snake {
+    let next = self.snake_next();
+    let mut new_body = vec![next];
+    new_body.extend_from_slice(self.snake.body());
+    if !grow {
+        new_body.pop(); // remove tail
+    }
+    Snake::new(new_body, *self.snake.direction()).unwrap()
+}"#,
+        )
+        .expect("write fixture");
+
+        let diff = r#"diff --git a/src/contexts/game_loop.rs b/src/contexts/game_loop.rs
+--- a/src/contexts/game_loop.rs
++++ b/src/contexts/game_loop.rs
+@@ -1,31 +1,153 @@
+-fn snake_head(&self) -> Position {
+-    self.snake.body()[0]
+-}
+-
+-fn snake_set_direction(&self, new_direction: Direction) -> Snake {
+-    // Apply steering rules
+-    let current = *self.snake.direction();
+-    if current == new_direction || current.is_opposite(new_direction) {
+-        return self.snake.clone();
+-    }
+-    Snake::new(self.snake.body().to_vec(), new_direction).unwrap()
+-}
+-
+-fn snake_next(&self) -> Position {
+-    let head = self.snake_head();
+-    match self.snake.direction() {
+-        Direction::Up => Position::new(head.x(), head.y() + 1),
+-        Direction::Down => Position::new(head.x(), head.y() - 1),
+-        Direction::Right => Position::new(head.x() + 1, head.y()),
+-        Direction::Left => Position::new(head.x() - 1, head.y()),
+-    }
+-}
+-
+-fn snake_move(&self, grow: bool) -> Snake {
+-    let next = self.snake_next();
+-    let mut new_body = vec![next];
+-    new_body.extend_from_slice(self.snake.body());
+-    if !grow {
+-        new_body.pop(); // remove tail
+-    }
+-    Snake::new(new_body, *self.snake.direction()).unwrap()
+-}
++use crate::data::{Board, Direction, Food, GameState, Position, Snake};
++use crate::contexts::command_input::CommandInputContext;
++
++/// Trait for dropping food onto the board.
++pub trait FoodDropper {
++    fn drop(&self, board: &Board, snake: &Snake) -> Option<Food>;
++}
++
++/// The core game logic component. Advances the game one tick at a time.
++pub struct GameLoopContext {
++    board: Board,
++    snake: Snake,
++    command: CommandInputContext,
++    food_dropper: Box<dyn FoodDropper>,
++    game_state: GameState,
++}
++
++impl GameLoopContext {
++    /// Constructs a new `GameLoopContext`.
++    pub fn new(
++        board: Board,
++        snake: Snake,
++        command: CommandInputContext,
++        food_dropper: Box<dyn FoodDropper>,
++        game_state: GameState,
++    ) -> Self {
++        tracing::info!("[GameLoopContext] new");
++        Self {
++            board,
++            snake,
++            command,
++            food_dropper,
++            game_state,
++        }
++    }
++
++    /// Returns the current score.
++    pub fn get_score(&self) -> i64 {
++        self.game_state.score()
++    }
++
++    /// Returns a 2D character grid representing the current game state.
++    /// `board[x][y]` maps to coordinate `(x, y)`.
++    /// - `'w'`: Wall at the boundary
++    /// - `' '`: Unoccupied cell
++    /// - `'s'`: Cell occupied by the snake
++    /// - `'f'`: Food placement
++    pub fn current_board(&self) -> Vec<Vec<char>> {
++        let width = self.board.width() as usize;
++        let height = self.board.height() as usize;
++        let mut grid = vec![vec![' '; height]; width];
++
++        // Draw walls
++        for x in 0..width {
++            for y in 0..height {
++                if x == 0 || x == width - 1 || y == 0 || y == height - 1 {
++                    grid[x][y] = 'w';
++                }
++            }
++        }
++
++        // Draw food
++        if let Some(food) = self.game_state.food() {
++            let pos = food.get_position();
++            let fx = pos.x() as usize;
++            let fy = pos.y() as usize;
++            if fx < width && fy < height {
++                grid[fx][fy] = 'f';
++            }
++        }
++
++        // Draw snake
++        for pos in self.snake.body() {
++            let sx = pos.x() as usize;
++            let sy = pos.y() as usize;
++            if sx < width && sy < height {
++                grid[sx][sy] = 's';
++            }
++        }
++
++        grid
++    }
++
++    /// Executes one game tick. Returns `Some(new GameLoopContext)` if the game
++    /// continues, or `None` if the game ends.
++    pub fn tick(mut self) -> Option<Self> {
++        // 1. Pacing: start at 10 ticks/second
++        let elapsed_ms = self.game_state.game_time();
++        let ticks_per_sec = 10.0_f64
++            + if elapsed_ms > 0 {
++                (elapsed_ms as f64 / 1000.0).ln().max(0.0)
++            } else {
++                0.0
++            };
++        let delay_ms = (1000.0 / ticks_per_sec) as u64;
++        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
++
++        // 2. Capture input
++        self.command.capture();
++
++        // 3. Steering
++        if let Some(dir) = self.command.next_direction() {
++            self.snake = snake_set_direction(&self.snake, dir);
++        }
++
++        // 4. Predict move
++        let next_pos = snake_next(&self.snake);
++
++        // 5. Classify collision
++        let width = self.board.width() as i32;
++        let height = self.board.height() as i32;
++        let nx = next_pos.x();
++        let ny = next_pos.y();
++
++        let is_wall = nx == 0 || ny == 0 || nx == width - 1 || ny == height - 1;
++        let is_body = self.snake.body().iter().any(|p| *p == next_pos);
++
++        if is_wall || is_body {
++            tracing::info!("[GameLoopContext] tick, collision with obstacle");
++            return None;
++        }
++
++        let is_food = self
++            .game_state
++            .food()
++            .map(|f| *f.get_position() == next_pos)
++            .unwrap_or(false);
++
++        // 6. Apply outcome
++        if is_food {
++            self.snake = snake_move(&self.snake, true);
++            let new_state = self.game_state.increment_score(10).ok()?;
++            let dropped = self.food_dropper.drop(&self.board, &self.snake);
++            let new_state = new_state.place_food(dropped);
++            self.game_state = new_state;
++        } else {
++            self.snake = snake_move(&self.snake, false);
++        }
++
++        Some(self)
++    }
++
++    fn head(&self) -> Position {
++        snake_head(&self.snake)
++    }
++}
++
++fn snake_head(snake: &Snake) -> Position {
++    snake.body()[0]
++}
++
++fn snake_set_direction(snake: &Snake, new_direction: Direction) -> Snake {
++    let current = *snake.direction();
++    if current == new_direction || current.is_opposite(new_direction) {
++        return snake.clone();
++    }
++    Snake::new(snake.body().to_vec(), new_direction).unwrap()
++}
++
++fn snake_next(snake: &Snake) -> Position {
++    let head = snake_head(snake);
++    match snake.direction() {
++        Direction::Up => Position::new(head.x(), head.y() + 1),
++        Direction::Down => Position::new(head.x(), head.y() - 1),
++        Direction::Right => Position::new(head.x() + 1, head.y()),
++        Direction::Left => Position::new(head.x() - 1, head.y()),
++    }
++}
++
++fn snake_move(snake: &Snake, grow: bool) -> Snake {
++    let next = snake_next(snake);
++    let mut new_body = vec![next];
++    new_body.extend_from_slice(snake.body());
++    if !grow {
++        new_body.pop();
++    }
++    Snake::new(new_body, *snake.direction()).unwrap()
++}
+"#;
+
+        apply_unified_diff(&root, diff).expect("patch should apply");
+
+        let updated = fs::read_to_string(&file).expect("read updated file");
+        assert!(updated.contains("pub struct GameLoopContext"));
+        assert!(updated.contains("pub fn tick(mut self) -> Option<Self>"));
+        assert!(updated.contains("fn snake_head(snake: &Snake) -> Position"));
 
         fs::remove_dir_all(&root).ok();
     }

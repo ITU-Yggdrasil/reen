@@ -1125,9 +1125,9 @@ mod tests {
     use super::{
         anthropic_system_blocks, coerce_tool_arguments, determine_provider,
         execute_fetch_dependency_artifacts, execute_openai_compatible_with_dispatch,
-        normalize_request, openai_messages, openai_prompt_cache_enabled,
-        openai_prompt_cache_key, select_relevant_text, NativeExecutionControl,
-        NativeRequestStep, NativeStepUsage, ANTHROPIC_PROMPT_CACHE_TTL,
+        normalize_request, openai_messages, openai_prompt_cache_enabled, openai_prompt_cache_key,
+        select_relevant_text, NativeExecutionControl, NativeRequestStep, NativeStepUsage,
+        ANTHROPIC_PROMPT_CACHE_TTL,
     };
     use serde_json::{json, Value};
     use std::sync::Mutex;
@@ -1350,9 +1350,14 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
             .and_then(|blocks| blocks.first())
             .expect("system block");
 
-        assert_eq!(system_block.get("text").and_then(Value::as_str), Some(shared_system));
         assert_eq!(
-            system_block.pointer("/cache_control/type").and_then(Value::as_str),
+            system_block.get("text").and_then(Value::as_str),
+            Some(shared_system)
+        );
+        assert_eq!(
+            system_block
+                .pointer("/cache_control/type")
+                .and_then(Value::as_str),
             Some("ephemeral")
         );
         assert_eq!(

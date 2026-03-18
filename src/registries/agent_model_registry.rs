@@ -553,9 +553,7 @@ create_specifications_data:
         std::env::set_current_dir(&original_dir).expect("restore cwd");
         fs::remove_dir_all(&test_dir).expect("cleanup");
 
-        assert!(resolved.ends_with(Path::new(
-            "agents/agent_model_registry.mistral.yml"
-        )));
+        assert!(resolved.ends_with(Path::new("agents/agent_model_registry.mistral.yml")));
     }
 
     #[test]
