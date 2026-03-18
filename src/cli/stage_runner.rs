@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::future::Future;
 use std::sync::Arc;
+use tokio::task::block_in_place;
 use tokio::time::sleep;
 
 use reen::execution::{NativeExecutionControl, NativeRequestStep, NativeStepUsage, TokenLimiter};
@@ -31,16 +32,18 @@ impl CliExecutionControl {
 impl NativeExecutionControl for CliExecutionControl {
     fn before_model_request(&self, step: &NativeRequestStep) -> Result<(), String> {
         if let Some(limiter) = &self.token_limiter {
-            if limiter.exceeds_limit_blocking(step.estimated_input_tokens) {
+            let exceeds_limit =
+                block_in_place(|| limiter.exceeds_limit_blocking(step.estimated_input_tokens));
+            if exceeds_limit {
                 return Err(format!(
                     "Estimated request size ({} input tokens) exceeds configured --token-limit/REEN_TOKEN_LIMIT budget for a single minute.",
                     step.estimated_input_tokens
                 ));
             }
-            limiter.acquire_tokens_blocking(step.estimated_input_tokens);
+            block_in_place(|| limiter.acquire_tokens_blocking(step.estimated_input_tokens));
         }
         if let Some(limiter) = &self.rate_limiter {
-            limiter.acquire_blocking();
+            block_in_place(|| limiter.acquire_blocking());
         }
         Ok(())
     }
@@ -61,7 +64,7 @@ impl NativeExecutionControl for CliExecutionControl {
             input_delta.saturating_add(output_tokens)
         };
 
-        limiter.add_tokens_blocking(additional_tokens);
+        block_in_place(|| limiter.add_tokens_blocking(additional_tokens));
     }
 }
 
