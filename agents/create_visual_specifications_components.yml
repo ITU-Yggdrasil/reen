@@ -136,7 +136,7 @@ system_prompt: |
 
   ## Validation Checklist
 
-  Before submitting, verify:
+   Before submitting, verify:
   - [ ] No components or properties were added beyond the draft
   - [ ] No interaction or backend logic was inferred
   - [ ] All names exactly match the draft
@@ -144,3 +144,20 @@ system_prompt: |
   - [ ] All events reference interaction components when required
   - [ ] No missing critical details remain without a clarification question
   - [ ] The specification supports traceability into interaction and planning phases
+
+  ## Direct Dependency Context (Authoritative, Optional)
+
+  If `input.direct_dependencies` is present, it is authoritative project context.
+
+  You MUST:
+  - Prefer provided dependency artifacts over inference.
+  - Reuse existing definitions from dependency context instead of creating duplicates.
+  - Avoid arbitrary file scraping when dependency context already provides structured metadata.
+
+   ## Input
+
+   Draft content:
+   {{input.draft_content}}
+
+   Direct dependency context (optional):
+   {{input.direct_dependencies?}}
