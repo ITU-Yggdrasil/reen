@@ -10,6 +10,8 @@ pub struct ProjectInfo {
     pub modules: HashMap<String, Vec<String>>, // folder -> [module names]
     /// Type names extracted from specs (folder/module_name -> TypeName)
     pub type_names: HashMap<String, String>,
+    /// Context feature -> direct context feature dependencies
+    pub context_dependencies: HashMap<String, Vec<String>>,
     /// Dependencies and their versions
     pub dependencies: HashMap<String, String>,
     /// Package name
@@ -34,6 +36,7 @@ pub fn analyze_specifications(spec_dir: &Path, draft_dir: Option<&Path>) -> Resu
 
     // Scan all specification files
     scan_directory(spec_dir, spec_dir, draft_dir, &mut project_info)?;
+    compute_context_dependencies(spec_dir, &mut project_info)?;
 
     Ok(project_info)
 }
@@ -140,6 +143,107 @@ fn read_draft_type_name(draft_root: &Path, relative_spec_path: &Path) -> Result<
     let draft_content = fs::read_to_string(&draft_path)
         .with_context(|| format!("Failed to read draft file: {}", draft_path.display()))?;
     Ok(extract_type_name(&draft_content))
+}
+
+fn is_context_folder(folder: &str) -> bool {
+    folder == "contexts" || folder.starts_with("contexts/")
+}
+
+fn context_feature_name(folder: &str, module: &str) -> String {
+    if folder == "contexts" {
+        module.to_string()
+    } else {
+        let suffix = folder.strip_prefix("contexts/").unwrap_or(folder);
+        format!("{}_{}", suffix.replace('/', "_"), module)
+    }
+}
+
+fn context_feature_entries(project_info: &ProjectInfo) -> Vec<(String, String)> {
+    let mut entries = project_info
+        .modules
+        .iter()
+        .filter(|(folder, _)| is_context_folder(folder))
+        .flat_map(|(folder, modules)| {
+            modules
+                .iter()
+                .map(|module| (context_feature_name(folder, module), module.clone()))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.dedup();
+    entries
+}
+
+fn tokenize_identifiers(content: &str) -> HashSet<&str> {
+    content
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn compute_context_dependencies(spec_dir: &Path, project_info: &mut ProjectInfo) -> Result<()> {
+    let mut module_to_features: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut type_to_features: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let context_entries = context_feature_entries(project_info);
+
+    for (feature_name, module_name) in &context_entries {
+        module_to_features
+            .entry(module_name.clone())
+            .or_default()
+            .insert(feature_name.clone());
+    }
+
+    for (folder, modules) in &project_info.modules {
+        if !is_context_folder(folder) {
+            continue;
+        }
+        for module in modules {
+            let key = format!("{}/{}", folder, module);
+            if let Some(type_name) = project_info.type_names.get(&key) {
+                type_to_features
+                    .entry(type_name.clone())
+                    .or_default()
+                    .insert(context_feature_name(folder, module));
+            }
+        }
+    }
+
+    project_info.context_dependencies.clear();
+    for (folder, modules) in &project_info.modules {
+        if !is_context_folder(folder) {
+            continue;
+        }
+
+        for module in modules {
+            let spec_path = spec_dir.join(folder).join(format!("{module}.md"));
+            if !spec_path.exists() {
+                continue;
+            }
+
+            let content = fs::read_to_string(&spec_path)
+                .with_context(|| format!("Failed to read spec file: {}", spec_path.display()))?;
+            let tokens = tokenize_identifiers(&content);
+            let current_feature = context_feature_name(folder, module);
+            let mut dependencies = BTreeSet::new();
+
+            for token in &tokens {
+                if let Some(features) = module_to_features.get(*token) {
+                    dependencies.extend(features.iter().cloned());
+                }
+                if let Some(features) = type_to_features.get(*token) {
+                    dependencies.extend(features.iter().cloned());
+                }
+            }
+
+            dependencies.remove(&current_feature);
+            project_info
+                .context_dependencies
+                .insert(current_feature, dependencies.into_iter().collect());
+        }
+    }
+
+    Ok(())
 }
 
 /// Extracts a likely type name from content.
@@ -307,14 +411,10 @@ pub fn generate_cargo_toml(project_info: &ProjectInfo, output_dir: &Path) -> Res
     );
 
     // Add features for context modules. All context features are enabled by default.
-    let mut context_features: Vec<String> = project_info
-        .modules
-        .iter()
-        .filter(|(folder, _)| *folder == "contexts" || folder.starts_with("contexts/"))
-        .flat_map(|(_, modules)| modules.iter().cloned())
-        .collect();
-    context_features.sort();
-    context_features.dedup();
+    let context_features = context_feature_entries(project_info)
+        .into_iter()
+        .map(|(feature_name, _)| feature_name)
+        .collect::<Vec<_>>();
 
     if !context_features.is_empty() {
         content.push_str("\n[features]\n");
@@ -325,7 +425,17 @@ pub fn generate_cargo_toml(project_info: &ProjectInfo, output_dir: &Path) -> Res
             .join(", ");
         content.push_str(&format!("default = [{}]\n", default_list));
         for feature in &context_features {
-            content.push_str(&format!("{} = []\n", feature));
+            let dependencies = project_info
+                .context_dependencies
+                .get(feature)
+                .cloned()
+                .unwrap_or_default();
+            let dependency_list = dependencies
+                .iter()
+                .map(|dependency| format!("\"{}\"", dependency))
+                .collect::<Vec<_>>()
+                .join(", ");
+            content.push_str(&format!("{} = [{}]\n", feature, dependency_list));
         }
     }
 
@@ -414,8 +524,14 @@ pub fn generate_mod_files(project_info: &ProjectInfo, output_dir: &Path) -> Resu
         let mut direct_subdirs = direct_child_subdirs(project_info, &folder);
         direct_subdirs.sort();
 
+        let is_context_module_folder = is_context_folder(&folder);
+
         // Declare modules
         for module in &sorted_modules {
+            if is_context_module_folder {
+                let feature_name = context_feature_name(&folder, module);
+                content.push_str(&format!("#[cfg(feature = \"{}\")]\n", feature_name));
+            }
             content.push_str(&format!("mod {};\n", module));
         }
         for subdir in &direct_subdirs {
@@ -432,6 +548,10 @@ pub fn generate_mod_files(project_info: &ProjectInfo, output_dir: &Path) -> Resu
                 .cloned()
                 .unwrap_or_else(|| to_pascal_case(module));
 
+            if is_context_module_folder {
+                let feature_name = context_feature_name(&folder, module);
+                content.push_str(&format!("#[cfg(feature = \"{}\")]\n", feature_name));
+            }
             content.push_str(&format!("pub use {}::{};\n", module, type_name));
         }
         for subdir in &direct_subdirs {
@@ -489,6 +609,15 @@ mod tests {
         assert_eq!(to_pascal_case("ledger_entry"), "LedgerEntry");
         assert_eq!(to_pascal_case("account"), "Account");
         assert_eq!(to_pascal_case("money_transfer"), "MoneyTransfer");
+    }
+
+    #[test]
+    fn context_feature_name_uses_folder_path() {
+        assert_eq!(context_feature_name("contexts", "terminal_renderer"), "terminal_renderer");
+        assert_eq!(
+            context_feature_name("contexts/ui", "terminal_renderer"),
+            "ui_terminal_renderer"
+        );
     }
 
     #[test]
@@ -554,6 +683,112 @@ mod tests {
         assert!(cargo_toml.contains(
             "tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"
         ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compute_context_dependencies_tracks_direct_context_references() {
+        let root = std::env::temp_dir().join("reen_project_structure_context_dependencies");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("contexts/ui")).expect("mkdir");
+
+        fs::write(
+            root.join("contexts/account.md"),
+            "# Account\n\nStores account state.\n",
+        )
+        .expect("write account spec");
+        fs::write(
+            root.join("contexts/ui/terminal_renderer.md"),
+            "# Terminal Renderer\n\nUses Account and account.\n",
+        )
+        .expect("write renderer spec");
+
+        let project_info = analyze_specifications(&root, None).expect("analyze specifications");
+        assert_eq!(
+            project_info.context_dependencies.get("account"),
+            Some(&Vec::<String>::new())
+        );
+        assert_eq!(
+            project_info.context_dependencies.get("ui_terminal_renderer"),
+            Some(&vec!["account".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_cargo_toml_includes_context_features_and_dependencies() {
+        let root = std::env::temp_dir().join("reen_project_structure_context_features");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut project_info = ProjectInfo::default();
+        project_info.package_name = "demo".to_string();
+        project_info.modules.insert(
+            "contexts".to_string(),
+            vec!["terminal_renderer".to_string()],
+        );
+        project_info.modules.insert(
+            "contexts/ui".to_string(),
+            vec!["terminal_renderer".to_string()],
+        );
+        project_info.context_dependencies.insert(
+            "terminal_renderer".to_string(),
+            Vec::new(),
+        );
+        project_info.context_dependencies.insert(
+            "ui_terminal_renderer".to_string(),
+            vec!["terminal_renderer".to_string()],
+        );
+
+        generate_cargo_toml(&project_info, &root).expect("generate cargo toml");
+        let cargo_toml = fs::read_to_string(root.join("Cargo.toml")).expect("read cargo toml");
+
+        assert!(cargo_toml.contains("[features]"));
+        assert!(cargo_toml.contains("default = [\"terminal_renderer\", \"ui_terminal_renderer\"]"));
+        assert!(cargo_toml.contains("terminal_renderer = []"));
+        assert!(cargo_toml.contains("ui_terminal_renderer = [\"terminal_renderer\"]"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_context_mod_files_are_feature_gated() {
+        let root = std::env::temp_dir().join("reen_project_structure_feature_gated_mods");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("mkdir");
+
+        let mut project_info = ProjectInfo::default();
+        project_info.modules.insert(
+            "contexts".to_string(),
+            vec!["terminal_renderer".to_string()],
+        );
+        project_info.modules.insert(
+            "contexts/ui".to_string(),
+            vec!["scoreboard".to_string()],
+        );
+        project_info.type_names.insert(
+            "contexts/terminal_renderer".to_string(),
+            "TerminalRenderer".to_string(),
+        );
+        project_info.type_names.insert(
+            "contexts/ui/scoreboard".to_string(),
+            "Scoreboard".to_string(),
+        );
+
+        generate_mod_files(&project_info, &root).expect("generate mod files");
+        let contexts_mod =
+            fs::read_to_string(root.join("src/contexts/mod.rs")).expect("read contexts mod");
+        let ui_mod =
+            fs::read_to_string(root.join("src/contexts/ui/mod.rs")).expect("read ui mod");
+
+        assert!(contexts_mod.contains("#[cfg(feature = \"terminal_renderer\")]"));
+        assert!(contexts_mod.contains("mod terminal_renderer;"));
+        assert!(contexts_mod.contains("pub use terminal_renderer::TerminalRenderer;"));
+        assert!(contexts_mod.contains("mod ui;"));
+        assert!(ui_mod.contains("#[cfg(feature = \"ui_scoreboard\")]"));
+        assert!(ui_mod.contains("pub use scoreboard::Scoreboard;"));
 
         let _ = fs::remove_dir_all(root);
     }
