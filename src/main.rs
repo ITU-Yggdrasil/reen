@@ -120,6 +120,12 @@ enum CreateCommands {
         alias = "specifications"
     )]
     Specification {
+        #[arg(
+            long,
+            help = "Only process drafts from the visuals/ folder"
+        )]
+        visuals: bool,
+
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
     },
@@ -292,12 +298,13 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Create(create_args) => {
-            let category_filter = cli::CategoryFilter {
-                contexts: create_args.contexts,
-                data: create_args.data,
-            };
             match create_args.command {
-                CreateCommands::Specification { names } => {
+                CreateCommands::Specification { visuals, names } => {
+                    let category_filter = cli::CategoryFilter {
+                        contexts: if visuals { false } else { create_args.contexts },
+                        data: if visuals { false } else { create_args.data },
+                        visuals,
+                    };
                     cli::create_specification(
                         names,
                         create_args.clear_cache,
@@ -310,6 +317,11 @@ async fn main() -> Result<()> {
                     max_compile_fix_attempts,
                     names,
                 } => {
+                    let category_filter = cli::CategoryFilter {
+                        contexts: create_args.contexts,
+                        data: create_args.data,
+                        visuals: false,
+                    };
                     cli::create_implementation(
                         names,
                         max_compile_fix_attempts as usize,
@@ -320,6 +332,11 @@ async fn main() -> Result<()> {
                     .await?;
                 }
                 CreateCommands::Tests { names } => {
+                    let category_filter = cli::CategoryFilter {
+                        contexts: create_args.contexts,
+                        data: create_args.data,
+                        visuals: false,
+                    };
                     cli::create_tests(names, create_args.clear_cache, &category_filter, &config)
                         .await?;
                 }

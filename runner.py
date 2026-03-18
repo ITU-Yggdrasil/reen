@@ -49,9 +49,14 @@ def ensure_venv():
     
     venv_python = _find_upwards(_start_dir, '.venv')
     if venv_python:
-        venv_python = os.path.join(venv_python, 'bin', 'python3')
-        if os.path.exists(venv_python):
-            os.execv(venv_python, [venv_python] + sys.argv)
+        candidates = [
+            os.path.join(venv_python, 'bin', 'python3'),           # POSIX
+            os.path.join(venv_python, 'Scripts', 'python.exe'),    # Windows
+            os.path.join(venv_python, 'Scripts', 'python'),        # Windows (some envs)
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                os.execv(candidate, [candidate] + sys.argv)
 
 # Run venv check before anything else
 ensure_venv()
@@ -302,15 +307,16 @@ def format_exception(exc: Exception) -> str:
 def main():
     """Main entry point - reads JSON from stdin, executes, writes JSON to stdout."""
     try:
-        # Read the entire input
-        input_data = sys.stdin.read()
+        # Read raw bytes and decode as UTF-8 to avoid Windows console encoding issues.
+        input_data = sys.stdin.buffer.read().decode("utf-8", errors="replace")
 
         if not input_data.strip():
             response = {
                 "success": False,
                 "error": "No input provided"
             }
-            print(json.dumps(response), flush=True)
+            sys.stdout.buffer.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+            sys.stdout.flush()
             sys.exit(1)
 
         # Parse the JSON request
@@ -320,7 +326,8 @@ def main():
         response = execute_model(request)
 
         # Write the response
-        print(json.dumps(response), flush=True)
+        sys.stdout.buffer.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+        sys.stdout.flush()
 
         # Exit with appropriate code
         sys.exit(0 if response.get("success") else 1)
@@ -330,7 +337,8 @@ def main():
             "success": False,
             "error": f"Invalid JSON input: {e}"
         }
-        print(json.dumps(response), flush=True)
+        sys.stdout.buffer.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+        sys.stdout.flush()
         sys.exit(1)
 
     except Exception as e:
@@ -338,7 +346,8 @@ def main():
             "success": False,
             "error": f"Unexpected error: {e}"
         }
-        print(json.dumps(response), flush=True)
+        sys.stdout.buffer.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+        sys.stdout.flush()
         sys.exit(1)
 
 

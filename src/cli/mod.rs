@@ -39,6 +39,7 @@ pub struct Config {
 pub struct CategoryFilter {
     pub contexts: bool,
     pub data: bool,
+    pub visuals: bool,
 }
 
 impl CategoryFilter {
@@ -46,24 +47,49 @@ impl CategoryFilter {
         Self {
             contexts: false,
             data: false,
+            visuals: false,
         }
     }
 
     fn include_data(&self) -> bool {
-        !self.contexts && !self.data || self.data
+        (!self.contexts && !self.data && !self.visuals) || self.data
     }
 
     fn include_contexts(&self) -> bool {
-        !self.contexts && !self.data || self.contexts
+        (!self.contexts && !self.data && !self.visuals) || self.contexts
+    }
+
+    fn include_visuals(&self) -> bool {
+        (!self.contexts && !self.data && !self.visuals) || self.visuals
     }
 
     fn include_root(&self) -> bool {
-        !self.contexts && !self.data
+        !self.contexts && !self.data && !self.visuals
     }
 }
 
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
+
+fn collect_files_recursive(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() || !dir.is_dir() {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, extension, files)?;
+            continue;
+        }
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
 
 pub async fn create_specification(
     names: Vec<String>,
@@ -2908,7 +2934,8 @@ fn remove_dir_if_empty(path: &Path) -> Result<()> {
 /// Resolves input files in a structured order:
 /// 1. data/ folder (simple data types)
 /// 2. contexts/ folder (use cases with role players)
-/// 3. Root files (like app.md)
+/// 3. visuals/ folder (UI component drafts)
+/// 4. Root files (like app.md)
 ///
 /// The `filter` controls which categories are included. When no filter is
 /// active (both flags false), all three categories are scanned.
@@ -2961,6 +2988,12 @@ fn resolve_input_files(
             }
         }
 
+        if filter.include_visuals() {
+            let visuals_dir = dir_path.join("visuals");
+            collect_files_recursive(&visuals_dir, extension, &mut files)
+                .context(format!("Failed to scan {}/visuals directory", dir))?;
+        }
+
         if filter.include_root() {
             let entries =
                 fs::read_dir(&dir_path).context(format!("Failed to read {} directory", dir))?;
@@ -3001,6 +3034,23 @@ fn resolve_input_files(
                 }
             }
 
+            if !found && filter.include_visuals() {
+                let visuals_dir = dir_path.join("visuals");
+                let mut candidates = Vec::new();
+                collect_files_recursive(&visuals_dir, extension, &mut candidates)
+                    .context(format!("Failed to scan {}/visuals directory", dir))?;
+                for candidate in candidates {
+                    if candidate
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|stem| stem == name)
+                    {
+                        files.push(candidate);
+                        found = true;
+                    }
+                }
+            }
+
             if !found && filter.include_root() {
                 let root_path = dir_path.join(format!("{}.{}", name, extension));
                 if root_path.exists() {
@@ -3010,13 +3060,22 @@ fn resolve_input_files(
             }
 
             if !found {
-                let searched = match (filter.include_data(), filter.include_contexts(), filter.include_root()) {
-                    (true, true, true) => "data/, contexts/, and root",
-                    (true, true, false) => "data/ and contexts/",
-                    (true, false, false) => "data/",
-                    (false, true, false) => "contexts/",
-                    (false, false, true) => "root",
-                    _ => "data/, contexts/, and root",
+                let searched = match (
+                    filter.include_data(),
+                    filter.include_contexts(),
+                    filter.include_visuals(),
+                    filter.include_root(),
+                ) {
+                    (true, true, true, true) => "data/, contexts/, visuals/, and root",
+                    (true, true, true, false) => "data/, contexts/, and visuals/",
+                    (true, true, false, false) => "data/ and contexts/",
+                    (true, false, true, false) => "data/ and visuals/",
+                    (false, true, true, false) => "contexts/ and visuals/",
+                    (true, false, false, false) => "data/",
+                    (false, true, false, false) => "contexts/",
+                    (false, false, true, false) => "visuals/",
+                    (false, false, false, true) => "root",
+                    _ => "data/, contexts/, visuals/, and root",
                 };
                 eprintln!(
                     "Warning: File not found: {}.{} (searched in {})",
@@ -3132,6 +3191,7 @@ fn determine_draft_input_path(
 /// Returns:
 /// - "create_specifications_data" for files in data/ folder
 /// - "create_specifications_context" for files in contexts/ folder
+/// - "create_specifications_visual_components" for files in visuals/ folder
 /// - "create_specifications_main" for files in root folder
 fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'static str {
     let draft_path = draft_file.to_path_buf();
@@ -3146,6 +3206,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
         match component_str.as_ref() {
             "data" => "create_specifications_data",
             "contexts" => "create_specifications_context",
+            "visuals" => "create_specifications_visual_components",
             _ => "create_specifications_main",
         }
     } else {

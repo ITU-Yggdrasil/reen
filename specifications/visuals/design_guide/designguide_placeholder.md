@@ -1,0 +1,1 @@
+Sure, please provide the draft content for the UI components you would like me to transform into a clear specification. Additionally, if there is any direct dependency context available, please share that as well.
