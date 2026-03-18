@@ -19,6 +19,6 @@ resolve_compilation_errors:
 review_draft_errors:
   model: qwen2.5:3b
   parallel: false
-create_visual_specification:
-  model: gpt-5 # qwen2.5:7b
+create_visual_specifications_components:
+  model: qwen2.5:7b # gpt-5
   parallel: false

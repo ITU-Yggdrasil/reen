@@ -22,6 +22,9 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
         "create_specifications_main.yml" => {
             Some(include_str!("../../agents/create_specifications_main.yml"))
         }
+        "create_specifications_visual_components.yml" => Some(include_str!(
+            "../../agents/create_specifications_visual_components.yml"
+        )),
         "create_implementation.yml" => Some(include_str!("../../agents/create_implementation.yml")),
         "create_test.yml" => Some(include_str!("../../agents/create_test.yml")),
         "resolve_compilation_errors.yml" => {

@@ -39,6 +39,7 @@ pub struct Config {
 pub struct CategoryFilter {
     pub contexts: bool,
     pub data: bool,
+    pub visuals: bool,
 }
 
 impl CategoryFilter {
@@ -46,24 +47,49 @@ impl CategoryFilter {
         Self {
             contexts: false,
             data: false,
+            visuals: false,
         }
     }
 
     fn include_data(&self) -> bool {
-        !self.contexts && !self.data || self.data
+        (!self.contexts && !self.data && !self.visuals) || self.data
     }
 
     fn include_contexts(&self) -> bool {
-        !self.contexts && !self.data || self.contexts
+        (!self.contexts && !self.data && !self.visuals) || self.contexts
+    }
+
+    fn include_visuals(&self) -> bool {
+        (!self.contexts && !self.data && !self.visuals) || self.visuals
     }
 
     fn include_root(&self) -> bool {
-        !self.contexts && !self.data
+        !self.contexts && !self.data && !self.visuals
     }
 }
 
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
+
+fn collect_files_recursive(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() || !dir.is_dir() {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, extension, files)?;
+            continue;
+        }
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
 
 pub async fn create_specification(
     names: Vec<String>,
@@ -2908,7 +2934,8 @@ fn remove_dir_if_empty(path: &Path) -> Result<()> {
 /// Resolves input files in a structured order:
 /// 1. data/ folder (simple data types)
 /// 2. contexts/ folder (use cases with role players)
-/// 3. Root files (like app.md)
+/// 3. visuals/ folder (UI component drafts)
+/// 4. Root files (like app.md)
 ///
 /// The `filter` controls which categories are included. When no filter is
 /// active (both flags false), all three categories are scanned.
@@ -2961,6 +2988,12 @@ fn resolve_input_files(
             }
         }
 
+        if filter.include_visuals() {
+            let visuals_dir = dir_path.join("visuals");
+            collect_files_recursive(&visuals_dir, extension, &mut files)
+                .context(format!("Failed to scan {}/visuals directory", dir))?;
+        }
+
         if filter.include_root() {
             let entries =
                 fs::read_dir(&dir_path).context(format!("Failed to read {} directory", dir))?;
@@ -3001,6 +3034,23 @@ fn resolve_input_files(
                 }
             }
 
+            if !found && filter.include_visuals() {
+                let visuals_dir = dir_path.join("visuals");
+                let mut candidates = Vec::new();
+                collect_files_recursive(&visuals_dir, extension, &mut candidates)
+                    .context(format!("Failed to scan {}/visuals directory", dir))?;
+                for candidate in candidates {
+                    if candidate
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|stem| stem == name)
+                    {
+                        files.push(candidate);
+                        found = true;
+                    }
+                }
+            }
+
             if !found && filter.include_root() {
                 let root_path = dir_path.join(format!("{}.{}", name, extension));
                 if root_path.exists() {
@@ -3010,13 +3060,22 @@ fn resolve_input_files(
             }
 
             if !found {
-                let searched = match (filter.include_data(), filter.include_contexts(), filter.include_root()) {
-                    (true, true, true) => "data/, contexts/, and root",
-                    (true, true, false) => "data/ and contexts/",
-                    (true, false, false) => "data/",
-                    (false, true, false) => "contexts/",
-                    (false, false, true) => "root",
-                    _ => "data/, contexts/, and root",
+                let searched = match (
+                    filter.include_data(),
+                    filter.include_contexts(),
+                    filter.include_visuals(),
+                    filter.include_root(),
+                ) {
+                    (true, true, true, true) => "data/, contexts/, visuals/, and root",
+                    (true, true, true, false) => "data/, contexts/, and visuals/",
+                    (true, true, false, false) => "data/ and contexts/",
+                    (true, false, true, false) => "data/ and visuals/",
+                    (false, true, true, false) => "contexts/ and visuals/",
+                    (true, false, false, false) => "data/",
+                    (false, true, false, false) => "contexts/",
+                    (false, false, true, false) => "visuals/",
+                    (false, false, false, true) => "root",
+                    _ => "data/, contexts/, visuals/, and root",
                 };
                 eprintln!(
                     "Warning: File not found: {}.{} (searched in {})",
@@ -3132,6 +3191,7 @@ fn determine_draft_input_path(
 /// Returns:
 /// - "create_specifications_data" for files in data/ folder
 /// - "create_specifications_context" for files in contexts/ folder
+/// - "create_specifications_visual_components" for files in visuals/ folder
 /// - "create_specifications_main" for files in root folder
 fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'static str {
     let draft_path = draft_file.to_path_buf();
@@ -3146,6 +3206,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
         match component_str.as_ref() {
             "data" => "create_specifications_data",
             "contexts" => "create_specifications_context",
+            "visuals" => "create_specifications_visual_components",
             _ => "create_specifications_main",
         }
     } else {
@@ -3461,11 +3522,21 @@ mod tests {
         apply_review_deltas, determine_specification_output_path,
         extract_actionable_blocking_bullets, extract_compile_error_message,
         extract_implementation_review_error_section, parse_review_delta_envelope,
-        parse_selection_input, score_review_candidate, select_suggestions,
-        suggestion_matches_file_filter, AppliedReviewChange, ReviewDelta, ReviewFixOptions,
-        ReviewSuggestion,
+        parse_selection_input, resolve_input_files, score_review_candidate, select_suggestions,
+        suggestion_matches_file_filter, AppliedReviewChange, CategoryFilter, ReviewDelta,
+        ReviewFixOptions, ReviewSuggestion,
     };
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time ok")
+            .as_nanos();
+        std::env::temp_dir().join(format!("reen_cli_{}_{}", prefix, nanos))
+    }
 
     #[test]
     fn extracts_compile_error_message_from_generated_code() {
@@ -3679,5 +3750,38 @@ msg.push_str("- Missing accessor.\n");
             path,
             &[String::from("app")]
         ));
+    }
+
+    #[test]
+    fn resolve_input_files_includes_visuals_when_unfiltered() {
+        let root = temp_root("resolve_visuals");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+        fs::create_dir_all(drafts.join("visuals").join("components")).expect("mkdir visuals");
+
+        let app = drafts.join("app.md");
+        let context = drafts.join("contexts").join("game_loop.md");
+        let visual = drafts
+            .join("visuals")
+            .join("components")
+            .join("button.md");
+
+        fs::write(&app, "# App").expect("write app");
+        fs::write(&context, "# GameLoop").expect("write context");
+        fs::write(&visual, "# Button").expect("write visual");
+
+        let files = resolve_input_files(
+            drafts.to_str().expect("draft path"),
+            Vec::new(),
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("resolve files");
+
+        assert!(files.contains(&app));
+        assert!(files.contains(&context));
+        assert!(files.contains(&visual));
+
+        let _ = fs::remove_dir_all(root);
     }
 }
