@@ -3522,11 +3522,21 @@ mod tests {
         apply_review_deltas, determine_specification_output_path,
         extract_actionable_blocking_bullets, extract_compile_error_message,
         extract_implementation_review_error_section, parse_review_delta_envelope,
-        parse_selection_input, score_review_candidate, select_suggestions,
-        suggestion_matches_file_filter, AppliedReviewChange, ReviewDelta, ReviewFixOptions,
-        ReviewSuggestion,
+        parse_selection_input, resolve_input_files, score_review_candidate, select_suggestions,
+        suggestion_matches_file_filter, AppliedReviewChange, CategoryFilter, ReviewDelta,
+        ReviewFixOptions, ReviewSuggestion,
     };
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time ok")
+            .as_nanos();
+        std::env::temp_dir().join(format!("reen_cli_{}_{}", prefix, nanos))
+    }
 
     #[test]
     fn extracts_compile_error_message_from_generated_code() {
@@ -3740,5 +3750,38 @@ msg.push_str("- Missing accessor.\n");
             path,
             &[String::from("app")]
         ));
+    }
+
+    #[test]
+    fn resolve_input_files_includes_visuals_when_unfiltered() {
+        let root = temp_root("resolve_visuals");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+        fs::create_dir_all(drafts.join("visuals").join("components")).expect("mkdir visuals");
+
+        let app = drafts.join("app.md");
+        let context = drafts.join("contexts").join("game_loop.md");
+        let visual = drafts
+            .join("visuals")
+            .join("components")
+            .join("button.md");
+
+        fs::write(&app, "# App").expect("write app");
+        fs::write(&context, "# GameLoop").expect("write context");
+        fs::write(&visual, "# Button").expect("write visual");
+
+        let files = resolve_input_files(
+            drafts.to_str().expect("draft path"),
+            Vec::new(),
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("resolve files");
+
+        assert!(files.contains(&app));
+        assert!(files.contains(&context));
+        assert!(files.contains(&visual));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

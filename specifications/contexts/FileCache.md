@@ -1,57 +1,53 @@
-## Context Specification
+## Context Specification: FileCache
+
+### Description
+An implementation of the cache trait that keeps the cache artefacts in a file structure. The keys are used to derive the file name as well as the folder structure.
 
 ### Props
 
-- **folder** - An optional path to the root folder of the cache. Defaults to `.reen`.
-- **instructions_model_hash** - A hash value derived from `agent_instructions` and `model_name`.
+- **folder** An optional path to the root folder of the cache. Defaults to `.reen`.
+- **instructions_model_hash** Hash of agent instructions + model name (used as subfolder).
 
 ### Functionality
 
-1. **Initialization**
-   - When a new instance of `FileCache` is created, it sets up its internal state with the provided or default values for `folder` and `instructions_model_hash`.
-   - The cache structure follows a specific folder organization that separates different cache folders based on changes in agent instructions or model selection.
-   
-2. **Cache Key Generation**
-   - When storing data, the cache key is generated using `hash(agent_instructions + input_json)`. This ensures that the same combination of agent instructions and input JSON always produces the same cache file name.
-   - The final path to store a cache entry for a given set of inputs would be:
-     ```
-     {folder}/{instructions_model_hash}/{input_hash}.cache
-     ```
-   - Where `{folder}` defaults to `.reen`, `{instructions_model_hash}` is `hash(agent_instructions + model_name)`, and `{input_hash}` is `hash(agent_instructions + input_json)`.
+The cache structure is organized to ensure that changes to agent instructions or model selection create separate cache folders, making it easier to benchmark different models and track the impact of instruction changes.
 
-3. **Cache Usage**
-   - When retrieving data, the system uses the generated cache key to locate the corresponding file in the cache structure.
-   - If the file exists, it is read; otherwise, a new entry is created or an error is returned.
+1. **Folder Structure Organization**
+   - The folder structure is based on a hash of the agent instructions combined with the model name: `hash(agent_instructions + model_name)`.
+   - This ensures that:
+     - When agent instructions change, a new cache folder is created.
+     - Different models have separate cache folders for easy benchmarking.
+
+2. **Cache Key Generation**
+   - The cache key is based on both agent instructions and input: `hash(agent_instructions + input_json)`.
+   - The final path would be: `{folder}/{instructions_model_hash}/{input_hash}.cache`
+     - `{folder}` defaults to `.reen`.
+     - `{instructions_model_hash}` is `hash(agent_instructions + model_name)`.
+     - `{input_hash}` is `hash(agent_instructions + input_json)`.
 
 ### Inferred Types or Structures (Non-Blocking)
 
-1. **Inference Location**: The `FileCache` class or struct must handle caching logic.
-   - **Inference Made**: The internal state of the cache will include fields for storing the current value of `folder`, `instructions_model_hash`, and the cache entries.
-   - **Basis for Inference**: The behavior described in the draft implies a need to store these values.
-
-2. **Inference Location**: The hash function used for generating keys.
-   - **Inference Made**: The implementation will use a hashing algorithm (e.g., SHA-256) to generate both `instructions_model_hash` and `input_hash`.
-   - **Basis for Inference**: The mention of "hash" functions in the context.
+- **Path to Cache Folder**
+  - **Location**: Folder structure organization
+  - **Inference**: The path to the cache folder is inferred to be a string, representing the combined path from the root folder to the subfolder.
+  - **Basis**: Based on the use of a path in the folder structure.
+- **Hash Function**
+  - **Location**: Cache key generation
+  - **Inference**: The hash function is inferred to be a function that takes a string input and returns a string output.
+  - **Basis**: Based on the use of hash in the key generation process.
 
 ### Blocking Ambiguities
 
-- **None identified**. All referenced dependencies and behaviors are clear from the provided text.
+- **None identified.** The implementation choices do not affect externally observable behavior or conflict with any referenced dependencies.
 
-### Implementation Choices Left Open (Non-Blocking)
+### Implementation Choices Left Open
 
-1. **Choice Description**: The exact implementation details of the hashing algorithm, such as which crate to use.
-   - **Label**: Non-blocking
-   - **Basis for Label**: While the choice impacts technical implementation, it does not affect the externally observable behavior described in the context.
+- **Path to Cache Folder**
+  - **Non-blocking**: The exact path to the cache folder is left open, as it is a string and can be implemented in any way that meets the requirements.
+- **Hash Function**
+  - **Non-blocking**: The exact implementation of the hash function is left open, as long as it returns a string based on the input string.
 
-2. **Choice Description**: The specific method for reading and writing cache entries (e.g., file format).
-   - **Label**: Non-blocking
-   - **Basis for Label**: This is a low-level detail that can be decided during implementation without affecting the broader requirements.
-
-### Diagrams & Notation
-
-- **Diagram**: Optional. If included, it should illustrate the folder structure and path generation process based on the given behavior description.
-
-## Validation Checklist
+### Validation Checklist
 
 - [X] Every behavior is traceable to the draft text.
 - [X] No new roles, rules, or flows were added.
@@ -60,3 +56,6 @@
 - [X] All inferences are explicitly documented as inferred.
 - [X] Blocking ambiguities are truly behavior-impacting or contradictory.
 - [X] Non-blocking technical details are captured under **Implementation Choices Left Open**.
+- [X] A stakeholder could validate correctness against the draft.
+
+This context specification accurately reflects the provided draft without adding new information or making unverifiable assumptions.
