@@ -22,7 +22,7 @@ Players take turns placing their mark on empty cells until one player has three 
 
 # Main Flow
 1. Receive the current board, current_player, and the chosen move.
-2. If the chosen cell is not empty, treat this as an invalid move (behavior can be refined later).
+2. If the chosen cell is not empty, treat this as an invalid move.
 3. Place current_player's mark in the chosen cell.
 4. Check if current_player now has three in a row (horizontal, vertical, or diagonal).
    - If yes, set status to "<player>_wins".
