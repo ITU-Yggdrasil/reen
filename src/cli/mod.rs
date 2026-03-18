@@ -15,6 +15,7 @@ mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
 mod openapi_fetcher;
+mod patch_service;
 mod pipeline_context;
 mod progress;
 mod project_structure;
@@ -22,7 +23,7 @@ mod rate_limiter;
 mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
-use compilation_fix::apply_draft_patches;
+use patch_service::apply_draft_patches;
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };

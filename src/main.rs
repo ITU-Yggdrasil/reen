@@ -10,6 +10,13 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Use agents/agent_model_registry.<profile>.yml for model selection"
+    )]
+    profile: Option<String>,
+
     #[arg(long, global = true, help = "Enable verbose debug output")]
     verbose: bool,
 
@@ -199,6 +206,11 @@ enum CheckCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(profile) = cli.profile.as_deref() {
+        std::env::set_var("REEN_PROFILE", profile);
+    }
+    reen::registries::validate_registry_profile(cli.profile.as_deref())
+        .map_err(anyhow::Error::msg)?;
 
     let config = cli::Config {
         verbose: cli.verbose,

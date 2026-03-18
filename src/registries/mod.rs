@@ -3,7 +3,9 @@ mod agent_registry;
 mod agent_spec_resolver;
 mod embedded_agent_assets;
 
-pub use agent_model_registry::FileAgentModelRegistry;
+pub use agent_model_registry::{
+    validate_registry_profile, FileAgentModelRegistry, resolve_registry_path_for_profile,
+};
 pub use agent_registry::FileAgentRegistry;
 pub use agent_spec_resolver::{
     candidate_agent_spec_filenames, candidate_agent_spec_paths, model_variant_suffix,

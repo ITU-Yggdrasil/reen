@@ -13,6 +13,8 @@ use crate::execution::estimate_tokens;
 static DOTENV_INIT: Once = Once::new();
 
 const LEGACY_USER_PROMPT: &str = "Please complete the task described in the system prompt.";
+const OPENAI_PROMPT_CACHE_MIN_TOKENS: usize = 1024;
+const ANTHROPIC_PROMPT_CACHE_TTL: &str = "1h";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeRequestStep {
@@ -429,10 +431,7 @@ fn execute_openai_compatible_with_dispatch<F>(
 where
     F: FnMut(&Value) -> Result<Value, String>,
 {
-    let mut messages = vec![
-        json!({"role": "system", "content": system_content}),
-        json!({"role": "user", "content": user_content}),
-    ];
+    let mut messages = openai_messages(system_content, user_content);
     let openai_tools = convert_tools_for_openai(tools);
     let mut metadata = NativeExecutionMetadata::default();
 
@@ -445,13 +444,12 @@ where
             body["tools"] = Value::Array(openai_tools.clone());
             body["tool_choice"] = Value::String("auto".to_string());
         }
-        if use_prompt_cache && system_content.len() >= 256 {
-            if let Some(agent_name) = agent_name {
-                body["prompt_cache_key"] =
-                    Value::String(openai_prompt_cache_key(agent_name, system_content));
-                if openai_supports_extended_cache(model) {
-                    body["prompt_cache_retention"] = Value::String("24h".to_string());
-                }
+        if openai_prompt_cache_enabled(use_prompt_cache, agent_name, system_content) {
+            let agent_name = agent_name.expect("checked by openai_prompt_cache_enabled");
+            body["prompt_cache_key"] =
+                Value::String(openai_prompt_cache_key(agent_name, system_content));
+            if openai_supports_extended_cache(model) {
+                body["prompt_cache_retention"] = Value::String("24h".to_string());
             }
         }
 
@@ -546,11 +544,7 @@ fn execute_with_anthropic(
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-    let system_blocks = Value::Array(vec![json!({
-        "type": "text",
-        "text": system_content,
-        "cache_control": { "type": "ephemeral" },
-    })]);
+    let system_blocks = anthropic_system_blocks(system_content);
     let mut messages = vec![json!({
         "role": "user",
         "content": user_content,
@@ -1084,6 +1078,34 @@ fn coerce_tool_arguments(arguments: Option<&Value>) -> Result<Value, String> {
     }
 }
 
+fn openai_messages(system_content: &str, user_content: &str) -> Vec<Value> {
+    vec![
+        json!({"role": "system", "content": system_content}),
+        json!({"role": "user", "content": user_content}),
+    ]
+}
+
+fn openai_prompt_cache_enabled(
+    use_prompt_cache: bool,
+    agent_name: Option<&str>,
+    system_content: &str,
+) -> bool {
+    use_prompt_cache
+        && agent_name.is_some()
+        && estimate_tokens(system_content) >= OPENAI_PROMPT_CACHE_MIN_TOKENS
+}
+
+fn anthropic_system_blocks(system_content: &str) -> Value {
+    Value::Array(vec![json!({
+        "type": "text",
+        "text": system_content,
+        "cache_control": {
+            "type": "ephemeral",
+            "ttl": ANTHROPIC_PROMPT_CACHE_TTL,
+        },
+    })])
+}
+
 fn openai_prompt_cache_key(agent_name: &str, static_prompt: &str) -> String {
     let short_hash = hex::encode(Sha256::digest(static_prompt.as_bytes()));
     format!("reen:{agent_name}:{}", &short_hash[..16])
@@ -1101,11 +1123,13 @@ fn openai_supports_extended_cache(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        coerce_tool_arguments, determine_provider, execute_fetch_dependency_artifacts,
-        execute_openai_compatible_with_dispatch, normalize_request, openai_prompt_cache_key,
-        select_relevant_text, NativeExecutionControl, NativeRequestStep, NativeStepUsage,
+        anthropic_system_blocks, coerce_tool_arguments, determine_provider,
+        execute_fetch_dependency_artifacts, execute_openai_compatible_with_dispatch,
+        normalize_request, openai_messages, openai_prompt_cache_enabled,
+        openai_prompt_cache_key, select_relevant_text, NativeExecutionControl,
+        NativeRequestStep, NativeStepUsage, ANTHROPIC_PROMPT_CACHE_TTL,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -1212,6 +1236,154 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
         let key = openai_prompt_cache_key("create_test", "static prompt");
         assert!(key.starts_with("reen:create_test:"));
         assert_eq!(key.len(), "reen:create_test:".len() + 16);
+    }
+
+    #[test]
+    fn openai_prompt_cache_uses_token_threshold() {
+        assert!(!openai_prompt_cache_enabled(
+            true,
+            Some("create_test"),
+            "short system prompt",
+        ));
+        assert!(openai_prompt_cache_enabled(
+            true,
+            Some("create_test"),
+            &"cache ".repeat(1200),
+        ));
+        assert!(!openai_prompt_cache_enabled(
+            true,
+            None,
+            &"cache ".repeat(1200),
+        ));
+    }
+
+    #[test]
+    fn openai_request_adds_prompt_cache_fields_for_long_system_prompts() {
+        let long_system = "cache ".repeat(1200);
+        let mut captured_body = None;
+
+        let result = execute_openai_compatible_with_dispatch(
+            "openai",
+            "gpt-5.4",
+            &long_system,
+            "user",
+            None,
+            None,
+            Some("create_implementation"),
+            true,
+            None,
+            |body| {
+                captured_body = Some(body.clone());
+                Ok(json!({
+                    "choices": [{
+                        "message": {
+                            "content": "final answer"
+                        }
+                    }],
+                    "usage": {
+                        "prompt_tokens": 120,
+                        "completion_tokens": 10,
+                        "total_tokens": 130
+                    }
+                }))
+            },
+        )
+        .expect("request should succeed");
+
+        assert_eq!(result.output, "final answer");
+        let body = captured_body.expect("request body should be captured");
+        let expected_key = openai_prompt_cache_key("create_implementation", &long_system);
+        assert_eq!(
+            body.get("prompt_cache_key").and_then(Value::as_str),
+            Some(expected_key.as_str())
+        );
+        assert_eq!(
+            body.get("prompt_cache_retention").and_then(Value::as_str),
+            Some("24h")
+        );
+    }
+
+    #[test]
+    fn openai_request_skips_prompt_cache_fields_for_short_system_prompts() {
+        let mut captured_body = None;
+
+        let result = execute_openai_compatible_with_dispatch(
+            "openai",
+            "gpt-5.4",
+            "short system prompt",
+            "user",
+            None,
+            None,
+            Some("create_implementation"),
+            true,
+            None,
+            |body| {
+                captured_body = Some(body.clone());
+                Ok(json!({
+                    "choices": [{
+                        "message": {
+                            "content": "final answer"
+                        }
+                    }],
+                    "usage": {
+                        "prompt_tokens": 80,
+                        "completion_tokens": 10,
+                        "total_tokens": 90
+                    }
+                }))
+            },
+        )
+        .expect("request should succeed");
+
+        assert_eq!(result.output, "final answer");
+        let body = captured_body.expect("request body should be captured");
+        assert!(body.get("prompt_cache_key").is_none());
+        assert!(body.get("prompt_cache_retention").is_none());
+    }
+
+    #[test]
+    fn anthropic_system_blocks_use_one_hour_ephemeral_cache() {
+        let shared_system = "Shared base system prompt";
+        let system_blocks = anthropic_system_blocks(shared_system);
+        let system_block = system_blocks
+            .as_array()
+            .and_then(|blocks| blocks.first())
+            .expect("system block");
+
+        assert_eq!(system_block.get("text").and_then(Value::as_str), Some(shared_system));
+        assert_eq!(
+            system_block.pointer("/cache_control/type").and_then(Value::as_str),
+            Some("ephemeral")
+        );
+        assert_eq!(
+            system_block
+                .pointer("/cache_control/ttl")
+                .and_then(Value::as_str),
+            Some(ANTHROPIC_PROMPT_CACHE_TTL)
+        );
+    }
+
+    #[test]
+    fn provider_request_builders_preserve_shared_system_prompt_content() {
+        let shared_system = "Shared base system prompt";
+        let openai_messages = openai_messages(shared_system, "user prompt");
+        let anthropic_system_blocks = anthropic_system_blocks(shared_system);
+
+        assert_eq!(
+            openai_messages
+                .first()
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str),
+            Some(shared_system)
+        );
+        assert_eq!(
+            anthropic_system_blocks
+                .as_array()
+                .and_then(|blocks| blocks.first())
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str),
+            Some(shared_system)
+        );
     }
 
     #[test]

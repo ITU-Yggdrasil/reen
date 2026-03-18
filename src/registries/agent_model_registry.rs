@@ -2,8 +2,11 @@ use super::embedded_agent_assets::embedded_expected_agent_names;
 use crate::execution::{AgentModelRegistry, ExecutionError, Model};
 use crate::registries::embedded_default_model_registry;
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const DEFAULT_REGISTRY_FILENAME: &str = "agent_model_registry.yml";
 
 /// Resolves the agent model registry path by searching upward from the current
 /// directory for a directory that contains `agents/agent_model_registry.yml`.
@@ -11,14 +14,18 @@ use std::path::{Path, PathBuf};
 /// (e.g. `tests/snake`). Falls back to `agents/agent_model_registry.yml` relative
 /// to the current directory if no project root is found.
 pub fn resolve_registry_path() -> PathBuf {
-    const REGISTRY_REL: &str = "agents/agent_model_registry.yml";
+    resolve_registry_path_for_profile(active_registry_profile().as_deref())
+}
+
+pub fn resolve_registry_path_for_profile(profile: Option<&str>) -> PathBuf {
+    let registry_rel = format!("agents/{}", registry_filename(profile));
     let cwd = match std::env::current_dir() {
         Ok(p) => p,
-        Err(_) => return PathBuf::from(REGISTRY_REL),
+        Err(_) => return PathBuf::from(&registry_rel),
     };
     let mut dir = cwd.as_path();
     loop {
-        let candidate = dir.join(REGISTRY_REL);
+        let candidate = dir.join(&registry_rel);
         if candidate.exists() {
             return candidate;
         }
@@ -28,7 +35,38 @@ pub fn resolve_registry_path() -> PathBuf {
             break;
         }
     }
-    PathBuf::from(REGISTRY_REL)
+    PathBuf::from(registry_rel)
+}
+
+pub fn validate_registry_profile(profile: Option<&str>) -> Result<(), ExecutionError> {
+    let Some(profile) = profile.filter(|profile| !profile.trim().is_empty()) else {
+        return Ok(());
+    };
+
+    let path = resolve_registry_path_for_profile(Some(profile));
+    if path.exists() {
+        return Ok(());
+    }
+
+    Err(ExecutionError::ExecutionFailed(format!(
+        "Agent model registry profile '{}' was requested, but '{}' does not exist.",
+        profile,
+        path.display()
+    )))
+}
+
+fn active_registry_profile() -> Option<String> {
+    env::var("REEN_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn registry_filename(profile: Option<&str>) -> String {
+    match profile.filter(|profile| !profile.trim().is_empty()) {
+        Some(profile) => format!("agent_model_registry.{}.yml", profile.trim()),
+        None => DEFAULT_REGISTRY_FILENAME.to_string(),
+    }
 }
 
 /// Agent configuration from the registry
@@ -497,5 +535,43 @@ create_specifications_data:
             .get_model("agent_that_does_not_exist")
             .expect_err("expected model lookup error");
         assert!(matches!(err, ExecutionError::ModelNotFound(_)));
+    }
+
+    #[test]
+    fn resolve_registry_path_uses_profiled_filename() {
+        let test_dir = unique_test_dir("profile_path");
+        let agents_dir = test_dir.join("agents");
+        fs::create_dir_all(&agents_dir).expect("create temp agents dir");
+        let registry_path = agents_dir.join("agent_model_registry.mistral.yml");
+        fs::write(&registry_path, complete_registry_yaml()).expect("write profiled registry");
+
+        let original_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&test_dir).expect("switch cwd");
+
+        let resolved = resolve_registry_path_for_profile(Some("mistral"));
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+        fs::remove_dir_all(&test_dir).expect("cleanup");
+
+        assert!(resolved.ends_with(Path::new(
+            "agents/agent_model_registry.mistral.yml"
+        )));
+    }
+
+    #[test]
+    fn validate_registry_profile_errors_when_profiled_file_is_missing() {
+        let test_dir = unique_test_dir("profile_missing");
+        fs::create_dir_all(test_dir.join("agents")).expect("create temp agents dir");
+
+        let original_dir = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(&test_dir).expect("switch cwd");
+
+        let err = validate_registry_profile(Some("missing"))
+            .expect_err("missing profile should error early");
+
+        std::env::set_current_dir(&original_dir).expect("restore cwd");
+        fs::remove_dir_all(&test_dir).expect("cleanup");
+
+        assert!(err.to_string().contains("agent_model_registry.missing.yml"));
     }
 }

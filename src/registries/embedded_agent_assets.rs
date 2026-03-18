@@ -46,7 +46,9 @@ pub fn embedded_expected_agent_names() -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
-    use super::{embedded_agent_spec, embedded_default_model_registry};
+    use super::{
+        embedded_agent_spec, embedded_default_model_registry, embedded_expected_agent_names,
+    };
 
     #[test]
     fn embedded_model_registry_is_available() {
@@ -61,5 +63,21 @@ mod tests {
             content.contains("static_prompt") || content.contains("system_prompt"),
             "agent spec must have static_prompt or system_prompt"
         );
+    }
+
+    #[test]
+    fn embedded_agent_specs_use_split_prompts_for_cacheable_prefixes() {
+        for agent_name in embedded_expected_agent_names() {
+            let filename = format!("{agent_name}.yml");
+            let content = embedded_agent_spec(&filename).expect("embedded spec");
+            assert!(
+                content.contains("static_prompt:") && content.contains("variable_prompt:"),
+                "{filename} should use split prompts"
+            );
+            assert!(
+                !content.contains("\nsystem_prompt:"),
+                "{filename} should not fall back to legacy system_prompt"
+            );
+        }
     }
 }

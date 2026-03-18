@@ -24,16 +24,13 @@ jobs:
       - name: Build reen
         run: cargo build --release
 
-      - name: Enable Sonnet agent registry
-        run: cp "agents/agent_model_registry.sonnet.yml" "agents/agent_model_registry.yml"
-
       - name: Create specifications (snake)
         working-directory: tests/snake
-        run: ../../target/release/reen create --token-limit 30000 specification  --fix --max-fix-attempts 3
+        run: ../../target/release/reen --profile sonnet create --token-limit 30000 specification --fix --max-fix-attempts 3
 
       - name: Create implementation (snake)
         working-directory: tests/snake
-        run: ../../target/release/reen create --token-limit 30000 implementation
+        run: ../../target/release/reen --profile sonnet create --token-limit 30000 implementation
 
       - name: Build generated snake project
         working-directory: tests/snake
