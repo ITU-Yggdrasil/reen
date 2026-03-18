@@ -1411,6 +1411,8 @@ fn parse_hunk_header(line: &str) -> Result<(usize, usize)> {
 
 fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
     let patches = parse_unified_diff(diff)?;
+    let mut writes: Vec<(PathBuf, String)> = Vec::new();
+
     for fp in patches {
         if fp.is_deletion {
             anyhow::bail!("Refusing to apply deletion patch");
@@ -1435,8 +1437,13 @@ fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
         let orig_lines = split_lines_preserve_empty(&original);
         let new_lines = apply_hunks(&orig_lines, &fp.hunks)
             .with_context(|| format!("Failed applying hunks to {}", target_rel))?;
+        writes.push((target_full, join_lines(&new_lines)));
+    }
 
-        let new_content = join_lines(&new_lines);
+    for (target_full, new_content) in writes {
+        if let Some(parent) = target_full.parent() {
+            fs::create_dir_all(parent).ok();
+        }
         fs::write(&target_full, &new_content)
             .with_context(|| format!("Failed to write {}", target_full.display()))?;
     }
@@ -1494,25 +1501,29 @@ fn join_lines(lines: &[String]) -> String {
 }
 
 fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
-    // Apply hunks using a fuzzy context search (similar to `patch`), since
-    // agent-produced diffs can have slightly-stale line numbers or shifted context.
+    // Apply hunks against the evolving file state, using line offsets from prior
+    // hunks first and only widening to fuzzy matching if the exact position fails.
     let mut current: Vec<String> = orig.to_vec();
+    let mut line_delta: isize = 0;
 
     for h in hunks {
-        let (pattern, pattern_len) = hunk_preimage_pattern(h);
-        let preferred = h.old_start.saturating_sub(1);
-
-        let start = find_hunk_start(&current, &pattern, preferred).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not locate hunk context (preferred_start={}, pattern_len={})",
-                preferred,
-                pattern_len
-            )
-        })?;
+        let expected_start = expected_hunk_start(h.old_start, line_delta);
+        let (start, trim_leading, trim_trailing) =
+            find_hunk_application(&current, h, expected_start).ok_or_else(|| {
+                let preferred = h.old_start.saturating_sub(1);
+                anyhow::anyhow!(
+                    "Could not locate hunk context (preferred_start={}, expected_start={}, pattern_len={})",
+                    preferred,
+                    expected_start,
+                    hunk_preimage_pattern_len(h)
+                )
+            })?;
+        let effective_end = h.lines.len().saturating_sub(trim_trailing);
+        let effective_lines = &h.lines[trim_leading..effective_end];
 
         let mut pos = start;
         let mut segment: Vec<String> = Vec::new();
-        for hl in &h.lines {
+        for hl in effective_lines {
             match hl.kind {
                 HunkLineKind::Context => {
                     let line = current
@@ -1554,33 +1565,127 @@ fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
         next.extend(segment);
         next.extend_from_slice(&current[pos..]);
         current = next;
+        line_delta += net_hunk_line_delta(h);
     }
 
     Ok(current)
 }
 
-fn hunk_preimage_pattern(h: &Hunk) -> (Vec<&str>, usize) {
+fn expected_hunk_start(old_start: usize, line_delta: isize) -> usize {
+    let base = old_start.saturating_sub(1) as isize + line_delta;
+    base.max(0) as usize
+}
+
+fn net_hunk_line_delta(h: &Hunk) -> isize {
+    let adds = h
+        .lines
+        .iter()
+        .filter(|hl| hl.kind == HunkLineKind::Add)
+        .count() as isize;
+    let removes = h
+        .lines
+        .iter()
+        .filter(|hl| hl.kind == HunkLineKind::Remove)
+        .count() as isize;
+    adds - removes
+}
+
+fn hunk_preimage_pattern(h: &Hunk) -> Vec<&str> {
+    hunk_preimage_pattern_for_lines(&h.lines)
+}
+
+fn hunk_preimage_pattern_len(h: &Hunk) -> usize {
+    hunk_preimage_pattern(h).len()
+}
+
+fn hunk_preimage_pattern_for_lines(lines: &[HunkLine]) -> Vec<&str> {
     // Pre-image = context + removed lines in order.
     let mut pattern: Vec<&str> = Vec::new();
-    for hl in &h.lines {
+    for hl in lines {
         match hl.kind {
             HunkLineKind::Context | HunkLineKind::Remove => pattern.push(hl.text.as_str()),
             HunkLineKind::Add => {}
         }
     }
-    let len = pattern.len();
-    (pattern, len)
+    pattern
 }
 
-fn find_hunk_start(lines: &[String], pattern: &[&str], preferred: usize) -> Option<usize> {
+fn find_hunk_application(
+    lines: &[String],
+    hunk: &Hunk,
+    expected_start: usize,
+) -> Option<(usize, usize, usize)> {
+    let leading_context = hunk
+        .lines
+        .iter()
+        .take_while(|hl| hl.kind == HunkLineKind::Context)
+        .count();
+    let trailing_context = hunk
+        .lines
+        .iter()
+        .rev()
+        .take_while(|hl| hl.kind == HunkLineKind::Context)
+        .count();
+    let max_fuzz = leading_context + trailing_context;
+
+    for total_trim in 0..=max_fuzz {
+        let min_leading_trim = total_trim.saturating_sub(trailing_context);
+        let max_leading_trim = total_trim.min(leading_context);
+        for trim_leading in min_leading_trim..=max_leading_trim {
+            let trim_trailing = total_trim - trim_leading;
+            let effective_end = hunk.lines.len().saturating_sub(trim_trailing);
+            if trim_leading > effective_end {
+                continue;
+            }
+            let effective_lines = &hunk.lines[trim_leading..effective_end];
+            let pattern = hunk_preimage_pattern_for_lines(effective_lines);
+            let adjusted_expected = expected_start.saturating_add(trim_leading);
+
+            if let Some(start) = find_hunk_start_near(lines, &pattern, adjusted_expected, 0) {
+                return Some((start, trim_leading, trim_trailing));
+            }
+            if let Some(start) = find_hunk_start_near(lines, &pattern, adjusted_expected, 8) {
+                return Some((start, trim_leading, trim_trailing));
+            }
+            if let Some(start) = find_hunk_start_near(lines, &pattern, adjusted_expected, 32) {
+                return Some((start, trim_leading, trim_trailing));
+            }
+        }
+    }
+
+    for total_trim in 0..=max_fuzz {
+        let min_leading_trim = total_trim.saturating_sub(trailing_context);
+        let max_leading_trim = total_trim.min(leading_context);
+        for trim_leading in min_leading_trim..=max_leading_trim {
+            let trim_trailing = total_trim - trim_leading;
+            let effective_end = hunk.lines.len().saturating_sub(trim_trailing);
+            if trim_leading > effective_end {
+                continue;
+            }
+            let effective_lines = &hunk.lines[trim_leading..effective_end];
+            let pattern = hunk_preimage_pattern_for_lines(effective_lines);
+            if let Some(start) = find_hunk_start_anywhere(lines, &pattern) {
+                return Some((start, trim_leading, trim_trailing));
+            }
+        }
+    }
+
+    None
+}
+
+fn find_hunk_start_near(
+    lines: &[String],
+    pattern: &[&str],
+    expected: usize,
+    fuzz: usize,
+) -> Option<usize> {
     if pattern.is_empty() {
-        return Some(preferred.min(lines.len()));
+        return Some(expected.min(lines.len()));
     }
     if lines.len() < pattern.len() {
         return None;
     }
 
-    // Try preferred first, then search with a bounded fuzz window, then fall back to full scan.
     let try_at = |i: usize| -> bool {
         if i + pattern.len() > lines.len() {
             return false;
@@ -1593,18 +1698,45 @@ fn find_hunk_start(lines: &[String], pattern: &[&str], preferred: usize) -> Opti
         true
     };
 
-    if try_at(preferred) {
-        return Some(preferred);
+    let expected = expected.min(lines.len().saturating_sub(pattern.len()));
+    if try_at(expected) {
+        return Some(expected);
     }
 
-    let fuzz: usize = 100;
-    let start = preferred.saturating_sub(fuzz);
-    let end = (preferred + fuzz).min(lines.len().saturating_sub(pattern.len()));
-    for i in start..=end {
-        if try_at(i) {
+    for distance in 1..=fuzz {
+        if let Some(i) = expected.checked_sub(distance) {
+            if try_at(i) {
+                return Some(i);
+            }
+        }
+        let i = expected + distance;
+        if i <= lines.len().saturating_sub(pattern.len()) && try_at(i) {
             return Some(i);
         }
     }
+
+    None
+}
+
+fn find_hunk_start_anywhere(lines: &[String], pattern: &[&str]) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+    if lines.len() < pattern.len() {
+        return None;
+    }
+
+    let try_at = |i: usize| -> bool {
+        if i + pattern.len() > lines.len() {
+            return false;
+        }
+        for (j, needle) in pattern.iter().enumerate() {
+            if lines[i + j].as_str() != *needle {
+                return false;
+            }
+        }
+        true
+    };
 
     for i in 0..=lines.len().saturating_sub(pattern.len()) {
         if try_at(i) {
@@ -1617,7 +1749,10 @@ fn find_hunk_start(lines: &[String], pattern: &[&str], preferred: usize) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::map_src_to_spec;
+    use super::{apply_hunks, apply_unified_diff, map_src_to_spec, Hunk, HunkLine, HunkLineKind};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn map_src_to_spec_supports_nested_context_paths() {
@@ -1633,5 +1768,215 @@ mod tests {
             map_src_to_spec("src/data/payments/ledger_entry.rs"),
             Some("specifications/data/payments/ledger_entry.md".to_string())
         );
+    }
+
+    #[test]
+    fn apply_hunks_tolerates_stale_leading_context() {
+        let original = vec![
+            "fn run() {".to_string(),
+            "    let x = 1;".to_string(),
+            "    let y = 2;".to_string(),
+            "    println!(\"{}\", y);".to_string(),
+            "}".to_string(),
+        ];
+        let hunks = vec![Hunk {
+            old_start: 1,
+            lines: vec![
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "fn execute() {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Remove,
+                    text: "    let y = 2;".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Add,
+                    text: "    let y = 3;".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    println!(\"{}\", y);".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "}".to_string(),
+                },
+            ],
+        }];
+
+        let updated = apply_hunks(&original, &hunks).expect("hunk should apply");
+
+        assert_eq!(
+            updated,
+            vec![
+                "fn run() {".to_string(),
+                "    let x = 1;".to_string(),
+                "    let y = 3;".to_string(),
+                "    println!(\"{}\", y);".to_string(),
+                "}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_hunks_tolerates_stale_trailing_context() {
+        let original = vec![
+            "fn run() {".to_string(),
+            "    let y = 2;".to_string(),
+            "    println!(\"{}\", y);".to_string(),
+            "}".to_string(),
+        ];
+        let hunks = vec![Hunk {
+            old_start: 1,
+            lines: vec![
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "fn run() {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Remove,
+                    text: "    let y = 2;".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Add,
+                    text: "    let y = 4;".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    eprintln!(\"{}\", y);".to_string(),
+                },
+            ],
+        }];
+
+        let updated = apply_hunks(&original, &hunks).expect("hunk should apply");
+
+        assert_eq!(
+            updated,
+            vec![
+                "fn run() {".to_string(),
+                "    let y = 4;".to_string(),
+                "    println!(\"{}\", y);".to_string(),
+                "}".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_hunks_uses_running_line_delta_between_hunks() {
+        let original = vec![
+            "start".to_string(),
+            "keep".to_string(),
+            "target one".to_string(),
+            "middle".to_string(),
+            "target two".to_string(),
+            "end".to_string(),
+        ];
+        let hunks = vec![
+            Hunk {
+                old_start: 2,
+                lines: vec![
+                    HunkLine {
+                        kind: HunkLineKind::Context,
+                        text: "keep".to_string(),
+                    },
+                    HunkLine {
+                        kind: HunkLineKind::Add,
+                        text: "inserted".to_string(),
+                    },
+                    HunkLine {
+                        kind: HunkLineKind::Context,
+                        text: "target one".to_string(),
+                    },
+                ],
+            },
+            Hunk {
+                old_start: 5,
+                lines: vec![
+                    HunkLine {
+                        kind: HunkLineKind::Context,
+                        text: "middle".to_string(),
+                    },
+                    HunkLine {
+                        kind: HunkLineKind::Remove,
+                        text: "target two".to_string(),
+                    },
+                    HunkLine {
+                        kind: HunkLineKind::Add,
+                        text: "target two updated".to_string(),
+                    },
+                    HunkLine {
+                        kind: HunkLineKind::Context,
+                        text: "end".to_string(),
+                    },
+                ],
+            },
+        ];
+
+        let updated = apply_hunks(&original, &hunks).expect("hunks should apply");
+
+        assert_eq!(
+            updated,
+            vec![
+                "start".to_string(),
+                "keep".to_string(),
+                "inserted".to_string(),
+                "target one".to_string(),
+                "middle".to_string(),
+                "target two updated".to_string(),
+                "end".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_unified_diff_is_transactional_across_files() {
+        let root = make_temp_test_dir("compilation_fix_transaction");
+        let file_a = root.join("src/a.rs");
+        let file_b = root.join("src/b.rs");
+        fs::create_dir_all(file_a.parent().expect("parent")).expect("create dir");
+        fs::write(&file_a, "alpha\nbeta\ngamma\n").expect("write a");
+        fs::write(&file_b, "one\ntwo\nthree\n").expect("write b");
+
+        let diff = r#"diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++beta updated
+ gamma
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -1,3 +1,3 @@
+ one
+-missing
++two updated
+ three
+"#;
+
+        let err = apply_unified_diff(&root, diff).expect_err("second file should fail");
+        assert!(err.to_string().contains("src/b.rs"));
+        assert_eq!(
+            fs::read_to_string(&file_a).expect("read a"),
+            "alpha\nbeta\ngamma\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&file_b).expect("read b"),
+            "one\ntwo\nthree\n"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    fn make_temp_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}_{}", prefix, nanos));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
     }
 }
