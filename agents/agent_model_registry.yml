@@ -1,26 +1,23 @@
 create_specifications_data:
-  model: qwen2.5:7b # gpt-5
-  parallel: true
+  model: qwen2.5:3b
+  parallel: false
 create_specifications_context:
-  model: qwen2.5:7b # gpt-5
-  parallel: true
+  model: qwen2.5:3b
+  parallel: false
 create_specifications_main:
-  model: qwen2.5:7b # gpt-5
-  parallel: true
-create_specifications_visual_components:
-  model: qwen2.5:7b
-  parallel: true
+  model: qwen2.5:3b
+  parallel: false
 create_implementation:
-  model: qwen2.5:7b # gpt-5
-  parallel: true
+  model: qwen2.5:3b
+  parallel: false 
 create_test:
-  model: qwen2.5:7b # gpt-5
+  model: qwen2.5:3b
   parallel: false
 resolve_compilation_errors:
-  model: qwen2.5:7b # gpt-5
+  model: qwen2.5:3b
   parallel: false
 review_draft_errors:
-  model: qwen2.5:7b # gpt-5
+  model: qwen2.5:3b
   parallel: false
 create_visual_specifications_components:
   model: qwen2.5:7b # gpt-5

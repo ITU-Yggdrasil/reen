@@ -2049,7 +2049,7 @@ pub async fn create_tests(
                 }));
             }
             for task in tasks {
-                let (context_name, result) = task.await?;
+                let (context_name, result): (String, Result<()>) = task.await?;
                 match result {
                     Ok(_) => {
                         progress.complete_item(&context_name, true);
