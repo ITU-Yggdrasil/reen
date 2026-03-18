@@ -1,0 +1,47 @@
+name: Snake Pipeline Main
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  snake-main:
+    name: Snake create+build
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build reen
+        run: cargo build --release
+
+      - name: Enable GPT-5 agent registry
+        run: cp "agents/agent_model_registry.gpt.yml" "agents/agent_model_registry.yml"
+
+      - name: Create specifications (snake)
+        working-directory: tests/snake
+        run: ../../target/release/reen create specification
+
+      - name: Create implementation (snake)
+        working-directory: tests/snake
+        run: ../../target/release/reen create implementation
+
+      - name: Build generated snake project
+        working-directory: tests/snake
+        run: cargo build

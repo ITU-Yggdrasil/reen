@@ -20,3 +20,10 @@ ollama:
     - llama3.1:13b
     - llama3.1:3b
     - llama3.1:3b
+
+mistral:
+  api-key: {{env:MISTRAL_API_KEY}}
+  models:
+    - codestral-latest
+    - mistral-large-latest
+    - mistral-small-latest

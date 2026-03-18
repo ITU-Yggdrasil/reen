@@ -317,6 +317,32 @@ pub fn build_execution_plan(
     Ok(levels)
 }
 
+pub fn expand_with_transitive_dependencies(
+    selected_inputs: Vec<PathBuf>,
+    primary_root: &str,
+    fallback_root: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+    if selected_inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let levels = build_execution_plan(selected_inputs.clone(), primary_root, fallback_root)?;
+    let mut expanded: HashSet<PathBuf> = selected_inputs.into_iter().collect();
+
+    for node in levels.into_iter().flatten() {
+        for dep in node.resolve_dependency_closure(primary_root, fallback_root)? {
+            let dep_path = PathBuf::from(dep.path);
+            if dep_path.exists() {
+                expanded.insert(dep_path);
+            }
+        }
+    }
+
+    let mut result: Vec<PathBuf> = expanded.into_iter().collect();
+    result.sort();
+    Ok(result)
+}
+
 fn levelize_with_cycles(
     nodes: Vec<ExecutionNode>,
     edges: Vec<Vec<usize>>,
@@ -714,6 +740,36 @@ mod tests {
 
         assert!(paths.iter().any(|p| p.ends_with("amount.md")));
         assert!(paths.iter().any(|p| p.ends_with("currency.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn expansion_includes_transitive_dependencies_for_filtered_roots() {
+        let root = temp_root("expand");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+
+        let app = drafts.join("app.md");
+        let game_loop = drafts.join("contexts").join("game_loop.md");
+        fs::write(&app, "Depends on: game_loop").expect("write");
+        fs::write(&game_loop, "tick").expect("write");
+
+        let expanded = expand_with_transitive_dependencies(
+            vec![app.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("expanded");
+
+        assert!(expanded.contains(&app));
+        assert!(expanded.contains(&game_loop));
+
+        let levels = build_execution_plan(expanded, drafts.to_str().unwrap_or("drafts"), None)
+            .expect("plan after expansion");
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0][0].input_path, game_loop);
+        assert_eq!(levels[1][0].input_path, app);
 
         let _ = fs::remove_dir_all(root);
     }

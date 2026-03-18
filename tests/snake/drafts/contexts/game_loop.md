@@ -2,31 +2,35 @@
 
 ## Description
 
-GameLoopContext performs **one tick** of the Snake game by making the full collaboration explicit in one place:
-user input and collision detection and score is handled. The context also handles game speec/difficulty by decreasing the tick duration
+GameLoopContext advances the game by exactly one tick.
+Per tick it handles:
+- input capture and steering,
+- movement and collision outcomes,
+- score/food updates,
+- tick pacing (difficulty).
 
 ---
 
 ## Roles
 
 - **snake**
-  The snake itself, representing occupied cells and current direction. Provides steering and movement operations.
+  Represents occupied cells and current direction.
 
 - **command**
-  The command role is played by keyboard input from standard input (`stdin`), not by a separate domain object.
-  It yields the next direction intention for the snake.
+  Provides shared user input for this tick.
 
 - **food_dropper**
-  RNG that places a new food object when needed.
+  Produces a valid next food placement when needed.
 
-- **game_state** The state of the game represented by a GameState object
+- **game_state**
+  Holds score, food placement, and game start time.
 
 ---
 
 ## Props
 
 - **board**
-  Board dimensions and boundary definition (used to derive boundary obstacle cells).
+  Board dimensions and boundary rules.
 
 ---
 
@@ -35,88 +39,108 @@ user input and collision detection and score is handled. The context also handle
 ### snake
 
 - **head**
-  Returns the position of the snake head.
+  Returns the current head position.
 
 - **set_direction(new_direction)**
-  If the new direction is opposite to the current direction or the same as the current direction then the existing snake object is returned.
-  Otherwise a new snake object is returned with the direction altered.
+  Applies steering rules:
+  - opposite direction changes are ignored,
+  - same-direction changes are ignored,
+  - other direction changes are accepted.
 
-- **next** 
-  - Find the next cell for the head based on the current direction of the snake
-    The new head cell is determined by the direction:
-    - UP:    (head.x,     head.y + 1)
-    - DOWN:  (head.x,     head.y - 1)
-    - RIGHT: (head.x + 1, head.y)
-    - LEFT:  (head.x - 1, head.y)
+- **next**
+  Computes next head position from current direction:
+  - UP: `(x, y + 1)`
+  - DOWN: `(x, y - 1)`
+  - RIGHT: `(x + 1, y)`
+  - LEFT: `(x - 1, y)`
 
-- **move** accepts a flag for whether the snake should grow or not. 
-  - call snake.next to get the new head position
-  - push this position to the front of snake.body
-  - if snake shouldn't grow pop the last element of body
-  - create and return a new snake with the new body and the same direction
+- **move(grow)**
+  Moves to `next()`.
+  If `grow=true`, length increases by 1.
+  If `grow=false`, length is unchanged.
 
 ### command
 
 - **next**
-  The command role is a FIFO buffer of keystrokes read from `stdin`.
-  - In each call to `next`, pop keystrokes from the front of the buffer until:
-    - a movement key is found (`W`/`A`/`S`/`D`, case-insensitive), in which case return `UP`/`LEFT`/`DOWN`/`RIGHT`, or
-    - the buffer becomes empty.
-  - If the buffer becomes empty before any `W`/`A`/`S`/`D` is found, return None
+  Returns the next available movement direction from shared input, if any.
 
 ### food_dropper
 
 - **drop**
-  Produces a new food object with a coordinate within the board that is not occupied by the snake nor by the boundary itself.
-  (Implementation policy is up to you: retry sampling, sample from precomputed free cells, etc.)
+  Returns `Some(food)` on a free non-wall, non-snake cell, or `None` if no free cell exists.
 
 ---
 
-## Functionality
-- **new(board, snake, food_dropper, game_state) -> GameLoopContext** constructs a new context by assigning the provided collaborators to their roles/props. The `command` role is implicitly bound to keyboard input (`stdin`) by the runtime and is therefore not passed as a constructor argument.
-  - `new` uses the shared command keystroke buffer bound to `stdin`.
+## Behavior
 
-- **current_board** returns a two dimensional array of characters, indices into the array matches coordinates on the board. i.e. array[0][1] matches the coordinates (x=0,y=1) .
+- **new(board, snake, command, food_dropper, game_state)**
+  - Uses the provided collaborators.
+  - Input must come from the provided shared command context; no separate stdin stream is allowed.
+
+- **current_board**
+  Returns a 2D char grid where `board[x][y]` maps to coordinate `(x,y)`:
   - 'w' for wall at the boundary
   - ' ' for unoccupied cells
-  - 's' for cells occupied by the snake 
+  - 's' for cells occupied by the snake
   - 'f' for where the food is placed
 
-- **get_score** returns the current score of the game
+- **get_score**
+  Returns current score.
 
 - **tick**
   Executes one tick and returns:
   - `Some(new GameLoopContext)` if the game continues
   - `None` if the game ends
 
-  Script:
+  Steps:
 
-  1. **calculate game speed**. We should start at 10 ticks pr second and then increase that in a logarithmic fashion (the exact algorithm is a free implementation choice). sleep for the calculated delay before proceeding
-     
-  2. **Steering**
-      - next_direction = command.next
-      - if next_direction is None then snake = snake
-      - else snake = snake.set_direction(next_direction)
-  
-  3. obtain the new position without moving the snake yet (snake.next())
+  1. **Pacing**
+     - Start at 10 ticks/second.
+     - Increase speed over time with logarithmic growth (exact formula is implementation-defined).
+     - Wait for the computed delay before continuing.
 
-  4. Test for collision at the new head position
-    - The collisionType is Some(Obstacle) if the head location is also occupied by
-      - any boundary cell (where x==0, y==0, x==board.width-1, y==board.height-1)
-      - any snake segment coordinate excluding the head coordinate
-    - the collisionType is Some(Food) if Food is not None and the coordiantes of the head equals the current food coordinate. 
-    - otherwise the collisionType is None
+  2. **Capture input**
+      - Capture pending keystrokes into the shared input stream.
 
-  5. handle game logic:  
-    - If collisionType is Some(Obstacle):
-       - return None
+  3. **Steering**
+      - Read next movement direction from command input.
+      - If a direction is available, apply snake steering rules.
+      - If no direction is available, keep current direction.
 
-    - If collisionType is Some(food):
-      - move the snake and mark that it should grow `snake.move(true)`
-      - increment the score by 10
-      - update state with new food placement from food_dropper.drop
-      - return a new Game loop context based on the updated state (snake and game state)
+  4. **Predict move**
+      - Compute the next head coordinate.
 
-    - otherwise:
-      - move the snake without growing `snake.move(false)`
-      - return a new Game loop context based on the updated state (snake and game state)
+  5. **Classify collision at predicted head**
+      - `Obstacle` if next head is on boundary cell
+        (`x==0`, `y==0`, `x==width-1`, `y==height-1`)
+        or overlaps any snake segment except current head.
+      - `Food` if food exists and next head equals food position.
+      - `None` otherwise.
+
+  6. **Apply outcome**
+      - If `Obstacle`: return `None`.
+      - If `Food`:
+        - move with growth,
+        - add 10 score,
+        - place new food via `food_dropper.drop`,
+        - return continued game state.
+      - If `None`:
+        - move without growth,
+        - keep score/food unchanged,
+        - return continued game state.
+
+---
+
+## Cross-tick input guarantees
+
+- Input captured before or during tick `N` must be eligible to affect steering in tick `N` (if a movement key is available).
+- Movement input consumed in tick `N` must not be re-applied automatically in tick `N+1`.
+- If no movement key is available at steering time, the snake keeps its current direction.
+
+---
+
+## Acceptance examples
+
+- Given the next predicted head hits a wall, when `tick()` runs, then result is `None`.
+- Given the next predicted head reaches food, when `tick()` runs, then score increases by 10 and snake length increases by 1.
+- Given buffered keys `x`, `w` before a tick, when `tick()` runs, then the snake steers `UP` (non-action keys ignored).

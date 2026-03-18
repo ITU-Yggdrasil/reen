@@ -14,9 +14,12 @@ The ledger is immutable so adding a new ledger entry produces a new ledger objec
 
 ## Functionality  
 
-**get_entries_for** Provided an account number (i32) the ledger returns all ledger entries where that account is either sink or source. It should be sorted ascending based on the timestamps of the entries. Duplicate timestampts for ledger entries for the same account can't happen.
+- **get_entries_for** Provided an account number (i32) the ledger returns all ledger entries where that account is either sink or source. It should be sorted ascending based on the timestamps of the entries. Duplicate timestampts for ledger entries for the same account can't happen.
 
-**add_entry** Commits an entry to the ledger. The result of the operation is a _new_ ledger, with the old one as it's (internal) tail. Every ledger entry represents a transaction. Adding the entry, is comparable to comitting an atomic transaction in a database. At least one of sink and source must be not None. The hash of the current head entry must match the prev_hash of the entry being added.
+- **add_entry** Commits an entry to the ledger. The result of the operation is a _new_ ledger, with the old one as it's (internal) tail. Every ledger entry represents a transaction. Adding the entry, is comparable to comitting an atomic transaction in a database. 
+  **business rules**:
+  - At least one of sink and source must be not None.
+  - The hash of the current head entry must match the prev_hash of the entry being added.
 
 **new** Accepts an entry and creates a new ledger with None as the tail and the provided entry as the head
 **settle** Only valid for an unsettled entry i.e. one where the sink is None. Since the entries are immutable, the method creates a new entry based on the input/argument setting the sink to the provided account id.

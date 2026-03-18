@@ -5,8 +5,8 @@
 Represents the main charater of the snake game.
 
 ## Fields
-- **body** A list of position objects. The head being the first element in the list
-- **direction** The direction the snake is travelling
+- **body_** A list of position objects. The head being the first element in the list
+- **direction_** The direction the snake is travelling
 
 
 ## business rules

@@ -13,13 +13,30 @@ import socket
 from urllib.parse import urlparse
 from typing import Dict, Any, Optional
 
+# Resolve the starting directory. When the script is embedded in the reen binary
+# and written to a temp file, REEN_PROJECT_DIR tells us where to start looking.
+_start_dir = os.environ.get("REEN_PROJECT_DIR") or os.path.dirname(os.path.realpath(__file__))
+
+
+def _find_upwards(start: str, name: str) -> Optional[str]:
+    """Walk from start up to the filesystem root looking for a file or directory."""
+    current = os.path.abspath(start)
+    while True:
+        candidate = os.path.join(current, name)
+        if os.path.exists(candidate):
+            return candidate
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
 # Load environment variables from .env file if it exists
 try:
     from dotenv import load_dotenv
-    # Load .env from the script's directory, resolving symlinks
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    dotenv_path = os.path.join(script_dir, '.env')
-    load_dotenv(dotenv_path)
+    dotenv_path = _find_upwards(_start_dir, '.env')
+    if dotenv_path:
+        load_dotenv(dotenv_path)
 except ImportError:
     # dotenv not installed, continue without it
     pass
@@ -27,18 +44,14 @@ except ImportError:
 # Auto-detect and use venv if available
 def ensure_venv():
     """Ensure we're using the project's virtual environment if it exists."""
-    # Check if we're already in a venv
     if hasattr(sys, 'real_prefix') or (hasattr(sys, 'base_prefix') and sys.base_prefix != sys.prefix):
-        # Already in a venv
         return
     
-    # Look for project venv, resolving symlinks to find the real script location
-    script_dir = os.path.dirname(os.path.realpath(__file__))
-    venv_python = os.path.join(script_dir, '.venv', 'bin', 'python3')
-    
-    if os.path.exists(venv_python):
-        # Re-execute with venv Python
-        os.execv(venv_python, [venv_python] + sys.argv)
+    venv_python = _find_upwards(_start_dir, '.venv')
+    if venv_python:
+        venv_python = os.path.join(venv_python, 'bin', 'python3')
+        if os.path.exists(venv_python):
+            os.execv(venv_python, [venv_python] + sys.argv)
 
 # Run venv check before anything else
 ensure_venv()
@@ -88,7 +101,8 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
     # Remove "ollama:" prefix if present
     if model_name.startswith("ollama:"):
         model_name = model_name[7:]
-    
+
+
     # The model name format "qwen2.5:7b" is correct for Ollama (model:tag)
     response = client.chat(
         model=model_name,
@@ -98,7 +112,31 @@ def execute_with_ollama(model: str, system_prompt: str) -> str:
         ]
     )
 
-    return response["message"]["content"]
+    first_output = response["message"]["content"]
+    lower = first_output.lower()
+    asks_for_prompt = (
+        "provide me with the system prompt" in lower
+        or "provide the system prompt" in lower
+        or "provide me with the details of the task" in lower
+        or "provide details of the task" in lower
+    )
+    if asks_for_prompt:
+        fallback_response = client.chat(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        f"{system_prompt}\n\n"
+                        "Please complete the task described above. "
+                        "Return only the final result."
+                    ),
+                }
+            ],
+        )
+        return fallback_response["message"]["content"]
+
+    return first_output
 
 
 def execute_with_openai(model: str, system_prompt: str) -> str:
@@ -146,19 +184,61 @@ def execute_with_openai(model: str, system_prompt: str) -> str:
     return response.choices[0].message.content
 
 
-def determine_provider(model: str) -> str:
-    """Determine which provider to use based on model name."""
+def execute_with_mistral(model: str, system_prompt: str) -> str:
+    """Execute using Mistral's API (OpenAI-compatible)."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError("openai package not installed. Run: pip install openai")
+
+    api_key = os.environ.get("MISTRAL_API_KEY")
+    if not api_key:
+        raise RuntimeError("MISTRAL_API_KEY environment variable not set")
+
+    base_url = os.environ.get("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
+    timeout = float(os.environ.get("MISTRAL_TIMEOUT_SECONDS", "180"))
+    max_retries = int(os.environ.get("MISTRAL_MAX_RETRIES", "3"))
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "Please complete the task described in the system prompt."}
+        ]
+    )
+
+    return response.choices[0].message.content
+
+
+def determine_provider(model: str) -> tuple:
+    """Determine which provider to use based on model name.
+
+    Supports an explicit 'provider/model' prefix (e.g. 'mistral/codestral-latest').
+    When no prefix is present, falls back to substring-based heuristics.
+
+    Returns (provider, model_name).
+    """
+    if "/" in model:
+        provider, model_name = model.split("/", 1)
+        return provider.lower(), model_name
+
     model_lower = model.lower()
 
     if any(x in model_lower for x in ["claude", "anthropic"]):
-        return "anthropic"
+        return "anthropic", model
     elif any(x in model_lower for x in ["ollama", "qwen", "llama", "mistral", "phi", "gemma", "codellama"]):
-        return "ollama"
+        return "ollama", model
     elif any(x in model_lower for x in ["gpt", "openai", "o1", "o3"]):
-        return "openai"
+        return "openai", model
     else:
-        # Default to Ollama for unknown models (local, no API key needed)
-        return "ollama"
+        return "ollama", model
 
 
 def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,14 +253,15 @@ def execute_model(request: Dict[str, Any]) -> Dict[str, Any]:
                 "error": "Missing required fields: model and system_prompt"
             }
 
-        provider = determine_provider(model)
-
+        provider, model_name = determine_provider(model)
         if provider == "anthropic":
-            output = execute_with_anthropic(model, system_prompt)
+            output = execute_with_anthropic(model_name, system_prompt)
         elif provider == "ollama":
-            output = execute_with_ollama(model, system_prompt)
+            output = execute_with_ollama(model_name, system_prompt)
         elif provider == "openai":
-            output = execute_with_openai(model, system_prompt)
+            output = execute_with_openai(model_name, system_prompt)
+        elif provider == "mistral":
+            output = execute_with_mistral(model_name, system_prompt)
         else:
             return {
                 "success": False,

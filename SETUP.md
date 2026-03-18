@@ -75,6 +75,12 @@ Set your OpenAI API key:
 export OPENAI_API_KEY='your-api-key-here'
 ```
 
+### Mistral - Optional
+Set your Mistral API key:
+```bash
+export MISTRAL_API_KEY='your-api-key-here'
+```
+
 **Tip** Add these to your `~/.bashrc`, `~/.zshrc`, or `~/.bash_profile` to make them permanent.
 
 ## Building
@@ -91,14 +97,28 @@ The system uses the `agents/agent_model_registry.yml` file to map agents to mode
 
 ```yaml
 create_specifications: gpt-4
-create_implementation: claude-3-opus-20240229
-create_test: gpt-4
+create_implementation: mistral/codestral-latest
+create_test: ollama/qwen2.5:7b
 ```
 
-Supported model names:
-- **Ollama** (default): Any model name containing "ollama", "qwen", "llama", "mistral", "phi", "gemma", or "codellama" (e.g., `qwen2.5:7b`, `llama3.1:8b`, `mistral:7b`)
-- **Anthropic**: Any model name containing "claude" or "anthropic" (e.g., `claude-3-opus-20240229`, `claude-3-5-sonnet-20241022`)
-- **OpenAI**: Any model name containing "gpt", "openai", "o1", or "o3" (e.g., `gpt-4`, `gpt-4-turbo`, `gpt-3.5-turbo`)
+### Explicit provider prefix (recommended)
+
+Use the `provider/model` format to explicitly choose a provider:
+
+- `ollama/qwen2.5:7b` — local Ollama
+- `mistral/codestral-latest` — Mistral API
+- `openai/gpt-4` — OpenAI API
+- `anthropic/claude-3-5-sonnet-20241022` — Anthropic API
+
+This is especially useful for models available from multiple providers (e.g. Codestral can run locally via Ollama or remotely via the Mistral API).
+
+### Automatic provider detection (fallback)
+
+When no `provider/` prefix is given, the provider is inferred from the model name:
+
+- **Ollama** (default): Names containing "ollama", "qwen", "llama", "mistral", "phi", "gemma", or "codellama"
+- **Anthropic**: Names containing "claude" or "anthropic"
+- **OpenAI**: Names containing "gpt", "openai", "o1", or "o3"
 
 **Note** Unknown model names default to Ollama (local, no API key required).
 

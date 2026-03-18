@@ -5,8 +5,10 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use reen::contexts::{AgentRunner, AgentRunnerError};
-use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
+use reen::contexts::{AgentModelRegistry, AgentRunner, AgentRunnerError};
+use reen::registries::{
+    candidate_agent_spec_filenames, embedded_agent_spec, FileAgentModelRegistry, FileAgentRegistry,
+};
 
 use super::Config;
 
@@ -51,6 +53,11 @@ impl AgentExecutor {
         self.model_registry
             .can_run_parallel(&self.agent_name)
             .map_err(|e| anyhow::anyhow!("Failed to read model registry: {}", e))
+    }
+
+    /// Reference to the model registry (for diagnostics).
+    pub fn model_registry(&self) -> &FileAgentModelRegistry {
+        &self.model_registry
     }
 
     /// Executes the agent with additional context (for conversational interactions)
@@ -211,15 +218,63 @@ impl AgentExecutor {
 }
 
 fn validate_agent_exists(agent_name: &str) -> Result<()> {
-    let agent_path = PathBuf::from("agents").join(format!("{}.yml", agent_name));
+    validate_agent_exists_with_registry(agent_name, &FileAgentModelRegistry::new(None, None, None))
+}
 
-    if !agent_path.exists() {
+fn validate_agent_exists_with_registry(
+    agent_name: &str,
+    model_registry: &FileAgentModelRegistry,
+) -> Result<()> {
+    let model_name = model_registry
+        .get_model(agent_name)
+        .map(|model| model.name)
+        .unwrap_or_default();
+    let candidates = candidate_agent_spec_filenames(agent_name, &model_name);
+    if candidates
+        .iter()
+        .all(|filename| embedded_agent_spec(filename).is_none())
+    {
+        let expected = candidates.into_iter().collect::<Vec<_>>().join(" or ");
         anyhow::bail!(
             "Agent '{}' not found. Expected file: {}",
             agent_name,
-            agent_path.display()
+            expected
         );
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_agent_exists_with_registry;
+    use reen::registries::FileAgentModelRegistry;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("reen_agent_executor_{}_{}", prefix, nanos))
+    }
+
+    #[test]
+    fn validate_uses_embedded_specs_without_agents_symlink() {
+        let test_dir = unique_test_dir("embedded_only");
+        fs::create_dir_all(&test_dir).expect("create temp dir");
+        let registry_path = test_dir.join("agent_model_registry.yml");
+        fs::write(
+            &registry_path,
+            "create_implementation:\n  model: claude-3-sonnet\n  parallel: false\n",
+        )
+        .expect("write model registry");
+
+        let registry = FileAgentModelRegistry::new(Some(registry_path), None, None);
+        validate_agent_exists_with_registry("create_implementation", &registry)
+            .expect("default fallback should validate");
+        fs::remove_dir_all(&test_dir).expect("cleanup");
+    }
 }

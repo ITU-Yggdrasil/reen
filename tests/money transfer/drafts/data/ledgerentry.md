@@ -7,7 +7,9 @@ A ledger entry is an entry in the main ledger. It has a source account, a destin
 The source might be None signifying that it's a cash deposit, the sink would on the other hand be None if it's a cash withdrawal
 
 If a transfer is reflected by the ledger entry, then both sink and source will be Some(...). 
-The amount must be greater than 0.
+
+## not on sink and source
+a ledger entry can have both sink and source set to None, it will however not be possible to add it to the ledger, because the ledger will reject that.
 
 ## Properties
 

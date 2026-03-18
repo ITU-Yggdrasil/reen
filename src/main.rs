@@ -152,6 +152,12 @@ struct CreateArgs {
     )]
     clear_cache: bool,
 
+    #[arg(long, help = "Only process drafts from the contexts/ folder")]
+    contexts: bool,
+
+    #[arg(long, help = "Only process drafts from the data/ folder")]
+    data: bool,
+
     #[command(subcommand)]
     command: CreateCommands,
 }
@@ -178,6 +184,46 @@ enum ReviewCommands {
         #[arg(long, help = "Apply suggested corrections directly to draft files")]
         fix: bool,
 
+        #[arg(
+            long,
+            help = "Select suggestions interactively before applying",
+            requires = "fix",
+            conflicts_with = "all"
+        )]
+        interactive: bool,
+
+        #[arg(
+            long,
+            help = "Apply all suggestions without prompts",
+            requires = "fix",
+            conflicts_with = "interactive"
+        )]
+        all: bool,
+
+        #[arg(
+            long,
+            help = "Prompt after each suggestion (step mode)",
+            requires = "fix",
+            conflicts_with = "all"
+        )]
+        step: bool,
+
+        #[arg(
+            long,
+            help = "Maximum number of suggestions to apply",
+            requires = "fix"
+        )]
+        max: Option<usize>,
+
+        #[arg(
+            long = "file",
+            help = "Only apply suggestions for matching draft file path/name (repeatable)",
+            requires = "fix",
+            value_name = "PATH_OR_NAME",
+            action = clap::ArgAction::Append
+        )]
+        files: Vec<String>,
+
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
     },
@@ -189,6 +235,46 @@ enum ReviewCommands {
     Implementation {
         #[arg(long, help = "Apply suggested corrections directly to draft files")]
         fix: bool,
+
+        #[arg(
+            long,
+            help = "Select suggestions interactively before applying",
+            requires = "fix",
+            conflicts_with = "all"
+        )]
+        interactive: bool,
+
+        #[arg(
+            long,
+            help = "Apply all suggestions without prompts",
+            requires = "fix",
+            conflicts_with = "interactive"
+        )]
+        all: bool,
+
+        #[arg(
+            long,
+            help = "Prompt after each suggestion (step mode)",
+            requires = "fix",
+            conflicts_with = "all"
+        )]
+        step: bool,
+
+        #[arg(
+            long,
+            help = "Maximum number of suggestions to apply",
+            requires = "fix"
+        )]
+        max: Option<usize>,
+
+        #[arg(
+            long = "file",
+            help = "Only apply suggestions for matching draft file path/name (repeatable)",
+            requires = "fix",
+            value_name = "PATH_OR_NAME",
+            action = clap::ArgAction::Append
+        )]
+        files: Vec<String>,
 
         #[arg(help = "Optional list of context names (without .md extension)")]
         names: Vec<String>,
@@ -205,37 +291,91 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Commands::Create(create_args) => match create_args.command {
-            CreateCommands::Specification { names } => {
-                cli::create_specification(names, create_args.clear_cache, &config).await?;
-            }
-            CreateCommands::Implementation {
-                max_compile_fix_attempts,
-                names,
-            } => {
-                cli::create_implementation(
+        Commands::Create(create_args) => {
+            let category_filter = cli::CategoryFilter {
+                contexts: create_args.contexts,
+                data: create_args.data,
+            };
+            match create_args.command {
+                CreateCommands::Specification { names } => {
+                    cli::create_specification(
+                        names,
+                        create_args.clear_cache,
+                        &category_filter,
+                        &config,
+                    )
+                    .await?;
+                }
+                CreateCommands::Implementation {
+                    max_compile_fix_attempts,
                     names,
-                    max_compile_fix_attempts as usize,
-                    create_args.clear_cache,
-                    &config,
-                )
-                .await?;
+                } => {
+                    cli::create_implementation(
+                        names,
+                        max_compile_fix_attempts as usize,
+                        create_args.clear_cache,
+                        &category_filter,
+                        &config,
+                    )
+                    .await?;
+                }
+                CreateCommands::Tests { names } => {
+                    cli::create_tests(names, create_args.clear_cache, &category_filter, &config)
+                        .await?;
+                }
             }
-            CreateCommands::Tests { names } => {
-                cli::create_tests(names, create_args.clear_cache, &config).await?;
-            }
-        },
+        }
         Commands::Check(check_cmd) => match check_cmd {
             CheckCommands::Specification { names } => {
                 cli::check_specification(names, &config).await?;
             }
         },
         Commands::Review(review_cmd) => match review_cmd {
-            ReviewCommands::Specification { fix, names } => {
-                cli::review_specification(names, fix, &config).await?;
+            ReviewCommands::Specification {
+                fix,
+                interactive,
+                all,
+                step,
+                max,
+                files,
+                names,
+            } => {
+                cli::review_specification(
+                    names,
+                    cli::ReviewFixOptions {
+                        fix,
+                        interactive,
+                        all,
+                        step,
+                        max,
+                        file_filters: files,
+                    },
+                    &config,
+                )
+                .await?;
             }
-            ReviewCommands::Implementation { fix, names } => {
-                cli::review_implementation(names, fix, &config).await?;
+            ReviewCommands::Implementation {
+                fix,
+                interactive,
+                all,
+                step,
+                max,
+                files,
+                names,
+            } => {
+                cli::review_implementation(
+                    names,
+                    cli::ReviewFixOptions {
+                        fix,
+                        interactive,
+                        all,
+                        step,
+                        max,
+                        file_filters: files,
+                    },
+                    &config,
+                )
+                .await?;
             }
         },
         Commands::Fix {
@@ -291,8 +431,21 @@ mod tests {
         let cli = Cli::try_parse_from(["reen", "review", "specification", "--fix", "app"])
             .expect("cli parse");
         match cli.command {
-            Commands::Review(ReviewCommands::Specification { fix, names }) => {
+            Commands::Review(ReviewCommands::Specification {
+                fix,
+                interactive,
+                all,
+                step,
+                max,
+                files,
+                names,
+            }) => {
                 assert!(fix);
+                assert!(!interactive);
+                assert!(!all);
+                assert!(!step);
+                assert!(max.is_none());
+                assert!(files.is_empty());
                 assert_eq!(names, vec!["app"]);
             }
             _ => panic!("unexpected command variant"),
@@ -304,8 +457,73 @@ mod tests {
         let cli = Cli::try_parse_from(["reen", "review", "implementation", "game_loop"])
             .expect("cli parse");
         match cli.command {
-            Commands::Review(ReviewCommands::Implementation { fix, names }) => {
+            Commands::Review(ReviewCommands::Implementation {
+                fix,
+                interactive,
+                all,
+                step,
+                max,
+                files,
+                names,
+            }) => {
                 assert!(!fix);
+                assert!(!interactive);
+                assert!(!all);
+                assert!(!step);
+                assert!(max.is_none());
+                assert!(files.is_empty());
+                assert_eq!(names, vec!["game_loop"]);
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn parses_review_fix_all_with_max() {
+        let cli = Cli::try_parse_from([
+            "reen",
+            "review",
+            "specification",
+            "--fix",
+            "--all",
+            "--max",
+            "2",
+            "app",
+        ])
+        .expect("cli parse");
+        match cli.command {
+            Commands::Review(ReviewCommands::Specification { all, max, .. }) => {
+                assert!(all);
+                assert_eq!(max, Some(2));
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn parses_review_fix_file_filters() {
+        let cli = Cli::try_parse_from([
+            "reen",
+            "review",
+            "implementation",
+            "--fix",
+            "--all",
+            "--file",
+            "drafts/contexts/game_loop.md",
+            "--file",
+            "app",
+            "game_loop",
+        ])
+        .expect("cli parse");
+        match cli.command {
+            Commands::Review(ReviewCommands::Implementation { files, names, .. }) => {
+                assert_eq!(
+                    files,
+                    vec![
+                        "drafts/contexts/game_loop.md".to_string(),
+                        "app".to_string()
+                    ]
+                );
                 assert_eq!(names, vec!["game_loop"]);
             }
             _ => panic!("unexpected command variant"),
