@@ -1101,68 +1101,6 @@ fn spec_declared_public_methods(project_root: &Path, target: &str) -> HashSet<St
             methods.insert(name.as_str().to_string());
         }
     }
-    // Pull role methods from any spec section that matches the target stem, e.g. `### snake`.
-    if let Some(role_name) = target
-        .strip_prefix("src/data/")
-        .and_then(|s| s.strip_suffix(".rs"))
-        .and_then(|s| s.rsplit('/').next())
-        .map(|s| s.to_ascii_lowercase())
-    {
-        for spec in all_spec_files(project_root) {
-            if let Ok(spec_text) = fs::read_to_string(&spec) {
-                methods.extend(role_section_methods(&spec_text, &role_name));
-            }
-        }
-    }
-    methods
-}
-
-fn all_spec_files(project_root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_markdown_files(&project_root.join("specifications"), &mut out);
-    out
-}
-
-fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_markdown_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            out.push(path);
-        }
-    }
-}
-
-fn role_section_methods(spec_text: &str, role_name: &str) -> HashSet<String> {
-    let mut methods = HashSet::new();
-    let mut in_role_section = false;
-    for line in spec_text.lines() {
-        let trimmed = line.trim();
-        if let Some(heading) = trimmed.strip_prefix("### ") {
-            in_role_section = heading.trim().eq_ignore_ascii_case(role_name);
-            continue;
-        }
-        if in_role_section && trimmed.starts_with("## ") {
-            in_role_section = false;
-        }
-        if !in_role_section {
-            continue;
-        }
-        for caps in spec_method_bold_re().captures_iter(trimmed) {
-            if let Some(name) = caps.get(1) {
-                methods.insert(name.as_str().to_string());
-            }
-        }
-        for caps in spec_method_code_re().captures_iter(trimmed) {
-            if let Some(name) = caps.get(1) {
-                methods.insert(name.as_str().to_string());
-            }
-        }
-    }
     methods
 }
 
@@ -1234,6 +1172,10 @@ fn evaluate_public_api_changes(
 }
 
 fn is_allowed_new_public_method(sig: &FnSig, allowed_public_methods: &HashSet<String>) -> bool {
+    if is_constructor_name(&sig.name) {
+        // Constructors are always safe to add as associated functions.
+        return matches!(sig.receiver, ReceiverKind::Other);
+    }
     if is_spec_allowed_public_method_name(&sig.name, allowed_public_methods) {
         return true;
     }
@@ -1249,11 +1191,6 @@ fn is_allowed_new_public_method(sig: &FnSig, allowed_public_methods: &HashSet<St
     ) {
         return false;
     }
-    if matches!(sig.name.as_str(), "new" | "try_new") {
-        // Constructors should be associated functions; allow args.
-        return matches!(sig.receiver, ReceiverKind::Other);
-    }
-
     // Otherwise, allow only getter-shaped additions.
     sig.non_self_param_types.is_empty()
 }
@@ -1294,14 +1231,16 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
     if old.name != new.name {
         return Some("function name changed".to_string());
     }
-    if matches!(
-        old.receiver,
-        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
-    ) || matches!(
-        new.receiver,
-        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
-    ) {
+    if matches!(new.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf) {
         return Some("introduces mutable receiver (`&mut self`/`mut self`)".to_string());
+    }
+    if matches!(old.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
+        && !is_allowed_immutable_receiver_transition(old, new)
+    {
+        return Some(
+            "changes a mutable receiver outside the allowed immutable transform patterns"
+                .to_string(),
+        );
     }
     if old.non_self_param_types.len() != new.non_self_param_types.len() {
         return Some("parameter count changed".to_string());
@@ -1333,6 +1272,13 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
     None
 }
 
+fn is_allowed_immutable_receiver_transition(old: &FnSig, new: &FnSig) -> bool {
+    matches!(old.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
+        && !matches!(new.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
+        && is_self_family_return(&old.return_type)
+        && is_self_family_return(&new.return_type)
+}
+
 fn is_ref_value_equivalent(a: &str, b: &str) -> bool {
     // Allow &T <-> T at the top-level only; block &mut and other structural changes.
     if a.contains("&mut") || b.contains("&mut") {
@@ -1359,6 +1305,21 @@ fn strip_top_level_ref(t: &str) -> String {
         }
     }
     s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn is_constructor_name(name: &str) -> bool {
+    matches!(name.strip_prefix("r#").unwrap_or(name), "new" | "try_new")
+}
+
+fn is_self_family_return(return_type: &Option<String>) -> bool {
+    let Some(return_type) = return_type else {
+        return false;
+    };
+    let normalized = return_type.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    normalized == "Self"
+        || normalized.starts_with("Result<Self,")
+        || normalized.starts_with("core::result::Result<Self,")
+        || normalized.starts_with("std::result::Result<Self,")
 }
 
 fn public_fn_re() -> &'static Regex {
@@ -1495,6 +1456,41 @@ mod tests {
         let root = make_temp_test_dir("compile_fix_guardrail_keyword_alias");
         let src = root.join("src/data/snake.rs");
         let snake_spec = root.join("specifications/data/snake.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(snake_spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct Snake;\nimpl Snake {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &snake_spec,
+            "# Snake\n\n## Functionalities\n- **new**: Constructs a Snake\n- **move(grow)**: Moves to next().\n",
+        )
+        .expect("write snake spec");
+
+        let diff = r#"diff --git a/src/data/snake.rs b/src/data/snake.rs
+--- a/src/data/snake.rs
++++ b/src/data/snake.rs
+@@ -1,3 +1,4 @@
+ pub struct Snake;
+ impl Snake {
+     pub fn new() -> Self { Self }
++    pub fn move_snake(mut self, grow: bool) -> Self { let _ = grow; self }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_blocks_data_methods_sourced_only_from_context_roles() {
+        let root = make_temp_test_dir("compile_fix_guardrail_data_role_leak");
+        let src = root.join("src/data/snake.rs");
+        let snake_spec = root.join("specifications/data/snake.md");
         let game_loop_spec = root.join("specifications/contexts/game_loop.md");
         fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
         fs::create_dir_all(snake_spec.parent().expect("spec parent")).expect("create spec dir");
@@ -1522,7 +1518,76 @@ mod tests {
  pub struct Snake;
  impl Snake {
      pub fn new() -> Self { Self }
-+    pub fn move_snake(mut self, grow: bool) -> Self { let _ = grow; self }
++    pub fn move_snake(&self, grow: bool) -> Self { let _ = grow; Self }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(!report.ok);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("patch adds new public function `move_snake`")),
+            "issues: {:?}",
+            report.issues
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_constructor_additions_even_if_not_declared() {
+        let root = make_temp_test_dir("compile_fix_guardrail_constructor_add");
+        let src = root.join("src/data/board.rs");
+        let spec = root.join("specifications/data/board.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(&src, "pub struct Board;\n").expect("write src");
+        fs::write(&spec, "# Board\n\n## Functionalities\n").expect("write spec");
+
+        let diff = r#"diff --git a/src/data/board.rs b/src/data/board.rs
+--- a/src/data/board.rs
++++ b/src/data/board.rs
+@@ -1 +1,5 @@
+ pub struct Board;
++impl Board {
++    pub fn new(width: u32, height: u32) -> Self { let _ = (width, height); Self }
++}
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_mut_self_to_borrowed_self_for_self_returning_api() {
+        let root = make_temp_test_dir("compile_fix_guardrail_immutable_transform");
+        let src = root.join("src/data/gamestate.rs");
+        let spec = root.join("specifications/data/gamestate.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameState;\nimpl GameState {\n    pub fn increment_score(mut self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(self) }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "# GameState\n\n## Functionalities\n- **increment_score**: returns a new GameState with score increased\n",
+        )
+        .expect("write spec");
+
+        let diff = r#"diff --git a/src/data/gamestate.rs b/src/data/gamestate.rs
+--- a/src/data/gamestate.rs
++++ b/src/data/gamestate.rs
+@@ -1,3 +1,3 @@
+ pub struct GameState;
+ impl GameState {
+-    pub fn increment_score(mut self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(self) }
++    pub fn increment_score(&self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(Self) }
  }
 "#;
 

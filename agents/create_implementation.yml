@@ -59,7 +59,8 @@ static_prompt: |
 
   9. **Field accessibility terminology is normative**
      - If the specification says a field/property is **readable**, interpret that as requiring a public getter for that field/property.
-     - If the specification says a field/property is **writable**, interpret that as requiring a public setter for that field/property.
+     - If the specification says a field/property is **writable** for an explicitly mutable type, interpret that as requiring a public setter or equivalent mutating API for that field/property.
+     - If the type is immutable, **writable** means callers must have a public way to obtain an updated value; satisfy that with an explicitly named functionality or a non-destructive transformation method, not a public setter.
      - These terms describe API obligations only; they do NOT require public struct fields or any particular internal representation.
      - If the specification explicitly lists accessor method names/signatures, those explicit definitions override this default interpretation.
 
@@ -93,7 +94,15 @@ static_prompt: |
           &self.inner
       }
 
-      // NO SETTERS unless spec explicitly documents mutability
+      // Non-destructive update methods may return a new value.
+      pub fn with_domain(&self, domain: String) -> Result<Self, ValidationError> {
+          let local = self.inner.split('@').next().unwrap_or(self.inner.as_str());
+          let updated = format!("{}@{}", local, domain);
+          validate_email(&updated)?;
+          Ok(Self { inner: updated })
+      }
+
+      // NO public `set_*` methods unless spec explicitly documents mutability
   }
   ```
 
@@ -131,7 +140,9 @@ static_prompt: |
        - This is a data type in `src/data/`
        - **CRITICAL**: Data types are IMMUTABLE by default
        - All fields should be private with public getters ONLY
-       - NO setters unless mutability is explicitly documented
+       - Public `set_*` methods are forbidden unless mutability is explicitly documented
+       - If a functionality returns an updated value, prefer a non-destructive transform such as `&self -> Self` or `&self -> Result<Self, _>`
+       - Do NOT consume owned `self` or use `mut self` for immutable public transforms unless the specification explicitly requires ownership transfer
        - Use `#[derive(Clone)]` for copying values
        - If mutability is specified, verify it's justified and implement constraints
      - **If specification is for "App" or "Application"**: This is a binary application
@@ -155,13 +166,15 @@ static_prompt: |
      - Read "Functionalities" - these become public methods
      - Treat statements that properties are "readable" or "writable" as accessor requirements:
        - "readable" => getter required
-       - "writable" => setter required
+       - "writable" on mutable types => setter or equivalent mutating API required
+       - "writable" on immutable types => public non-destructive update API required, not a `set_*` method
      - If Functionalities is empty/absent, implement:
        - A `new` constructor taking all properties as arguments
        - Public getter methods for each property
        - NO setters (immutable)
      - If Functionalities is present, implement ONLY those methods
      - Include constructor in Functionalities if needed; don't assume it exists
+     - For immutable data methods that "return a new X", prefer borrowed receivers (`&self`) and rebuild the new value without mutating the original instance
 
      **For Contexts (has Props, Roles, Functionality sections)**:
      - Read "Roles and Responsibilities" - identify role players and their capabilities
@@ -440,6 +453,11 @@ static_prompt: |
 
   - Prefer returning owned values for computed/constructed outputs:
     - If you construct new data, return `T` (owned) rather than forcing lifetimes.
+
+  - Immutable data transformations:
+    - For immutable public APIs that return an updated value, prefer `&self -> Self` or `&self -> Result<Self, _>`.
+    - Rebuild the returned value from existing fields instead of mutating a local owned `self` and returning it.
+    - Do NOT introduce public `set_*` methods for immutable data unless the specification explicitly names and requires that API.
 
   - Avoid “clone-by-default”:
     - Do not introduce clones unless necessary for correctness or required by the spec.

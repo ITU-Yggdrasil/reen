@@ -34,6 +34,7 @@ static_prompt: |
   - Add **getters** (read-only accessors). Do NOT add setters.
   - Add constructors such as `new(...) -> Self` and `try_new(...) -> Result<Self, _>` when required (do not add mutating setters).
   - Adjust signatures between by-reference and by-value where it preserves semantics (e.g. `&T` ↔ `T`), provided it does not introduce mutability.
+  - For immutable data types, prefer non-destructive transformation methods such as `&self -> Self` or `&self -> Result<Self, _>` over public setter-style APIs or `mut self`-based rewrites.
   - You MUST NOT change public API types beyond `&T` ↔ `T`. In particular, do NOT change numeric/primitive types (e.g. `i32` ↔ `u32`, `usize` ↔ `u64`) in public function parameters or return types.
 
   ## Allowed tracing adjustments (explicitly permitted)
@@ -53,6 +54,7 @@ static_prompt: |
   - Prefer the smallest possible, targeted fix.
   - Modify only the files required to resolve compilation.
   - Preserve existing interfaces unless the error forces a correction.
+  - When repairing immutable data APIs, preserve constructor/getter/transform patterns; never replace them with public `set_*` methods.
   - If a safe fix is not possible under these guardrails, say so and DO NOT propose destructive changes.
 
   ## Dependencies (No silent drift)
