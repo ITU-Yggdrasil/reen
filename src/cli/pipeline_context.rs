@@ -5,7 +5,8 @@ use std::path::Path;
 
 use super::agent_executor::AgentExecutor;
 use super::openapi_fetcher::{
-    is_external_api_draft_path, load_openapi_content, parse_external_api_draft,
+    extract_external_api_symbol_inventory, is_external_api_draft_path, load_openapi_content,
+    parse_external_api_draft,
 };
 use super::stage_runner::estimate_agent_request_tokens;
 use super::DRAFTS_DIR;
@@ -120,7 +121,15 @@ pub(super) fn build_specification_context(
 
     let metadata = parse_external_api_draft(draft_content);
     let openapi_content = load_openapi_content(draft_file, &metadata)?;
+    let symbol_inventory = extract_external_api_symbol_inventory(draft_file, draft_content)?;
     context.insert("openapi_content".to_string(), json!(openapi_content));
+    context.insert(
+        "external_symbol_inventory".to_string(),
+        json!({
+            "operation_symbols": symbol_inventory.operation_symbols,
+            "boundary_type_symbols": symbol_inventory.boundary_type_symbols,
+        }),
+    );
     if !metadata.documentation_urls.is_empty() {
         context.insert(
             "documentation_urls".to_string(),

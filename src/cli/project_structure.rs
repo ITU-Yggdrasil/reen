@@ -613,7 +613,10 @@ mod tests {
 
     #[test]
     fn context_feature_name_uses_folder_path() {
-        assert_eq!(context_feature_name("contexts", "terminal_renderer"), "terminal_renderer");
+        assert_eq!(
+            context_feature_name("contexts", "terminal_renderer"),
+            "terminal_renderer"
+        );
         assert_eq!(
             context_feature_name("contexts/ui", "terminal_renderer"),
             "ui_terminal_renderer"
@@ -710,7 +713,9 @@ mod tests {
             Some(&Vec::<String>::new())
         );
         assert_eq!(
-            project_info.context_dependencies.get("ui_terminal_renderer"),
+            project_info
+                .context_dependencies
+                .get("ui_terminal_renderer"),
             Some(&vec!["account".to_string()])
         );
 
@@ -733,10 +738,9 @@ mod tests {
             "contexts/ui".to_string(),
             vec!["terminal_renderer".to_string()],
         );
-        project_info.context_dependencies.insert(
-            "terminal_renderer".to_string(),
-            Vec::new(),
-        );
+        project_info
+            .context_dependencies
+            .insert("terminal_renderer".to_string(), Vec::new());
         project_info.context_dependencies.insert(
             "ui_terminal_renderer".to_string(),
             vec!["terminal_renderer".to_string()],
@@ -764,10 +768,9 @@ mod tests {
             "contexts".to_string(),
             vec!["terminal_renderer".to_string()],
         );
-        project_info.modules.insert(
-            "contexts/ui".to_string(),
-            vec!["scoreboard".to_string()],
-        );
+        project_info
+            .modules
+            .insert("contexts/ui".to_string(), vec!["scoreboard".to_string()]);
         project_info.type_names.insert(
             "contexts/terminal_renderer".to_string(),
             "TerminalRenderer".to_string(),
@@ -780,8 +783,7 @@ mod tests {
         generate_mod_files(&project_info, &root).expect("generate mod files");
         let contexts_mod =
             fs::read_to_string(root.join("src/contexts/mod.rs")).expect("read contexts mod");
-        let ui_mod =
-            fs::read_to_string(root.join("src/contexts/ui/mod.rs")).expect("read ui mod");
+        let ui_mod = fs::read_to_string(root.join("src/contexts/ui/mod.rs")).expect("read ui mod");
 
         assert!(contexts_mod.contains("#[cfg(feature = \"terminal_renderer\")]"));
         assert!(contexts_mod.contains("mod terminal_renderer;"));

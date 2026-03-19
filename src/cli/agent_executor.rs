@@ -93,13 +93,24 @@ impl AgentExecutor {
         additional_context: HashMap<String, serde_json::Value>,
         execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<AgentResponse> {
+        self.execute_with_context_options(input, additional_context, execution_control, false)
+            .await
+    }
+
+    pub async fn execute_with_context_options(
+        &self,
+        input: &str,
+        additional_context: HashMap<String, serde_json::Value>,
+        execution_control: Option<&dyn NativeExecutionControl>,
+        ignore_cache_reads: bool,
+    ) -> Result<AgentResponse> {
         if self.verbose {
             println!("Executing agent: {}", self.agent_name);
         }
 
         let result = self
             .runner(input, additional_context)
-            .run_with_control(execution_control)
+            .run_with_control_options(execution_control, ignore_cache_reads)
             .map_err(Self::map_runner_error)?;
 
         if output_contains_questions(&result.output) {
@@ -131,14 +142,14 @@ impl AgentExecutor {
             .map_err(Self::map_runner_error)
     }
 
-    /// Prepares a request and cache metadata without executing the model.
-    pub fn prepare_execution(
+    pub fn prepare_execution_options(
         &self,
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
+        ignore_cache_reads: bool,
     ) -> Result<PreparedExecutionState> {
         self.runner(input, additional_context)
-            .prepare_execution()
+            .prepare_execution_options(ignore_cache_reads)
             .map_err(Self::map_runner_error)
     }
 
@@ -166,13 +177,13 @@ impl AgentExecutor {
         Ok(results)
     }
 
-    /// Handles the full conversational loop with question/answer cycles and caller-provided seed context
-    pub async fn execute_with_conversation_with_seed(
+    pub async fn execute_with_conversation_with_seed_options(
         &self,
         input: &str,
         context_name: &str,
         mut context: HashMap<String, serde_json::Value>,
         execution_control: Option<&dyn NativeExecutionControl>,
+        ignore_cache_reads: bool,
     ) -> Result<String> {
         let mut conversation_round = 0;
 
@@ -184,7 +195,12 @@ impl AgentExecutor {
             }
 
             match self
-                .execute_with_context(input, context.clone(), execution_control)
+                .execute_with_context_options(
+                    input,
+                    context.clone(),
+                    execution_control,
+                    ignore_cache_reads,
+                )
                 .await?
             {
                 AgentResponse::Final(result) => {

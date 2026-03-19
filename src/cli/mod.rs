@@ -14,6 +14,7 @@ mod agent_executor;
 mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
+mod external_api_expansion;
 mod openapi_fetcher;
 mod patch_service;
 mod pipeline_context;
@@ -26,6 +27,10 @@ use agent_executor::{AgentExecutor, AgentResponse};
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };
+use external_api_expansion::{
+    parse_external_api_expansion, sanitize_generated_artifact_name, GeneratedDraftArtifact,
+};
+use openapi_fetcher::is_external_api_draft_path;
 use patch_service::apply_draft_patches;
 use pipeline_context::{build_specification_context, fit_context_to_token_limit};
 use progress::ProgressIndicator;
@@ -116,7 +121,7 @@ impl CategoryFilter {
                 let component = first.as_os_str().to_string_lossy();
                 return match component.as_ref() {
                     "data" => self.include_data(),
-                    "contexts" | "external_apis" => self.include_contexts(),
+                    "contexts" | "external_apis" | "apis" => self.include_contexts(),
                     _ => self.include_root(),
                 };
             }
@@ -204,7 +209,6 @@ fn create_specification_inner(
     let config = *config;
     Box::pin(async move {
         let names_provided = !names.is_empty();
-        let names_for_clear = names.clone();
         let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &filter)?;
 
         if draft_files.is_empty() {
@@ -228,14 +232,6 @@ fn create_specification_inner(
 
         // Load build tracker
         let mut tracker = BuildTracker::load()?;
-        if clear_cache {
-            clear_tracker_stage(
-                &mut tracker,
-                Stage::Specification,
-                &names_for_clear,
-                &config,
-            )?;
-        }
 
         let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
         println!("Creating specifications for {} draft(s)", total_count);
@@ -294,7 +290,7 @@ fn create_specification_inner(
                         SPECIFICATIONS_DIR,
                     )?;
 
-                    let needs_update = if dependency_invalidated {
+                    let needs_update = if clear_cache || dependency_invalidated {
                         true
                     } else {
                         tracker.needs_update(
@@ -335,9 +331,13 @@ fn create_specification_inner(
                         dependency_context,
                         token_limit,
                     )?;
-                    let cache_hit = executor
-                        .is_cache_hit(&draft_content, dependency_context.clone())
-                        .unwrap_or(false);
+                    let cache_hit = if clear_cache {
+                        false
+                    } else {
+                        executor
+                            .is_cache_hit(&draft_content, dependency_context.clone())
+                            .unwrap_or(false)
+                    };
                     stage_items.push(StageItem {
                         name: draft_name.clone(),
                         estimated,
@@ -378,6 +378,7 @@ fn create_specification_inner(
                                 &draft_file,
                                 &draft_name,
                                 &cfg,
+                                clear_cache,
                                 dependency_context,
                                 execution_control,
                             )
@@ -509,7 +510,8 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
             format!("Failed to read specification file: {}", spec_path.display())
         })?;
         if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-            let actionable = extract_actionable_blocking_bullets(&blocking);
+            let actionable =
+                extract_actionable_blocking_bullets_for_path(&blocking, Some(&spec_path));
             if !actionable.is_empty() {
                 issues += 1;
                 eprintln!("error[spec:blocking]:");
@@ -541,6 +543,7 @@ async fn process_specification(
     draft_file: &Path,
     draft_name: &str,
     config: &Config,
+    ignore_cache_reads: bool,
     additional_context: HashMap<String, serde_json::Value>,
     execution_control: Option<CliExecutionControl>,
 ) -> Result<ProcessSpecOutcome> {
@@ -549,15 +552,30 @@ async fn process_specification(
         return Ok(ProcessSpecOutcome::Success);
     }
 
+    if is_external_api_draft_path(draft_file, DRAFTS_DIR) {
+        return process_external_api_specification(
+            executor,
+            draft_content,
+            draft_file,
+            draft_name,
+            config,
+            ignore_cache_reads,
+            additional_context,
+            execution_control,
+        )
+        .await;
+    }
+
     // Use conversational execution to handle questions
     let spec_content = executor
-        .execute_with_conversation_with_seed(
+        .execute_with_conversation_with_seed_options(
             &draft_content,
             draft_name,
             additional_context.clone(),
             execution_control
                 .as_ref()
                 .map(|control| control as &dyn NativeExecutionControl),
+            ignore_cache_reads,
         )
         .await?;
 
@@ -568,6 +586,289 @@ async fn process_specification(
         spec_content,
         additional_context,
     )
+}
+
+#[derive(Debug)]
+struct WrittenSpecification {
+    spec_content: String,
+    actionable: Vec<String>,
+    has_blocking_ambiguities: bool,
+}
+
+async fn process_external_api_specification(
+    executor: &AgentExecutor,
+    draft_content: &str,
+    draft_file: &Path,
+    draft_name: &str,
+    config: &Config,
+    ignore_cache_reads: bool,
+    additional_context: HashMap<String, serde_json::Value>,
+    execution_control: Option<CliExecutionControl>,
+) -> Result<ProcessSpecOutcome> {
+    let expansion = execute_external_api_expansion_with_cache_recovery(
+        executor,
+        draft_content,
+        draft_name,
+        config,
+        ignore_cache_reads,
+        additional_context.clone(),
+        execution_control.clone(),
+    )
+    .await?;
+
+    let data_executor = AgentExecutor::new("create_specifications_data", config)?;
+    let context_executor = AgentExecutor::new("create_specifications_context", config)?;
+    let namespace = sanitize_generated_artifact_name(&expansion.api_name);
+    let generated_context = prune_generated_spec_context(additional_context.clone());
+
+    clear_external_generated_output_dirs(&namespace)?;
+
+    let primary_context_path =
+        determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+    let mut used_data_names = HashMap::new();
+    let mut used_context_names = HashMap::new();
+    let mut generated = Vec::new();
+
+    for artifact in &expansion.data_drafts {
+        let file_stem = unique_generated_name(
+            &sanitize_generated_artifact_name(&artifact.name),
+            &mut used_data_names,
+        );
+        let output_path = external_generated_data_output_path(&namespace, &file_stem);
+        let result = generate_external_spec_artifact(
+            &data_executor,
+            artifact,
+            draft_file,
+            &artifact.name,
+            output_path,
+            generated_context.clone(),
+            ignore_cache_reads,
+            execution_control.clone(),
+        )
+        .await?;
+        generated.push(result);
+    }
+
+    let mut context_iter = expansion.context_drafts.iter();
+    if let Some(primary_context) = context_iter.next() {
+        let result = generate_external_spec_artifact(
+            &context_executor,
+            primary_context,
+            draft_file,
+            &primary_context.name,
+            primary_context_path,
+            generated_context.clone(),
+            ignore_cache_reads,
+            execution_control.clone(),
+        )
+        .await?;
+        generated.push(result);
+    }
+    for artifact in context_iter {
+        let file_stem = unique_generated_name(
+            &sanitize_generated_artifact_name(&artifact.name),
+            &mut used_context_names,
+        );
+        let output_path = external_generated_context_output_path(&namespace, &file_stem);
+        let result = generate_external_spec_artifact(
+            &context_executor,
+            artifact,
+            draft_file,
+            &artifact.name,
+            output_path,
+            generated_context.clone(),
+            ignore_cache_reads,
+            execution_control.clone(),
+        )
+        .await?;
+        generated.push(result);
+    }
+
+    let mut actionable = Vec::new();
+    let mut combined_spec_content = String::new();
+    for (artifact_name, written) in generated {
+        if !combined_spec_content.is_empty() {
+            combined_spec_content.push_str("\n\n");
+        }
+        combined_spec_content.push_str(&format!("<!-- {} -->\n", artifact_name));
+        combined_spec_content.push_str(&written.spec_content);
+        if written.has_blocking_ambiguities {
+            actionable.extend(
+                written
+                    .actionable
+                    .into_iter()
+                    .map(|item| format!("[{}] {}", artifact_name, item)),
+            );
+        }
+    }
+
+    if !actionable.is_empty() {
+        return Ok(ProcessSpecOutcome::BlockingAmbiguities {
+            draft_file: draft_file.to_path_buf(),
+            draft_name: draft_name.to_string(),
+            draft_content: draft_content.to_string(),
+            spec_content: combined_spec_content,
+            actionable,
+            additional_context,
+        });
+    }
+
+    Ok(ProcessSpecOutcome::Success)
+}
+
+async fn execute_external_api_expansion_with_cache_recovery(
+    executor: &AgentExecutor,
+    draft_content: &str,
+    draft_name: &str,
+    config: &Config,
+    ignore_cache_reads: bool,
+    additional_context: HashMap<String, serde_json::Value>,
+    execution_control: Option<CliExecutionControl>,
+) -> Result<external_api_expansion::ExternalApiExpansion> {
+    let execute_once = |context: HashMap<String, serde_json::Value>| async {
+        executor
+            .execute_with_conversation_with_seed_options(
+                draft_content,
+                draft_name,
+                context,
+                execution_control
+                    .as_ref()
+                    .map(|control| control as &dyn NativeExecutionControl),
+                ignore_cache_reads,
+            )
+            .await
+    };
+
+    let expansion_output = execute_once(additional_context.clone()).await?;
+    match parse_external_api_expansion(&expansion_output, draft_name) {
+        Ok(expansion) => Ok(expansion),
+        Err(parse_error) => {
+            if ignore_cache_reads {
+                return Err(parse_error);
+            }
+            let cache_hit = executor
+                .is_cache_hit(draft_content, additional_context.clone())
+                .unwrap_or(false);
+            if !cache_hit {
+                return Err(parse_error);
+            }
+
+            clear_specific_agent_response_cache_entry(
+                "create_specifications_external_api",
+                CacheAgentInput {
+                    draft_content: Some(draft_content.to_string()),
+                    context_content: None,
+                    additional: additional_context.clone(),
+                },
+                config,
+            )?;
+
+            eprintln!(
+                "warning[spec:cache]: cleared stale cached external API expansion for '{}'; retrying with a fresh model response",
+                draft_name
+            );
+
+            let retry_output = execute_once(additional_context).await?;
+            parse_external_api_expansion(&retry_output, draft_name).with_context(|| {
+                format!(
+                    "external API expansion output was not valid JSON after clearing the cached response for '{}'",
+                    draft_name
+                )
+            })
+        }
+    }
+}
+
+async fn generate_external_spec_artifact(
+    executor: &AgentExecutor,
+    artifact: &GeneratedDraftArtifact,
+    source_draft_file: &Path,
+    display_name: &str,
+    output_path: PathBuf,
+    additional_context: HashMap<String, serde_json::Value>,
+    ignore_cache_reads: bool,
+    execution_control: Option<CliExecutionControl>,
+) -> Result<(String, WrittenSpecification)> {
+    let spec_content = executor
+        .execute_with_conversation_with_seed_options(
+            &artifact.draft_markdown,
+            &artifact.name,
+            additional_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+            ignore_cache_reads,
+        )
+        .await?;
+    let written =
+        write_specification_output(source_draft_file, display_name, &output_path, spec_content)?;
+    Ok((display_name.to_string(), written))
+}
+
+fn prune_generated_spec_context(
+    mut context: HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    for key in [
+        "openapi_content",
+        "documentation_urls",
+        "openapi_scope",
+        "external_symbol_inventory",
+        "previous_questions",
+        "user_answers",
+        "conversation_round",
+    ] {
+        context.remove(key);
+    }
+    context
+}
+
+fn clear_external_generated_output_dirs(api_namespace: &str) -> Result<()> {
+    for dir in [
+        PathBuf::from(SPECIFICATIONS_DIR)
+            .join("data")
+            .join("external")
+            .join(api_namespace),
+        PathBuf::from(SPECIFICATIONS_DIR)
+            .join("contexts")
+            .join("external")
+            .join(api_namespace),
+    ] {
+        if dir.exists() {
+            fs::remove_dir_all(&dir).with_context(|| {
+                format!("Failed to remove generated directory: {}", dir.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn unique_generated_name(base: &str, used: &mut HashMap<String, usize>) -> String {
+    let count = used.entry(base.to_string()).or_insert(0usize);
+    *count += 1;
+    if *count == 1 {
+        base.to_string()
+    } else {
+        format!("{}_{}", base, count)
+    }
+}
+
+fn external_generated_data_output_path(api_namespace: &str, artifact_file_stem: &str) -> PathBuf {
+    PathBuf::from(SPECIFICATIONS_DIR)
+        .join("data")
+        .join("external")
+        .join(api_namespace)
+        .join(format!("{artifact_file_stem}.md"))
+}
+
+fn external_generated_context_output_path(
+    api_namespace: &str,
+    artifact_file_stem: &str,
+) -> PathBuf {
+    PathBuf::from(SPECIFICATIONS_DIR)
+        .join("contexts")
+        .join("external")
+        .join(api_namespace)
+        .join(format!("{artifact_file_stem}.md"))
 }
 
 fn finalize_specification_output(
@@ -581,12 +882,34 @@ fn finalize_specification_output(
     let output_path =
         determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
+    let written = write_specification_output(draft_file, draft_name, &output_path, spec_content)?;
+
+    if written.has_blocking_ambiguities {
+        return Ok(ProcessSpecOutcome::BlockingAmbiguities {
+            draft_file: draft_file.to_path_buf(),
+            draft_name: draft_name.to_string(),
+            draft_content: draft_content.to_string(),
+            spec_content: written.spec_content,
+            actionable: written.actionable,
+            additional_context,
+        });
+    }
+
+    Ok(ProcessSpecOutcome::Success)
+}
+
+fn write_specification_output(
+    draft_file: &Path,
+    draft_name: &str,
+    output_path: &Path,
+    spec_content: String,
+) -> Result<WrittenSpecification> {
     let mut has_blocking_ambiguities = false;
     let mut actionable = Vec::new();
 
     // Report Blocking Ambiguities immediately if present in generated spec
     if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-        actionable = extract_actionable_blocking_bullets(&blocking);
+        actionable = extract_actionable_blocking_bullets_for_path(&blocking, Some(output_path));
         if !actionable.is_empty() {
             has_blocking_ambiguities = true;
             eprintln!("error[spec:blocking]:");
@@ -609,20 +932,13 @@ fn finalize_specification_output(
         fs::create_dir_all(parent).context("Failed to create specification output directory")?;
     }
 
-    fs::write(&output_path, &spec_content).context("Failed to write specification file")?;
+    fs::write(output_path, &spec_content).context("Failed to write specification file")?;
 
-    if has_blocking_ambiguities {
-        return Ok(ProcessSpecOutcome::BlockingAmbiguities {
-            draft_file: draft_file.to_path_buf(),
-            draft_name: draft_name.to_string(),
-            draft_content: draft_content.to_string(),
-            spec_content,
-            actionable,
-            additional_context,
-        });
-    }
-
-    Ok(ProcessSpecOutcome::Success)
+    Ok(WrittenSpecification {
+        spec_content,
+        actionable,
+        has_blocking_ambiguities,
+    })
 }
 
 fn build_dependency_drafts_from_context(
@@ -745,14 +1061,6 @@ async fn try_fix_and_retry(
 
     let affected_names_vec: Vec<String> = affected_names.into_iter().collect();
 
-    let mut tracker = BuildTracker::load()?;
-    clear_tracker_stage(
-        &mut tracker,
-        Stage::Specification,
-        &affected_names_vec,
-        config,
-    )?;
-
     create_specification_inner(
         affected_names_vec,
         true,
@@ -778,7 +1086,6 @@ pub async fn create_implementation(
     config: &Config,
 ) -> Result<()> {
     let names_provided = !names.is_empty();
-    let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
     if context_files.is_empty() {
@@ -788,14 +1095,6 @@ pub async fn create_implementation(
 
     // Load build tracker
     let mut tracker = BuildTracker::load()?;
-    if clear_cache {
-        clear_tracker_stage(
-            &mut tracker,
-            Stage::Implementation,
-            &names_for_clear,
-            config,
-        )?;
-    }
 
     // Check if any specifications need to be regenerated first
     if tracker.upstream_changed(Stage::Implementation, "")? {
@@ -887,7 +1186,7 @@ pub async fn create_implementation(
                 continue;
             }
 
-            let needs_update = if dependency_invalidated {
+            let needs_update = if clear_cache || dependency_invalidated {
                 true
             } else {
                 tracker.needs_update(
@@ -919,9 +1218,13 @@ pub async fn create_implementation(
                 dependency_context,
                 token_limit,
             )?;
-            let cache_hit = executor
-                .is_cache_hit(&context_content, dependency_context.clone())
-                .unwrap_or(false);
+            let cache_hit = if clear_cache {
+                false
+            } else {
+                executor
+                    .is_cache_hit(&context_content, dependency_context.clone())
+                    .unwrap_or(false)
+            };
             runnable.push((
                 context_file,
                 context_name,
@@ -964,6 +1267,7 @@ pub async fn create_implementation(
                             &context_file,
                             &context_name,
                             &cfg,
+                            clear_cache,
                             dependency_context,
                             resources.execution_control.clone(),
                         )
@@ -980,7 +1284,11 @@ pub async fn create_implementation(
 
                     progress.start_item(&context_name, Some(estimated));
                     match executor
-                        .prepare_execution(&context_content, dependency_context.clone())?
+                        .prepare_execution_options(
+                            &context_content,
+                            dependency_context.clone(),
+                            clear_cache,
+                        )?
                     {
                         reen::execution::PreparedExecutionState::Cached(output) => {
                             let result = finalize_implementation_output(
@@ -1045,6 +1353,7 @@ pub async fn create_implementation(
                                         &item.context_file,
                                         &item.context_name,
                                         &cfg,
+                                        clear_cache,
                                         item.dependency_context.clone(),
                                         resources.execution_control.clone(),
                                     )
@@ -1071,6 +1380,7 @@ pub async fn create_implementation(
                                     &item.context_file,
                                     &item.context_name,
                                     &cfg,
+                                    clear_cache,
                                     item.dependency_context,
                                     resources.execution_control.clone(),
                                 )
@@ -1176,6 +1486,7 @@ pub async fn create_implementation(
                                 &context_file,
                                 &context_name,
                                 &cfg,
+                                clear_cache,
                                 dependency_context,
                                 execution_control,
                             )
@@ -1275,6 +1586,7 @@ pub async fn create_implementation(
                             &context_file,
                             &context_name,
                             &cfg,
+                            clear_cache,
                             dependency_context,
                             execution_control,
                         )
@@ -1356,6 +1668,7 @@ async fn process_implementation(
     context_file: &Path,
     context_name: &str,
     config: &Config,
+    ignore_cache_reads: bool,
     additional_context: HashMap<String, serde_json::Value>,
     execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
@@ -1373,13 +1686,14 @@ async fn process_implementation(
 
     // Use conversational execution to handle questions
     let impl_result = executor
-        .execute_with_conversation_with_seed(
+        .execute_with_conversation_with_seed_options(
             &context_content,
             context_name,
             additional_context,
             execution_control
                 .as_ref()
                 .map(|control| control as &dyn NativeExecutionControl),
+            ignore_cache_reads,
         )
         .await?;
 
@@ -1680,7 +1994,54 @@ fn is_no_issue_placeholder_bullet(text: &str) -> bool {
     )
 }
 
-fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
+fn is_external_specification_path(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    normalized.starts_with("specifications/data/external/")
+        || normalized.starts_with("specifications/contexts/external/")
+}
+
+fn is_external_source_gap_detail(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let contradiction_markers = [
+        "conflict",
+        "conflicting",
+        "contradiction",
+        "contradictory",
+        "contradicts",
+        "incompatible",
+        "mismatch",
+        "disagree",
+        "disagrees",
+        "diverge",
+        "diverges",
+    ];
+    if contradiction_markers.iter().any(|marker| lower.contains(marker)) {
+        return false;
+    }
+
+    let source_gap_markers = [
+        "undefined",
+        "undocumented",
+        "unspecified",
+        "not specified",
+        "not documented",
+        "documentation does not specify",
+        "openapi does not specify",
+        "provider does not specify",
+        "api does not specify",
+        "lacks a defined structure",
+        "lacks defined structure",
+        "structure is undefined",
+        "unknown structure",
+        "missing from the documentation",
+        "not described by the provider",
+    ];
+    source_gap_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn extract_actionable_blocking_bullets_for_path(section: &str, path: Option<&Path>) -> Vec<String> {
     let bullets = extract_bullets_with_indent(section);
     if bullets.is_empty() {
         return Vec::new();
@@ -1688,10 +2049,15 @@ fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
 
     let mut actionable = vec![false; bullets.len()];
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); bullets.len()];
+    let ignore_external_source_gaps = path.is_some_and(is_external_specification_path);
 
     for i in 0..bullets.len() {
         actionable[i] = !is_language_or_paradigm_specific_detail(&bullets[i].1)
             && !is_no_issue_placeholder_bullet(&bullets[i].1);
+        if actionable[i] && ignore_external_source_gaps && is_external_source_gap_detail(&bullets[i].1)
+        {
+            actionable[i] = false;
+        }
         let parent_indent = bullets[i].0;
         let mut j = i + 1;
         while j < bullets.len() && bullets[j].0 > parent_indent {
@@ -1720,7 +2086,7 @@ fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &st
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read context file: {}", path.display()))?;
     if let Some(blocking) = extract_blocking_ambiguities_section(&content) {
-        let actionable = extract_actionable_blocking_bullets(&blocking);
+        let actionable = extract_actionable_blocking_bullets_for_path(&blocking, Some(path));
         if actionable.is_empty() {
             return Ok(false);
         }
@@ -1749,23 +2115,11 @@ pub async fn create_tests(
     config: &Config,
 ) -> Result<()> {
     let names_provided = !names.is_empty();
-    let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
     if context_files.is_empty() {
         println!("No context files found to process");
         return Ok(());
-    }
-
-    // Clear build-tracker entries for tests stage if requested.
-    // Note: test generation does not currently use build-tracker caching,
-    // but we support the flag for consistency.
-    if clear_cache {
-        let mut tracker = BuildTracker::load()?;
-        clear_tracker_stage(&mut tracker, Stage::Tests, &names_for_clear, config)?;
-        if !config.dry_run {
-            tracker.save()?;
-        }
     }
 
     let dependency_roots =
@@ -1804,9 +2158,13 @@ pub async fn create_tests(
                 dependency_context,
                 token_limit,
             )?;
-            let cache_hit = executor
-                .is_cache_hit(&context_content, dependency_context.clone())
-                .unwrap_or(false);
+            let cache_hit = if clear_cache {
+                false
+            } else {
+                executor
+                    .is_cache_hit(&context_content, dependency_context.clone())
+                    .unwrap_or(false)
+            };
             runnable.push(StageItem {
                 name: context_name.clone(),
                 estimated,
@@ -1841,6 +2199,7 @@ pub async fn create_tests(
                         &context_file,
                         &context_name,
                         &cfg,
+                        clear_cache,
                         dependency_context,
                         execution_control,
                     )
@@ -1880,50 +2239,6 @@ pub async fn create_tests(
     }
 }
 
-fn clear_tracker_stage(
-    tracker: &mut BuildTracker,
-    stage: Stage,
-    names: &[String],
-    config: &Config,
-) -> Result<()> {
-    if config.dry_run {
-        if names.is_empty() {
-            println!("[DRY RUN] Would clear cache entries for {:?}", stage);
-        } else {
-            println!(
-                "[DRY RUN] Would clear cache entries for {:?}: {}",
-                stage,
-                names.join(", ")
-            );
-        }
-        return Ok(());
-    }
-
-    let removed = if names.is_empty() {
-        tracker.clear_stage(stage)
-    } else {
-        tracker.clear_stage_names(stage, names)
-    };
-    let removed_agent_cache_entries = clear_agent_response_cache_for_stage(stage, names, config)?;
-    if config.verbose {
-        if names.is_empty() {
-            println!("✓ Cleared {} cache entries for {:?}", removed, stage);
-        } else {
-            println!(
-                "✓ Cleared {} cache entries for {:?}: {}",
-                removed,
-                stage,
-                names.join(", ")
-            );
-        }
-        println!(
-            "✓ Cleared {} agent response cache entrie(s) for {:?}",
-            removed_agent_cache_entries, stage
-        );
-    }
-    Ok(())
-}
-
 #[derive(Serialize)]
 struct CacheAgentInput {
     draft_content: Option<String>,
@@ -1949,6 +2264,7 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
             "create_specifications",
             "create_specifications_data",
             "create_specifications_context",
+            "create_specifications_external_api",
             "create_specifications_main",
         ],
         Stage::Implementation => &["create_implementation"],
@@ -2173,6 +2489,16 @@ fn clear_single_agent_cache_entry(
     Ok(false)
 }
 
+fn clear_specific_agent_response_cache_entry(
+    agent_name: &str,
+    input: CacheAgentInput,
+    config: &Config,
+) -> Result<bool> {
+    let agent_registry = FileAgentRegistry::new(None);
+    let model_registry = FileAgentModelRegistry::new(None, None, None);
+    clear_single_agent_cache_entry(&agent_registry, &model_registry, agent_name, &input, config)
+}
+
 fn instructions_model_hash(agent_instructions: &str, model_name: &str) -> String {
     let composite = format!("{}:{}", agent_instructions, model_name);
     let mut hasher = Sha256::new();
@@ -2186,6 +2512,7 @@ async fn process_tests(
     context_file: &Path,
     context_name: &str,
     config: &Config,
+    ignore_cache_reads: bool,
     additional_context: HashMap<String, serde_json::Value>,
     execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
@@ -2207,13 +2534,14 @@ async fn process_tests(
     }
 
     let test_result = executor
-        .execute_with_conversation_with_seed(
+        .execute_with_conversation_with_seed_options(
             &context_content,
             context_name,
             additional_context,
             execution_control
                 .as_ref()
                 .map(|control| control as &dyn NativeExecutionControl),
+            ignore_cache_reads,
         )
         .await?;
 
@@ -2917,6 +3245,8 @@ fn resolve_input_files(
             files.extend(collect_md_files_recursive(&contexts_dir, extension)?);
             let external_dir = dir_path.join("external_apis");
             files.extend(collect_md_files_recursive(&external_dir, extension)?);
+            let apis_dir = dir_path.join("apis");
+            files.extend(collect_md_files_recursive(&apis_dir, extension)?);
         }
 
         if filter.include_root() {
@@ -2963,6 +3293,16 @@ fn resolve_input_files(
                     if !external_matches.is_empty() {
                         files.extend(external_matches);
                         found = true;
+                    } else {
+                        let api_matches = resolve_named_input_in_category(
+                            &dir_path.join("apis"),
+                            &name,
+                            extension,
+                        )?;
+                        if !api_matches.is_empty() {
+                            files.extend(api_matches);
+                            found = true;
+                        }
                     }
                 }
             }
@@ -3024,6 +3364,7 @@ fn select_dependency_roots(
 /// - drafts/data/X.md → specifications/data/X.md
 /// - drafts/contexts/X.md → specifications/contexts/X.md
 /// - drafts/external_apis/X.md → specifications/contexts/external/X.md
+/// - drafts/apis/X.md → specifications/contexts/external/X.md
 /// - drafts/X.md → specifications/X.md
 fn determine_specification_output_path(
     draft_file: &Path,
@@ -3072,7 +3413,7 @@ fn determine_specification_output_path(
         .components()
         .next()
         .and_then(|component| component.as_os_str().to_str())
-        == Some("external_apis")
+        .is_some_and(|component| matches!(component, "external_apis" | "apis"))
     {
         let remainder = PathBuf::from_iter(relative_path.components().skip(1));
         return Ok(PathBuf::from(specifications_dir)
@@ -3091,7 +3432,8 @@ fn determine_specification_output_path(
 /// Maps:
 /// - specifications/data/X.md → drafts/data/X.md
 /// - specifications/contexts/X.md → drafts/contexts/X.md
-/// - specifications/contexts/external/X.md → drafts/external_apis/X.md
+/// - specifications/contexts/external/X.md → drafts/external_apis/X.md (or drafts/apis/X.md when present)
+/// - specifications/contexts/external/X/Y.md → drafts/external_apis/X.md (or drafts/apis/X.md when present)
 /// - specifications/X.md → drafts/X.md
 fn determine_draft_input_path(
     specification_file: &Path,
@@ -3134,9 +3476,33 @@ fn determine_draft_input_path(
     let second = components.next().and_then(|c| c.as_os_str().to_str());
     if first == Some("contexts") && second == Some("external") {
         let remainder = PathBuf::from_iter(relative_path.components().skip(2));
-        return Ok(PathBuf::from(drafts_dir)
+        if remainder.components().count() <= 1 {
+            let external_apis_path = PathBuf::from(drafts_dir).join("external_apis").join(&remainder);
+            if external_apis_path.exists() {
+                return Ok(external_apis_path);
+            }
+            let apis_path = PathBuf::from(drafts_dir).join("apis").join(&remainder);
+            if apis_path.exists() {
+                return Ok(apis_path);
+            }
+            return Ok(external_apis_path);
+        }
+        let api_name = remainder
+            .components()
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .unwrap_or_default();
+        let external_apis_path = PathBuf::from(drafts_dir)
             .join("external_apis")
-            .join(remainder));
+            .join(format!("{api_name}.md"));
+        if external_apis_path.exists() {
+            return Ok(external_apis_path);
+        }
+        let apis_path = PathBuf::from(drafts_dir).join("apis").join(format!("{api_name}.md"));
+        if apis_path.exists() {
+            return Ok(apis_path);
+        }
+        return Ok(external_apis_path);
     }
 
     Ok(PathBuf::from(drafts_dir).join(relative_path))
@@ -3147,7 +3513,7 @@ fn determine_draft_input_path(
 /// Returns:
 /// - "create_specifications_data" for files in data/ folder
 /// - "create_specifications_context" for files in contexts/ folder
-/// - "create_specifications_external_api" for files in external_apis/ folder
+/// - "create_specifications_external_api" for files in external_apis/ or apis/ folder
 /// - "create_specifications_main" for files in root folder
 fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'static str {
     let draft_path = draft_file.to_path_buf();
@@ -3162,7 +3528,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
         match component_str.as_ref() {
             "data" => "create_specifications_data",
             "contexts" => "create_specifications_context",
-            "external_apis" => "create_specifications_external_api",
+            "external_apis" | "apis" => "create_specifications_external_api",
             _ => "create_specifications_main",
         }
     } else {
@@ -3547,7 +3913,8 @@ mod tests {
         build_implemented_dependency_manifest, determine_bdd_test_paths,
         determine_draft_input_path, determine_implementation_output_path,
         determine_specification_output_path, ensure_dev_dependency_entry,
-        extract_actionable_blocking_bullets, extract_compile_error_message,
+        external_generated_context_output_path, external_generated_data_output_path,
+        extract_actionable_blocking_bullets_for_path, extract_compile_error_message,
         generated_project_structure_paths, parse_generated_files, resolve_input_files,
         sync_managed_block, CategoryFilter, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
     };
@@ -3625,6 +3992,20 @@ Problem:
     }
 
     #[test]
+    fn maps_apis_draft_to_contexts_external_specification_path() {
+        let path = determine_specification_output_path(
+            Path::new("drafts/apis/aisstream.md"),
+            "drafts",
+            "specifications",
+        )
+        .expect("path mapping");
+        assert_eq!(
+            path,
+            Path::new("specifications/contexts/external/aisstream.md")
+        );
+    }
+
+    #[test]
     fn maps_contexts_external_specification_back_to_external_api_draft_path() {
         let path = determine_draft_input_path(
             Path::new("specifications/contexts/external/stripe.md"),
@@ -3633,6 +4014,29 @@ Problem:
         )
         .expect("path mapping");
         assert_eq!(path, Path::new("drafts/external_apis/stripe.md"));
+    }
+
+    #[test]
+    fn maps_nested_external_context_specification_back_to_root_external_api_draft() {
+        let path = determine_draft_input_path(
+            Path::new("specifications/contexts/external/stripe/auth_flow.md"),
+            "specifications",
+            "drafts",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("drafts/external_apis/stripe.md"));
+    }
+
+    #[test]
+    fn builds_generated_external_output_paths_under_external_namespaces() {
+        assert_eq!(
+            external_generated_data_output_path("stripe", "PaymentIntent"),
+            Path::new("specifications/data/external/stripe/PaymentIntent.md")
+        );
+        assert_eq!(
+            external_generated_context_output_path("stripe", "auth_flow"),
+            Path::new("specifications/contexts/external/stripe/auth_flow.md")
+        );
     }
 
     #[test]
@@ -3651,6 +4055,7 @@ Problem:
         let drafts = root.join("drafts");
         fs::create_dir_all(drafts.join("contexts/ui")).expect("mkdir");
         fs::create_dir_all(drafts.join("external_apis")).expect("mkdir");
+        fs::create_dir_all(drafts.join("apis")).expect("mkdir");
         fs::create_dir_all(drafts.join("data/payments")).expect("mkdir");
         fs::write(
             drafts.join("contexts/ui/terminal_renderer.md"),
@@ -3658,6 +4063,7 @@ Problem:
         )
         .expect("write");
         fs::write(drafts.join("external_apis/stripe.md"), "# Stripe API").expect("write");
+        fs::write(drafts.join("apis/aisstream.md"), "# AISStream API").expect("write");
         fs::write(
             drafts.join("data/payments/ledger_entry.md"),
             "# Ledger Entry",
@@ -3675,6 +4081,7 @@ Problem:
             .iter()
             .any(|p| p.ends_with("contexts/ui/terminal_renderer.md")));
         assert!(all.iter().any(|p| p.ends_with("external_apis/stripe.md")));
+        assert!(all.iter().any(|p| p.ends_with("apis/aisstream.md")));
         assert!(all
             .iter()
             .any(|p| p.ends_with("data/payments/ledger_entry.md")));
@@ -3701,6 +4108,19 @@ Problem:
         .expect("external lookup");
         assert_eq!(by_external_name.len(), 1);
         assert!(by_external_name[0].ends_with("external_apis/stripe.md"));
+
+        let by_api_name = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["aisstream".to_string()],
+            "md",
+            &CategoryFilter {
+                contexts: true,
+                data: false,
+            },
+        )
+        .expect("api lookup");
+        assert_eq!(by_api_name.len(), 1);
+        assert!(by_api_name[0].ends_with("apis/aisstream.md"));
 
         let by_nested_name = resolve_input_files(
             drafts.to_str().expect("drafts path"),
@@ -3889,7 +4309,7 @@ fn main() {}
 - no blocking ambiguities
 - N/A
 "#;
-        let actionable = extract_actionable_blocking_bullets(section);
+        let actionable = extract_actionable_blocking_bullets_for_path(section, None);
         assert!(actionable.is_empty());
     }
 
@@ -3899,8 +4319,38 @@ fn main() {}
 - none
 - Missing required role method for game loop construction
 "#;
-        let actionable = extract_actionable_blocking_bullets(section);
+        let actionable = extract_actionable_blocking_bullets_for_path(section, None);
         assert_eq!(actionable.len(), 1);
         assert!(actionable[0].contains("Missing required role method"));
+    }
+
+    #[test]
+    fn ignores_external_upstream_source_gaps_as_actionable_blockers() {
+        let section = r#"
+1. **Undefined `MetaData` Structure**:
+   - The `MetaData` field lacks a defined structure.
+   - Its purpose and contents are unspecified.
+
+2. **Undocumented Limits on Subscription Parameters**:
+   - The documentation does not specify the maximum number of filters.
+"#;
+        let actionable = extract_actionable_blocking_bullets_for_path(
+            section,
+            Some(Path::new("specifications/contexts/external/aisstream.md")),
+        );
+        assert!(actionable.is_empty());
+    }
+
+    #[test]
+    fn preserves_external_conflicts_as_actionable_blockers() {
+        let section = r#"
+- Documentation conflicts with the OpenAPI authentication requirement for the same request.
+"#;
+        let actionable = extract_actionable_blocking_bullets_for_path(
+            section,
+            Some(Path::new("specifications/contexts/external/world_bank.md")),
+        );
+        assert_eq!(actionable.len(), 1);
+        assert!(actionable[0].contains("conflicts"));
     }
 }

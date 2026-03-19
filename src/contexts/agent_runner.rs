@@ -398,6 +398,9 @@ where
         if let Some(tool_context) = tool_context {
             request["tool_context"] = tool_context;
         }
+        if self.agent == "create_specifications_external_api" {
+            request["max_output_tokens"] = serde_json::Value::Number(32000u64.into());
+        }
 
         Ok(request)
     }
@@ -497,28 +500,7 @@ where
 
     /// Prepares a native-runner request and cache metadata without executing it.
     pub fn prepare_execution(self) -> Result<PreparedExecutionState, AgentRunnerError> {
-        let agent_template = self
-            .agent_registry
-            .get_specification(&self.agent)
-            .map_err(AgentRunnerError::Populate)?;
-        let model = self.agent_model_registry.get_model(&self.agent)?;
-        let canonical = agent_template.canonical_for_cache();
-        let cache_key = self.generate_cache_key(&canonical);
-        let cache = self.get_cached_artefact(&canonical, &model.name)?;
-        if let Some(cached_value) = cache.get(&cache_key) {
-            return Ok(PreparedExecutionState::Cached(cached_value));
-        }
-
-        let specification = self.populate()?;
-        let request = self.build_request_json(&specification, &model)?;
-        let estimated_input_tokens = self.estimate_input_tokens()?;
-
-        Ok(PreparedExecutionState::Ready(PreparedExecution {
-            request,
-            cache_key,
-            cache,
-            estimated_input_tokens,
-        }))
+        self.prepare_execution_options(false)
     }
 
     /// Role method: cache.get_cached_artefact
@@ -640,6 +622,14 @@ where
         self,
         execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<ExecutionResult, AgentRunnerError> {
+        self.run_with_control_options(execution_control, false)
+    }
+
+    pub fn run_with_control_options(
+        self,
+        execution_control: Option<&dyn NativeExecutionControl>,
+        ignore_cache_reads: bool,
+    ) -> Result<ExecutionResult, AgentRunnerError> {
         // Step 1: Load agent template (instructions) before populating
         // This is needed to generate the cache folder hash
         let agent_template = self
@@ -658,13 +648,15 @@ where
         let cache = self.get_cached_artefact(&canonical, &model.name)?;
 
         // Step 5: Check cache for existing result
-        if let Some(cached_value) = cache.get(&cache_key) {
-            // Cache hit - return immediately
-            return Ok(ExecutionResult {
-                output: cached_value,
-                cached: true,
-                usage: None,
-            });
+        if !ignore_cache_reads {
+            if let Some(cached_value) = cache.get(&cache_key) {
+                // Cache hit - return immediately
+                return Ok(ExecutionResult {
+                    output: cached_value,
+                    cached: true,
+                    usage: None,
+                });
+            }
         }
 
         // Cache miss - proceed with execution
@@ -689,6 +681,36 @@ where
     /// with persistent caching.
     pub fn run(self) -> Result<ExecutionResult, AgentRunnerError> {
         self.run_with_control(None)
+    }
+
+    pub fn prepare_execution_options(
+        self,
+        ignore_cache_reads: bool,
+    ) -> Result<PreparedExecutionState, AgentRunnerError> {
+        let agent_template = self
+            .agent_registry
+            .get_specification(&self.agent)
+            .map_err(AgentRunnerError::Populate)?;
+        let model = self.agent_model_registry.get_model(&self.agent)?;
+        let canonical = agent_template.canonical_for_cache();
+        let cache_key = self.generate_cache_key(&canonical);
+        let cache = self.get_cached_artefact(&canonical, &model.name)?;
+        if !ignore_cache_reads {
+            if let Some(cached_value) = cache.get(&cache_key) {
+                return Ok(PreparedExecutionState::Cached(cached_value));
+            }
+        }
+
+        let specification = self.populate()?;
+        let request = self.build_request_json(&specification, &model)?;
+        let estimated_input_tokens = self.estimate_input_tokens()?;
+
+        Ok(PreparedExecutionState::Ready(PreparedExecution {
+            request,
+            cache_key,
+            cache,
+            estimated_input_tokens,
+        }))
     }
 }
 

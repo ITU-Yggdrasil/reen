@@ -1,10 +1,12 @@
 use html2text::from_read;
-use reqwest::blocking::{Client, Response};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::{Client, Response};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::env;
+use std::future::Future;
 use std::io::Cursor;
+use std::thread;
 use std::sync::Once;
 use std::time::Duration;
 
@@ -54,6 +56,26 @@ pub fn execute_request(request: &Value) -> Result<String, String> {
 }
 
 pub fn execute_request_with_metadata(
+    request: &Value,
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<NativeExecutionResult, String> {
+    thread::scope(|scope| {
+        scope
+            .spawn(|| execute_request_with_metadata_inner(request, execution_control))
+            .join()
+            .map_err(|panic_payload| {
+                if let Some(message) = panic_payload.downcast_ref::<&str>() {
+                    format!("Native request execution thread panicked: {message}")
+                } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+                    format!("Native request execution thread panicked: {message}")
+                } else {
+                    "Native request execution thread panicked".to_string()
+                }
+            })?
+    })
+}
+
+fn execute_request_with_metadata_inner(
     request: &Value,
     execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<NativeExecutionResult, String> {
@@ -340,7 +362,7 @@ fn execute_with_openai(
 
     execute_openai_compatible(
         provider,
-        &build_client(timeout)?,
+        timeout,
         &format!("{}/chat/completions", base_url.trim_end_matches('/')),
         &api_key,
         model,
@@ -374,7 +396,7 @@ fn execute_with_mistral(
 
     execute_openai_compatible(
         provider,
-        &build_client(timeout)?,
+        timeout,
         &format!("{}/chat/completions", base_url.trim_end_matches('/')),
         &api_key,
         model,
@@ -390,7 +412,7 @@ fn execute_with_mistral(
 
 fn execute_openai_compatible(
     provider: &str,
-    client: &Client,
+    timeout_seconds: u64,
     endpoint: &str,
     api_key: &str,
     model: &str,
@@ -412,7 +434,7 @@ fn execute_openai_compatible(
         agent_name,
         use_prompt_cache,
         execution_control,
-        |body| post_json_bearer(client, endpoint, api_key, body),
+        |body| post_json_bearer(timeout_seconds, endpoint, api_key, body),
     )
 }
 
@@ -533,7 +555,6 @@ fn execute_with_anthropic(
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(180);
-    let client = build_client(timeout)?;
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -543,6 +564,7 @@ fn execute_with_anthropic(
     );
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
 
     let system_blocks = anthropic_system_blocks(system_content);
     let mut messages = vec![json!({
@@ -571,7 +593,7 @@ fn execute_with_anthropic(
             control.before_model_request(&step)?;
         }
         let response = post_json_with_headers(
-            &client,
+            timeout,
             &format!("{}/v1/messages", base_url.trim_end_matches('/')),
             headers.clone(),
             &body,
@@ -644,7 +666,6 @@ fn execute_with_ollama(
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(180);
-    let client = build_client(timeout)?;
 
     let model_name = model.strip_prefix("ollama:").unwrap_or(model);
     let request_body = json!({
@@ -664,7 +685,7 @@ fn execute_with_ollama(
     if let Some(control) = execution_control {
         control.before_model_request(&first_step)?;
     }
-    let response = post_json(&client, &endpoint, &request_body)?;
+    let response = post_json(timeout, &endpoint, &request_body)?;
     let mut metadata = NativeExecutionMetadata {
         steps: vec![ollama_usage_from_response(
             provider,
@@ -718,7 +739,7 @@ fn execute_with_ollama(
     if let Some(control) = execution_control {
         control.before_model_request(&fallback_step)?;
     }
-    let fallback = post_json(&client, &endpoint, &fallback_body)?;
+    let fallback = post_json(timeout, &endpoint, &fallback_body)?;
     let fallback_usage = ollama_usage_from_response(
         provider,
         model,
@@ -738,61 +759,95 @@ fn execute_with_ollama(
 }
 
 fn build_client(timeout_seconds: u64) -> Result<Client, String> {
-    Client::builder()
-        .timeout(Duration::from_secs(timeout_seconds))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {e}"))
+    thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                Client::builder()
+                    .timeout(Duration::from_secs(timeout_seconds))
+                    .build()
+                    .map_err(|e| format!("Failed to create HTTP client: {e}"))
+            })
+            .join()
+            .map_err(|_| "HTTP client construction thread panicked".to_string())?
+    })
 }
 
-fn post_json(client: &Client, url: &str, body: &Value) -> Result<Value, String> {
-    decode_json_response(
-        client
+fn post_json(timeout_seconds: u64, url: &str, body: &Value) -> Result<Value, String> {
+    run_async_http(|| async {
+        let client = build_client(timeout_seconds)?;
+        let response = client
             .post(url)
             .json(body)
             .send()
-            .map_err(|e| format!("Failed to send request to {url}: {e}"))?,
-        url,
-    )
+            .await
+            .map_err(|e| format!("Failed to send request to {url}: {e}"))?;
+        decode_json_response(response, url).await
+    })
 }
 
 fn post_json_bearer(
-    client: &Client,
+    timeout_seconds: u64,
     url: &str,
     api_key: &str,
     body: &Value,
 ) -> Result<Value, String> {
-    decode_json_response(
-        client
+    run_async_http(|| async {
+        let client = build_client(timeout_seconds)?;
+        let response = client
             .post(url)
             .header(AUTHORIZATION, format!("Bearer {api_key}"))
             .json(body)
             .send()
-            .map_err(|e| format!("Failed to send request to {url}: {e}"))?,
-        url,
-    )
+            .await
+            .map_err(|e| format!("Failed to send request to {url}: {e}"))?;
+        decode_json_response(response, url).await
+    })
 }
 
 fn post_json_with_headers(
-    client: &Client,
+    timeout_seconds: u64,
     url: &str,
     headers: HeaderMap,
     body: &Value,
 ) -> Result<Value, String> {
-    decode_json_response(
-        client
+    run_async_http(|| async {
+        let client = build_client(timeout_seconds)?;
+        let response = client
             .post(url)
             .headers(headers)
             .json(body)
             .send()
-            .map_err(|e| format!("Failed to send request to {url}: {e}"))?,
-        url,
-    )
+            .await
+            .map_err(|e| format!("Failed to send request to {url}: {e}"))?;
+        decode_json_response(response, url).await
+    })
 }
 
-fn decode_json_response(response: Response, url: &str) -> Result<Value, String> {
+fn run_async_http<T, F, Fut>(f: F) -> Result<T, String>
+where
+    T: Send,
+    F: FnOnce() -> Fut + Send,
+    Fut: Future<Output = Result<T, String>>,
+{
+    thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?;
+                runtime.block_on(f())
+            })
+            .join()
+            .map_err(|_| "HTTP execution thread panicked".to_string())?
+    })
+}
+
+async fn decode_json_response(response: Response, url: &str) -> Result<Value, String> {
     let status = response.status();
     let payload = response
         .text()
+        .await
         .map_err(|e| format!("Failed to read response body from {url}: {e}"))?;
     if !status.is_success() {
         return Err(format!("HTTP {} for {url}: {}", status.as_u16(), payload));
@@ -948,32 +1003,33 @@ fn execute_fetch_documentation(
         }
     }
 
-    let client = build_client(180)?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|e| format!("Failed to fetch documentation URL {url}: {e}"))?;
-    let status = response.status();
-    if !status.is_success() {
+    let (body, is_html) = run_async_http(|| async {
+        let client = build_client(180)?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch documentation URL {url}: {e}"))?;
+        let status = response.status();
+        let is_html = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.contains("html"))
+            .unwrap_or(false);
         let body = response
             .text()
-            .unwrap_or_else(|_| "<response body unavailable>".to_string());
-        return Err(format!(
-            "Documentation URL returned HTTP {}: {}",
-            status.as_u16(),
-            body
-        ));
-    }
-
-    let is_html = response
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.contains("html"))
-        .unwrap_or(false);
-    let body = response
-        .text()
-        .map_err(|e| format!("Failed to read documentation response body: {e}"))?;
+            .await
+            .map_err(|e| format!("Failed to read documentation response body: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "Documentation URL returned HTTP {}: {}",
+                status.as_u16(),
+                body
+            ));
+        }
+        Ok((body, is_html))
+    })?;
     let normalized = if is_html {
         from_read(Cursor::new(body.as_bytes()), 80)
             .map_err(|e| format!("Failed to extract documentation text: {e}"))?

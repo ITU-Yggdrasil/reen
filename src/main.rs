@@ -213,7 +213,9 @@ enum CheckCommands {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(profile) = cli.profile.as_deref() {
-        std::env::set_var("REEN_PROFILE", profile);
+        unsafe {
+            std::env::set_var("REEN_PROFILE", profile);
+        }
     }
     reen::registries::validate_registry_profile(cli.profile.as_deref())
         .map_err(anyhow::Error::msg)?;

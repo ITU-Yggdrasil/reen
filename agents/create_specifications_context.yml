@@ -124,6 +124,7 @@ static_prompt: |
   **Blocking Ambiguities**
   - List only ambiguities that block implementation because they affect externally observable behavior, business rules, or conflict directly with referenced dependency artifacts
   - Do NOT include an item here unless dependency context was checked first and no compatible definition resolved it
+  - For third-party or external API integrations, missing upstream documentation, undocumented limits, opaque metadata, or unspecified provider-owned fields are usually NOT blocking by themselves; record them as unspecified or under **Implementation Choices Left Open** unless they create a direct contradiction or prevent describing a required caller-visible contract
   - Keep this section business-facing and review-friendly for non-developers
   - If no blocking ambiguities exist, OMIT this section entirely
   - Language/paradigm-specific implementation choices MUST NOT appear here

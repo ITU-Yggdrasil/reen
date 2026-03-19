@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use regex::Regex;
+use serde::Serialize;
 use serde_json::Value as JsonValue;
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExternalApiDraftMetadata {
@@ -21,6 +24,43 @@ impl ExternalApiDraftMetadata {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExternalApiOperationSymbol {
+    pub name: String,
+    pub method: String,
+    pub path: String,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExternalApiBoundaryTypeSymbol {
+    pub name: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ExternalApiSymbolInventory {
+    pub operation_symbols: Vec<ExternalApiOperationSymbol>,
+    pub boundary_type_symbols: Vec<ExternalApiBoundaryTypeSymbol>,
+}
+
+impl ExternalApiSymbolInventory {
+    pub fn published_symbol_names(&self) -> Vec<String> {
+        let mut names = BTreeSet::new();
+        for operation in &self.operation_symbols {
+            names.insert(operation.name.clone());
+        }
+        for boundary in &self.boundary_type_symbols {
+            names.insert(boundary.name.clone());
+        }
+        names.into_iter().collect()
+    }
+}
+
+fn is_external_api_folder(component: &str) -> bool {
+    matches!(component, "external_apis" | "apis")
+}
+
 pub fn is_external_api_draft_path(draft_file: &Path, drafts_dir: &str) -> bool {
     let drafts_root = PathBuf::from(drafts_dir);
     let relative = draft_file.strip_prefix(&drafts_root).unwrap_or(draft_file);
@@ -28,17 +68,19 @@ pub fn is_external_api_draft_path(draft_file: &Path, drafts_dir: &str) -> bool {
         .components()
         .next()
         .and_then(|component| component.as_os_str().to_str())
-        .map(|component| component == "external_apis")
+        .map(is_external_api_folder)
         .unwrap_or(false)
 }
 
 pub fn parse_external_api_draft(draft_content: &str) -> ExternalApiDraftMetadata {
-    let openapi_section = extract_markdown_section(draft_content, "OpenAPI");
-    let documentation_section = extract_markdown_section(draft_content, "Documentation");
-    let scope_section = extract_markdown_section(draft_content, "Scope");
+    let openapi_section =
+        extract_markdown_section(draft_content, &["OpenAPI", "API Specification"]);
+    let documentation_section = extract_markdown_section(draft_content, &["Documentation"]);
+    let scope_section = extract_markdown_section(draft_content, &["Scope"]);
 
     ExternalApiDraftMetadata {
-        openapi_url: extract_labeled_value(&openapi_section, "URL"),
+        openapi_url: extract_labeled_value(&openapi_section, "URL")
+            .or_else(|| extract_first_url(&openapi_section)),
         openapi_local: extract_labeled_value(&openapi_section, "Local"),
         documentation_urls: extract_urls(&documentation_section),
         endpoint_scope: extract_endpoint_scope(&scope_section),
@@ -49,6 +91,14 @@ pub fn load_openapi_content(
     draft_file: &Path,
     metadata: &ExternalApiDraftMetadata,
 ) -> Result<String> {
+    let filtered = load_openapi_document(draft_file, metadata)?;
+    serde_json::to_string_pretty(&filtered).context("failed to serialize normalized OpenAPI")
+}
+
+pub fn load_openapi_document(
+    draft_file: &Path,
+    metadata: &ExternalApiDraftMetadata,
+) -> Result<JsonValue> {
     metadata
         .preferred_openapi_source()
         .context("external API draft is missing an OpenAPI URL or Local entry")?;
@@ -65,9 +115,29 @@ pub fn load_openapi_content(
     };
 
     let parsed = parse_openapi_document(&raw)?;
-    let filtered = filter_openapi_to_scope(parsed, &metadata.endpoint_scope);
+    Ok(filter_openapi_to_scope(parsed, &metadata.endpoint_scope))
+}
 
-    serde_json::to_string_pretty(&filtered).context("failed to serialize normalized OpenAPI")
+pub fn extract_external_api_symbol_inventory(
+    draft_file: &Path,
+    draft_content: &str,
+) -> Result<ExternalApiSymbolInventory> {
+    let metadata = parse_external_api_draft(draft_content);
+    let document = load_openapi_document(draft_file, &metadata)?;
+    Ok(extract_symbol_inventory_from_openapi(&document))
+}
+
+pub fn fallback_operation_name(method: &str, path: &str) -> String {
+    let normalized_path = normalize_operation_path(path);
+    format!(
+        "{}_{}",
+        method.trim().to_ascii_lowercase(),
+        if normalized_path.is_empty() {
+            "root".to_string()
+        } else {
+            normalized_path
+        }
+    )
 }
 
 fn read_local_openapi(draft_file: &Path, relative_or_absolute: &str) -> Result<String> {
@@ -86,17 +156,38 @@ fn read_local_openapi(draft_file: &Path, relative_or_absolute: &str) -> Result<S
 }
 
 fn fetch_remote_text(url: &str) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .build()
-        .context("failed to create HTTP client")?;
-    client
-        .get(url)
-        .send()
-        .with_context(|| format!("failed to fetch OpenAPI URL: {url}"))?
-        .error_for_status()
-        .with_context(|| format!("OpenAPI URL returned error status: {url}"))?
-        .text()
-        .context("failed to read OpenAPI response body")
+    let url = normalize_openapi_source_url(url);
+    thread::spawn(move || {
+        let client = reqwest::blocking::Client::builder()
+            .build()
+            .context("failed to create HTTP client")?;
+        client
+            .get(&url)
+            .send()
+            .with_context(|| format!("failed to fetch OpenAPI URL: {url}"))?
+            .error_for_status()
+            .with_context(|| format!("OpenAPI URL returned error status: {url}"))?
+            .text()
+            .context("failed to read OpenAPI response body")
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("OpenAPI fetch thread panicked"))?
+}
+
+fn normalize_openapi_source_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://github.com/") {
+        let parts = rest.split('/').collect::<Vec<_>>();
+        if parts.len() >= 5 && parts[2] == "blob" {
+            let owner = parts[0];
+            let repo = parts[1];
+            let branch = parts[3];
+            let path = parts[4..].join("/");
+            return format!(
+                "https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
+            );
+        }
+    }
+    url.to_string()
 }
 
 fn parse_openapi_document(raw: &str) -> Result<JsonValue> {
@@ -107,6 +198,104 @@ fn parse_openapi_document(raw: &str) -> Result<JsonValue> {
     let yaml_value = serde_yaml::from_str::<serde_yaml::Value>(raw)
         .context("OpenAPI content is neither valid JSON nor YAML")?;
     serde_json::to_value(yaml_value).context("failed to normalize OpenAPI YAML")
+}
+
+fn extract_symbol_inventory_from_openapi(document: &JsonValue) -> ExternalApiSymbolInventory {
+    let mut operations = Vec::new();
+    let mut published_type_names = BTreeSet::new();
+    let Some(root) = document.as_object() else {
+        return ExternalApiSymbolInventory::default();
+    };
+
+    let global_security = root
+        .get("security")
+        .map(extract_security_scheme_names)
+        .unwrap_or_default();
+
+    let mut proposed_names: Vec<(String, String, String, Option<String>)> = Vec::new();
+    let mut collision_counts = BTreeMap::new();
+
+    if let Some(paths) = root.get("paths").and_then(|value| value.as_object()) {
+        let mut sorted_paths: Vec<_> = paths.iter().collect();
+        sorted_paths.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        for (path, item) in sorted_paths {
+            let Some(path_item) = item.as_object() else {
+                continue;
+            };
+            for method in [
+                "get", "post", "put", "delete", "patch", "options", "head", "trace",
+            ] {
+                let Some(operation) = path_item.get(method).and_then(|value| value.as_object())
+                else {
+                    continue;
+                };
+
+                let operation_id = operation
+                    .get("operationId")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
+                let proposed_name = operation_id
+                    .clone()
+                    .unwrap_or_else(|| fallback_operation_name(method, path));
+                *collision_counts
+                    .entry(proposed_name.clone())
+                    .or_insert(0usize) += 1;
+                proposed_names.push((
+                    proposed_name,
+                    method.to_string(),
+                    path.to_string(),
+                    operation_id.clone(),
+                ));
+
+                let mut refs = BTreeSet::new();
+                collect_json_refs(&JsonValue::Object(operation.clone()), &mut refs);
+                for reference in refs {
+                    if let Some((section, name)) = parse_component_reference(&reference) {
+                        published_type_names.insert((name.to_string(), section.to_string()));
+                    }
+                }
+
+                let mut security_names = global_security.clone();
+                security_names.extend(extract_security_scheme_names(
+                    operation.get("security").unwrap_or(&JsonValue::Null),
+                ));
+                for name in security_names {
+                    published_type_names.insert((name, "securitySchemes".to_string()));
+                }
+            }
+        }
+    }
+
+    for (proposed_name, method, path, operation_id) in proposed_names {
+        let name = if collision_counts.get(&proposed_name).copied().unwrap_or(0) > 1 {
+            format!(
+                "{}_{}",
+                proposed_name,
+                short_symbol_hash(&format!("{}:{}", method, path))
+            )
+        } else {
+            proposed_name
+        };
+        operations.push(ExternalApiOperationSymbol {
+            name,
+            method,
+            path,
+            operation_id,
+        });
+    }
+
+    let boundary_type_symbols = published_type_names
+        .into_iter()
+        .map(|(name, source)| ExternalApiBoundaryTypeSymbol { name, source })
+        .collect();
+
+    ExternalApiSymbolInventory {
+        operation_symbols: operations,
+        boundary_type_symbols,
+    }
 }
 
 fn filter_openapi_to_scope(document: JsonValue, endpoint_scope: &[String]) -> JsonValue {
@@ -154,6 +343,28 @@ fn filter_openapi_to_scope(document: JsonValue, endpoint_scope: &[String]) -> Js
     }
 
     JsonValue::Object(output)
+}
+
+fn parse_component_reference(reference: &str) -> Option<(&str, &str)> {
+    reference
+        .strip_prefix("#/components/")
+        .and_then(|path| path.split_once('/'))
+}
+
+fn extract_security_scheme_names(value: &JsonValue) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    if let Some(requirements) = value.as_array() {
+        for requirement in requirements {
+            if let Some(map) = requirement.as_object() {
+                for name in map.keys() {
+                    if !name.trim().is_empty() {
+                        names.insert(name.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
 }
 
 fn filter_components(
@@ -224,15 +435,57 @@ fn collect_json_refs(value: &JsonValue, refs: &mut BTreeSet<String>) {
     }
 }
 
-fn extract_markdown_section(content: &str, title: &str) -> String {
-    let heading = format!("## {}", title);
+fn normalize_operation_path(path: &str) -> String {
+    let param_re = Regex::new(r"\{([^}]+)\}").expect("valid path parameter regex");
+    let mut normalized_segments = Vec::new();
+    for raw_segment in path.trim_matches('/').split('/') {
+        if raw_segment.is_empty() {
+            continue;
+        }
+
+        let replaced = param_re.replace_all(raw_segment, "by_$1");
+        let normalized = normalize_symbol_fragment(replaced.as_ref());
+        if !normalized.is_empty() {
+            normalized_segments.push(normalized);
+        }
+    }
+
+    normalized_segments.join("_")
+}
+
+fn normalize_symbol_fragment(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_underscore = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_was_underscore = false;
+        } else if !last_was_underscore {
+            out.push('_');
+            last_was_underscore = true;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn short_symbol_hash(value: &str) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())[..8].to_string()
+}
+
+fn extract_markdown_section(content: &str, titles: &[&str]) -> String {
+    let headings = titles
+        .into_iter()
+        .map(|title| format!("## {}", title))
+        .collect::<Vec<_>>();
     let mut lines = Vec::new();
     let mut in_section = false;
 
     for line in content.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("## ") {
-            if trimmed == heading {
+            if headings.iter().any(|heading| trimmed == heading) {
                 in_section = true;
                 continue;
             }
@@ -271,6 +524,10 @@ fn extract_urls(section: &str) -> Vec<String> {
     urls
 }
 
+fn extract_first_url(section: &str) -> Option<String> {
+    extract_urls(section).into_iter().next()
+}
+
 fn extract_endpoint_scope(section: &str) -> Vec<String> {
     let endpoint_re = Regex::new(r"/[A-Za-z0-9_{}./:-]*").expect("valid endpoint regex");
     let mut endpoints = Vec::new();
@@ -286,7 +543,8 @@ fn extract_endpoint_scope(section: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_openapi_to_scope, is_external_api_draft_path, load_openapi_content,
+        extract_external_api_symbol_inventory, fallback_operation_name, filter_openapi_to_scope,
+        is_external_api_draft_path, load_openapi_content, normalize_openapi_source_url,
         parse_external_api_draft, ExternalApiDraftMetadata,
     };
     use serde_json::json;
@@ -306,7 +564,7 @@ mod tests {
     fn parses_external_api_draft_metadata() {
         let draft = r#"# Stripe API Client
 
-## OpenAPI
+## API Specification
 - **URL**: https://example.com/openapi.json
 - **Local**: specs/stripe.yaml
 
@@ -339,10 +597,36 @@ mod tests {
             Path::new("drafts/external_apis/stripe.md"),
             "drafts"
         ));
+        assert!(is_external_api_draft_path(
+            Path::new("drafts/apis/stripe.md"),
+            "drafts"
+        ));
         assert!(!is_external_api_draft_path(
             Path::new("drafts/contexts/stripe.md"),
             "drafts"
         ));
+    }
+
+    #[test]
+    fn parses_external_api_draft_metadata_from_bare_api_specification_url() {
+        let draft = r#"# AISStream
+
+## API Specification
+- https://example.com/openapi.yaml
+
+## Documentation
+- https://docs.example.com/aisstream
+"#;
+
+        let metadata = parse_external_api_draft(draft);
+        assert_eq!(
+            metadata.openapi_url.as_deref(),
+            Some("https://example.com/openapi.yaml")
+        );
+        assert_eq!(
+            metadata.documentation_urls,
+            vec!["https://docs.example.com/aisstream"]
+        );
     }
 
     #[test]
@@ -418,6 +702,138 @@ mod tests {
         };
         let content = load_openapi_content(&draft_file, &metadata).expect("load openapi");
         assert!(content.contains("/v1/charges"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uses_operation_id_when_present_and_extracts_boundary_types() {
+        let root = temp_dir("symbols_operation_id");
+        let draft_dir = root.join("drafts/external_apis");
+        let spec_dir = draft_dir.join("specs");
+        fs::create_dir_all(&spec_dir).expect("create dirs");
+        let draft_file = draft_dir.join("stripe.md");
+        fs::write(
+            &draft_file,
+            "# Stripe\n\n## OpenAPI\n- Local: specs/stripe.yaml\n",
+        )
+        .expect("write draft");
+        fs::write(
+            spec_dir.join("stripe.yaml"),
+            r##"
+openapi: 3.1.0
+paths:
+  /v1/charges:
+    post:
+      operationId: CreateCharge
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateChargeRequest"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Charge"
+components:
+  schemas:
+    CreateChargeRequest:
+      type: object
+    Charge:
+      type: object
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+"##,
+        )
+        .expect("write spec");
+
+        let inventory = extract_external_api_symbol_inventory(
+            &draft_file,
+            &fs::read_to_string(&draft_file).unwrap(),
+        )
+        .expect("inventory");
+
+        assert_eq!(inventory.operation_symbols.len(), 1);
+        assert_eq!(inventory.operation_symbols[0].name, "CreateCharge");
+        let published = inventory.published_symbol_names();
+        assert!(published.iter().any(|name| name == "CreateChargeRequest"));
+        assert!(published.iter().any(|name| name == "Charge"));
+        assert!(published.iter().any(|name| name == "bearerAuth"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fallback_operation_name_is_deterministic_and_normalized() {
+        assert_eq!(
+            fallback_operation_name("POST", "/v1/payment-intents/{intent_id}.json"),
+            "post_v1_payment_intents_by_intent_id_json"
+        );
+    }
+
+    #[test]
+    fn normalizes_github_blob_urls_to_raw_content() {
+        assert_eq!(
+            normalize_openapi_source_url(
+                "https://github.com/aisstream/ais-message-models/blob/master/type-definition.yaml"
+            ),
+            "https://raw.githubusercontent.com/aisstream/ais-message-models/master/type-definition.yaml"
+        );
+    }
+
+    #[test]
+    fn colliding_fallback_names_receive_stable_suffixes() {
+        let root = temp_dir("symbols_collision");
+        let draft_dir = root.join("drafts/external_apis");
+        let spec_dir = draft_dir.join("specs");
+        fs::create_dir_all(&spec_dir).expect("create dirs");
+        let draft_file = draft_dir.join("demo.md");
+        fs::write(
+            &draft_file,
+            "# Demo\n\n## OpenAPI\n- Local: specs/demo.yaml\n",
+        )
+        .expect("write draft");
+        fs::write(
+            spec_dir.join("demo.yaml"),
+            r##"
+openapi: 3.1.0
+paths:
+  /users/{id}:
+    get:
+      responses:
+        "200": { description: ok }
+  /users/by-id:
+    get:
+      responses:
+        "200": { description: ok }
+"##,
+        )
+        .expect("write spec");
+
+        let inventory = extract_external_api_symbol_inventory(
+            &draft_file,
+            &fs::read_to_string(&draft_file).unwrap(),
+        )
+        .expect("inventory");
+        let names: Vec<String> = inventory
+            .operation_symbols
+            .iter()
+            .map(|operation| operation.name.clone())
+            .collect();
+
+        assert_eq!(names.len(), 2);
+        assert!(names
+            .iter()
+            .all(|name| name.starts_with("get_users_by_id_")));
+        assert_ne!(names[0], names[1]);
 
         let _ = fs::remove_dir_all(root);
     }

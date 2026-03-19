@@ -6,6 +6,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::openapi_fetcher::{extract_external_api_symbol_inventory, is_external_api_draft_path};
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencySource {
@@ -242,6 +244,7 @@ struct IndexedArtifact {
 enum ArtifactCategory {
     App,
     Contexts,
+    ExternalApi,
     Data,
     Other,
 }
@@ -278,7 +281,8 @@ fn categorize_artifact(
         .and_then(|c| c.as_os_str().to_str())
         .unwrap_or("");
     match first {
-        "contexts" | "external_apis" => ArtifactCategory::Contexts,
+        "contexts" => ArtifactCategory::Contexts,
+        "external_apis" | "apis" => ArtifactCategory::ExternalApi,
         "data" => ArtifactCategory::Data,
         _ => ArtifactCategory::Other,
     }
@@ -290,10 +294,18 @@ fn dependency_allowed(from: ArtifactCategory, to: ArtifactCategory) -> bool {
         ArtifactCategory::Data => matches!(to, ArtifactCategory::Data),
         // Contexts may depend on data and other contexts, but never on the app entrypoint.
         ArtifactCategory::Contexts => {
-            matches!(to, ArtifactCategory::Contexts | ArtifactCategory::Data)
+            matches!(
+                to,
+                ArtifactCategory::Contexts | ArtifactCategory::ExternalApi | ArtifactCategory::Data
+            )
         }
+        // External APIs are source-boundary leaves and do not depend on other drafts.
+        ArtifactCategory::ExternalApi => false,
         // The app entrypoint can depend on contexts and data.
-        ArtifactCategory::App => matches!(to, ArtifactCategory::Contexts | ArtifactCategory::Data),
+        ArtifactCategory::App => matches!(
+            to,
+            ArtifactCategory::Contexts | ArtifactCategory::ExternalApi | ArtifactCategory::Data
+        ),
         ArtifactCategory::Other => true,
     }
 }
@@ -344,6 +356,16 @@ pub fn build_execution_plan(
 
         let mut direct_dependencies = Vec::new();
         let mut edge_targets = Vec::new();
+
+        if from_category == ArtifactCategory::ExternalApi {
+            nodes.push(ExecutionNode {
+                name,
+                input_path: input_path.clone(),
+                direct_dependencies,
+            });
+            edges.push(edge_targets);
+            continue;
+        }
 
         let canonicals = extract_dependency_canonicals(&content, &primary_index, &fallback_index);
         for canonical in canonicals {
@@ -604,6 +626,7 @@ fn build_index(root: &str) -> Result<Vec<IndexedArtifact>> {
     let mut files = Vec::new();
     collect_markdown_files(&root_path, &mut files)?;
     let mut artifacts = Vec::new();
+    let mut seen = HashSet::new();
 
     for path in files {
         let name = match path.file_stem().and_then(|s| s.to_str()) {
@@ -623,16 +646,58 @@ fn build_index(root: &str) -> Result<Vec<IndexedArtifact>> {
             continue;
         }
 
-        let token_len = token_count(&name).max(1);
-        artifacts.push(IndexedArtifact {
-            name,
-            canonical,
-            path,
-            token_len,
-        });
+        push_indexed_artifact(
+            &mut artifacts,
+            &mut seen,
+            IndexedArtifact {
+                name,
+                canonical,
+                path: path.clone(),
+                token_len: token_count(
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default(),
+                )
+                .max(1),
+            },
+        );
+
+        if is_external_api_draft_path(&path, root) {
+            let content = fs::read_to_string(&path).with_context(|| {
+                format!("failed reading external API draft: {}", path.display())
+            })?;
+            let inventory = extract_external_api_symbol_inventory(&path, &content)?;
+            for symbol_name in inventory.published_symbol_names() {
+                let canonical = canonicalize(&symbol_name);
+                if canonical.is_empty() {
+                    continue;
+                }
+                push_indexed_artifact(
+                    &mut artifacts,
+                    &mut seen,
+                    IndexedArtifact {
+                        token_len: token_count(&symbol_name).max(1),
+                        name: symbol_name,
+                        canonical,
+                        path: path.clone(),
+                    },
+                );
+            }
+        }
     }
 
     Ok(artifacts)
+}
+
+fn push_indexed_artifact(
+    artifacts: &mut Vec<IndexedArtifact>,
+    seen: &mut HashSet<(PathBuf, String)>,
+    artifact: IndexedArtifact,
+) {
+    let key = (artifact.path.clone(), artifact.canonical.clone());
+    if seen.insert(key) {
+        artifacts.push(artifact);
+    }
 }
 
 fn index_by_canonical(index: &[IndexedArtifact]) -> HashMap<String, Vec<IndexedArtifact>> {
@@ -945,6 +1010,104 @@ mod tests {
         let paths: Vec<String> = closure.iter().map(|d| d.path.clone()).collect();
 
         assert!(!paths.iter().any(|p| p.ends_with("app.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_api_symbols_are_visible_for_dependency_resolution() {
+        let root = temp_root("external_symbols");
+        let drafts = root.join("drafts");
+        let external = drafts.join("external_apis");
+        let contexts = drafts.join("contexts");
+        fs::create_dir_all(external.join("specs")).expect("mkdir external");
+        fs::create_dir_all(&contexts).expect("mkdir contexts");
+
+        let stripe = external.join("stripe.md");
+        let payments = contexts.join("payments.md");
+        fs::write(
+            external.join("specs/stripe.yaml"),
+            r##"
+openapi: 3.1.0
+paths:
+  /v1/payment_intents:
+    post:
+      operationId: CreatePaymentIntent
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentIntent"
+components:
+  schemas:
+    PaymentIntent:
+      type: object
+"##,
+        )
+        .expect("write spec");
+        fs::write(
+            &stripe,
+            "# Stripe\n\n## OpenAPI\n- Local: specs/stripe.yaml\n",
+        )
+        .expect("write draft");
+        fs::write(&payments, "Depends on: CreatePaymentIntent, PaymentIntent")
+            .expect("write payments");
+
+        let levels = build_execution_plan(
+            vec![stripe.clone(), payments.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0][0].input_path, stripe);
+        assert_eq!(levels[1][0].input_path, payments);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_api_nodes_are_leaves_even_if_their_draft_mentions_other_symbols() {
+        let root = temp_root("external_leaf");
+        let drafts = root.join("drafts");
+        let external = drafts.join("external_apis");
+        let data = drafts.join("data");
+        fs::create_dir_all(external.join("specs")).expect("mkdir external");
+        fs::create_dir_all(&data).expect("mkdir data");
+
+        let stripe = external.join("stripe.md");
+        let money = data.join("money.md");
+        fs::write(
+            external.join("specs/stripe.yaml"),
+            "openapi: 3.1.0\npaths:\n  /v1/charges:\n    get:\n      responses:\n        \"200\": { description: ok }\n",
+        )
+        .expect("write spec");
+        fs::write(
+            &stripe,
+            "# Stripe\n\nMentions Money.\n\n## OpenAPI\n- Local: specs/stripe.yaml\n",
+        )
+        .expect("write draft");
+        fs::write(&money, "# Money").expect("write data");
+
+        let levels = build_execution_plan(
+            vec![stripe.clone(), money.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+
+        let stripe_node = levels
+            .iter()
+            .flatten()
+            .find(|node| node.input_path == stripe)
+            .expect("stripe node");
+        assert!(stripe_node
+            .resolve_direct_dependencies()
+            .expect("deps")
+            .is_empty());
 
         let _ = fs::remove_dir_all(root);
     }
