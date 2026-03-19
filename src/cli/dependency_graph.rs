@@ -143,7 +143,7 @@ impl ExecutionNode {
                 categorize_artifact(&path, &primary_root_path, fallback_root_path.as_deref());
 
             let canonicals =
-                extract_dependency_canonicals(&content, &primary_index, &fallback_index);
+                extract_dependency_canonicals(&path, &content, &primary_index, &fallback_index);
             for canonical in canonicals {
                 let primary_candidates = primary_by_canonical
                     .get(&canonical)
@@ -367,7 +367,8 @@ pub fn build_execution_plan(
             continue;
         }
 
-        let canonicals = extract_dependency_canonicals(&content, &primary_index, &fallback_index);
+        let canonicals =
+            extract_dependency_canonicals(input_path, &content, &primary_index, &fallback_index);
         for canonical in canonicals {
             let primary_candidates = primary_by_canonical
                 .get(&canonical)
@@ -715,6 +716,7 @@ fn index_by_canonical(index: &[IndexedArtifact]) -> HashMap<String, Vec<IndexedA
 }
 
 fn extract_dependency_canonicals(
+    artifact_path: &Path,
     content: &str,
     primary_index: &[IndexedArtifact],
     fallback_index: &[IndexedArtifact],
@@ -740,6 +742,15 @@ fn extract_dependency_canonicals(
         }
     }
 
+    if is_generated_external_data_specification_path(artifact_path) {
+        discovered.extend(extract_external_reference_canonicals(
+            content,
+            primary_index,
+            fallback_index,
+        ));
+        return discovered;
+    }
+
     let token_re = Regex::new(r"[A-Za-z0-9]+").expect("valid token regex");
     let tokens: Vec<String> = token_re
         .find_iter(content)
@@ -760,6 +771,92 @@ fn extract_dependency_canonicals(
     }
 
     discovered
+}
+
+fn is_generated_external_data_specification_path(path: &Path) -> bool {
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    components
+        .windows(2)
+        .any(|window| window[0] == "data" && window[1] == "external")
+}
+
+fn extract_external_reference_canonicals(
+    content: &str,
+    primary_index: &[IndexedArtifact],
+    fallback_index: &[IndexedArtifact],
+) -> BTreeSet<String> {
+    let mut discovered = BTreeSet::new();
+
+    let mut names_by_canonical: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in primary_index.iter().chain(fallback_index.iter()) {
+        names_by_canonical
+            .entry(entry.canonical.clone())
+            .or_default()
+            .push(entry.name.clone());
+    }
+
+    for (canonical, names) in names_by_canonical {
+        if has_external_dependency_reference(content, &names) {
+            discovered.insert(canonical);
+        }
+    }
+
+    discovered
+}
+
+fn has_external_dependency_reference(content: &str, candidate_names: &[String]) -> bool {
+    let patterns = candidate_names
+        .iter()
+        .filter_map(|name| dependency_name_regex(name))
+        .collect::<Vec<_>>();
+    if patterns.is_empty() {
+        return false;
+    }
+
+    for line in content.lines() {
+        if !patterns.iter().any(|pattern| pattern.is_match(line)) {
+            continue;
+        }
+        if !is_context_only_external_data_reference(line) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn dependency_name_regex(name: &str) -> Option<Regex> {
+    let tokens = Regex::new(r"[A-Za-z0-9]+")
+        .expect("valid token regex")
+        .find_iter(name)
+        .map(|m| regex::escape(m.as_str()))
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+
+    let body = tokens.join(r"[^A-Za-z0-9]+");
+    Regex::new(&format!(r"(?i)(^|[^A-Za-z0-9])({})($|[^A-Za-z0-9])", body)).ok()
+}
+
+fn is_context_only_external_data_reference(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "carried inside",
+        "carried in",
+        "within `",
+        "within ",
+        "payload of",
+        "only present in",
+        "only valid in the context",
+        "only meaningful in the context",
+        "used exclusively as the payload",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn extract_explicit_dependency_names(content: &str) -> Vec<String> {
@@ -1108,6 +1205,40 @@ components:
             .resolve_direct_dependencies()
             .expect("deps")
             .is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_generated_payload_specs_do_not_create_back_edges_to_envelope() {
+        let root = temp_root("external_generated_direction");
+        let specs = root.join("specifications");
+        fs::create_dir_all(specs.join("data/external/aisstream")).expect("mkdir data");
+
+        let envelope = specs.join("data/external/aisstream/AisStreamMessage.md");
+        let payload = specs.join("data/external/aisstream/PositionReport.md");
+
+        fs::write(
+            &envelope,
+            "# AisStreamMessage\n\n`Message` contains `PositionReport` when `MessageType` is `PositionReport`.\n",
+        )
+        .expect("write envelope");
+        fs::write(
+            &payload,
+            "# PositionReport\n\n`PositionReport` is carried inside `AisStreamMessage.Message` when `MessageType` is `PositionReport`.\n",
+        )
+        .expect("write payload");
+
+        let levels = build_execution_plan(
+            vec![envelope.clone(), payload.clone()],
+            specs.to_str().unwrap_or("specifications"),
+            None,
+        )
+        .expect("plan");
+
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0][0].input_path, payload);
+        assert_eq!(levels[1][0].input_path, envelope);
 
         let _ = fs::remove_dir_all(root);
     }

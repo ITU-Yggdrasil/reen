@@ -1,173 +1,105 @@
 # E2E Test Quickstart Guide
 
-This guide will help you run the money transfer end-to-end test in 3 simple steps.
+This guide runs the money-transfer fixture from end to end.
 
 ## Prerequisites
 
-1. **Build reen**:
+1. Build Reen:
+
    ```bash
    cargo build --release
    ```
 
-2. **Set API key** (choose one):
-   ```bash
-   # Option A: Anthropic (Claude)
-   export ANTHROPIC_API_KEY='your-key-here'
+2. Configure at least one supported provider before running the test.
 
-   # Option B: OpenAI (GPT)
-   export OPENAI_API_KEY='your-key-here'
+   Examples:
+
+   ```bash
+   export OPENAI_API_KEY="your-key-here"
+   export ANTHROPIC_API_KEY="your-key-here"
+   export MISTRAL_API_KEY="your-key-here"
+   export OLLAMA_BASE_URL="http://localhost:11434"
    ```
 
-## Running the Test
+   For full setup details, see [SETUP.md](../SETUP.md).
 
-### Step 1: Verify Setup
+## Running The Test
+
+### Step 1: Verify setup
 
 ```bash
 ./tests/check_setup.sh
 ```
 
-This will check if everything is configured correctly.
-
-### Step 2: Run the E2E Test
+### Step 2: Run the e2e shell flow
 
 ```bash
 ./tests/e2e_money_transfer_test.sh
 ```
 
-This will:
-- Build reen
-- Generate specifications from drafts
-- Generate implementation from specifications
-- Generate tests
-- Compile the code
-- Run a money transfer test (transfer 100 from account A to B)
+This flow:
 
-### Step 3: Examine Results
+1. Builds Reen
+2. Generates specifications from drafts
+3. Generates implementation from specifications
+4. Generates BDD tests from specifications
+5. Compiles the fixture project
+6. Runs the generated and manual verification tests
 
-After a successful run, check:
+### Step 3: Inspect the generated fixture output
+
+After a successful run, inspect:
 
 ```bash
-# View generated specifications
-cat "tests/money transfer/contexts/account.md"
-cat "tests/money transfer/contexts/money_transfer.md"
-
-# View generated implementation
+ls -la "tests/money transfer/specifications/"
 ls -la "tests/money transfer/src/contexts/"
-cat "tests/money transfer/src/contexts/account.rs"
-cat "tests/money transfer/src/contexts/money_transfer.rs"
-
-# View generated tests
 ls -la "tests/money transfer/tests/"
 ```
 
-## What to Expect
+Key locations:
 
-### Successful Output
+- `tests/money transfer/specifications/`
+- `tests/money transfer/src/`
+- `tests/money transfer/tests/features/`
+- `tests/money transfer/tests/steps/`
 
-You should see:
-```
-=====================================
-Money Transfer E2E Integration Test
-=====================================
-
-Step 0: Building reen...
-✓ reen built successfully
-
-Step 1: Creating specifications from drafts...
-✓ Specifications created successfully
-
-Step 2: Creating implementation from specifications...
-✓ Implementation created successfully
-
-Step 3: Creating tests from specifications...
-✓ Tests created successfully
-
-Step 4: Compiling the generated code...
-✓ Project compiled successfully
-
-Step 5: Running generated tests...
-✓ Generated tests passed
-
-Step 6: Creating manual integration test...
-✓ Manual integration test created
-
-Step 7: Running manual integration test...
-Initial balance A: 1000
-Initial balance B: 500
-Transfer successful!
-Final balance A: 900
-Final balance B: 600
-✓ Transfer test passed!
-
-=====================================
-✓ E2E TEST SUCCESSFUL!
-=====================================
-```
-
-## Troubleshooting
-
-### "Native runner failed"
-- Rebuild the binary: `cargo build --release`
-- Check that your API key is set: `echo $ANTHROPIC_API_KEY`
-
-### "Agent not found"
-- Run from the project root directory (where `Cargo.toml` is)
-
-### "Compilation failed"
-- The AI-generated code may need manual adjustments
-- Check the compiler errors for specific issues
-- This is normal - reen is a development tool that generates a starting point
-
-### Test takes a long time
-- LLM API calls can be slow (several minutes)
-- This is normal for the first run
-
-## Alternative: Rust Integration Test
-
-Instead of the shell script, you can run the Rust integration test:
+## Alternative: Run The Rust Test
 
 ```bash
 cargo test e2e_money_transfer --test e2e_test -- --nocapture --ignored
 ```
 
-This does the same thing but from within Rust's test framework.
+## What The Test Proves
 
-## Understanding the Test
+The fixture checks that Reen can:
 
-The test verifies that reen can:
+1. Turn `drafts/` into `specifications/`
+2. Turn `specifications/` into Rust implementation under `src/`
+3. Turn `specifications/` into executable BDD tests under `tests/`
+4. Produce code that compiles and passes the money-transfer scenario
 
-1. **Transform drafts → specifications**
-   - Input: Plain language descriptions in `drafts/`
-   - Output: Formal specifications in `contexts/`
+## Troubleshooting
 
-2. **Transform specifications → code**
-   - Input: Formal specifications
-   - Output: Working Rust implementation in `src/contexts/`
+### `Native runner failed`
 
-3. **Transform specifications → tests**
-   - Input: Formal specifications
-   - Output: Test files
+- Rebuild Reen with `cargo build --release`
+- Recheck provider credentials and model configuration
 
-4. **Verify correctness**
-   - The generated code compiles
-   - The money transfer logic works:
-     - Account A starts with 1000
-     - Account B starts with 500
-     - Transfer 100 from A to B
-     - Account A ends with 900
-     - Account B ends with 600
+### `Agent not found`
 
-## Next Steps
+- Run from the project root so Reen can find `agents/`
 
-After a successful test:
+### Compilation failed inside the fixture
 
-1. Modify the drafts and re-run to see how reen handles changes
-2. Add your own draft documents
-3. Use reen for your own projects
-4. Check out the main [README.md](../README.md) for more commands
+- Inspect the generated Rust code and compiler output
+- Regenerate with different model settings or retry with fix-enabled implementation flow
 
-## Getting Help
+### The test takes a long time
 
-- See [tests/README.md](README.md) for detailed documentation
-- See [SETUP.md](../SETUP.md) for installation details
-- Check the [main README](../README.md) for command reference
+- First runs can take several minutes because they make live model calls
+
+## More Help
+
+- [tests/README.md](README.md)
+- [SETUP.md](../SETUP.md)
+- [README.md](../README.md)

@@ -1175,7 +1175,17 @@ pub async fn create_implementation(
                 .direct_dependency_names()
                 .iter()
                 .any(|dep_name| updated_in_run.contains(dep_name));
-            let dependency_fingerprint = dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
+            let (fingerprint_primary_root, fingerprint_fallback_root) =
+                if node.input_path.starts_with(SPECIFICATIONS_DIR) {
+                    (SPECIFICATIONS_DIR, Some(DRAFTS_DIR))
+                } else {
+                    (DRAFTS_DIR, None)
+                };
+            let dependency_fingerprint = dependency_fingerprint_for_node(
+                &node,
+                fingerprint_primary_root,
+                fingerprint_fallback_root,
+            )?;
             let output_path =
                 determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
 
@@ -1995,9 +2005,15 @@ fn is_no_issue_placeholder_bullet(text: &str) -> bool {
 }
 
 fn is_external_specification_path(path: &Path) -> bool {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    normalized.starts_with("specifications/data/external/")
-        || normalized.starts_with("specifications/contexts/external/")
+    let components: Vec<String> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str().map(|value| value.to_string()))
+        .collect();
+    components.windows(3).any(|window| {
+        window[0] == "specifications"
+            && ((window[1] == "data" && window[2] == "external")
+                || (window[1] == "contexts" && window[2] == "external"))
+    })
 }
 
 fn is_external_source_gap_detail(text: &str) -> bool {
@@ -2773,26 +2789,52 @@ fn build_implementation_execution_plan(
     spec_files: Vec<PathBuf>,
     filter: &CategoryFilter,
 ) -> Result<Vec<Vec<ExecutionNode>>> {
-    let mut draft_inputs = Vec::new();
-    for spec_file in spec_files {
-        let draft_path = determine_draft_input_path(&spec_file, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
-        if draft_path.exists() {
-            draft_inputs.push(draft_path);
-        } else {
-            draft_inputs.push(spec_file);
-        }
-    }
+    let implementation_inputs =
+        resolve_implementation_dependency_inputs(spec_files, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
 
-    let expanded_inputs = expand_with_transitive_dependencies(draft_inputs, DRAFTS_DIR, None)?;
+    let expanded_inputs = expand_with_transitive_dependencies(
+        implementation_inputs,
+        SPECIFICATIONS_DIR,
+        Some(DRAFTS_DIR),
+    )?;
     let filtered_inputs = if filter.is_active() {
         expanded_inputs
             .into_iter()
-            .filter(|f| filter.matches_path(f, DRAFTS_DIR))
+            .filter(|f| {
+                let base_dir = if f.starts_with(SPECIFICATIONS_DIR) {
+                    SPECIFICATIONS_DIR
+                } else {
+                    DRAFTS_DIR
+                };
+                filter.matches_path(f, base_dir)
+            })
             .collect()
     } else {
         expanded_inputs
     };
-    build_execution_plan(filtered_inputs, DRAFTS_DIR, None)
+    build_execution_plan(filtered_inputs, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))
+}
+
+fn resolve_implementation_dependency_inputs(
+    spec_files: Vec<PathBuf>,
+    specifications_dir: &str,
+    drafts_dir: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut inputs = Vec::new();
+    for spec_file in spec_files {
+        if is_external_specification_path(&spec_file) {
+            inputs.push(spec_file);
+            continue;
+        }
+
+        let draft_path = determine_draft_input_path(&spec_file, specifications_dir, drafts_dir)?;
+        if draft_path.exists() {
+            inputs.push(draft_path);
+        } else {
+            inputs.push(spec_file);
+        }
+    }
+    Ok(inputs)
 }
 
 fn dependency_fingerprint_for_node(
@@ -3910,13 +3952,15 @@ fn generated_project_structure_paths(project_info: &ProjectInfo) -> Vec<PathBuf>
 mod tests {
     use super::{
         build_dependency_drafts_from_context, build_dependency_manifest,
+        build_implementation_execution_plan, build_execution_plan,
         build_implemented_dependency_manifest, determine_bdd_test_paths,
         determine_draft_input_path, determine_implementation_output_path,
         determine_specification_output_path, ensure_dev_dependency_entry,
         external_generated_context_output_path, external_generated_data_output_path,
         extract_actionable_blocking_bullets_for_path, extract_compile_error_message,
-        generated_project_structure_paths, parse_generated_files, resolve_input_files,
-        sync_managed_block, CategoryFilter, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
+        generated_project_structure_paths, parse_generated_files,
+        resolve_implementation_dependency_inputs, resolve_input_files, sync_managed_block,
+        CategoryFilter, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -4037,6 +4081,115 @@ Problem:
             external_generated_context_output_path("stripe", "auth_flow"),
             Path::new("specifications/contexts/external/stripe/auth_flow.md")
         );
+    }
+
+    #[test]
+    fn implementation_plan_keeps_generated_external_specs_and_their_dependencies() {
+        let root = temp_root("external_impl_plan");
+        let drafts = root.join("drafts");
+        let specs = root.join("specifications");
+        fs::create_dir_all(drafts.join("apis")).expect("mkdir drafts apis");
+        fs::create_dir_all(specs.join("contexts/external")).expect("mkdir contexts external");
+        fs::create_dir_all(specs.join("data/external/aisstream"))
+            .expect("mkdir data external");
+
+        let external_draft = drafts.join("apis/aisstream.md");
+        let context_spec = specs.join("contexts/external/aisstream.md");
+        let message_spec = specs.join("data/external/aisstream/AisStreamMessage.md");
+        let subscription_spec = specs.join("data/external/aisstream/SubscriptionMessage.md");
+        let position_spec = specs.join("data/external/aisstream/PositionReport.md");
+
+        fs::write(
+            &external_draft,
+            "# AISStream API draft\n\n## OpenAPI\n- Local: specs/aisstream.yaml\n",
+        )
+        .expect("write draft");
+        fs::create_dir_all(drafts.join("apis/specs")).expect("mkdir api specs");
+        fs::write(
+            drafts.join("apis/specs/aisstream.yaml"),
+            "openapi: 3.1.0\npaths: {}\ncomponents: {}\n",
+        )
+        .expect("write openapi spec");
+        fs::write(
+            &context_spec,
+            "# AISStream\n\nUses `SubscriptionMessage` and `AisStreamMessage`.\n",
+        )
+        .expect("write context spec");
+        fs::write(
+            &message_spec,
+            "# AisStreamMessage\n\nCarries `PositionReport` payloads.\n",
+        )
+        .expect("write message spec");
+        fs::write(&subscription_spec, "# SubscriptionMessage\n").expect("write subscription spec");
+        fs::write(&position_spec, "# PositionReport\n").expect("write position spec");
+
+        let implementation_inputs = resolve_implementation_dependency_inputs(
+            vec![
+                context_spec.clone(),
+                message_spec.clone(),
+                subscription_spec.clone(),
+                position_spec.clone(),
+            ],
+            specs.to_str().unwrap_or("specifications"),
+            drafts.to_str().unwrap_or("drafts"),
+        )
+        .expect("implementation inputs");
+
+        assert!(implementation_inputs.contains(&context_spec));
+        assert!(!implementation_inputs.contains(&external_draft));
+
+        let levels = build_execution_plan(
+            implementation_inputs.clone(),
+            specs.to_str().unwrap_or("specifications"),
+            Some(drafts.to_str().unwrap_or("drafts")),
+        )
+        .expect("plan");
+
+        let context_node = levels
+            .iter()
+            .flatten()
+            .find(|node| node.input_path == context_spec)
+            .expect("context node");
+        let message_node = levels
+            .iter()
+            .flatten()
+            .find(|node| node.input_path == message_spec)
+            .expect("message node");
+        assert_eq!(
+            context_node.direct_dependency_names(),
+            vec!["AisStreamMessage".to_string(), "SubscriptionMessage".to_string()]
+        );
+        assert_eq!(
+            message_node.direct_dependency_names(),
+            vec!["PositionReport".to_string()]
+        );
+
+        let original_dir = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&root).expect("set cwd");
+        let implementation_levels = build_implementation_execution_plan(
+            vec![context_spec, message_spec, subscription_spec, position_spec],
+            &CategoryFilter::all(),
+        )
+        .expect("implementation plan");
+        std::env::set_current_dir(original_dir).expect("restore cwd");
+
+        let context_level = implementation_levels
+            .iter()
+            .position(|level| level.iter().any(|node| node.name == "aisstream"))
+            .expect("context level");
+        let message_level = implementation_levels
+            .iter()
+            .position(|level| level.iter().any(|node| node.name == "AisStreamMessage"))
+            .expect("message level");
+        let position_level = implementation_levels
+            .iter()
+            .position(|level| level.iter().any(|node| node.name == "PositionReport"))
+            .expect("position level");
+
+        assert!(position_level < message_level);
+        assert!(message_level < context_level);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

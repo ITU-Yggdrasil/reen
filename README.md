@@ -1,309 +1,350 @@
 # Reen
 
-A compiler-like CLI tool for agent-driven specification and implementation.
+Reen is a compiler-like CLI for turning markdown drafts into structured specifications, Rust implementation, and executable BDD tests.
 
-## Overview
+## Pipeline
 
-Reen is a meta-development tool that uses AI agents to transform draft documents into formal specifications and then into working code. It follows a pipeline approach:
+The normal flow is:
 
-1. **Drafts** → Specifications (via `create_specifications` agent)
-2. **Specifications** → Implementation (via `create_implementation` agent)
-3. **Specifications** → Tests (via `create_test` agent)
+1. `drafts/` -> `specifications/`
+2. `specifications/` -> `src/`
+3. `specifications/` -> `tests/`
 
-**Key Features**
-- 🚀 **Incremental builds** - Only regenerates changed files
-- 📦 **Smart caching** - Tracks file hashes to skip unnecessary work
-- 🔗 **Dependency tracking** - Automatically detects when upstream files change
-- 💰 **Cost efficient** - Minimizes LLM API calls
+Reen keeps build-tracker state so unchanged work can be skipped on later runs.
 
-## Directory Structure
+## Project Layout
 
-```
+```text
 reen/
-├── drafts/          # Draft documents describing features/components
-├── contexts/        # Generated formal specifications
-├── agents/          # Agent specifications (YAML)
-├── src/             # Generated Rust source code
-└── tests/           # Generated tests
+├── agents/          # Agent specs and model registry files
+├── drafts/          # Human-authored input markdown
+├── specifications/  # Generated specification markdown
+├── src/             # Generated Rust implementation
+└── tests/           # Generated BDD features, step files, and test runners
 ```
 
-## Installation
+## Setup And Build
 
-### Quick Start
+For platform-specific setup on Windows, Linux/WSL, and macOS, see [SETUP.md](SETUP.md).
 
-1. Set your API key(s) for your chosen provider:
-```bash
-export OPENAI_API_KEY='your-api-key-here'
-export ANTHROPIC_API_KEY='your-api-key-here'
-export MISTRAL_API_KEY='your-api-key-here'
-```
+Build the release binary with:
 
-2. Build the project:
 ```bash
 cargo build --release
 ```
 
-The binary will be available at `target/release/reen`.
+Binary paths:
 
-For detailed setup instructions, see [SETUP.md](SETUP.md).
+- macOS, Linux, WSL: `./target/release/reen`
+- Windows PowerShell: `.\target\release\reen.exe`
 
-## Usage
+All command examples below use `reen` as a placeholder for that compiled binary.
 
-### Create Specifications
+## CLI Guide
 
-Transform draft documents into formal specifications:
+### Global Flags
 
-```bash
-# Process all drafts
-reen create specification
+These flags work with every command:
 
-# Process specific drafts
-reen create specification app agent_runner
+| Flag | Description | Example |
+| --- | --- | --- |
+| `--profile <name>` | Use `agents/agent_model_registry.<name>.yml` instead of the default registry. | `reen --profile sonnet create specification` |
+| `--verbose` | Print extra progress and debug output. | `reen --verbose create implementation app` |
+| `--dry-run` | Show what would happen without changing files. | `reen --dry-run clear artefact specification app` |
+| `-h, --help` | Show help for the current command. | `reen create --help` |
 
-# Auto-fix drafts when blocking ambiguities are detected
-reen create specification --fix
+### Command Tree
 
-# Limit fix attempts (default: 3)
-reen create specification --fix --max-fix-attempts 5
-```
-
-When `--fix` is used and the specification agent reports blocking ambiguities, a new agent (`fix_draft_blockers`) is invoked to propose patches to draft files. Blockers in one draft may require fixes in a dependency draft (e.g. an underspecified data draft can cause blockers in a context spec that depends on it). Patches are applied and specification creation retries until blockers are resolved or the max attempt limit is reached.
-
-### Create Implementation
-
-Generate implementation code from specifications:
-
-```bash
-# Implement all contexts
-reen create implementation
-
-# Implement specific contexts
-reen create implementation app file_cache
-```
-
-### Create Tests
-
-Generate tests from specifications:
-
-```bash
-# Create tests for all contexts
-reen create tests
-
-# Create tests for specific contexts
-reen create tests app
-```
-
-### Compile, Run & Test
-
-Wrapper commands around cargo:
-
-```bash
-# Compile the project
+```text
+reen create <subcommand>
+reen check <subcommand>
+reen fix
 reen compile
-
-# Build and run the application
-reen run
-
-# Pass arguments to the application
-reen run -- arg1 arg2
-
-# Run tests
+reen run [-- <args...>]
 reen test
+reen clear <subcommand>
+reen help <command>
 ```
 
-## Global Options
+You can also use `-h` or `--help` at any level, for example `reen clear --help` or `reen create implementation --help`.
 
-- `--verbose` - Enable detailed debug output
-- `--dry-run` - Show what would be done without executing
+### `create`
+
+`create` is the main generation command. It has its own shared options before the stage subcommand:
+
+| Flag | Description | Example |
+| --- | --- | --- |
+| `--clear-cache` | Ignore build-tracker state for this create run and refresh the stage cache first. | `reen create --clear-cache specification` |
+| `--contexts` | Only include `drafts/contexts/`, `drafts/apis/`, and `drafts/external_apis/`. | `reen create --contexts specification` |
+| `--data` | Only include `drafts/data/`. | `reen create --data specification` |
+| `--rate-limit <n>` | Maximum API requests per second. Overrides `REEN_RATE_LIMIT` and registry config. | `reen create --rate-limit 2 specification` |
+| `--token-limit <n>` | Maximum tokens per minute. Overrides `REEN_TOKEN_LIMIT` and registry config. | `reen create --token-limit 60000 implementation` |
 
 Examples:
 
 ```bash
-# See what would happen without executing
-reen --dry-run create specification
-
-# Get detailed output during execution
-reen --verbose create implementation app
+reen create --clear-cache specification
+reen create --contexts specification
+reen create --data specification
+reen create --rate-limit 2 --token-limit 60000 implementation
 ```
 
-## Agent Specifications
+#### `create specification`
 
-Agents are defined in YAML files in the `agents/` directory. Each agent specification includes:
+Create specifications from draft files. Alias: `specifications`.
 
-- `name`: Agent identifier
-- `description`: What the agent does
-- `system_prompt`: Instructions for the agent (supports templating)
+Usage:
 
-### Templating
-
-System prompts support placeholders for dynamic content:
-
-- `{{input.property}}` - Required property (fails if missing)
-- `{{input.property?}}` - Optional property (replaced with None if missing)
-- `{{input.prop1.prop2}}` - Nested properties
-
-### Strict Implementation Rules
-
-The `create_implementation` agent enforces **strict specification compliance**:
-
-- **ONLY** functions in "Functionality" section can be public
-- **ONLY** methods in "Role Methods" section can be private methods
-- **NO** additional fields, methods, or functions allowed
-- Implementations must match specifications **exactly**
-- **ALL** methods must be instrumented with tracing
-
-See [docs/SPECIFICATION_COMPLIANCE.md](docs/SPECIFICATION_COMPLIANCE.md) for details.
-
-### Tracing Instrumentation
-
-All generated code includes structured tracing for observability:
-
-- Role methods: `"[ContextName] [role] [method], message"`
-- Public methods: `"[ContextName] [method], message"`
-
-See [docs/TRACING_STANDARDS.md](docs/TRACING_STANDARDS.md) for details.
-
-### Agent-Model Registry
-
-The `agents/agent_model_registry.yml` file maps agents to specific models.
-Use the `provider/model` format to choose a provider explicitly:
-
-```yaml
-create_specifications_data:
-  model: mistral/codestral-latest
-create_implementation:
-  model: openai/gpt-5
-create_test:
-  model: ollama/qwen2.5:7b
-fix_draft_blockers:
-  model: mistral/mistral-large-latest
+```text
+reen create specification [OPTIONS] [NAMES]...
 ```
 
-Supported providers: **OpenAI**, **Anthropic**, **Mistral**, and **Ollama** (local).
-Preset registry files are available for quick switching:
+Arguments and options:
 
-- `agents/agent_model_registry.gpt.yml` — OpenAI (GPT-5)
-- `agents/agent_model_registry.mistral.yml` — Mistral API (Codestral / Mistral Large)
-- `agents/agent_model_registry.qwen.yml` — Ollama (Qwen 2.5)
+- `[NAMES]...`: Optional draft names without the `.md` extension.
+- `--fix`: When blocking ambiguities are found, ask Reen to patch drafts and retry.
+- `--max-fix-attempts <n>`: Limit automatic draft-fix retries. Default: `3`.
 
-## Specification Format
+Examples:
 
-Generated specifications use markdown with a specific structure:
-
-```markdown
-# Component Name
-
-## System Prompt
-[Instructions for implementation]
-
-## Input Format
-[Expected inputs]
-
-## Output Format
-[Expected outputs]
-
-## Props
-[Properties and their descriptions]
-
-## Roles
-[System roles]
-
-## Role Methods
-[Methods for each role]
-
-## Description
-[Overall description]
-
-## Functionality
-[Detailed functionality]
+```bash
+reen create specification
+reen create specification app agent_runner
+reen create specification --fix
+reen create specification --fix --max-fix-attempts 5 app
 ```
 
-## Language Choice
+Notes:
 
-Rust is the default implementation target for this project. Agents can still generate other languages for downstream projects when a draft explicitly calls for them.
+- Drafts under `drafts/apis/` and `drafts/external_apis/` are written under `specifications/contexts/external/`.
+- Names are resolved by file stem, so pass `aisstream`, not `aisstream.md`.
 
-## Error Handling
+#### `create implementation`
 
-- Missing files are handled gracefully with clear error messages
-- When processing multiple files, execution continues even if one fails
-- Progress indication shows success/failure for each item
-- Non-existent agent specifications cause immediate failure with helpful messages
+Create Rust implementation from specification files.
 
-## Interactive Mode
+Usage:
 
-Agents can ask questions when they need clarification:
+```text
+reen create implementation [OPTIONS] [NAMES]...
+```
 
-1. Agent generates a markdown file with context and questions
-2. User is notified to update the file
-3. User signals readiness by entering "ready" or an empty line
-4. Answers are sent back to the agent
-5. Conversational context is maintained
+Arguments and options:
+
+- `[NAMES]...`: Optional specification names without the `.md` extension.
+- `--fix`: If compilation fails after generation, run the automatic compile-fix loop.
+- `--max-compile-fix-attempts <n>`: Limit automatic compile-fix retries. Default: `3`.
+
+Examples:
+
+```bash
+reen create implementation
+reen create implementation app file_cache
+reen create implementation --fix
+reen create implementation --fix --max-compile-fix-attempts 5 app
+```
+
+Notes:
+
+- Reen generates project structure files such as `Cargo.toml`, `src/lib.rs`, and `mod.rs` files before generating implementation files.
+- If upstream specifications changed, Reen warns that you should rerun `reen create specification` first.
+
+#### `create tests`
+
+Create executable BDD tests from specification files. Alias: `test`.
+
+Usage:
+
+```text
+reen create tests [OPTIONS] [NAMES]...
+```
+
+Arguments:
+
+- `[NAMES]...`: Optional specification names without the `.md` extension.
+
+Examples:
+
+```bash
+reen create tests
+reen create tests app
+reen create tests account money_transfer
+```
+
+Generated test output goes under:
+
+- `tests/features/`
+- `tests/steps/`
+- `tests/bdd_*.rs`
+
+### `check`
+
+`check` currently has one subcommand:
+
+#### `check specification`
+
+Check whether each requested draft has a generated specification and whether the specification still contains blocking ambiguities. Alias: `specifications`.
+
+Usage:
+
+```text
+reen check specification [NAMES]...
+```
+
+Examples:
+
+```bash
+reen check specification
+reen check specification app agent_runner
+```
+
+### `fix`
+
+Attempt to restore compilation by running a compile -> patch -> recompile loop.
+
+Usage:
+
+```text
+reen fix [--max-compile-fix-attempts <n>]
+```
+
+Options:
+
+- `--max-compile-fix-attempts <n>`: Maximum automatic fix attempts. Default: `3`.
+
+Examples:
+
+```bash
+reen fix
+reen fix --max-compile-fix-attempts 5
+```
+
+### `compile`
+
+Run `cargo build` for the generated project.
+
+```bash
+reen compile
+```
+
+### `run`
+
+Run `cargo run` for the generated project. Extra application arguments must come after `--`.
+
+Examples:
+
+```bash
+reen run
+reen run -- arg1 arg2
+```
+
+### `test`
+
+Run `cargo test` for the generated project.
+
+```bash
+reen test
+```
+
+### `clear`
+
+`clear` removes either cache entries or generated artifacts.
+
+#### `clear cache`
+
+Clear build-tracker entries and agent response cache entries for a stage.
+
+Targets:
+
+- `reen clear cache specification [NAMES]...`
+- `reen clear cache implementation [NAMES]...`
+- `reen clear cache tests [NAMES]...`
+
+Target aliases:
+
+- `specification` -> `specifications`
+- `implementation` -> `implementations`
+- `tests` -> `test`
+
+Examples:
+
+```bash
+reen clear cache specification
+reen clear cache specification app
+reen clear cache implementation app file_cache
+reen clear cache tests account
+```
+
+#### `clear artefact`
+
+Remove generated files for a stage. The command name is spelled `artefact`, and it also accepts the alias `artifact`.
+
+Targets:
+
+- `reen clear artefact specification [NAMES]...`
+- `reen clear artefact implementation [NAMES]...`
+- `reen clear artefact tests [NAMES]...`
+
+Examples:
+
+```bash
+reen clear artefact specification
+reen clear artefact specification app
+reen clear artefact implementation app
+reen clear artifact tests account
+```
+
+Behavior:
+
+- Omitting names removes all artifacts for that target.
+- Supplying names removes only the matching generated files for that target.
+
+## Model Registry And Limits
+
+The default registry file is `agents/agent_model_registry.yml`.
+
+You can switch registries with:
+
+```bash
+reen --profile sonnet create specification
+```
+
+That command uses `agents/agent_model_registry.sonnet.yml`.
+
+Rate and token limits for `create` commands resolve in this order:
+
+1. CLI flags
+2. `REEN_RATE_LIMIT` / `REEN_TOKEN_LIMIT`
+3. Top-level values in the active registry file
+
+Examples:
+
+```bash
+export REEN_RATE_LIMIT=2
+export REEN_TOKEN_LIMIT=60000
+
+reen create specification
+reen create --rate-limit 1 implementation
+```
+
+## Provider Notes
+
+Reen works with OpenAI, Anthropic, Mistral, and Ollama-backed models depending on your registry configuration. Reen also loads a `.env` file by searching upward from the current working directory, so running from the repo root or from a nested fixture project both work.
 
 ## Development
 
-The project uses standard Rust tooling:
+Common local commands:
 
 ```bash
-# Build
 cargo build
-
-# Run tests
 cargo test
-
-# Run with cargo
-cargo run -- create specification app
+cargo run -- --help
 ```
 
-## Incremental Builds
+## More Docs
 
-Reen automatically tracks file changes and dependencies to skip unnecessary regeneration:
-
-```bash
-# First run - generates everything
-reen create specification
-
-# Second run - skips unchanged files
-reen create specification
-# Output: "All specifications are up to date"
-
-# Use --verbose to see what's skipped
-reen --verbose create specification
-# Output: "⊚ Skipping file_cache (up to date)"
-```
-
-See [docs/INCREMENTAL_BUILDS.md](docs/INCREMENTAL_BUILDS.md) for details.
-
-## Future Enhancements
-
-- Cross-file dependency tracking
-- Incremental agent execution
-- Build cache across git branches
-- Parallel processing of independent tasks
-
-## Docker CLI Image
-
-You can run `reen` as a containerized CLI so local setup only needs Docker.
-
-**Quick start:** Build once, then use the wrapper script:
-
-```bash
-docker build -t reen:latest .
-source scripts/reen.sh   # macOS / Linux / WSL
-# or on Windows PowerShell: . .\scripts\reen.ps1
-
-reen create specification
-```
-
-For full instructions (first build, sourcing, and platform-specific setup for macOS, Windows, and WSL), see [docs/DOCKER_WRAPPER.md](docs/DOCKER_WRAPPER.md).
-
-**Manual run** (without the wrapper):
-
-```bash
-docker run --rm -it \
-  -e MISTRAL_API_KEY="your-key" \
-  -v "$(pwd):/work" \
-  -w /work \
-  reen:latest create specification
-```
-
-If you use OpenAI/Anthropic/Ollama instead, pass the corresponding env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_BASE_URL`, etc.).
+- [SETUP.md](SETUP.md)
+- [docs/INCREMENTAL_BUILDS.md](docs/INCREMENTAL_BUILDS.md)
+- [docs/SPECIFICATION_COMPLIANCE.md](docs/SPECIFICATION_COMPLIANCE.md)
+- [docs/TRACING_STANDARDS.md](docs/TRACING_STANDARDS.md)
+- [docs/DOCKER_WRAPPER.md](docs/DOCKER_WRAPPER.md)

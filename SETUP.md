@@ -1,137 +1,236 @@
-# Setup Instructions for Reen
+# Reen Setup
 
-## Prerequisites
+This guide gets Reen running on Windows, Linux/WSL, and macOS.
 
-### 1. Rust
-Ensure you have Rust installed. If not, install from [rustup.rs](https://rustup.rs/)
+## 1. Install Rust
 
-### 2. Environment Variables
-Reen loads provider credentials from your shell environment or a `.env` file in the project tree.
+### Windows
 
-## LLM Provider Setup
+Open PowerShell and install Rust with:
 
-### Ollama (Recommended - Local, No API Key Required)
-
-Ollama is the default provider and runs models locally. No API key is needed!
-
-1. **Install Ollama** (if not already installed):
-
-   For windows:
-   ```bash
-   irm https://ollama.com/install.ps1 | iex
-   ```
-   For linux:
-   ```bash
-   curl -fsSL https://ollama.com/install.sh | sh
-   ```
-
-2. **Start Ollama** (if not running):
-   ```bash
-   ollama serve
-   ```
-
-3. **Pull a model** (e.g., for testing):
-   ```bash
-   ollama pull qwen2.5:7b
-   # or
-   ollama pull llama3.1:8b
-   ```
-
-4. **Optional**: Set a custom Ollama server URL (for remote instances):
-   ```bash
-   export OLLAMA_BASE_URL='http://your-ollama-server:11434'
-   ```
-
-### Anthropic (Claude) - Optional
-Set your Anthropic API key:
-```bash
-export ANTHROPIC_API_KEY='your-api-key-here'
+```powershell
+winget install Rustlang.Rustup
 ```
 
-### OpenAI (GPT) - Optional
-Set your OpenAI API key:
-```bash
-export OPENAI_API_KEY='your-api-key-here'
+Close and reopen PowerShell, then verify:
+
+```powershell
+rustc --version
+cargo --version
 ```
 
-### Mistral - Optional
-Set your Mistral API key:
+If Rust later fails at the linker step, install the Visual Studio C++ build tools and retry.
+
+### Linux / WSL
+
+Install Rust with:
+
 ```bash
-export MISTRAL_API_KEY='your-api-key-here'
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 ```
 
-**Tip** Add these to your `~/.bashrc`, `~/.zshrc`, or `~/.bash_profile` to make them permanent.
+Verify:
 
-## Building
+```bash
+rustc --version
+cargo --version
+```
+
+### macOS
+
+Install Rust with:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Verify:
+
+```bash
+rustc --version
+cargo --version
+```
+
+## 2. Clone And Enter The Repo
+
+```bash
+git clone <your-repo-url>
+cd reen
+```
+
+## 3. Configure A Model Provider
+
+Reen reads credentials from shell environment variables or from a `.env` file found by searching upward from your current working directory.
+
+You only need the variables for the provider(s) you actually use.
+
+### PowerShell examples
+
+```powershell
+$env:OPENAI_API_KEY = "your-openai-key"
+$env:ANTHROPIC_API_KEY = "your-anthropic-key"
+$env:MISTRAL_API_KEY = "your-mistral-key"
+$env:OLLAMA_BASE_URL = "http://localhost:11434"
+```
+
+### Bash / zsh examples
+
+```bash
+export OPENAI_API_KEY="your-openai-key"
+export ANTHROPIC_API_KEY="your-anthropic-key"
+export MISTRAL_API_KEY="your-mistral-key"
+export OLLAMA_BASE_URL="http://localhost:11434"
+```
+
+### Optional `.env` file
+
+You can also create a `.env` file in the repo root:
+
+```dotenv
+OPENAI_API_KEY=your-openai-key
+ANTHROPIC_API_KEY=your-anthropic-key
+MISTRAL_API_KEY=your-mistral-key
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+## 4. Optional: Set Up Ollama
+
+Use this if your model registry points to local Ollama models.
+
+### Windows
+
+```powershell
+winget install Ollama.Ollama
+ollama serve
+ollama pull qwen2.5:7b
+```
+
+### Linux / WSL
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama serve
+ollama pull qwen2.5:7b
+```
+
+### macOS
+
+```bash
+brew install --cask ollama
+ollama serve
+ollama pull qwen2.5:7b
+```
+
+Notes:
+
+- If Ollama runs on another machine, point Reen at it with `OLLAMA_BASE_URL`.
+- In WSL, a remote or host-level Ollama server often works better than installing it twice.
+
+## 5. Build Reen
+
+From the repo root:
 
 ```bash
 cargo build --release
 ```
 
-The binary will be available at `target/release/reen`.
+Compiled binary paths:
 
-## Model Selection
+- macOS, Linux, WSL: `./target/release/reen`
+- Windows PowerShell: `.\target\release\reen.exe`
 
-The system uses the `agents/agent_model_registry.yml` file to map agents to models:
+## 6. Verify The Install
 
-```yaml
-create_specifications: gpt-4
-create_implementation: mistral/codestral-latest
-create_test: ollama/qwen2.5:7b
-```
+### Quick verification
 
-### Explicit provider prefix (recommended)
-
-Use the `provider/model` format to explicitly choose a provider:
-
-- `ollama/qwen2.5:7b` — local Ollama
-- `mistral/codestral-latest` — Mistral API
-- `openai/gpt-4` — OpenAI API
-- `anthropic/claude-3-5-sonnet-20241022` — Anthropic API
-
-This is especially useful for models available from multiple providers (e.g. Codestral can run locally via Ollama or remotely via the Mistral API).
-
-### Automatic provider detection (fallback)
-
-When no `provider/` prefix is given, the provider is inferred from the model name:
-
-- **Ollama** (default): Names containing "ollama", "qwen", "llama", "mistral", "phi", "gemma", or "codellama"
-- **Anthropic**: Names containing "claude" or "anthropic"
-- **OpenAI**: Names containing "gpt", "openai", "o1", or "o3"
-
-**Note** Unknown model names default to Ollama (local, no API key required).
-
-**Note** Bare model names containing "mistral" (e.g. `mistral:7b`) are routed to Ollama for local execution. To use the Mistral API instead, use the explicit prefix: `mistral/codestral-latest`, `mistral/mistral-large-latest`, etc.
-
-### Rate limiting
-
-To avoid API rate limit errors (e.g. 429 from Mistral), you can cap requests per second and tokens per minute:
-
-**Requests per second:**
-- **CLI**: `reen create --rate-limit 2 specification`
-- **Env**: `export REEN_RATE_LIMIT=2`
-- **Registry**: Add `rate_limit: 2` at the top level of `agent_model_registry.yml`
-
-**Tokens per minute:**
-- **CLI**: `reen create --token-limit 60000 specification`
-- **Env**: `export REEN_TOKEN_LIMIT=60000`
-- **Registry**: Add `token_limit: 60000` at the top level of `agent_model_registry.yml`
-
-Precedence: CLI > env > registry. Both limits apply to all create commands (specification, implementation, tests).
-
-The token limiter uses a token bucket with continuous refill to keep throughput stable. Token count is approximated from the request content (word count and character-based heuristics) plus a fixed overhead for system prompts.
-
-When a 429 rate limit error occurs and a rate limit is configured, reen will wait for double the minimum interval, retry the request once, and use half the previous rate for the rest of the run.
-
-## Verification
-
-Test that everything is set up correctly:
+macOS, Linux, WSL:
 
 ```bash
-cargo build
+./target/release/reen --help
+```
+
+Windows PowerShell:
+
+```powershell
+.\target\release\reen.exe --help
+```
+
+### Optional full verification
+
+```bash
 cargo test
 ```
 
-## Usage
+## 7. Choose A Model Registry Profile
 
-See the main README.md for usage instructions.
+By default Reen uses:
+
+```text
+agents/agent_model_registry.yml
+```
+
+You can switch to a profiled registry file:
+
+```bash
+./target/release/reen --profile sonnet create specification
+```
+
+That resolves to:
+
+```text
+agents/agent_model_registry.sonnet.yml
+```
+
+## 8. Optional Rate Limits
+
+These only affect `create` commands.
+
+### Environment variables
+
+```bash
+export REEN_RATE_LIMIT=2
+export REEN_TOKEN_LIMIT=60000
+```
+
+### CLI overrides
+
+```bash
+./target/release/reen create --rate-limit 2 specification
+./target/release/reen create --token-limit 60000 implementation
+```
+
+Resolution order:
+
+1. CLI flags
+2. `REEN_RATE_LIMIT` / `REEN_TOKEN_LIMIT`
+3. Top-level values in the active model registry file
+
+## 9. First Commands To Try
+
+```bash
+./target/release/reen create specification
+./target/release/reen create implementation
+./target/release/reen create tests
+```
+
+See [README.md](README.md) for the full CLI reference.
+
+## Troubleshooting
+
+### `cargo` or `rustc` not found
+
+Restart your shell after installing Rust, then re-run `rustc --version`.
+
+### API key errors
+
+Confirm the required provider variable is set in your current shell or `.env` file.
+
+### Running from a nested project directory
+
+That is supported. Reen searches upward for `.env` and for the active `agents/agent_model_registry*.yml` file.
+
+### `reen` command not found
+
+Use the full binary path from `target/release/` or add that directory to your `PATH`.
