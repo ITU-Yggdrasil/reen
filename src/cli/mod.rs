@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 mod agent_executor;
+mod brand_specs;
 mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
@@ -23,6 +24,10 @@ mod rate_limiter;
 mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
+use brand_specs::{
+    is_brand_draft_path, is_brand_spec_path, unresolved_brand_token_references,
+    validate_brand_spec_content,
+};
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };
@@ -78,6 +83,7 @@ pub fn resolve_token_limit(cli_arg: Option<f64>) -> Option<f64> {
 pub struct CategoryFilter {
     pub contexts: bool,
     pub data: bool,
+    pub brands: bool,
 }
 
 impl CategoryFilter {
@@ -85,11 +91,12 @@ impl CategoryFilter {
         Self {
             contexts: false,
             data: false,
+            brands: false,
         }
     }
 
     fn is_active(&self) -> bool {
-        self.contexts || self.data
+        self.contexts || self.data || self.brands
     }
 
     fn include_data(&self) -> bool {
@@ -98,6 +105,10 @@ impl CategoryFilter {
 
     fn include_contexts(&self) -> bool {
         !self.is_active() || self.contexts
+    }
+
+    fn include_brands(&self) -> bool {
+        !self.is_active() || self.brands
     }
 
     fn include_root(&self) -> bool {
@@ -117,6 +128,7 @@ impl CategoryFilter {
                 return match component.as_ref() {
                     "data" => self.include_data(),
                     "contexts" | "external_apis" => self.include_contexts(),
+                    "brands" => self.include_brands(),
                     _ => self.include_root(),
                 };
             }
@@ -140,6 +152,26 @@ pub enum ProcessSpecOutcome {
         actionable: Vec<String>,
         additional_context: HashMap<String, serde_json::Value>,
     },
+}
+
+fn print_blocking_items(path: &Path, label: &str, headline: &str, items: &[String]) {
+    eprintln!("error[{}]:", label);
+    eprintln!("\u{001b}[31m{}\u{001b}[0m", path.display());
+    eprintln!("  {}", headline);
+    eprintln!();
+    for item in items {
+        eprintln!("  {}", item);
+    }
+    eprintln!();
+}
+
+fn check_brand_references_in_spec_content(path: &Path, content: &str) -> Result<Vec<String>> {
+    unresolved_brand_token_references(content, SPECIFICATIONS_DIR).with_context(|| {
+        format!(
+            "failed to validate brand token references in {}",
+            path.display()
+        )
+    })
 }
 
 struct PreparedImplementationBatchItem {
@@ -508,22 +540,66 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
         let spec_content = fs::read_to_string(&spec_path).with_context(|| {
             format!("Failed to read specification file: {}", spec_path.display())
         })?;
+        if is_brand_spec_path(&spec_path, SPECIFICATIONS_DIR)
+            || is_brand_draft_path(&draft_file, DRAFTS_DIR)
+        {
+            match validate_brand_spec_content(&spec_content) {
+                Ok(validation) => {
+                    if !validation.blocking_ambiguities.is_empty() {
+                        issues += 1;
+                        print_blocking_items(
+                            &draft_file,
+                            "spec:blocking",
+                            &format!(
+                                "Blocking ambiguities detected in specification for '{}'.",
+                                draft_name
+                            ),
+                            &validation.blocking_ambiguities,
+                        );
+                    }
+                }
+                Err(err) => {
+                    issues += 1;
+                    eprintln!("error[spec:invalid-brand]:");
+                    eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
+                    eprintln!(
+                        "  Invalid brand specification for '{}': {}",
+                        draft_name, err
+                    );
+                    eprintln!();
+                }
+            }
+            continue;
+        }
+
         if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
             let actionable = extract_actionable_blocking_bullets(&blocking);
             if !actionable.is_empty() {
                 issues += 1;
-                eprintln!("error[spec:blocking]:");
-                eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
-                eprintln!(
-                    "  Blocking Ambiguities detected in specification for '{}'.",
-                    draft_name
+                print_blocking_items(
+                    &draft_file,
+                    "spec:blocking",
+                    &format!(
+                        "Blocking ambiguities detected in specification for '{}'.",
+                        draft_name
+                    ),
+                    &actionable,
                 );
-                eprintln!();
-                for bullet in actionable {
-                    eprintln!("  {}", bullet);
-                }
-                eprintln!();
             }
+        }
+
+        let unresolved = check_brand_references_in_spec_content(&spec_path, &spec_content)?;
+        if !unresolved.is_empty() {
+            issues += 1;
+            print_blocking_items(
+                &draft_file,
+                "spec:brand-token",
+                &format!(
+                    "Undefined brand token references detected in specification for '{}'.",
+                    draft_name
+                ),
+                &unresolved,
+            );
         }
     }
 
@@ -584,23 +660,52 @@ fn finalize_specification_output(
     let mut has_blocking_ambiguities = false;
     let mut actionable = Vec::new();
 
-    // Report Blocking Ambiguities immediately if present in generated spec
-    if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-        actionable = extract_actionable_blocking_bullets(&blocking);
-        if !actionable.is_empty() {
-            has_blocking_ambiguities = true;
-            eprintln!("error[spec:blocking]:");
-            // Print source input path (draft) so IDEs can navigate to where fixes are needed.
-            eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
-            eprintln!(
-                "  Blocking Ambiguities detected in generated specification for '{}'.",
+    if is_brand_draft_path(draft_file, DRAFTS_DIR) {
+        let validation = validate_brand_spec_content(&spec_content).with_context(|| {
+            format!(
+                "generated brand specification for '{}' is invalid",
                 draft_name
+            )
+        })?;
+        actionable = validation.blocking_ambiguities;
+        has_blocking_ambiguities = !actionable.is_empty();
+
+        if has_blocking_ambiguities {
+            print_blocking_items(
+                draft_file,
+                "spec:blocking",
+                &format!(
+                    "Blocking ambiguities detected in generated specification for '{}'.",
+                    draft_name
+                ),
+                &actionable,
             );
-            eprintln!();
-            for bullet in &actionable {
-                eprintln!("  {}", bullet);
+        }
+    } else {
+        // Report Blocking Ambiguities immediately if present in generated spec
+        if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
+            actionable = extract_actionable_blocking_bullets(&blocking);
+            if !actionable.is_empty() {
+                has_blocking_ambiguities = true;
+                print_blocking_items(
+                    draft_file,
+                    "spec:blocking",
+                    &format!(
+                        "Blocking ambiguities detected in generated specification for '{}'.",
+                        draft_name
+                    ),
+                    &actionable,
+                );
             }
-            eprintln!();
+        }
+
+        let unresolved = check_brand_references_in_spec_content(&output_path, &spec_content)?;
+        if !unresolved.is_empty() {
+            anyhow::bail!(
+                "generated specification for '{}' references undefined brand token(s): {}",
+                draft_name,
+                unresolved.join(", ")
+            );
         }
     }
 
@@ -1737,6 +1842,20 @@ fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &st
         }
         return Ok(true);
     }
+
+    let unresolved = check_brand_references_in_spec_content(path, &content)?;
+    if !unresolved.is_empty() {
+        print_blocking_items(
+            path,
+            "spec:brand-token",
+            &format!(
+                "Specification references undefined brand token(s); skipping {} for '{}'.",
+                stage_name, context_name
+            ),
+            &unresolved,
+        );
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -2651,11 +2770,13 @@ fn clear_specification_artifacts(names: Vec<String>, config: &Config) -> Result<
         return Ok(());
     }
 
-    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", &CategoryFilter::all())?;
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &CategoryFilter::all())?;
     let mut removed = 0usize;
     let mut found = 0usize;
-    for spec_file in spec_files {
+    for draft_file in draft_files {
         found += 1;
+        let spec_file =
+            determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
         if spec_file.exists() {
             if config.dry_run {
                 println!("[DRY RUN] Would remove {}", spec_file.display());
@@ -2919,6 +3040,11 @@ fn resolve_input_files(
             files.extend(collect_md_files_recursive(&external_dir, extension)?);
         }
 
+        if filter.include_brands() {
+            let brands_dir = dir_path.join("brands");
+            files.extend(collect_md_files_recursive(&brands_dir, extension)?);
+        }
+
         if filter.include_root() {
             let entries =
                 fs::read_dir(&dir_path).context(format!("Failed to read {} directory", dir))?;
@@ -2967,6 +3093,15 @@ fn resolve_input_files(
                 }
             }
 
+            if !found && filter.include_brands() {
+                let brand_matches =
+                    resolve_named_input_in_category(&dir_path.join("brands"), &name, extension)?;
+                if !brand_matches.is_empty() {
+                    files.extend(brand_matches);
+                    found = true;
+                }
+            }
+
             if !found && filter.include_root() {
                 let root_path = dir_path.join(format!("{}.{}", name, extension));
                 if root_path.exists() {
@@ -2979,14 +3114,19 @@ fn resolve_input_files(
                 let searched = match (
                     filter.include_data(),
                     filter.include_contexts(),
+                    filter.include_brands(),
                     filter.include_root(),
                 ) {
-                    (true, true, true) => "data/, contexts/, and root",
-                    (true, true, false) => "data/ and contexts/",
-                    (true, false, false) => "data/",
-                    (false, true, false) => "contexts/",
-                    (false, false, true) => "root",
-                    _ => "data/, contexts/, and root",
+                    (true, true, true, true) => "data/, contexts/, brands/, and root",
+                    (true, true, true, false) => "data/, contexts/, and brands/",
+                    (true, true, false, false) => "data/ and contexts/",
+                    (true, false, true, false) => "data/ and brands/",
+                    (false, true, true, false) => "contexts/ and brands/",
+                    (true, false, false, false) => "data/",
+                    (false, true, false, false) => "contexts/",
+                    (false, false, true, false) => "brands/",
+                    (false, false, false, true) => "root",
+                    _ => "data/, contexts/, brands/, and root",
                 };
                 eprintln!(
                     "Warning: File not found: {}.{} (searched in {})",
@@ -3081,6 +3221,17 @@ fn determine_specification_output_path(
             .join(remainder));
     }
 
+    if relative_path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("brands")
+    {
+        return Ok(PathBuf::from(specifications_dir)
+            .join(relative_path)
+            .with_extension("json"));
+    }
+
     // Build output path in specifications directory
     let output_path = PathBuf::from(specifications_dir).join(relative_path);
     Ok(output_path)
@@ -3139,6 +3290,12 @@ fn determine_draft_input_path(
             .join(remainder));
     }
 
+    if first == Some("brands") {
+        return Ok(PathBuf::from(drafts_dir)
+            .join(relative_path)
+            .with_extension("md"));
+    }
+
     Ok(PathBuf::from(drafts_dir).join(relative_path))
 }
 
@@ -3163,6 +3320,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
             "data" => "create_specifications_data",
             "contexts" => "create_specifications_context",
             "external_apis" => "create_specifications_external_api",
+            "brands" => "create_specifications_brand",
             _ => "create_specifications_main",
         }
     } else {
@@ -3625,6 +3783,17 @@ Problem:
     }
 
     #[test]
+    fn maps_brand_draft_to_brand_specification_path() {
+        let path = determine_specification_output_path(
+            Path::new("drafts/brands/acme.md"),
+            "drafts",
+            "specifications",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("specifications/brands/acme.json"));
+    }
+
+    #[test]
     fn maps_contexts_external_specification_back_to_external_api_draft_path() {
         let path = determine_draft_input_path(
             Path::new("specifications/contexts/external/stripe.md"),
@@ -3633,6 +3802,17 @@ Problem:
         )
         .expect("path mapping");
         assert_eq!(path, Path::new("drafts/external_apis/stripe.md"));
+    }
+
+    #[test]
+    fn maps_brand_specification_back_to_draft_path() {
+        let path = determine_draft_input_path(
+            Path::new("specifications/brands/acme.json"),
+            "specifications",
+            "drafts",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("drafts/brands/acme.md"));
     }
 
     #[test]
@@ -3651,6 +3831,7 @@ Problem:
         let drafts = root.join("drafts");
         fs::create_dir_all(drafts.join("contexts/ui")).expect("mkdir");
         fs::create_dir_all(drafts.join("external_apis")).expect("mkdir");
+        fs::create_dir_all(drafts.join("brands")).expect("mkdir");
         fs::create_dir_all(drafts.join("data/payments")).expect("mkdir");
         fs::write(
             drafts.join("contexts/ui/terminal_renderer.md"),
@@ -3658,6 +3839,7 @@ Problem:
         )
         .expect("write");
         fs::write(drafts.join("external_apis/stripe.md"), "# Stripe API").expect("write");
+        fs::write(drafts.join("brands/acme.md"), "# Acme Brand").expect("write");
         fs::write(
             drafts.join("data/payments/ledger_entry.md"),
             "# Ledger Entry",
@@ -3675,6 +3857,7 @@ Problem:
             .iter()
             .any(|p| p.ends_with("contexts/ui/terminal_renderer.md")));
         assert!(all.iter().any(|p| p.ends_with("external_apis/stripe.md")));
+        assert!(all.iter().any(|p| p.ends_with("brands/acme.md")));
         assert!(all
             .iter()
             .any(|p| p.ends_with("data/payments/ledger_entry.md")));
@@ -3696,6 +3879,7 @@ Problem:
             &CategoryFilter {
                 contexts: true,
                 data: false,
+                brands: false,
             },
         )
         .expect("external lookup");
@@ -3709,11 +3893,26 @@ Problem:
             &CategoryFilter {
                 contexts: false,
                 data: true,
+                brands: false,
             },
         )
         .expect("nested lookup");
         assert_eq!(by_nested_name.len(), 1);
         assert!(by_nested_name[0].ends_with("data/payments/ledger_entry.md"));
+
+        let by_brand_name = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["acme".to_string()],
+            "md",
+            &CategoryFilter {
+                contexts: false,
+                data: false,
+                brands: true,
+            },
+        )
+        .expect("brand lookup");
+        assert_eq!(by_brand_name.len(), 1);
+        assert!(by_brand_name[0].ends_with("brands/acme.md"));
 
         let _ = fs::remove_dir_all(root);
     }

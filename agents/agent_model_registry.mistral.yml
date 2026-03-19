@@ -16,6 +16,10 @@ create_specifications_external_api:
   model: mistral/mistral-large-latest
   parallel: false
   batch: false
+create_specifications_brand:
+  model: mistral/mistral-large-latest
+  parallel: false
+  batch: false
 create_implementation:
   model: mistral/codestral-latest
   parallel: true

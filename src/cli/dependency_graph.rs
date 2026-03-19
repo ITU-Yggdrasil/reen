@@ -240,6 +240,7 @@ struct IndexedArtifact {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ArtifactCategory {
+    Brands,
     App,
     Contexts,
     Data,
@@ -278,6 +279,7 @@ fn categorize_artifact(
         .and_then(|c| c.as_os_str().to_str())
         .unwrap_or("");
     match first {
+        "brands" => ArtifactCategory::Brands,
         "contexts" | "external_apis" => ArtifactCategory::Contexts,
         "data" => ArtifactCategory::Data,
         _ => ArtifactCategory::Other,
@@ -286,14 +288,21 @@ fn categorize_artifact(
 
 fn dependency_allowed(from: ArtifactCategory, to: ArtifactCategory) -> bool {
     match from {
+        ArtifactCategory::Brands => matches!(to, ArtifactCategory::Brands),
         // Architectural rule: data is pure and cannot depend on contexts or app.
-        ArtifactCategory::Data => matches!(to, ArtifactCategory::Data),
+        ArtifactCategory::Data => matches!(to, ArtifactCategory::Data | ArtifactCategory::Brands),
         // Contexts may depend on data and other contexts, but never on the app entrypoint.
         ArtifactCategory::Contexts => {
-            matches!(to, ArtifactCategory::Contexts | ArtifactCategory::Data)
+            matches!(
+                to,
+                ArtifactCategory::Contexts | ArtifactCategory::Data | ArtifactCategory::Brands
+            )
         }
         // The app entrypoint can depend on contexts and data.
-        ArtifactCategory::App => matches!(to, ArtifactCategory::Contexts | ArtifactCategory::Data),
+        ArtifactCategory::App => matches!(
+            to,
+            ArtifactCategory::Contexts | ArtifactCategory::Data | ArtifactCategory::Brands
+        ),
         ArtifactCategory::Other => true,
     }
 }
@@ -945,6 +954,72 @@ mod tests {
         let paths: Vec<String> = closure.iter().map(|d| d.path.clone()).collect();
 
         assert!(!paths.iter().any(|p| p.ends_with("app.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_and_contexts_can_depend_on_brands_but_data_cannot_escape_foundations() {
+        let root = temp_root("category_brands");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("brands")).expect("mkdir");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+
+        let brand = drafts.join("brands").join("acme.md");
+        let context = drafts.join("contexts").join("landing_page.md");
+        let data = drafts.join("data").join("palette.md");
+        let app = drafts.join("app.md");
+
+        fs::write(&brand, "Primary color and typography").expect("write");
+        fs::write(&context, "Depends on: acme").expect("write");
+        fs::write(&data, "Depends on: acme").expect("write");
+        fs::write(&app, "Depends on: landing_page").expect("write");
+
+        let context_levels = build_execution_plan(
+            vec![context.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("context plan");
+        let context_closure = context_levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("context closure");
+        let context_paths: Vec<String> = context_closure.iter().map(|d| d.path.clone()).collect();
+        assert!(context_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("brands/acme.md")));
+
+        let app_levels =
+            build_execution_plan(vec![app.clone()], drafts.to_str().unwrap_or("drafts"), None)
+                .expect("app plan");
+        let app_closure = app_levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("app closure");
+        let app_paths: Vec<String> = app_closure.iter().map(|d| d.path.clone()).collect();
+        assert!(app_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("contexts/landing_page.md")));
+
+        let data_levels = build_execution_plan(
+            vec![data.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("data plan");
+        let data_closure = data_levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("data closure");
+        let data_paths: Vec<String> = data_closure.iter().map(|d| d.path.clone()).collect();
+        assert!(data_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("brands/acme.md")));
+        assert!(!data_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("contexts/landing_page.md")));
+        assert!(!data_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("app.md")));
 
         let _ = fs::remove_dir_all(root);
     }

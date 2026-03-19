@@ -1,6 +1,6 @@
 # Agent Types for Specification Creation
 
-The reen system uses three different specification agents based on the type of draft being processed. This ensures that specifications are tailored to the specific nature of each component type.
+The reen system uses multiple specialized specification agents based on the type of draft being processed. This ensures that specifications are tailored to the specific nature of each component type.
 
 ## Agent Selection
 
@@ -95,6 +95,33 @@ The system automatically selects the appropriate agent based on the file's locat
 - Low-level data structures (those go in data specs)
 - Role player interactions (those go in context specs)
 
+### 4. Brand Identity Agent (`create_specifications_brand`)
+
+**Used for**: `drafts/brands/*.md`
+
+**Purpose**: Creates structured brand identity artifacts from designer drafts.
+
+**Characteristics**:
+- Outputs JSON, not markdown prose
+- Defines reusable visual primitives
+- Covers colors, typography, spacing, iconography, motion, and layout
+- Is implementation-independent and component-independent
+- Serves as the authoritative token source for downstream specs
+
+**Output includes**:
+- `color_tokens`
+- `typography`
+- `spacing`
+- `iconography`
+- `motion`
+- `layout`
+- `blocking_ambiguities`
+
+**Does NOT include**:
+- Component styling
+- Framework-specific code
+- Freeform narrative specification sections
+
 ## Processing Order
 
 Files are processed in this order to ensure dependencies are available:
@@ -105,7 +132,10 @@ Files are processed in this order to ensure dependencies are available:
 2. **Contexts second** (`contexts/` folder)
    - May depend on data types
 
-3. **Main files last** (root folder)
+3. **Brands as foundational design artifacts** (`brands/` folder)
+   - May be referenced by downstream visual work
+
+4. **Main files last** (root folder)
    - May depend on both data types and contexts
 
 ## File Structure Mapping

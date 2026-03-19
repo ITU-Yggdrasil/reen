@@ -13,6 +13,10 @@ create_specifications_external_api:
   model: gpt-5 # qwen2.5:7b
   parallel: false
   batch: false
+create_specifications_brand:
+  model: gpt-5 # qwen2.5:7b
+  parallel: false
+  batch: false
 create_implementation:
   model: gpt-5
   parallel: true
