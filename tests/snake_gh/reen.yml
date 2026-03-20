@@ -1,0 +1,7 @@
+github: ITU-yggdrasil/snake
+profile: sonnet
+create:
+  token-limit: 30000.0
+  specification:
+    fix:
+      max-fix-attempts: 3

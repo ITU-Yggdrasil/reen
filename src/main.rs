@@ -26,6 +26,13 @@ struct Cli {
         help = "Perform a dry run without executing actions"
     )]
     dry_run: bool,
+
+    #[arg(
+        long,
+        global = true,
+        help = "Use GitHub issues in <owner>/<repo> as the drafts/specifications backend"
+    )]
+    github: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -223,6 +230,7 @@ async fn main() -> Result<()> {
     let config = cli::Config {
         verbose: cli.verbose,
         dry_run: cli.dry_run,
+        github_repo: cli::resolve_github_repo(cli.github.as_deref())?,
     };
 
     match cli.command {

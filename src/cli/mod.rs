@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 mod agent_executor;
+mod artifact_backend;
 mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
@@ -22,8 +23,10 @@ mod progress;
 mod project_structure;
 mod rate_limiter;
 mod stage_runner;
+mod yaml_config;
 
 use agent_executor::{AgentExecutor, AgentResponse};
+use artifact_backend::{ArtifactCategory, ArtifactKind, ArtifactStore, BackendSelection, build_artifact_store};
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };
@@ -42,10 +45,43 @@ use reen::execution::{AgentModelRegistry, AgentRegistry, NativeExecutionControl}
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
 use stage_runner::{run_stage_items, CliExecutionControl, ExecutionResources, StageItem};
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Config {
     pub verbose: bool,
     pub dry_run: bool,
+    pub github_repo: Option<String>,
+}
+
+#[derive(Clone)]
+struct WorkspaceContext {
+    store: Arc<dyn ArtifactStore>,
+    drafts_root: PathBuf,
+    specifications_root: PathBuf,
+    drafts_dir: String,
+    specifications_dir: String,
+}
+
+impl WorkspaceContext {
+    fn resolve(config: &Config) -> Result<Self> {
+        let backend = BackendSelection::from_repo_spec(config.github_repo.as_deref())?;
+        let store = build_artifact_store(&backend)?;
+        let drafts_root = store.drafts_root().to_path_buf();
+        let specifications_root = store.specifications_root().to_path_buf();
+        Ok(Self {
+            store,
+            drafts_dir: drafts_root.to_string_lossy().into_owned(),
+            specifications_dir: specifications_root.to_string_lossy().into_owned(),
+            drafts_root,
+            specifications_root,
+        })
+    }
+}
+
+pub fn resolve_github_repo(cli_github: Option<&str>) -> Result<Option<String>> {
+    if let Some(repo) = cli_github {
+        return Ok(Some(repo.trim().to_string()));
+    }
+    Ok(yaml_config::load_config()?.config.github)
 }
 
 /// Resolves rate limit (requests per second) from CLI, env, or registry.
@@ -206,29 +242,38 @@ fn create_specification_inner(
     config: &Config,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     let filter = *filter;
-    let config = *config;
+    let config = config.clone();
     Box::pin(async move {
+        let workspace = WorkspaceContext::resolve(&config)?;
         let names_provided = !names.is_empty();
-        let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &filter)?;
+        let draft_artifacts = workspace
+            .store
+            .resolve_inputs(ArtifactKind::Draft, names, &filter)?;
 
-        if draft_files.is_empty() {
+        if draft_artifacts.is_empty() {
             println!("No draft files found to process");
             return Ok(());
         }
 
         let dependency_roots =
-            select_dependency_roots(draft_files, DRAFTS_DIR, names_provided, &filter)?;
+            workspace
+                .store
+                .select_dependency_roots(draft_artifacts, names_provided, &filter)?;
         let expanded_draft_files =
-            expand_with_transitive_dependencies(dependency_roots, DRAFTS_DIR, None)?;
+            expand_with_transitive_dependencies(
+                dependency_roots.iter().map(|artifact| artifact.path.clone()).collect(),
+                &workspace.drafts_dir,
+                None,
+            )?;
         let filtered_draft_files = if filter.is_active() {
             expanded_draft_files
                 .into_iter()
-                .filter(|f| filter.matches_path(f, DRAFTS_DIR))
+                .filter(|f| filter.matches_path(f, &workspace.drafts_dir))
                 .collect()
         } else {
             expanded_draft_files
         };
-        let execution_levels = build_execution_plan(filtered_draft_files, DRAFTS_DIR, None)?;
+        let execution_levels = build_execution_plan(filtered_draft_files, &workspace.drafts_dir, None)?;
 
         // Load build tracker
         let mut tracker = BuildTracker::load()?;
@@ -254,7 +299,8 @@ fn create_specification_inner(
 
             let mut nodes_by_agent: HashMap<String, Vec<ExecutionNode>> = HashMap::new();
             for node in level_nodes {
-                let agent = determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
+                let agent =
+                    determine_specification_agent(&node.input_path, &workspace.drafts_dir).to_string();
                 nodes_by_agent.entry(agent).or_default().push(node);
             }
 
@@ -283,11 +329,11 @@ fn create_specification_inner(
                         .iter()
                         .any(|dep_name| updated_in_run.contains(dep_name));
                     let dependency_fingerprint =
-                        dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
+                        dependency_fingerprint_for_node(&node, &workspace.drafts_dir, None)?;
                     let output_path = determine_specification_output_path(
                         &draft_file,
-                        DRAFTS_DIR,
-                        SPECIFICATIONS_DIR,
+                        &workspace.drafts_dir,
+                        &workspace.specifications_dir,
                     )?;
 
                     let needs_update = if clear_cache || dependency_invalidated {
@@ -310,7 +356,11 @@ fn create_specification_inner(
                         continue;
                     }
 
-                    let dependency_context = match build_dependency_context(&node) {
+                    let dependency_context = match build_dependency_context(
+                        &node,
+                        &workspace.drafts_dir,
+                        None,
+                    ) {
                         Ok(context) => context,
                         Err(e) => {
                             progress.complete_item(&draft_name, false);
@@ -324,6 +374,7 @@ fn create_specification_inner(
                         &draft_file,
                         &draft_content,
                         dependency_context,
+                        &workspace.drafts_dir,
                     )?;
                     let (dependency_context, estimated) = fit_context_to_token_limit(
                         &executor,
@@ -353,7 +404,8 @@ fn create_specification_inner(
                     });
                 }
 
-                let cfg = config;
+                let cfg = config.clone();
+                let workspace_ctx = workspace.clone();
                 let executor_clone = executor.clone();
                 let results = run_stage_items(
                     stage_items,
@@ -371,12 +423,15 @@ fn create_specification_inner(
                     ),
                           execution_control| {
                         let executor = executor_clone.clone();
+                        let cfg = cfg.clone();
+                        let workspace_ctx = workspace_ctx.clone();
                         async move {
                             let result = process_specification(
                                 &executor,
                                 &draft_content,
                                 &draft_file,
                                 &draft_name,
+                                &workspace_ctx,
                                 &cfg,
                                 clear_cache,
                                 dependency_context,
@@ -470,27 +525,29 @@ fn create_specification_inner(
     })
 }
 
-pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result<()> {
-    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &CategoryFilter::all())?;
-    if draft_files.is_empty() {
+pub async fn check_specification(names: Vec<String>, config: &Config) -> Result<()> {
+    let workspace = WorkspaceContext::resolve(config)?;
+    let draft_artifacts = workspace
+        .store
+        .resolve_inputs(ArtifactKind::Draft, names, &CategoryFilter::all())?;
+    if draft_artifacts.is_empty() {
         println!("No draft files found to process");
         return Ok(());
     }
 
     let tracker = BuildTracker::load()?;
     let mut issues = 0usize;
-    println!("Checking specifications for {} draft(s)", draft_files.len());
+    println!("Checking specifications for {} draft(s)", draft_artifacts.len());
 
-    for draft_file in draft_files {
-        let draft_name = draft_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
-            .context("Invalid draft filename")?;
-        let spec_path =
-            determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
-
-        if !spec_path.exists() {
+    for draft_artifact in draft_artifacts {
+        let draft_file = draft_artifact.path.clone();
+        let draft_name = draft_artifact.name.clone();
+        let Some(spec_artifact) = workspace.store.find_specification_for_draft(&draft_artifact)? else {
+            let spec_path = determine_specification_output_path(
+                &draft_file,
+                &workspace.drafts_dir,
+                &workspace.specifications_dir,
+            )?;
             issues += 1;
             eprintln!("error[spec:missing]:");
             eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
@@ -504,10 +561,12 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
             }
             eprintln!();
             continue;
-        }
-
-        let spec_content = fs::read_to_string(&spec_path).with_context(|| {
-            format!("Failed to read specification file: {}", spec_path.display())
+        };
+        let spec_path = spec_artifact.path.clone();
+        let spec_content = workspace.store.read_content(&spec_artifact).or_else(|_| {
+            fs::read_to_string(&spec_path).with_context(|| {
+                format!("Failed to read specification file: {}", spec_path.display())
+            })
         })?;
         if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
             let actionable =
@@ -542,6 +601,7 @@ async fn process_specification(
     draft_content: &str,
     draft_file: &Path,
     draft_name: &str,
+    workspace: &WorkspaceContext,
     config: &Config,
     ignore_cache_reads: bool,
     additional_context: HashMap<String, serde_json::Value>,
@@ -552,12 +612,13 @@ async fn process_specification(
         return Ok(ProcessSpecOutcome::Success);
     }
 
-    if is_external_api_draft_path(draft_file, DRAFTS_DIR) {
+    if is_external_api_draft_path(draft_file, &workspace.drafts_dir) {
         return process_external_api_specification(
             executor,
             draft_content,
             draft_file,
             draft_name,
+            workspace,
             config,
             ignore_cache_reads,
             additional_context,
@@ -583,6 +644,7 @@ async fn process_specification(
         draft_content,
         draft_file,
         draft_name,
+        workspace,
         spec_content,
         additional_context,
     )
@@ -600,6 +662,7 @@ async fn process_external_api_specification(
     draft_content: &str,
     draft_file: &Path,
     draft_name: &str,
+    workspace: &WorkspaceContext,
     config: &Config,
     ignore_cache_reads: bool,
     additional_context: HashMap<String, serde_json::Value>,
@@ -621,10 +684,14 @@ async fn process_external_api_specification(
     let namespace = sanitize_generated_artifact_name(&expansion.api_name);
     let generated_context = prune_generated_spec_context(additional_context.clone());
 
-    clear_external_generated_output_dirs(&namespace)?;
+    clear_external_generated_output_dirs(&workspace.specifications_dir, &namespace)?;
 
     let primary_context_path =
-        determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+        determine_specification_output_path(
+            draft_file,
+            &workspace.drafts_dir,
+            &workspace.specifications_dir,
+        )?;
     let mut used_data_names = HashMap::new();
     let mut used_context_names = HashMap::new();
     let mut generated = Vec::new();
@@ -634,13 +701,16 @@ async fn process_external_api_specification(
             &sanitize_generated_artifact_name(&artifact.name),
             &mut used_data_names,
         );
-        let output_path = external_generated_data_output_path(&namespace, &file_stem);
+        let output_path =
+            external_generated_data_output_path(&workspace.specifications_dir, &namespace, &file_stem);
         let result = generate_external_spec_artifact(
             &data_executor,
             artifact,
             draft_file,
             &artifact.name,
             output_path,
+            ArtifactCategory::Data,
+            workspace,
             generated_context.clone(),
             ignore_cache_reads,
             execution_control.clone(),
@@ -657,6 +727,8 @@ async fn process_external_api_specification(
             draft_file,
             &primary_context.name,
             primary_context_path,
+            ArtifactCategory::Api,
+            workspace,
             generated_context.clone(),
             ignore_cache_reads,
             execution_control.clone(),
@@ -669,13 +741,19 @@ async fn process_external_api_specification(
             &sanitize_generated_artifact_name(&artifact.name),
             &mut used_context_names,
         );
-        let output_path = external_generated_context_output_path(&namespace, &file_stem);
+        let output_path = external_generated_context_output_path(
+            &workspace.specifications_dir,
+            &namespace,
+            &file_stem,
+        );
         let result = generate_external_spec_artifact(
             &context_executor,
             artifact,
             draft_file,
             &artifact.name,
             output_path,
+            ArtifactCategory::Context,
+            workspace,
             generated_context.clone(),
             ignore_cache_reads,
             execution_control.clone(),
@@ -785,6 +863,8 @@ async fn generate_external_spec_artifact(
     source_draft_file: &Path,
     display_name: &str,
     output_path: PathBuf,
+    spec_category: ArtifactCategory,
+    workspace: &WorkspaceContext,
     additional_context: HashMap<String, serde_json::Value>,
     ignore_cache_reads: bool,
     execution_control: Option<CliExecutionControl>,
@@ -800,8 +880,15 @@ async fn generate_external_spec_artifact(
             ignore_cache_reads,
         )
         .await?;
-    let written =
-        write_specification_output(source_draft_file, display_name, &output_path, spec_content)?;
+    let written = write_specification_output(
+        workspace,
+        source_draft_file,
+        display_name,
+        display_name,
+        spec_category,
+        &output_path,
+        spec_content,
+    )?;
     Ok((display_name.to_string(), written))
 }
 
@@ -822,13 +909,13 @@ fn prune_generated_spec_context(
     context
 }
 
-fn clear_external_generated_output_dirs(api_namespace: &str) -> Result<()> {
+fn clear_external_generated_output_dirs(specifications_dir: &str, api_namespace: &str) -> Result<()> {
     for dir in [
-        PathBuf::from(SPECIFICATIONS_DIR)
+        PathBuf::from(specifications_dir)
             .join("data")
             .join("external")
             .join(api_namespace),
-        PathBuf::from(SPECIFICATIONS_DIR)
+        PathBuf::from(specifications_dir)
             .join("contexts")
             .join("external")
             .join(api_namespace),
@@ -852,8 +939,12 @@ fn unique_generated_name(base: &str, used: &mut HashMap<String, usize>) -> Strin
     }
 }
 
-fn external_generated_data_output_path(api_namespace: &str, artifact_file_stem: &str) -> PathBuf {
-    PathBuf::from(SPECIFICATIONS_DIR)
+fn external_generated_data_output_path(
+    specifications_dir: &str,
+    api_namespace: &str,
+    artifact_file_stem: &str,
+) -> PathBuf {
+    PathBuf::from(specifications_dir)
         .join("data")
         .join("external")
         .join(api_namespace)
@@ -861,10 +952,11 @@ fn external_generated_data_output_path(api_namespace: &str, artifact_file_stem: 
 }
 
 fn external_generated_context_output_path(
+    specifications_dir: &str,
     api_namespace: &str,
     artifact_file_stem: &str,
 ) -> PathBuf {
-    PathBuf::from(SPECIFICATIONS_DIR)
+    PathBuf::from(specifications_dir)
         .join("contexts")
         .join("external")
         .join(api_namespace)
@@ -875,14 +967,33 @@ fn finalize_specification_output(
     draft_content: &str,
     draft_file: &Path,
     draft_name: &str,
+    workspace: &WorkspaceContext,
     spec_content: String,
     additional_context: HashMap<String, serde_json::Value>,
 ) -> Result<ProcessSpecOutcome> {
     // Determine output path preserving folder structure
     let output_path =
-        determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+        determine_specification_output_path(
+            draft_file,
+            &workspace.drafts_dir,
+            &workspace.specifications_dir,
+        )?;
 
-    let written = write_specification_output(draft_file, draft_name, &output_path, spec_content)?;
+    let spec_category = workspace
+        .store
+        .artifact_for_path(draft_file)
+        .map(|artifact| artifact.category)
+        .unwrap_or(ArtifactCategory::Root);
+
+    let written = write_specification_output(
+        workspace,
+        draft_file,
+        draft_name,
+        draft_name,
+        spec_category,
+        &output_path,
+        spec_content,
+    )?;
 
     if written.has_blocking_ambiguities {
         return Ok(ProcessSpecOutcome::BlockingAmbiguities {
@@ -899,8 +1010,11 @@ fn finalize_specification_output(
 }
 
 fn write_specification_output(
+    workspace: &WorkspaceContext,
     draft_file: &Path,
     draft_name: &str,
+    display_name: &str,
+    spec_category: ArtifactCategory,
     output_path: &Path,
     spec_content: String,
 ) -> Result<WrittenSpecification> {
@@ -927,12 +1041,26 @@ fn write_specification_output(
         }
     }
 
-    // Ensure the output directory exists
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).context("Failed to create specification output directory")?;
+    match workspace.store.backend() {
+        BackendSelection::File => {
+            if let Some(parent) = output_path.parent() {
+                fs::create_dir_all(parent).context("Failed to create specification output directory")?;
+            }
+            fs::write(output_path, &spec_content).context("Failed to write specification file")?;
+        }
+        BackendSelection::GitHub { .. } => {
+            let draft_artifact = workspace
+                .store
+                .artifact_for_path(draft_file)
+                .with_context(|| format!("missing projected draft artifact {}", draft_file.display()))?;
+            workspace.store.write_specification(
+                &draft_artifact,
+                display_name,
+                spec_category,
+                spec_content.clone(),
+            )?;
+        }
     }
-
-    fs::write(output_path, &spec_content).context("Failed to write specification file")?;
 
     Ok(WrittenSpecification {
         spec_content,
@@ -1085,8 +1213,9 @@ pub async fn create_implementation(
     token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let workspace = WorkspaceContext::resolve(config)?;
     let names_provided = !names.is_empty();
-    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
+    let context_files = resolve_input_files(&workspace.specifications_dir, names, "md", filter)?;
 
     if context_files.is_empty() {
         println!("No context files found to process");
@@ -1102,8 +1231,18 @@ pub async fn create_implementation(
     }
 
     let dependency_roots =
-        select_dependency_roots(context_files, SPECIFICATIONS_DIR, names_provided, filter)?;
-    let execution_levels = build_implementation_execution_plan(dependency_roots, filter)?;
+        select_dependency_roots(
+            context_files,
+            &workspace.specifications_dir,
+            names_provided,
+            filter,
+        )?;
+    let execution_levels = build_implementation_execution_plan(
+        dependency_roots,
+        filter,
+        &workspace.specifications_dir,
+        &workspace.drafts_dir,
+    )?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!(
         "Creating implementation for {} specification(s)",
@@ -1115,8 +1254,8 @@ pub async fn create_implementation(
         println!("Generating project structure...");
     }
 
-    let spec_dir = PathBuf::from(SPECIFICATIONS_DIR);
-    let drafts_dir = PathBuf::from(DRAFTS_DIR);
+    let spec_dir = workspace.specifications_root.clone();
+    let drafts_dir = workspace.drafts_root.clone();
     let project_info = analyze_specifications(&spec_dir, Some(&drafts_dir))
         .context("Failed to analyze specifications")?;
 
@@ -1176,10 +1315,10 @@ pub async fn create_implementation(
                 .iter()
                 .any(|dep_name| updated_in_run.contains(dep_name));
             let (fingerprint_primary_root, fingerprint_fallback_root) =
-                if node.input_path.starts_with(SPECIFICATIONS_DIR) {
-                    (SPECIFICATIONS_DIR, Some(DRAFTS_DIR))
+                if node.input_path.starts_with(&workspace.specifications_root) {
+                    (&workspace.specifications_dir, Some(workspace.drafts_dir.as_str()))
                 } else {
-                    (DRAFTS_DIR, None)
+                    (&workspace.drafts_dir, None)
                 };
             let dependency_fingerprint = dependency_fingerprint_for_node(
                 &node,
@@ -1187,7 +1326,7 @@ pub async fn create_implementation(
                 fingerprint_fallback_root,
             )?;
             let output_path =
-                determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
+                determine_implementation_output_path(&context_file, &workspace.specifications_dir)?;
 
             if has_unfinished_specification(&context_file, &context_name, "implementation")? {
                 had_unspecified = true;
@@ -1217,8 +1356,16 @@ pub async fn create_implementation(
                 continue;
             }
 
-            let mut dependency_context = build_dependency_context(&node)?;
-            if let Some(target_type_name) = infer_target_type_name(&context_file)? {
+            let mut dependency_context = build_dependency_context(
+                &node,
+                &workspace.specifications_dir,
+                Some(&workspace.drafts_dir),
+            )?;
+            if let Some(target_type_name) = infer_target_type_name(
+                &context_file,
+                &workspace.specifications_root,
+                &workspace.drafts_root,
+            )? {
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
@@ -1251,7 +1398,7 @@ pub async fn create_implementation(
             if config.verbose {
                 println!("Parallel execution enabled for create_implementation");
             }
-            let cfg = *config;
+            let cfg = config.clone();
             let use_batch = executor.can_use_batch().unwrap_or(false);
             if use_batch {
                 let mut batch_items: Vec<PreparedImplementationBatchItem> = Vec::new();
@@ -1276,6 +1423,7 @@ pub async fn create_implementation(
                             &context_content,
                             &context_file,
                             &context_name,
+                            &workspace.specifications_dir,
                             &cfg,
                             clear_cache,
                             dependency_context,
@@ -1304,6 +1452,7 @@ pub async fn create_implementation(
                             let result = finalize_implementation_output(
                                 &context_file,
                                 &context_name,
+                                &workspace.specifications_dir,
                                 &cfg,
                                 output,
                             );
@@ -1349,6 +1498,7 @@ pub async fn create_implementation(
                                     finalize_implementation_output(
                                         &item.context_file,
                                         &item.context_name,
+                                        &workspace.specifications_dir,
                                         &cfg,
                                         output,
                                     )
@@ -1362,6 +1512,7 @@ pub async fn create_implementation(
                                         &item.context_content,
                                         &item.context_file,
                                         &item.context_name,
+                                        &workspace.specifications_dir,
                                         &cfg,
                                         clear_cache,
                                         item.dependency_context.clone(),
@@ -1389,6 +1540,7 @@ pub async fn create_implementation(
                                     &item.context_content,
                                     &item.context_file,
                                     &item.context_name,
+                                    &workspace.specifications_dir,
                                     &cfg,
                                     clear_cache,
                                     item.dependency_context,
@@ -1473,6 +1625,7 @@ pub async fn create_implementation(
                     .collect::<Vec<_>>();
 
                 let executor_clone = executor.clone();
+                let specifications_dir = workspace.specifications_dir.clone();
                 let results = run_stage_items(
                     stage_items,
                     true,
@@ -1489,12 +1642,15 @@ pub async fn create_implementation(
                     ),
                           execution_control| {
                         let executor = executor_clone.clone();
+                        let cfg = cfg.clone();
+                        let specifications_dir = specifications_dir.clone();
                         async move {
                             process_implementation(
                                 &executor,
                                 &context_content,
                                 &context_file,
                                 &context_name,
+                                &specifications_dir,
                                 &cfg,
                                 clear_cache,
                                 dependency_context,
@@ -1572,7 +1728,8 @@ pub async fn create_implementation(
                 .collect::<Vec<_>>();
 
             let executor_clone = executor.clone();
-            let cfg = *config;
+            let cfg = config.clone();
+            let specifications_dir = workspace.specifications_dir.clone();
             let results = run_stage_items(
                 stage_items,
                 false,
@@ -1589,12 +1746,15 @@ pub async fn create_implementation(
                 ),
                       execution_control| {
                     let executor = executor_clone.clone();
+                    let cfg = cfg.clone();
+                    let specifications_dir = specifications_dir.clone();
                     async move {
                         process_implementation(
                             &executor,
                             &context_content,
                             &context_file,
                             &context_name,
+                            &specifications_dir,
                             &cfg,
                             clear_cache,
                             dependency_context,
@@ -1677,6 +1837,7 @@ async fn process_implementation(
     context_content: &str,
     context_file: &Path,
     context_name: &str,
+    specifications_dir: &str,
     config: &Config,
     ignore_cache_reads: bool,
     additional_context: HashMap<String, serde_json::Value>,
@@ -1707,12 +1868,19 @@ async fn process_implementation(
         )
         .await?;
 
-    finalize_implementation_output(context_file, context_name, config, impl_result)
+    finalize_implementation_output(
+        context_file,
+        context_name,
+        specifications_dir,
+        config,
+        impl_result,
+    )
 }
 
 fn finalize_implementation_output(
     context_file: &Path,
     context_name: &str,
+    specifications_dir: &str,
     config: &Config,
     impl_result: String,
 ) -> Result<()> {
@@ -1737,7 +1905,7 @@ fn finalize_implementation_output(
     }
 
     // Determine output path preserving folder structure
-    let output_path = determine_implementation_output_path(context_file, SPECIFICATIONS_DIR)?;
+    let output_path = determine_implementation_output_path(context_file, specifications_dir)?;
 
     // Ensure the output directory exists
     if let Some(parent) = output_path.parent() {
@@ -2130,8 +2298,9 @@ pub async fn create_tests(
     token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let workspace = WorkspaceContext::resolve(config)?;
     let names_provided = !names.is_empty();
-    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
+    let context_files = resolve_input_files(&workspace.specifications_dir, names, "md", filter)?;
 
     if context_files.is_empty() {
         println!("No context files found to process");
@@ -2139,9 +2308,17 @@ pub async fn create_tests(
     }
 
     let dependency_roots =
-        select_dependency_roots(context_files, SPECIFICATIONS_DIR, names_provided, filter)?;
-    let execution_levels =
-        build_execution_plan(dependency_roots, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
+        select_dependency_roots(
+            context_files,
+            &workspace.specifications_dir,
+            names_provided,
+            filter,
+        )?;
+    let execution_levels = build_execution_plan(
+        dependency_roots,
+        &workspace.specifications_dir,
+        Some(&workspace.drafts_dir),
+    )?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating tests for {} context(s)", total_count);
 
@@ -2165,8 +2342,17 @@ pub async fn create_tests(
         for node in level_nodes {
             let context_file = node.input_path.clone();
             let context_name = node.name.clone();
-            let mut dependency_context = build_dependency_context(&node)?;
-            augment_test_generation_context(&context_file, &mut dependency_context)?;
+            let mut dependency_context = build_dependency_context(
+                &node,
+                &workspace.specifications_dir,
+                Some(&workspace.drafts_dir),
+            )?;
+            augment_test_generation_context(
+                &context_file,
+                &workspace.specifications_root,
+                &workspace.drafts_root,
+                &mut dependency_context,
+            )?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
             let (dependency_context, estimated) = fit_context_to_token_limit(
                 &executor,
@@ -2197,8 +2383,9 @@ pub async fn create_tests(
         if can_parallel && config.verbose {
             println!("Parallel execution enabled for create_test");
         }
-        let cfg = *config;
+        let cfg = config.clone();
         let executor_clone = executor.clone();
+        let specifications_dir = workspace.specifications_dir.clone();
         let results = run_stage_items(
             runnable,
             can_parallel,
@@ -2208,12 +2395,15 @@ pub async fn create_tests(
             move |(context_file, context_name, dependency_context, context_content),
                   execution_control| {
                 let executor = executor_clone.clone();
+                let cfg = cfg.clone();
+                let specifications_dir = specifications_dir.clone();
                 async move {
                     process_tests(
                         &executor,
                         &context_content,
                         &context_file,
                         &context_name,
+                        &specifications_dir,
                         &cfg,
                         clear_cache,
                         dependency_context,
@@ -2348,21 +2538,23 @@ fn clear_stage_agent_cache_entries_by_name(
     names: &[String],
     config: &Config,
 ) -> Result<usize> {
+    let workspace = WorkspaceContext::resolve(config)?;
     let names_vec = names.to_vec();
     let mut removed = 0usize;
     let mut candidates: Vec<(String, CacheAgentInput)> = Vec::new();
 
     match stage {
         Stage::Specification => {
-            let files = resolve_input_files(DRAFTS_DIR, names_vec, "md", &CategoryFilter::all())?;
-            let levels = build_execution_plan(files, DRAFTS_DIR, None)?;
+            let files =
+                resolve_input_files(&workspace.drafts_dir, names_vec, "md", &CategoryFilter::all())?;
+            let levels = build_execution_plan(files, &workspace.drafts_dir, None)?;
             for node in levels.into_iter().flatten() {
                 let draft_content = fs::read_to_string(&node.input_path).with_context(|| {
                     format!("Failed to read draft file: {}", node.input_path.display())
                 })?;
-                let additional = build_dependency_context(&node)?;
+                let additional = build_dependency_context(&node, &workspace.drafts_dir, None)?;
                 let agent_name =
-                    determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
+                    determine_specification_agent(&node.input_path, &workspace.drafts_dir).to_string();
                 candidates.push((
                     agent_name,
                     CacheAgentInput {
@@ -2374,9 +2566,18 @@ fn clear_stage_agent_cache_entries_by_name(
             }
         }
         Stage::Implementation => {
-            let files =
-                resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
-            let levels = build_implementation_execution_plan(files, &CategoryFilter::all())?;
+            let files = resolve_input_files(
+                &workspace.specifications_dir,
+                names_vec,
+                "md",
+                &CategoryFilter::all(),
+            )?;
+            let levels = build_implementation_execution_plan(
+                files,
+                &CategoryFilter::all(),
+                &workspace.specifications_dir,
+                &workspace.drafts_dir,
+            )?;
             for node in levels.into_iter().flatten() {
                 let context_file = resolve_implementation_context_file(&node.input_path)?;
                 let context_content = fs::read_to_string(&context_file).with_context(|| {
@@ -2385,8 +2586,16 @@ fn clear_stage_agent_cache_entries_by_name(
                         context_file.display()
                     )
                 })?;
-                let mut additional = build_dependency_context(&node)?;
-                if let Some(target_type_name) = infer_target_type_name(&context_file)? {
+                let mut additional = build_dependency_context(
+                    &node,
+                    &workspace.specifications_dir,
+                    Some(&workspace.drafts_dir),
+                )?;
+                if let Some(target_type_name) = infer_target_type_name(
+                    &context_file,
+                    &workspace.specifications_root,
+                    &workspace.drafts_root,
+                )? {
                     additional.insert("target_type_name".to_string(), json!(target_type_name));
                 }
                 candidates.push((
@@ -2400,9 +2609,17 @@ fn clear_stage_agent_cache_entries_by_name(
             }
         }
         Stage::Tests => {
-            let files =
-                resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
-            let levels = build_execution_plan(files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
+            let files = resolve_input_files(
+                &workspace.specifications_dir,
+                names_vec,
+                "md",
+                &CategoryFilter::all(),
+            )?;
+            let levels = build_execution_plan(
+                files,
+                &workspace.specifications_dir,
+                Some(&workspace.drafts_dir),
+            )?;
             for node in levels.into_iter().flatten() {
                 let context_content = fs::read_to_string(&node.input_path).with_context(|| {
                     format!(
@@ -2410,8 +2627,17 @@ fn clear_stage_agent_cache_entries_by_name(
                         node.input_path.display()
                     )
                 })?;
-                let mut additional = build_dependency_context(&node)?;
-                augment_test_generation_context(&node.input_path, &mut additional)?;
+                let mut additional = build_dependency_context(
+                    &node,
+                    &workspace.specifications_dir,
+                    Some(&workspace.drafts_dir),
+                )?;
+                augment_test_generation_context(
+                    &node.input_path,
+                    &workspace.specifications_root,
+                    &workspace.drafts_root,
+                    &mut additional,
+                )?;
                 candidates.push((
                     "create_test".to_string(),
                     CacheAgentInput {
@@ -2527,6 +2753,7 @@ async fn process_tests(
     context_content: &str,
     context_file: &Path,
     context_name: &str,
+    specifications_dir: &str,
     config: &Config,
     ignore_cache_reads: bool,
     additional_context: HashMap<String, serde_json::Value>,
@@ -2536,7 +2763,7 @@ async fn process_tests(
         anyhow::bail!("unfinished specification");
     }
 
-    let test_paths = determine_bdd_test_paths(context_file, SPECIFICATIONS_DIR)?;
+    let test_paths = determine_bdd_test_paths(context_file, specifications_dir)?;
 
     if config.dry_run {
         println!(
@@ -2658,9 +2885,12 @@ fn parse_generated_files(output: &str) -> Result<Vec<(PathBuf, String)>> {
 
 fn augment_test_generation_context(
     context_file: &Path,
+    specifications_root: &Path,
+    drafts_root: &Path,
     additional_context: &mut HashMap<String, serde_json::Value>,
 ) -> Result<()> {
-    let test_paths = determine_bdd_test_paths(context_file, SPECIFICATIONS_DIR)?;
+    let test_paths =
+        determine_bdd_test_paths(context_file, specifications_root.to_string_lossy().as_ref())?;
     additional_context.insert(
         "feature_output_path".to_string(),
         json!(test_paths.feature_path.to_string_lossy().to_string()),
@@ -2677,7 +2907,9 @@ fn augment_test_generation_context(
         "runner_test_name".to_string(),
         json!(test_paths.runner_test_name),
     );
-    if let Some(target_type_name) = infer_target_type_name(context_file)? {
+    if let Some(target_type_name) =
+        infer_target_type_name(context_file, specifications_root, drafts_root)?
+    {
         additional_context.insert("target_type_name".to_string(), json!(target_type_name));
     }
     Ok(())
@@ -2741,14 +2973,13 @@ fn build_implemented_dependency_manifest(
         .collect()
 }
 
-fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serde_json::Value>> {
+fn build_dependency_context(
+    node: &ExecutionNode,
+    primary_root: &str,
+    fallback_root: Option<&str>,
+) -> Result<HashMap<String, serde_json::Value>> {
     let mut context = HashMap::new();
     let direct_dependencies = node.resolve_direct_dependencies()?;
-    let (primary_root, fallback_root) = if node.input_path.starts_with(SPECIFICATIONS_DIR) {
-        (SPECIFICATIONS_DIR, Some(DRAFTS_DIR))
-    } else {
-        (DRAFTS_DIR, None)
-    };
     let dependency_closure = node.resolve_dependency_closure(primary_root, fallback_root)?;
     let dependency_manifest = build_dependency_manifest(&dependency_closure, &direct_dependencies);
     let direct_dependency_manifest =
@@ -2788,23 +3019,25 @@ fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serd
 fn build_implementation_execution_plan(
     spec_files: Vec<PathBuf>,
     filter: &CategoryFilter,
+    specifications_dir: &str,
+    drafts_dir: &str,
 ) -> Result<Vec<Vec<ExecutionNode>>> {
     let implementation_inputs =
-        resolve_implementation_dependency_inputs(spec_files, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
+        resolve_implementation_dependency_inputs(spec_files, specifications_dir, drafts_dir)?;
 
     let expanded_inputs = expand_with_transitive_dependencies(
         implementation_inputs,
-        SPECIFICATIONS_DIR,
-        Some(DRAFTS_DIR),
+        specifications_dir,
+        Some(drafts_dir),
     )?;
     let filtered_inputs = if filter.is_active() {
         expanded_inputs
             .into_iter()
             .filter(|f| {
-                let base_dir = if f.starts_with(SPECIFICATIONS_DIR) {
-                    SPECIFICATIONS_DIR
+                let base_dir = if f.starts_with(specifications_dir) {
+                    specifications_dir
                 } else {
-                    DRAFTS_DIR
+                    drafts_dir
                 };
                 filter.matches_path(f, base_dir)
             })
@@ -2812,7 +3045,7 @@ fn build_implementation_execution_plan(
     } else {
         expanded_inputs
     };
-    build_execution_plan(filtered_inputs, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))
+    build_execution_plan(filtered_inputs, specifications_dir, Some(drafts_dir))
 }
 
 fn resolve_implementation_dependency_inputs(
@@ -3579,8 +3812,12 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
     }
 }
 
-fn infer_target_type_name(spec_file: &Path) -> Result<Option<String>> {
-    let rel = match spec_file.strip_prefix(Path::new(SPECIFICATIONS_DIR)) {
+fn infer_target_type_name(
+    spec_file: &Path,
+    specifications_root: &Path,
+    drafts_root: &Path,
+) -> Result<Option<String>> {
+    let rel = match spec_file.strip_prefix(specifications_root) {
         Ok(r) => r.to_path_buf(),
         Err(_) => {
             return Ok(spec_file
@@ -3590,7 +3827,7 @@ fn infer_target_type_name(spec_file: &Path) -> Result<Option<String>> {
         }
     };
 
-    let draft_path = PathBuf::from(DRAFTS_DIR).join(&rel);
+    let draft_path = drafts_root.join(&rel);
     if draft_path.exists() {
         let content = fs::read_to_string(&draft_path)
             .with_context(|| format!("Failed to read draft file: {}", draft_path.display()))?;
@@ -4074,11 +4311,11 @@ Problem:
     #[test]
     fn builds_generated_external_output_paths_under_external_namespaces() {
         assert_eq!(
-            external_generated_data_output_path("stripe", "PaymentIntent"),
+            external_generated_data_output_path("specifications", "stripe", "PaymentIntent"),
             Path::new("specifications/data/external/stripe/PaymentIntent.md")
         );
         assert_eq!(
-            external_generated_context_output_path("stripe", "auth_flow"),
+            external_generated_context_output_path("specifications", "stripe", "auth_flow"),
             Path::new("specifications/contexts/external/stripe/auth_flow.md")
         );
     }
@@ -4169,6 +4406,8 @@ Problem:
         let implementation_levels = build_implementation_execution_plan(
             vec![context_spec, message_spec, subscription_spec, position_spec],
             &CategoryFilter::all(),
+            specs.to_str().unwrap_or("specifications"),
+            drafts.to_str().unwrap_or("drafts"),
         )
         .expect("implementation plan");
         std::env::set_current_dir(original_dir).expect("restore cwd");

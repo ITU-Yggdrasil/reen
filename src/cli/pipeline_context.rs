@@ -9,8 +9,6 @@ use super::openapi_fetcher::{
     parse_external_api_draft,
 };
 use super::stage_runner::estimate_agent_request_tokens;
-use super::DRAFTS_DIR;
-
 fn compact_dependency_entries(
     value: &serde_json::Value,
     content_limit: usize,
@@ -114,8 +112,9 @@ pub(super) fn build_specification_context(
     draft_file: &Path,
     draft_content: &str,
     mut context: HashMap<String, serde_json::Value>,
+    drafts_dir: &str,
 ) -> Result<HashMap<String, serde_json::Value>> {
-    if !is_external_api_draft_path(draft_file, DRAFTS_DIR) {
+    if !is_external_api_draft_path(draft_file, drafts_dir) {
         return Ok(context);
     }
 
