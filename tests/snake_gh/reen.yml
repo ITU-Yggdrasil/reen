@@ -4,4 +4,7 @@ create:
   token-limit: 30000.0
   specification:
     fix:
-      max-fix-attempts: 3
+      max-compile-fix-attempts: 3
+  implementation:
+    fix:
+      max-compile-fix-attempts: 3

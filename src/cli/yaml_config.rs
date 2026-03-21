@@ -1,6 +1,4 @@
-//! `reen.yml` helpers; some accessors are unused until additional CLI flows land.
-#![allow(dead_code)]
-
+//! `reen.yml` parsing and helpers used by tests and the CLI.
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_yaml::{Mapping, Value};
@@ -52,31 +50,11 @@ pub struct CreateSpecificationConfig {
     pub fix: OptionalYamlValue,
 }
 
-impl CreateSpecificationConfig {
-    pub fn fix_enabled(&self) -> bool {
-        fix_value_enabled(self.fix.as_ref())
-    }
-
-    pub fn max_fix_attempts(&self) -> Option<u32> {
-        fix_value_u32(self.fix.as_ref(), "max-fix-attempts")
-    }
-}
-
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct CreateImplementationConfig {
     #[serde(default, skip_serializing_if = "OptionalYamlValue::is_missing")]
     pub fix: OptionalYamlValue,
-}
-
-impl CreateImplementationConfig {
-    pub fn fix_enabled(&self) -> bool {
-        fix_value_enabled(self.fix.as_ref())
-    }
-
-    pub fn max_compile_fix_attempts(&self) -> Option<u32> {
-        fix_value_u32(self.fix.as_ref(), "max-compile-fix-attempts")
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -89,13 +67,6 @@ pub enum OptionalYamlValue {
 impl OptionalYamlValue {
     fn is_missing(&self) -> bool {
         matches!(self, Self::Missing)
-    }
-
-    fn as_ref(&self) -> Option<&Value> {
-        match self {
-            Self::Missing => None,
-            Self::Present(value) => Some(value),
-        }
     }
 }
 
@@ -127,13 +98,6 @@ pub struct FixCommandConfig {
     pub max_compile_fix_attempts: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
-pub struct LoadedConfig {
-    pub path: PathBuf,
-    pub raw: Value,
-    pub config: ReenConfig,
-}
-
 pub fn resolve_config_path() -> PathBuf {
     match std::env::current_dir() {
         Ok(cwd) => resolve_config_path_from(cwd.as_path()),
@@ -148,7 +112,7 @@ pub fn resolve_config_path_from(start: &Path) -> PathBuf {
     start.join(CONFIG_FILENAME)
 }
 
-pub fn load_config() -> Result<LoadedConfig> {
+pub fn load_config() -> Result<ReenConfig> {
     let path = resolve_config_path();
     let raw = if path.exists() {
         let content = fs::read_to_string(&path)
@@ -168,73 +132,8 @@ pub fn load_config() -> Result<LoadedConfig> {
         Value::Mapping(_) => raw,
         _ => anyhow::bail!("Config file '{}' must contain a YAML mapping", path.display()),
     };
-    let config = serde_yaml::from_value::<ReenConfig>(raw.clone())
-        .with_context(|| format!("Failed to decode config '{}'", path.display()))?;
-
-    Ok(LoadedConfig { path, raw, config })
-}
-
-pub fn write_config(path: &Path, raw: &Value) -> Result<()> {
-    let rendered = render_yaml(raw)?;
-    fs::write(path, rendered)
-        .with_context(|| format!("Failed to write config file '{}'", path.display()))
-}
-
-pub fn set_path(root: &mut Value, path: &[&str], value: Value) {
-    if path.is_empty() {
-        *root = value;
-        return;
-    }
-
-    if !matches!(root, Value::Mapping(_)) {
-        *root = Value::Mapping(Mapping::new());
-    }
-
-    let mut current = root;
-    for segment in &path[..path.len() - 1] {
-        let mapping = current
-            .as_mapping_mut()
-            .expect("config root should be a mapping");
-        let entry = mapping
-            .entry(Value::String((*segment).to_string()))
-            .or_insert_with(|| Value::Mapping(Mapping::new()));
-        if !matches!(entry, Value::Mapping(_)) {
-            *entry = Value::Mapping(Mapping::new());
-        }
-        current = entry;
-    }
-
-    current
-        .as_mapping_mut()
-        .expect("config parent should be a mapping")
-        .insert(Value::String(path[path.len() - 1].to_string()), value);
-}
-
-pub fn get_path<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
-    let mut current = root;
-    for segment in path {
-        let mapping = current.as_mapping()?;
-        current = mapping.get(Value::String((*segment).to_string()))?;
-    }
-    Some(current)
-}
-
-pub fn ensure_switch_enabled(root: &mut Value, path: &[&str]) {
-    match get_path(root, path) {
-        Some(Value::Null) | Some(Value::Bool(true)) | Some(Value::Mapping(_)) => return,
-        _ => {}
-    }
-    set_path(root, path, Value::Null);
-}
-
-pub fn to_yaml_value<T: Serialize>(value: T) -> Result<Value> {
-    serde_yaml::to_value(value).context("Failed to encode config value as YAML")
-}
-
-fn render_yaml(raw: &Value) -> Result<String> {
-    let serialized =
-        serde_yaml::to_string(raw).context("Failed to serialize YAML config for writing")?;
-    Ok(serialized.replace(": null\n", ":\n"))
+    serde_yaml::from_value::<ReenConfig>(raw)
+        .with_context(|| format!("Failed to decode config '{}'", path.display()))
 }
 
 fn find_upwards(start: &Path, name: &str) -> Option<PathBuf> {
@@ -250,32 +149,88 @@ fn find_upwards(start: &Path, name: &str) -> Option<PathBuf> {
     }
 }
 
-fn fix_value_enabled(value: Option<&Value>) -> bool {
-    match value {
-        None => false,
-        Some(Value::Bool(enabled)) => *enabled,
-        Some(Value::Null) | Some(Value::Mapping(_)) => true,
-        Some(_) => false,
-    }
-}
-
-fn fix_value_u32(value: Option<&Value>, key: &str) -> Option<u32> {
-    let mapping = value?.as_mapping()?;
-    let value = mapping.get(Value::String(key.to_string()))?;
-    match value {
-        Value::Number(number) => number.as_u64().and_then(|raw| u32::try_from(raw).ok()),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        ReenConfig, Value, ensure_switch_enabled, get_path, render_yaml, resolve_config_path_from, set_path,
-    };
+    use super::{ReenConfig, Value, resolve_config_path_from, OptionalYamlValue};
+    use anyhow::{Context, Result};
     use serde_yaml::Mapping;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn set_path(root: &mut Value, path: &[&str], value: Value) {
+        if path.is_empty() {
+            *root = value;
+            return;
+        }
+
+        if !matches!(root, Value::Mapping(_)) {
+            *root = Value::Mapping(Mapping::new());
+        }
+
+        let mut current = root;
+        for segment in &path[..path.len() - 1] {
+            let mapping = current
+                .as_mapping_mut()
+                .expect("config root should be a mapping");
+            let entry = mapping
+                .entry(Value::String((*segment).to_string()))
+                .or_insert_with(|| Value::Mapping(Mapping::new()));
+            if !matches!(entry, Value::Mapping(_)) {
+                *entry = Value::Mapping(Mapping::new());
+            }
+            current = entry;
+        }
+
+        current
+            .as_mapping_mut()
+            .expect("config parent should be a mapping")
+            .insert(Value::String(path[path.len() - 1].to_string()), value);
+    }
+
+    fn get_path<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
+        let mut current = root;
+        for segment in path {
+            let mapping = current.as_mapping()?;
+            current = mapping.get(Value::String((*segment).to_string()))?;
+        }
+        Some(current)
+    }
+
+    fn ensure_switch_enabled(root: &mut Value, path: &[&str]) {
+        match get_path(root, path) {
+            Some(Value::Null) | Some(Value::Bool(true)) | Some(Value::Mapping(_)) => return,
+            _ => {}
+        }
+        set_path(root, path, Value::Null);
+    }
+
+    fn render_yaml(raw: &Value) -> Result<String> {
+        let serialized = serde_yaml::to_string(raw).context("Failed to serialize YAML")?;
+        Ok(serialized.replace(": null\n", ":\n"))
+    }
+
+    fn fix_value_enabled(fix: &OptionalYamlValue) -> bool {
+        match fix {
+            OptionalYamlValue::Missing => false,
+            OptionalYamlValue::Present(Value::Bool(enabled)) => *enabled,
+            OptionalYamlValue::Present(Value::Null) | OptionalYamlValue::Present(Value::Mapping(_)) => {
+                true
+            }
+            OptionalYamlValue::Present(_) => false,
+        }
+    }
+
+    fn fix_mapping_u32(fix: &OptionalYamlValue, key: &str) -> Option<u32> {
+        let mapping = match fix {
+            OptionalYamlValue::Present(Value::Mapping(m)) => m,
+            _ => return None,
+        };
+        let value = mapping.get(Value::String(key.to_string()))?;
+        match value {
+            Value::Number(number) => number.as_u64().and_then(|raw| u32::try_from(raw).ok()),
+            _ => None,
+        }
+    }
 
     #[test]
     fn parses_fix_null_as_enabled() {
@@ -290,8 +245,8 @@ create:
 
         let create = parsed.create.expect("create config");
         let specification = create.specification.expect("spec config");
-        assert!(specification.fix_enabled());
-        assert_eq!(specification.max_fix_attempts(), None);
+        assert!(fix_value_enabled(&specification.fix));
+        assert_eq!(fix_mapping_u32(&specification.fix, "max-fix-attempts"), None);
     }
 
     #[test]
@@ -312,8 +267,11 @@ fix:
             .create
             .and_then(|create| create.implementation)
             .expect("implementation config");
-        assert!(implementation.fix_enabled());
-        assert_eq!(implementation.max_compile_fix_attempts(), Some(7));
+        assert!(fix_value_enabled(&implementation.fix));
+        assert_eq!(
+            fix_mapping_u32(&implementation.fix, "max-compile-fix-attempts"),
+            Some(7)
+        );
         assert_eq!(
             parsed.fix.and_then(|fix| fix.max_compile_fix_attempts),
             Some(4)

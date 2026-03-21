@@ -1,7 +1,4 @@
-//! File and GitHub artifact backends. Several types and helpers are unused in the current binary
-//! but kept as the public surface for tooling and future commands.
-#![allow(dead_code)]
-
+//! File and GitHub artifact backends for drafts and specifications.
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -27,13 +24,6 @@ impl BackendSelection {
                 let (owner, repo) = parse_repo_spec(spec)?;
                 Ok(Self::GitHub { owner, repo })
             }
-        }
-    }
-
-    pub fn cache_namespace(&self) -> String {
-        match self {
-            Self::File => "file".to_string(),
-            Self::GitHub { owner, repo } => format!("github:{owner}/{repo}"),
         }
     }
 }
@@ -101,106 +91,6 @@ pub struct ArtifactRef {
     pub source_draft_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct ArtifactWriteResult {
-    pub artifact: ArtifactRef,
-    pub output_path: PathBuf,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitHubSyncScope {
-    DraftsOnly,
-    SpecificationsOnly,
-    All,
-}
-
-impl GitHubSyncScope {
-    fn includes(self, kind: ArtifactKind) -> bool {
-        match self {
-            Self::DraftsOnly => kind == ArtifactKind::Draft,
-            Self::SpecificationsOnly => kind == ArtifactKind::Specification,
-            Self::All => true,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GitHubProjectionEntry {
-    pub issue_number: u64,
-    pub issue_title: String,
-    pub artifact_id: String,
-    pub kind: ArtifactKind,
-    pub category: ArtifactCategory,
-    pub path: PathBuf,
-    pub source_draft_id: Option<String>,
-    pub dependency_numbers: Vec<u64>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GitHubProjectionManifest {
-    pub owner: String,
-    pub repo: String,
-    pub root: PathBuf,
-    pub drafts_root: PathBuf,
-    pub specifications_root: PathBuf,
-    pub entries: Vec<GitHubProjectionEntry>,
-}
-
-impl GitHubProjectionManifest {
-    pub fn issue_summaries_for_kind(&self, kind: ArtifactKind) -> Vec<GitHubProjectionEntry> {
-        let mut entries = self
-            .entries
-            .iter()
-            .filter(|entry| entry.kind == kind)
-            .cloned()
-            .collect::<Vec<_>>();
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        entries
-    }
-
-    pub fn projected_file_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn dependency_edge_count(&self) -> usize {
-        self.entries
-            .iter()
-            .map(|entry| entry.dependency_numbers.len())
-            .sum()
-    }
-
-    pub fn entry_for_path(&self, path: &Path) -> Option<&GitHubProjectionEntry> {
-        self.entries.iter().find(|entry| entry.path == path)
-    }
-
-    pub fn draft_entry_for_spec_path(
-        &self,
-        spec_path: &Path,
-        store: &dyn ArtifactStore,
-    ) -> Result<Option<&GitHubProjectionEntry>> {
-        let Some(spec_artifact) = store.artifact_for_path(spec_path) else {
-            return Ok(None);
-        };
-        let Some(draft_artifact) = store.find_draft_for_specification(&spec_artifact)? else {
-            return Ok(None);
-        };
-        Ok(self.entry_for_path(&draft_artifact.path))
-    }
-
-    pub fn matching_spec_entry(
-        &self,
-        spec_artifact: &ArtifactRef,
-        source_draft_id: Option<&str>,
-    ) -> Option<&GitHubProjectionEntry> {
-        self.entries.iter().find(|entry| {
-            entry.kind == ArtifactKind::Specification
-                && entry.category == spec_artifact.category
-                && entry.source_draft_id.as_deref() == source_draft_id
-                && entry.path.file_name() == spec_artifact.path.file_name()
-        })
-    }
-}
-
 pub trait ArtifactStore: Send + Sync {
     fn backend(&self) -> BackendSelection;
     fn drafts_root(&self) -> &Path;
@@ -221,29 +111,16 @@ pub trait ArtifactStore: Send + Sync {
         names_provided: bool,
         filter: &CategoryFilter,
     ) -> Result<Vec<ArtifactRef>>;
-    fn artifact_by_id(&self, id: &str) -> Result<ArtifactRef>;
     fn artifact_for_path(&self, path: &Path) -> Option<ArtifactRef>;
     fn read_content(&self, artifact: &ArtifactRef) -> Result<String>;
     fn find_specification_for_draft(&self, draft: &ArtifactRef) -> Result<Option<ArtifactRef>>;
-    fn find_draft_for_specification(&self, spec: &ArtifactRef) -> Result<Option<ArtifactRef>>;
     fn write_specification(
         &self,
         draft: &ArtifactRef,
         display_name: &str,
         category: ArtifactCategory,
         content: String,
-    ) -> Result<ArtifactWriteResult>;
-    fn clear_specifications(&self, names: &[String], dry_run: bool) -> Result<usize>;
-    fn explicit_dependencies(&self, _artifact: &ArtifactRef) -> Result<Option<Vec<ArtifactRef>>> {
-        Ok(None)
-    }
-    fn sync_specification_dependencies(
-        &self,
-        _spec: &ArtifactRef,
-        _direct_dependencies: &[ArtifactRef],
-    ) -> Result<()> {
-        Ok(())
-    }
+    ) -> Result<()>;
 }
 
 pub fn build_artifact_store(selection: &BackendSelection) -> Result<Arc<dyn ArtifactStore>> {
@@ -269,10 +146,6 @@ impl FileArtifactStore {
             PathBuf::from("specifications"),
             "file".to_string(),
         )
-    }
-
-    pub fn with_roots(drafts_root: PathBuf, specs_root: PathBuf) -> Self {
-        Self::with_roots_and_namespace(drafts_root, specs_root, "file".to_string())
     }
 
     pub fn with_roots_and_namespace(
@@ -350,10 +223,6 @@ impl ArtifactStore for FileArtifactStore {
         Ok(selected_inputs)
     }
 
-    fn artifact_by_id(&self, id: &str) -> Result<ArtifactRef> {
-        file_artifact_from_id(id, self.drafts_root(), self.specifications_root(), &self.id_namespace)
-    }
-
     fn artifact_for_path(&self, path: &Path) -> Option<ArtifactRef> {
         file_artifact_from_path(
             path,
@@ -388,26 +257,13 @@ impl ArtifactStore for FileArtifactStore {
         Ok(None)
     }
 
-    fn find_draft_for_specification(&self, spec: &ArtifactRef) -> Result<Option<ArtifactRef>> {
-        let draft_path = determine_file_draft_path(spec.path.as_path(), self.drafts_root(), self.specifications_root());
-        if draft_path.exists() {
-            return Ok(Some(file_artifact_from_path(
-                &draft_path,
-                self.drafts_root(),
-                self.specifications_root(),
-                &self.id_namespace,
-            )?));
-        }
-        Ok(None)
-    }
-
     fn write_specification(
         &self,
         draft: &ArtifactRef,
         display_name: &str,
         category: ArtifactCategory,
         content: String,
-    ) -> Result<ArtifactWriteResult> {
+    ) -> Result<()> {
         let output_path = determine_file_specification_path(
             draft,
             display_name,
@@ -419,52 +275,7 @@ impl ArtifactStore for FileArtifactStore {
             fs::create_dir_all(parent).context("Failed to create specification output directory")?;
         }
         fs::write(&output_path, &content).context("Failed to write specification file")?;
-        let artifact = file_artifact_from_path(
-            &output_path,
-            self.drafts_root(),
-            self.specifications_root(),
-            &self.id_namespace,
-        )?;
-        Ok(ArtifactWriteResult {
-            artifact,
-            output_path,
-        })
-    }
-
-    fn clear_specifications(&self, names: &[String], dry_run: bool) -> Result<usize> {
-        if names.is_empty() {
-            if !self.specifications_root().exists() {
-                return Ok(0);
-            }
-            if dry_run {
-                return Ok(count_markdown_files(self.specifications_root())?);
-            }
-            fs::remove_dir_all(self.specifications_root()).with_context(|| {
-                format!("Failed to remove {}", self.specifications_root().display())
-            })?;
-            return Ok(1);
-        }
-
-        let spec_files = resolve_file_inputs(
-            self.specifications_root(),
-            ArtifactKind::Specification,
-            names.to_vec(),
-            &CategoryFilter::all(),
-            self.drafts_root(),
-            self.specifications_root(),
-            &self.id_namespace,
-        )?;
-        let mut removed = 0usize;
-        for spec in spec_files {
-            if spec.path.exists() {
-                if !dry_run {
-                    fs::remove_file(&spec.path)
-                        .with_context(|| format!("Failed to remove {}", spec.path.display()))?;
-                }
-                removed += 1;
-            }
-        }
-        Ok(removed)
+        Ok(())
     }
 }
 
@@ -490,12 +301,7 @@ struct GitHubState {
 struct GitHubIssueRecord {
     artifact: ArtifactRef,
     issue_number: u64,
-    issue_id: u64,
-    node_id: String,
-    title: String,
     body: String,
-    labels: HashSet<String>,
-    dependency_numbers: Vec<u64>,
 }
 
 impl GitHubArtifactStore {
@@ -521,7 +327,6 @@ impl GitHubArtifactStore {
             &self.repo,
             &self.drafts_root,
             &self.specs_root,
-            GitHubSyncScope::All,
         )?;
 
         let mut by_id = HashMap::new();
@@ -566,14 +371,6 @@ impl GitHubArtifactStore {
         Ok(())
     }
 
-    fn list_repo_issues(&self) -> Result<Vec<GitHubIssuePayload>> {
-        list_repo_issues_for_repo(&self.owner, &self.repo)
-    }
-
-    fn list_sub_issue_numbers(&self, issue_number: u64) -> Result<Vec<u64>> {
-        list_sub_issue_numbers_for_repo(&self.owner, &self.repo, issue_number)
-    }
-
     fn upsert_issue(
         &self,
         issue_number: Option<u64>,
@@ -583,189 +380,6 @@ impl GitHubArtifactStore {
     ) -> Result<GitHubIssuePayload> {
         upsert_repo_issue(&self.owner, &self.repo, issue_number, title, body, labels)
     }
-
-    fn sync_sub_issue_numbers(&self, parent: &GitHubIssueRecord, desired_numbers: &[u64]) -> Result<()> {
-        let current: HashSet<u64> = parent.dependency_numbers.iter().copied().collect();
-        let desired: HashSet<u64> = desired_numbers.iter().copied().collect();
-        let desired_node_ids = self.lookup_node_ids(&desired)?;
-        let current_node_ids = self.lookup_node_ids(&current)?;
-
-        for (number, node_id) in desired_node_ids {
-            if !current.contains(&number) {
-                self.add_sub_issue(&parent.node_id, &node_id)?;
-            }
-        }
-        for (number, node_id) in current_node_ids {
-            if !desired.contains(&number) {
-                self.remove_sub_issue(&parent.node_id, &node_id)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn lookup_node_ids(&self, issue_numbers: &HashSet<u64>) -> Result<Vec<(u64, String)>> {
-        let state = self.state.lock().expect("github state");
-        let mut result = Vec::new();
-        for record in state.by_id.values() {
-            if issue_numbers.contains(&record.issue_number) {
-                result.push((record.issue_number, record.node_id.clone()));
-            }
-        }
-        Ok(result)
-    }
-
-    fn add_sub_issue(&self, parent_node_id: &str, sub_issue_node_id: &str) -> Result<()> {
-        let query = r#"mutation($issueId:ID!, $subIssueId:ID!) {
-  addSubIssue(input:{issueId:$issueId, subIssueId:$subIssueId}) {
-    issue {
-      id
-    }
-  }
-}"#;
-        let variables = serde_json::json!({
-            "issueId": parent_node_id,
-            "subIssueId": sub_issue_node_id,
-        });
-        run_gh_graphql(query, variables).map(|_| ())
-    }
-
-    fn remove_sub_issue(&self, parent_node_id: &str, sub_issue_node_id: &str) -> Result<()> {
-        let query = r#"mutation($issueId:ID!, $subIssueId:ID!) {
-  removeSubIssue(input:{issueId:$issueId, subIssueId:$subIssueId}) {
-    issue {
-      id
-    }
-  }
-}"#;
-        let variables = serde_json::json!({
-            "issueId": parent_node_id,
-            "subIssueId": sub_issue_node_id,
-        });
-        run_gh_graphql(query, variables).map(|_| ())
-    }
-}
-
-pub fn build_file_artifact_store_with_roots(
-    drafts_root: PathBuf,
-    specs_root: PathBuf,
-    id_namespace: String,
-) -> Arc<dyn ArtifactStore> {
-    Arc::new(FileArtifactStore::with_roots_and_namespace(
-        drafts_root,
-        specs_root,
-        id_namespace,
-    ))
-}
-
-pub fn sync_github_projection(
-    owner: &str,
-    repo: &str,
-    scope: GitHubSyncScope,
-) -> Result<GitHubProjectionManifest> {
-    let root = PathBuf::from(".reen")
-        .join("github")
-        .join(format!("{}__{}", owner, repo));
-    let drafts_root = root.join("drafts");
-    let specs_root = root.join("specifications");
-    let manifest_path = root.join("projection_manifest.json");
-
-    if drafts_root.exists() {
-        fs::remove_dir_all(&drafts_root)
-            .with_context(|| format!("Failed to clear {}", drafts_root.display()))?;
-    }
-    if specs_root.exists() {
-        fs::remove_dir_all(&specs_root)
-            .with_context(|| format!("Failed to clear {}", specs_root.display()))?;
-    }
-    fs::create_dir_all(&root).with_context(|| format!("Failed to create {}", root.display()))?;
-
-    let (records, _) = load_github_issue_records(owner, repo, &drafts_root, &specs_root, scope)?;
-    let mut entries = Vec::new();
-    for record in records {
-        if let Some(parent) = record.artifact.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
-        }
-        fs::write(&record.artifact.path, &record.body).with_context(|| {
-            format!(
-                "Failed to write projected issue artifact {}",
-                record.artifact.path.display()
-            )
-        })?;
-        entries.push(GitHubProjectionEntry {
-            issue_number: record.issue_number,
-            issue_title: record.title,
-            artifact_id: record.artifact.id.clone(),
-            kind: record.artifact.kind,
-            category: record.artifact.category,
-            path: record.artifact.path,
-            source_draft_id: record.artifact.source_draft_id,
-            dependency_numbers: record.dependency_numbers,
-        });
-    }
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    let manifest = GitHubProjectionManifest {
-        owner: owner.to_string(),
-        repo: repo.to_string(),
-        root,
-        drafts_root,
-        specifications_root: specs_root,
-        entries,
-    };
-    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)
-        .with_context(|| format!("Failed to write {}", manifest_path.display()))?;
-    Ok(manifest)
-}
-
-pub fn publish_projected_specifications(
-    manifest: &GitHubProjectionManifest,
-    dry_run: bool,
-) -> Result<usize> {
-    let store = build_file_artifact_store_with_roots(
-        manifest.drafts_root.clone(),
-        manifest.specifications_root.clone(),
-        format!("github-sync:{}/{}", manifest.owner, manifest.repo),
-    );
-    let spec_artifacts =
-        store.resolve_inputs(ArtifactKind::Specification, Vec::new(), &CategoryFilter::all())?;
-    let mut published = 0usize;
-    for spec_artifact in spec_artifacts {
-        let Some(draft_entry) = manifest.draft_entry_for_spec_path(&spec_artifact.path, store.as_ref())?
-        else {
-            continue;
-        };
-        let content = store.read_content(&spec_artifact)?;
-        let draft_ref = format!("{}/{}#{}", manifest.owner, manifest.repo, draft_entry.issue_number);
-        let existing = manifest.matching_spec_entry(&spec_artifact, Some(&draft_entry.artifact_id));
-        let publish_title = existing
-            .map(|entry| entry.issue_title.clone())
-            .or_else(|| {
-                if spec_artifact.category == ArtifactCategory::Root {
-                    Some(draft_entry.issue_title.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| spec_artifact.name.clone());
-        let labels = [
-            "specification",
-            spec_artifact.category.label().unwrap_or("context"),
-        ];
-        if dry_run {
-            published += 1;
-            continue;
-        }
-        upsert_repo_issue(
-            &manifest.owner,
-            &manifest.repo,
-            existing.map(|entry| entry.issue_number),
-            &publish_title,
-            &upsert_issue_metadata(&content, Some(&draft_ref)),
-            &labels,
-        )?;
-        published += 1;
-    }
-    Ok(published)
 }
 
 impl ArtifactStore for GitHubArtifactStore {
@@ -855,16 +469,6 @@ impl ArtifactStore for GitHubArtifactStore {
         Ok(selected_inputs)
     }
 
-    fn artifact_by_id(&self, id: &str) -> Result<ArtifactRef> {
-        self.refresh_projection()?;
-        let state = self.state.lock().expect("github state");
-        state
-            .by_id
-            .get(id)
-            .map(|record| record.artifact.clone())
-            .with_context(|| format!("unknown GitHub artifact id: {id}"))
-    }
-
     fn artifact_for_path(&self, path: &Path) -> Option<ArtifactRef> {
         self.refresh_projection().ok()?;
         let state = self.state.lock().expect("github state");
@@ -895,22 +499,13 @@ impl ArtifactStore for GitHubArtifactStore {
             .min_by(|a, b| a.path.cmp(&b.path)))
     }
 
-    fn find_draft_for_specification(&self, spec: &ArtifactRef) -> Result<Option<ArtifactRef>> {
-        self.refresh_projection()?;
-        let state = self.state.lock().expect("github state");
-        let Some(draft_id) = &spec.source_draft_id else {
-            return Ok(None);
-        };
-        Ok(state.by_id.get(draft_id).map(|record| record.artifact.clone()))
-    }
-
     fn write_specification(
         &self,
         draft: &ArtifactRef,
         display_name: &str,
         category: ArtifactCategory,
         content: String,
-    ) -> Result<ArtifactWriteResult> {
+    ) -> Result<()> {
         self.refresh_projection()?;
         let labels = ["specification", category.label().unwrap_or("context")];
         let source_ref = match &self.backend() {
@@ -938,77 +533,6 @@ impl ArtifactStore for GitHubArtifactStore {
         };
         self.upsert_issue(existing, display_name, &body, &labels)?;
         self.refresh_projection()?;
-        let state = self.state.lock().expect("github state");
-        let artifact = state
-            .draft_to_specs
-            .get(&draft.id)
-            .into_iter()
-            .flatten()
-            .filter_map(|id| state.by_id.get(id))
-            .find(|record| {
-                record.artifact.name == display_name
-                    && record.artifact.category == category
-                    && record.artifact.kind == ArtifactKind::Specification
-            })
-            .map(|record| record.artifact.clone())
-            .with_context(|| format!("failed to resolve written GitHub specification '{display_name}'"))?;
-        Ok(ArtifactWriteResult {
-            output_path: artifact.path.clone(),
-            artifact,
-        })
-    }
-
-    fn clear_specifications(&self, _names: &[String], _dry_run: bool) -> Result<usize> {
-        bail!("clearing GitHub-backed specification issues is not yet supported")
-    }
-
-    fn explicit_dependencies(&self, artifact: &ArtifactRef) -> Result<Option<Vec<ArtifactRef>>> {
-        self.refresh_projection()?;
-        let state = self.state.lock().expect("github state");
-        let Some(record) = state.by_id.get(&artifact.id) else {
-            return Ok(Some(Vec::new()));
-        };
-        let mut refs = Vec::new();
-        for number in &record.dependency_numbers {
-            let dep_id = github_issue_artifact_id(&self.owner, &self.repo, *number);
-            if let Some(dep) = state.by_id.get(&dep_id) {
-                refs.push(dep.artifact.clone());
-            }
-        }
-        refs.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(Some(refs))
-    }
-
-    fn sync_specification_dependencies(
-        &self,
-        spec: &ArtifactRef,
-        direct_dependencies: &[ArtifactRef],
-    ) -> Result<()> {
-        self.refresh_projection()?;
-        let desired_numbers = direct_dependencies
-            .iter()
-            .filter_map(|dep| {
-                if dep.kind == ArtifactKind::Specification {
-                    github_issue_number_from_artifact_id(&dep.id).ok()
-                } else {
-                    self.find_specification_for_draft(dep)
-                        .ok()
-                        .and_then(|maybe| maybe)
-                        .and_then(|spec_dep| github_issue_number_from_artifact_id(&spec_dep.id).ok())
-                        .or_else(|| github_issue_number_from_artifact_id(&dep.id).ok())
-                }
-            })
-            .collect::<Vec<_>>();
-        let record = {
-            let state = self.state.lock().expect("github state");
-            state
-                .by_id
-                .get(&spec.id)
-                .cloned()
-                .with_context(|| format!("missing GitHub spec record {}", spec.id))?
-        };
-        self.sync_sub_issue_numbers(&record, &desired_numbers)?;
-        self.refresh_projection()?;
         Ok(())
     }
 }
@@ -1022,22 +546,6 @@ fn filter_artifacts(artifacts: Vec<ArtifactRef>, filter: &CategoryFilter, root: 
         .into_iter()
         .filter(|artifact| filter.matches_path(&artifact.path, &root))
         .collect()
-}
-
-fn count_markdown_files(dir: &Path) -> Result<usize> {
-    if !dir.exists() {
-        return Ok(0);
-    }
-    let mut count = 0usize;
-    for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
-            count += count_markdown_files(&path)?;
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-            count += 1;
-        }
-    }
-    Ok(count)
 }
 
 fn resolve_file_inputs(
@@ -1183,29 +691,6 @@ fn determine_file_specification_path(
     Ok(path)
 }
 
-fn file_artifact_from_id(
-    id: &str,
-    drafts_root: &Path,
-    specs_root: &Path,
-    id_namespace: &str,
-) -> Result<ArtifactRef> {
-    let mut parts = id.splitn(3, ':');
-    let _prefix = parts.next().unwrap_or_default();
-    let kind_str = parts.next().unwrap_or_default();
-    let relative = parts.next().unwrap_or_default();
-    let _ = id_namespace;
-    let kind = match kind_str {
-        "draft" => ArtifactKind::Draft,
-        "specification" => ArtifactKind::Specification,
-        other => bail!("unsupported artifact kind '{other}' in id {id}"),
-    };
-    let root = match kind {
-        ArtifactKind::Draft => drafts_root,
-        ArtifactKind::Specification => specs_root,
-    };
-    file_artifact_from_path(&root.join(relative), drafts_root, specs_root, id_namespace)
-}
-
 fn file_artifact_from_path(
     path: &Path,
     drafts_root: &Path,
@@ -1265,7 +750,6 @@ fn file_artifact_from_path(
 #[derive(Clone, Debug)]
 struct GitHubIssuePayload {
     id: u64,
-    node_id: String,
     number: u64,
     title: String,
     body: String,
@@ -1290,11 +774,6 @@ impl GitHubIssuePayload {
                 .get("id")
                 .and_then(|v| v.as_u64())
                 .context("missing issue id")?,
-            node_id: value
-                .get("node_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v.to_string())
-                .context("missing issue node id")?,
             number: value
                 .get("number")
                 .and_then(|v| v.as_u64())
@@ -1374,32 +853,11 @@ fn parse_issue_artifact(
     )))
 }
 
-fn determine_file_draft_path(spec_path: &Path, drafts_root: &Path, specs_root: &Path) -> PathBuf {
-    let relative = spec_path.strip_prefix(specs_root).unwrap_or(spec_path);
-    let mut components = relative.components();
-    let first = components.next().and_then(|c| c.as_os_str().to_str());
-    let second = components.next().and_then(|c| c.as_os_str().to_str());
-    if first == Some("contexts") && second == Some("external") {
-        let remainder = PathBuf::from_iter(relative.components().skip(2));
-        if remainder.components().count() <= 1 {
-            return drafts_root.join("apis").join(remainder);
-        }
-        let api_name = remainder
-            .components()
-            .next()
-            .and_then(|component| component.as_os_str().to_str())
-            .unwrap_or_default();
-        return drafts_root.join("apis").join(format!("{api_name}.md"));
-    }
-    drafts_root.join(relative)
-}
-
 fn load_github_issue_records(
     owner: &str,
     repo: &str,
     drafts_root: &Path,
     specs_root: &Path,
-    scope: GitHubSyncScope,
 ) -> Result<(Vec<GitHubIssueRecord>, HashMap<u64, u64>)> {
     let issues = list_repo_issues_for_repo(owner, repo)?;
     let mut records = Vec::new();
@@ -1409,27 +867,15 @@ fn load_github_issue_records(
         issue_number_to_id.insert(issue.number, issue.id);
         let parsed = parse_issue_artifact(owner, repo, drafts_root, specs_root, &issue)?;
         if let Some((artifact, source_draft_ref)) = parsed {
-            if !scope.includes(artifact.kind) {
-                continue;
-            }
             records.push(GitHubIssueRecord {
                 artifact: ArtifactRef {
                     source_draft_id: source_draft_ref,
                     ..artifact
                 },
                 issue_number: issue.number,
-                issue_id: issue.id,
-                node_id: issue.node_id,
-                title: issue.title,
                 body: issue.body,
-                labels: issue.labels.into_iter().collect(),
-                dependency_numbers: Vec::new(),
             });
         }
-    }
-
-    for record in &mut records {
-        record.dependency_numbers = list_sub_issue_numbers_for_repo(owner, repo, record.issue_number)?;
     }
 
     Ok((records, issue_number_to_id))
@@ -1527,41 +973,6 @@ fn list_repo_issues_for_repo(owner: &str, repo: &str) -> Result<Vec<GitHubIssueP
     Ok(issues)
 }
 
-fn list_sub_issue_numbers_for_repo(owner: &str, repo: &str, issue_number: u64) -> Result<Vec<u64>> {
-    let query = r#"query($owner:String!, $repo:String!, $issueNumber:Int!) {
-  repository(owner:$owner, name:$repo) {
-    issue(number:$issueNumber) {
-      subIssues(first:100) {
-        nodes {
-          number
-        }
-      }
-    }
-  }
-}"#;
-    let variables = serde_json::json!({
-        "owner": owner,
-        "repo": repo,
-        "issueNumber": issue_number as i64,
-    });
-    let output = run_gh_graphql(query, variables)?;
-    let value: Value = serde_json::from_slice(&output).context("failed parsing sub-issue query")?;
-    Ok(value
-        .get("data")
-        .and_then(|v| v.get("repository"))
-        .and_then(|v| v.get("issue"))
-        .and_then(|v| v.get("subIssues"))
-        .and_then(|v| v.get("nodes"))
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("number").and_then(|v| v.as_u64()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default())
-}
-
 fn upsert_repo_issue(
     owner: &str,
     repo: &str,
@@ -1628,17 +1039,6 @@ fn run_gh_json_stdin(args: &[&str], stdin_bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-fn run_gh_graphql(query: &str, variables: Value) -> Result<Vec<u8>> {
-    let payload = serde_json::json!({
-        "query": query,
-        "variables": variables,
-    });
-    run_gh_json_stdin(
-        &["api", "graphql", "--input", "-"],
-        payload.to_string().as_bytes(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1658,7 +1058,6 @@ mod tests {
         let specs_root = PathBuf::from(".reen/github/demo/specifications");
         let issue = GitHubIssuePayload {
             id: 1,
-            node_id: "node".to_string(),
             number: 12,
             title: "Snake".to_string(),
             body: "# Snake draft".to_string(),
@@ -1695,52 +1094,6 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].path, drafts_root.join("data/User.md"));
         assert_eq!(artifacts[0].id, "github-sync:demo/snake:draft:data/User.md");
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn publish_projected_specifications_counts_specs_in_dry_run() {
-        let root = temp_root("publish_dry_run");
-        let drafts_root = root.join("drafts");
-        let specs_root = root.join("specifications");
-        fs::create_dir_all(drafts_root.join("data")).expect("mkdir drafts data");
-        fs::create_dir_all(specs_root.join("data")).expect("mkdir specs data");
-        fs::write(drafts_root.join("data/User.md"), "# User draft").expect("write draft");
-        fs::write(specs_root.join("data/User.md"), "# User spec").expect("write spec");
-
-        let manifest = GitHubProjectionManifest {
-            owner: "demo".to_string(),
-            repo: "snake".to_string(),
-            root: root.clone(),
-            drafts_root: drafts_root.clone(),
-            specifications_root: specs_root.clone(),
-            entries: vec![
-                GitHubProjectionEntry {
-                    issue_number: 1,
-                    issue_title: "User".to_string(),
-                    artifact_id: "github:demo/snake#1".to_string(),
-                    kind: ArtifactKind::Draft,
-                    category: ArtifactCategory::Data,
-                    path: drafts_root.join("data/User.md"),
-                    source_draft_id: None,
-                    dependency_numbers: Vec::new(),
-                },
-                GitHubProjectionEntry {
-                    issue_number: 2,
-                    issue_title: "User".to_string(),
-                    artifact_id: "github:demo/snake#2".to_string(),
-                    kind: ArtifactKind::Specification,
-                    category: ArtifactCategory::Data,
-                    path: specs_root.join("data/User.md"),
-                    source_draft_id: Some("github:demo/snake#1".to_string()),
-                    dependency_numbers: Vec::new(),
-                },
-            ],
-        };
-
-        let published = publish_projected_specifications(&manifest, true).expect("dry run publish");
-        assert_eq!(published, 1);
 
         let _ = fs::remove_dir_all(root);
     }

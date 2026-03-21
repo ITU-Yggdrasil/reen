@@ -87,7 +87,7 @@ pub fn resolve_github_repo(cli_github: Option<&str>) -> Result<Option<String>> {
     if let Some(repo) = cli_github {
         return Ok(Some(repo.trim().to_string()));
     }
-    Ok(yaml_config::load_config()?.config.github)
+    Ok(yaml_config::load_config()?.github)
 }
 
 /// Resolves rate limit (requests per second) from CLI, env, or registry.
