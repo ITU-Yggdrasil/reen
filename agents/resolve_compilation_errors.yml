@@ -33,8 +33,10 @@ static_prompt: |
   - Add standard trait derives or implementations such as `Debug`, `Clone`, `PartialEq`, `Eq`, `Ord`, `Hash` when they do not change runtime behavior.
   - Add **getters** (read-only accessors). Do NOT add setters.
   - Add constructors such as `new(...) -> Self` and `try_new(...) -> Result<Self, _>` when required (do not add mutating setters).
+  - Add methods **declared by name** in the relevant specification/draft for that module (including polling/stream-style APIs), matching the spec’s intent.
+  - When you must advance internal state and a spec does not mandate `&mut self`, prefer **owned state-passing** APIs such as `fn step(mut self, ...) -> (Self, Option<T>)` or `-> Self` instead of new public `&mut self` methods (guardrails treat the tuple/`Self` return form as a safe “non-destructive” alternative to hidden mutation).
   - Adjust signatures between by-reference and by-value where it preserves semantics (e.g. `&T` ↔ `T`), provided it does not introduce mutability.
-  - For immutable data types, prefer non-destructive transformation methods such as `&self -> Self` or `&self -> Result<Self, _>` over public setter-style APIs or `mut self`-based rewrites.
+  - For immutable data types, prefer non-destructive transformation methods such as `&self -> Self` or `&self -> Result<Self, _>` over public setter-style APIs.
   - You MUST NOT change public API types beyond `&T` ↔ `T`. In particular, do NOT change numeric/primitive types (e.g. `i32` ↔ `u32`, `usize` ↔ `u64`) in public function parameters or return types.
 
   ## Allowed tracing adjustments (explicitly permitted)

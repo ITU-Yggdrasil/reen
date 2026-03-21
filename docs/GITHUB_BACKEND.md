@@ -57,6 +57,8 @@ When GitHub mode is enabled, Reen mirrors issue-backed artifacts under:
 
 That projected tree is what `check specification`, `create implementation`, and `create tests` consume.
 
+The CLI treats this projection directory as the **artifact workspace root** for the active backend: with `--github` / `reen.yml` `github:`, that root is `.reen/github/<owner>__<repo>` only (not also `./specifications` at the repo root). Without GitHub, the root is the working tree, with `./drafts` and `./specifications` beside `src/`.
+
 ## Recommended Authentication Model
 
 There are two related integrations:

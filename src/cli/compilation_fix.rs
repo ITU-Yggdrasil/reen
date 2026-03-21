@@ -85,6 +85,7 @@ pub async fn ensure_compiles_with_auto_fix(
     config: &Config,
     max_attempts: usize,
     project_root: &Path,
+    artifact_root: &Path,
     project_info: &ProjectInfo,
     recent_generated_files: &[PathBuf],
     execution_control: Option<&dyn NativeExecutionControl>,
@@ -142,7 +143,7 @@ pub async fn ensure_compiles_with_auto_fix(
                 snippet_lines,
             )?;
             let specs_json = if include_specs {
-                snapshot_specs_json(project_root, &relevant_paths)?
+                snapshot_specs_json(project_root, artifact_root, &relevant_paths)?
             } else {
                 BTreeMap::new()
             };
@@ -221,7 +222,7 @@ pub async fn ensure_compiles_with_auto_fix(
         let extracted = extract_unified_diff_from_agent_output(&patch_text)
             .context("Resolver output did not contain a unified diff starting with 'diff --git'")?;
 
-        let guardrail = check_guardrails(project_root, &extracted)?;
+        let guardrail = check_guardrails(project_root, artifact_root, &extracted)?;
         fs::write(
             attempt_dir.join("guardrail_report.json"),
             serde_json::to_string_pretty(&guardrail_to_json(&guardrail))
@@ -717,6 +718,7 @@ fn snapshot_files_json_snippets(
 
 fn snapshot_specs_json(
     project_root: &Path,
+    artifact_root: &Path,
     src_paths: &[PathBuf],
 ) -> Result<BTreeMap<String, String>> {
     let mut spec_paths: HashSet<PathBuf> = HashSet::new();
@@ -725,8 +727,7 @@ fn snapshot_specs_json(
         let rel_s = rel.to_string_lossy();
         let spec_rel = map_src_to_spec(&rel_s);
         if let Some(spec_rel) = spec_rel {
-            let spec_full = project_root.join(&spec_rel);
-            if spec_full.exists() {
+            if let Some(spec_full) = resolve_spec_path(artifact_root, &spec_rel) {
                 spec_paths.insert(spec_full);
             }
         }
@@ -737,7 +738,7 @@ fn snapshot_specs_json(
     list.sort();
     for p in list {
         let rel = p
-            .strip_prefix(project_root)
+            .strip_prefix(artifact_root)
             .unwrap_or(&p)
             .to_string_lossy()
             .to_string();
@@ -769,6 +770,22 @@ fn map_src_to_spec(src_rel: &str) -> Option<String> {
     }
     if src_rel == "src/main.rs" {
         return Some("specifications/app.md".to_string());
+    }
+    None
+}
+
+/// Resolve a logical spec path (`specifications/...`) under the active artifact workspace root
+/// (`ArtifactStore::artifact_workspace_root`: repo root for file backend, GitHub projection root
+/// for `--github`). Falls back to the parallel `drafts/...` path when the specification file is absent.
+fn resolve_spec_path(artifact_root: &Path, spec_rel: &str) -> Option<PathBuf> {
+    let spec_path = artifact_root.join(spec_rel);
+    if spec_path.is_file() {
+        return Some(spec_path);
+    }
+    let draft_rel = spec_rel.replacen("specifications/", "drafts/", 1);
+    let draft_path = artifact_root.join(draft_rel);
+    if draft_path.is_file() {
+        return Some(draft_path);
     }
     None
 }
@@ -825,7 +842,11 @@ fn guardrail_to_json(r: &GuardrailReport) -> serde_json::Value {
     })
 }
 
-fn check_guardrails(project_root: &Path, diff: &str) -> Result<GuardrailReport> {
+fn check_guardrails(
+    project_root: &Path,
+    artifact_root: &Path,
+    diff: &str,
+) -> Result<GuardrailReport> {
     let file_patches = parse_unified_diff(diff).context("Invalid unified diff")?;
 
     let mut issues = Vec::new();
@@ -922,7 +943,7 @@ fn check_guardrails(project_root: &Path, diff: &str) -> Result<GuardrailReport> 
             }
         }
 
-        let allowed_public_methods = spec_declared_public_methods(project_root, &target);
+        let allowed_public_methods = spec_declared_public_methods(artifact_root, &target);
 
         issues.extend(evaluate_public_api_changes(
             &target,
@@ -1081,11 +1102,13 @@ fn parse_pub_fn_signature(line: &str) -> Option<FnSig> {
     })
 }
 
-fn spec_declared_public_methods(project_root: &Path, target: &str) -> HashSet<String> {
+fn spec_declared_public_methods(artifact_root: &Path, target: &str) -> HashSet<String> {
     let Some(spec_rel) = map_src_to_spec(target) else {
         return HashSet::new();
     };
-    let spec_path = project_root.join(spec_rel);
+    let Some(spec_path) = resolve_spec_path(artifact_root, &spec_rel) else {
+        return HashSet::new();
+    };
     let Ok(spec_text) = fs::read_to_string(spec_path) else {
         return HashSet::new();
     };
@@ -1150,7 +1173,7 @@ fn evaluate_public_api_changes(
                 // Allow adding getters; block setters and other public additions.
                 if !allowed {
                     issues.push(format!(
-                        "{}: patch adds new public function `{}` outside allowed patterns (getter-only additions are allowed; setters are not).",
+                        "{}: patch adds new public function `{}` outside allowed patterns (getters; spec-declared methods; constructors; or owned `mut self -> (Self, …)` / `Self` transitions — not `set_*` or `&mut self` unless the name is declared in the module spec).",
                         target, name
                     ));
                 }
@@ -1171,6 +1194,36 @@ fn evaluate_public_api_changes(
     issues
 }
 
+/// True when the return type is an owned state-passing shape (`(Self, …)`, `Self`, or the same
+/// inside common enums/result wrappers). This matches the "non-destructive" / functional-update
+/// style as an alternative to `&mut self` polling APIs.
+fn return_type_implies_owned_state_transition(sig: &FnSig) -> bool {
+    let Some(rt) = &sig.return_type else {
+        return false;
+    };
+    let compact: String = rt.chars().filter(|c| !c.is_whitespace()).collect();
+    if !compact.contains("Self") {
+        return false;
+    }
+    if compact.starts_with("(Self,") || compact.starts_with("(Self)") {
+        return true;
+    }
+    if compact == "Self" {
+        return true;
+    }
+    for prefix in [
+        "Result<(Self,",
+        "Option<(Self,",
+        "ControlFlow<(Self,",
+        "Poll<(Self,",
+    ] {
+        if compact.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_allowed_new_public_method(sig: &FnSig, allowed_public_methods: &HashSet<String>) -> bool {
     if is_constructor_name(&sig.name) {
         // Constructors are always safe to add as associated functions.
@@ -1182,16 +1235,18 @@ fn is_allowed_new_public_method(sig: &FnSig, allowed_public_methods: &HashSet<St
     // Allowed:
     // - adding getters (no args except receiver, no mut receiver), and not a setter
     // - adding constructors: `new` / `try_new` (associated functions; no `self` receiver)
+    // - adding owned-receiver state transitions: `mut self -> (Self, T)` (etc.)
     if sig.name.starts_with("set_") {
         return false;
     }
-    if matches!(
-        sig.receiver,
-        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
-    ) {
+    if matches!(sig.receiver, ReceiverKind::MutRefSelf) {
         return false;
     }
-    // Otherwise, allow only getter-shaped additions.
+    if matches!(sig.receiver, ReceiverKind::MutValSelf) {
+        return sig.non_self_param_types.is_empty()
+            && return_type_implies_owned_state_transition(sig);
+    }
+    // RefSelf, ValSelf, or Other: allow only getter-shaped additions.
     sig.non_self_param_types.is_empty()
 }
 
@@ -1349,14 +1404,17 @@ fn stub_macro_re() -> &'static Regex {
 fn spec_method_code_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`\n]*\))?`").expect("valid regex")
+        // Allow `name()`, `name() -> T`, etc. (draft lines often document a return arrow before closing backtick.)
+        Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`\n]*\))?(?:\s*->.*?)?`")
+            .expect("valid regex")
     })
 }
 
 fn spec_method_bold_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\*\*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^*\n]*\))?\*\*").expect("valid regex")
+        Regex::new(r"\*\*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^*\n]*\))?(?:\s*->.*?)?\*\*")
+            .expect("valid regex")
     })
 }
 
@@ -1414,7 +1472,101 @@ mod tests {
  }
 "#;
 
-        let report = check_guardrails(&root, diff).expect("guardrail report");
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_public_methods_declared_in_drafts_only() {
+        let root = make_temp_test_dir("compile_fix_guardrail_drafts_spec");
+        let src = root.join("src/contexts/command_input.rs");
+        let draft = root.join("drafts/contexts/command_input.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(draft.parent().expect("draft parent")).expect("create draft dir");
+        fs::write(
+            &src,
+            "pub struct CommandInputContext;\nimpl CommandInputContext {\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &draft,
+            "## Functionalities\n- **next_key() -> Option<char>**\n- **next_action() -> Option<UserAction>**\n",
+        )
+        .expect("write draft");
+
+        let diff = r#"diff --git a/src/contexts/command_input.rs b/src/contexts/command_input.rs
+--- a/src/contexts/command_input.rs
++++ b/src/contexts/command_input.rs
+@@ -1,3 +1,9 @@
+ pub struct CommandInputContext;
+ impl CommandInputContext {
++    pub fn next_key(&mut self) -> Option<char> { None }
++    pub fn next_action(&mut self) -> Option<()> { None }
+ }
+"#;
+
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_owned_mut_self_state_transition_without_spec() {
+        let root = make_temp_test_dir("compile_fix_guardrail_owned_transition");
+        let src = root.join("src/contexts/input.rs");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::write(&src, "pub struct Input;\nimpl Input {\n}\n").expect("write src");
+
+        let diff = r#"diff --git a/src/contexts/input.rs b/src/contexts/input.rs
+--- a/src/contexts/input.rs
++++ b/src/contexts/input.rs
+@@ -1,3 +1,6 @@
+ pub struct Input;
+ impl Input {
++    pub fn poll(mut self) -> (Self, Option<char>) { (self, None) }
+ }
+"#;
+
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_loads_spec_from_github_projection() {
+        let root = make_temp_test_dir("compile_fix_guardrail_gh_spec");
+        let src = root.join("src/contexts/command_input.rs");
+        let gh_draft = root.join(".reen/github/demo__proj/drafts/contexts/command_input.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(gh_draft.parent().expect("gh draft parent")).expect("create gh dir");
+        fs::write(
+            &src,
+            "pub struct CommandInputContext;\nimpl CommandInputContext {\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &gh_draft,
+            "## Functionalities\n- **next_key() -> Option<char>**\n",
+        )
+        .expect("write gh draft");
+
+        let artifact_root = root.join(".reen/github/demo__proj");
+
+        let diff = r#"diff --git a/src/contexts/command_input.rs b/src/contexts/command_input.rs
+--- a/src/contexts/command_input.rs
++++ b/src/contexts/command_input.rs
+@@ -1,3 +1,6 @@
+ pub struct CommandInputContext;
+ impl CommandInputContext {
++    pub fn next_key(&mut self) -> Option<char> { None }
+ }
+"#;
+
+        let report = check_guardrails(&root, &artifact_root, diff).expect("guardrail report");
         assert!(report.ok, "issues: {:?}", report.issues);
 
         fs::remove_dir_all(&root).ok();
@@ -1449,7 +1601,7 @@ mod tests {
  }
 "#;
 
-        let report = check_guardrails(&root, diff).expect("guardrail report");
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
         assert!(!report.ok);
         assert!(
             report
@@ -1492,7 +1644,7 @@ mod tests {
  }
 "#;
 
-        let report = check_guardrails(&root, diff).expect("guardrail report");
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
         assert!(report.ok, "issues: {:?}", report.issues);
 
         fs::remove_dir_all(&root).ok();
@@ -1534,7 +1686,7 @@ mod tests {
  }
 "#;
 
-        let report = check_guardrails(&root, diff).expect("guardrail report");
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
         assert!(!report.ok);
         assert!(
             report
@@ -1568,7 +1720,7 @@ mod tests {
 +}
 "#;
 
-        let report = check_guardrails(&root, diff).expect("guardrail report");
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
         assert!(report.ok, "issues: {:?}", report.issues);
 
         fs::remove_dir_all(&root).ok();
@@ -1603,7 +1755,7 @@ mod tests {
  }
 "#;
 
-        let report = check_guardrails(&root, diff).expect("guardrail report");
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
         assert!(report.ok, "issues: {:?}", report.issues);
 
         fs::remove_dir_all(&root).ok();

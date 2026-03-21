@@ -1,3 +1,7 @@
+//! File and GitHub artifact backends. Several types and helpers are unused in the current binary
+//! but kept as the public surface for tooling and future commands.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -201,6 +205,10 @@ pub trait ArtifactStore: Send + Sync {
     fn backend(&self) -> BackendSelection;
     fn drafts_root(&self) -> &Path;
     fn specifications_root(&self) -> &Path;
+    /// Directory that contains the active `drafts/` and `specifications/` trees: repository root
+    /// for the file backend (default `./drafts`, `./specifications`), or `.reen/github/<owner>__<repo>`
+    /// for GitHub-backed runs. Callers should not mix this with a second root.
+    fn artifact_workspace_root(&self) -> PathBuf;
     fn resolve_inputs(
         &self,
         kind: ArtifactKind,
@@ -291,6 +299,13 @@ impl ArtifactStore for FileArtifactStore {
 
     fn specifications_root(&self) -> &Path {
         &self.specs_root
+    }
+
+    fn artifact_workspace_root(&self) -> PathBuf {
+        match (self.drafts_root.parent(), self.specs_root.parent()) {
+            (Some(pd), Some(ps)) if pd == ps => pd.to_path_buf(),
+            _ => PathBuf::from("."),
+        }
     }
 
     fn resolve_inputs(
@@ -456,6 +471,8 @@ impl ArtifactStore for FileArtifactStore {
 struct GitHubArtifactStore {
     owner: String,
     repo: String,
+    /// `.reen/github/<owner>__<repo>` — parent of `drafts_root` / `specs_root`.
+    projection_root: PathBuf,
     drafts_root: PathBuf,
     specs_root: PathBuf,
     state: Mutex<GitHubState>,
@@ -483,14 +500,15 @@ struct GitHubIssueRecord {
 
 impl GitHubArtifactStore {
     fn new(owner: String, repo: String) -> Result<Self> {
-        let root = PathBuf::from(".reen")
+        let projection_root = PathBuf::from(".reen")
             .join("github")
             .join(format!("{}__{}", owner, repo));
         let store = Self {
             owner,
             repo,
-            drafts_root: root.join("drafts"),
-            specs_root: root.join("specifications"),
+            drafts_root: projection_root.join("drafts"),
+            specs_root: projection_root.join("specifications"),
+            projection_root,
             state: Mutex::new(GitHubState::default()),
         };
         store.refresh_projection()?;
@@ -764,6 +782,10 @@ impl ArtifactStore for GitHubArtifactStore {
 
     fn specifications_root(&self) -> &Path {
         &self.specs_root
+    }
+
+    fn artifact_workspace_root(&self) -> PathBuf {
+        self.projection_root.clone()
     }
 
     fn resolve_inputs(

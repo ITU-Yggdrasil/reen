@@ -1,3 +1,6 @@
+//! `reen.yml` helpers; some accessors are unused until additional CLI flows land.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_yaml::{Mapping, Value};

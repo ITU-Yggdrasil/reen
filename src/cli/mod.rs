@@ -53,7 +53,7 @@ pub struct Config {
 }
 
 #[derive(Clone)]
-struct WorkspaceContext {
+pub(crate) struct WorkspaceContext {
     store: Arc<dyn ArtifactStore>,
     drafts_root: PathBuf,
     specifications_root: PathBuf,
@@ -62,7 +62,13 @@ struct WorkspaceContext {
 }
 
 impl WorkspaceContext {
-    fn resolve(config: &Config) -> Result<Self> {
+    /// Single root for the active backend’s `drafts/` + `specifications/` trees (cwd for files,
+    /// `.reen/github/<owner>__<repo>` for GitHub). Downstream code should not merge this with a second root.
+    pub(crate) fn artifact_workspace_root(&self) -> PathBuf {
+        self.store.artifact_workspace_root()
+    }
+
+    pub(crate) fn resolve(config: &Config) -> Result<Self> {
         let backend = BackendSelection::from_repo_spec(config.github_repo.as_deref())?;
         let store = build_artifact_store(&backend)?;
         let drafts_root = store.drafts_root().to_path_buf();
@@ -1803,10 +1809,12 @@ pub async fn create_implementation(
 
     // Always compile after generation. Auto-fix is opt-in via --fix.
     if fix {
+        let artifact_root = workspace.artifact_workspace_root();
         compilation_fix::ensure_compiles_with_auto_fix(
             config,
             max_compile_fix_attempts,
             Path::new("."),
+            artifact_root.as_path(),
             &project_info,
             &recent_generated_files,
             resources

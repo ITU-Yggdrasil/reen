@@ -5,7 +5,7 @@ use std::process::Command;
 use super::compilation_fix;
 use super::project_structure::{analyze_specifications, ProjectInfo};
 use super::stage_runner::ExecutionResources;
-use super::{Config, DRAFTS_DIR, SPECIFICATIONS_DIR};
+use super::{Config, WorkspaceContext};
 use reen::execution::NativeExecutionControl;
 
 pub async fn compile(config: &Config) -> Result<()> {
@@ -46,15 +46,16 @@ pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()>
     }
 
     let project_root = Path::new(".");
-    let spec_dir = PathBuf::from(SPECIFICATIONS_DIR);
-    let drafts_dir = PathBuf::from(DRAFTS_DIR);
+    let workspace = WorkspaceContext::resolve(config)?;
+    let artifact_root = workspace.store.artifact_workspace_root();
 
-    let project_info = if spec_dir.exists() && spec_dir.is_dir() {
-        analyze_specifications(&spec_dir, Some(&drafts_dir))
-            .context("Failed to analyze specifications for fix loop")?
-    } else {
-        ProjectInfo::default()
-    };
+    let project_info =
+        if workspace.specifications_root.exists() && workspace.specifications_root.is_dir() {
+            analyze_specifications(&workspace.specifications_root, Some(&workspace.drafts_root))
+                .context("Failed to analyze specifications for fix loop")?
+        } else {
+            ProjectInfo::default()
+        };
 
     let mut recent_files: Vec<PathBuf> = Vec::new();
     for path in [
@@ -77,6 +78,7 @@ pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()>
         config,
         max_compile_fix_attempts,
         project_root,
+        artifact_root.as_path(),
         &project_info,
         &recent_files,
         resources
