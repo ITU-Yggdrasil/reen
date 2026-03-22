@@ -5,12 +5,12 @@ use std::io;
 use std::path::PathBuf;
 
 use reen::execution::{
-    build_agent_input, execute_native_request_with_metadata, output_contains_questions,
     AgentModelRegistry, AgentRunner, AgentRunnerError, NativeExecutionControl, PreparedExecution,
-    PreparedExecutionState,
+    PreparedExecutionState, build_agent_input, execute_native_request_with_metadata,
+    output_contains_questions,
 };
 use reen::registries::{
-    candidate_agent_spec_filenames, embedded_agent_spec, FileAgentModelRegistry, FileAgentRegistry,
+    FileAgentModelRegistry, FileAgentRegistry, candidate_agent_spec_filenames, embedded_agent_spec,
 };
 
 use super::Config;

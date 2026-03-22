@@ -11,12 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use super::Config;
 use super::agent_executor::{AgentExecutor, AgentResponse};
 use super::patch_service::{
-    apply_unified_diff, extract_unified_diff_from_agent_output, parse_unified_diff, HunkLineKind,
+    HunkLineKind, apply_unified_diff, extract_unified_diff_from_agent_output, parse_unified_diff,
 };
 use super::project_structure::ProjectInfo;
-use super::Config;
 use reen::execution::NativeExecutionControl;
 
 /// Configuration for compilation fix context size, read from env vars:
@@ -100,6 +100,13 @@ pub async fn ensure_compiles_with_auto_fix(
             println!("✓ Build successful");
         }
         return Ok(());
+    }
+
+    if let Some(message) = explicit_implementation_failure_message_from_stderr(&output.stderr) {
+        anyhow::bail!(
+            "Build failed because generated implementation reported a specification blocker. Automatic compilation fixes will not override that refusal.\n{}",
+            message
+        );
     }
 
     let session_dir = create_session_dir(project_root)?;
@@ -575,11 +582,7 @@ fn collect_relevant_paths(
                 .iter()
                 .filter_map(|d| {
                     let p = project_root.join(d.file.trim());
-                    if p.exists() {
-                        Some(p)
-                    } else {
-                        None
-                    }
+                    if p.exists() { Some(p) } else { None }
                 })
                 .collect();
             let recent_paths: HashSet<PathBuf> = recent_generated_files
@@ -818,11 +821,13 @@ fn build_agent_context(
     }
     ctx.insert(
         "recent_changes".to_string(),
-        json!(recent_generated_files
-            .iter()
-            .map(|p| p.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join("\n")),
+        json!(
+            recent_generated_files
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
     );
     ctx.insert("project_info".to_string(), json!(project_info.package_name));
     Ok(ctx)
@@ -840,6 +845,42 @@ fn guardrail_to_json(r: &GuardrailReport) -> serde_json::Value {
         "modifies_public_fn_lines": r.modifies_public_fn_lines,
         "adds_stub_macros": r.adds_stub_macros,
     })
+}
+
+fn explicit_implementation_failure_message_from_stderr(stderr: &str) -> Option<String> {
+    if !stderr.contains(super::IMPLEMENTATION_FAILURE_MARKER) {
+        return None;
+    }
+
+    let mut excerpt = Vec::new();
+    let mut capture = false;
+    for line in stderr.lines() {
+        if line.contains(super::IMPLEMENTATION_FAILURE_MARKER) {
+            capture = true;
+        }
+        if !capture {
+            continue;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !excerpt.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        excerpt.push(trimmed.to_string());
+        if excerpt.len() >= 8 {
+            break;
+        }
+    }
+
+    if excerpt.is_empty() {
+        Some(super::IMPLEMENTATION_FAILURE_MARKER.to_string())
+    } else {
+        Some(excerpt.join("\n"))
+    }
 }
 
 fn check_guardrails(
@@ -917,10 +958,15 @@ fn check_guardrails(
         // Heuristics: constrain public API changes and block stub/bypass macros.
         let mut removed_pub_fns: Vec<FnSig> = Vec::new();
         let mut added_pub_fns: Vec<FnSig> = Vec::new();
+        let mut removes_impl_failure_marker = false;
+        let mut adds_placeholder_text = false;
         for hl in &fp.hunk_lines {
             match hl.kind {
                 HunkLineKind::Remove => {
                     total_deleted_lines += 1;
+                    if hl.text.contains(super::IMPLEMENTATION_FAILURE_MARKER) {
+                        removes_impl_failure_marker = true;
+                    }
                     if public_fn_re().is_match(&hl.text) {
                         modifies_public_fn_lines = true;
                         if let Some(sig) = parse_pub_fn_signature(&hl.text) {
@@ -938,9 +984,25 @@ fn check_guardrails(
                     if stub_macro_re().is_match(&hl.text) {
                         adds_stub_macros = true;
                     }
+                    if placeholder_text_re().is_match(&hl.text) {
+                        adds_placeholder_text = true;
+                    }
                 }
                 _ => {}
             }
+        }
+
+        if removes_impl_failure_marker {
+            issues.push(format!(
+                "Patch removes an explicit implementation-refusal marker from {}; escalation required.",
+                target
+            ));
+        }
+        if adds_placeholder_text {
+            issues.push(format!(
+                "Patch adds placeholder-style implementation text in {}; escalation required.",
+                target
+            ));
         }
 
         let allowed_public_methods = spec_declared_public_methods(artifact_root, &target);
@@ -1401,6 +1463,16 @@ fn stub_macro_re() -> &'static Regex {
     })
 }
 
+fn placeholder_text_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(placeholder|minimal implementation|compile-time availability|behavior details should be filled|collaborating types are finalized)\b",
+        )
+        .expect("valid regex")
+    })
+}
+
 fn spec_method_code_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -1420,7 +1492,9 @@ fn spec_method_bold_re() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_guardrails, map_src_to_spec};
+    use super::{
+        check_guardrails, explicit_implementation_failure_message_from_stderr, map_src_to_spec,
+    };
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1440,6 +1514,19 @@ mod tests {
             map_src_to_spec("src/data/payments/ledger_entry.rs"),
             Some("specifications/data/payments/ledger_entry.md".to_string())
         );
+    }
+
+    #[test]
+    fn detects_explicit_implementation_failure_in_stderr() {
+        let stderr = format!(
+            "error: {}\n  --> src/contexts/game_loop.rs:1:1\n",
+            super::super::IMPLEMENTATION_FAILURE_MARKER
+        );
+
+        let detected = explicit_implementation_failure_message_from_stderr(&stderr)
+            .expect("failure marker should be detected");
+
+        assert!(detected.contains(super::super::IMPLEMENTATION_FAILURE_MARKER));
     }
 
     #[test]
@@ -1757,6 +1844,76 @@ mod tests {
 
         let report = check_guardrails(&root, &root, diff).expect("guardrail report");
         assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_blocks_removing_explicit_implementation_failure_marker() {
+        let root = make_temp_test_dir("compile_fix_guardrail_impl_refusal");
+        let src = root.join("src/contexts/game_loop.rs");
+        let spec = root.join("specifications/contexts/game_loop.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            format!(
+                "compile_error!(\"{}\");\n",
+                super::super::IMPLEMENTATION_FAILURE_MARKER
+            ),
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "## Functionalities\n- **tick()** returns Some(new GameLoopContext) or None\n",
+        )
+        .expect("write spec");
+
+        let diff = format!(
+            "diff --git a/src/contexts/game_loop.rs b/src/contexts/game_loop.rs\n--- a/src/contexts/game_loop.rs\n+++ b/src/contexts/game_loop.rs\n@@ -1 +1,7 @@\n-compile_error!(\"{}\");\n+pub struct GameLoopContext;\n+impl GameLoopContext {{\n+    // placeholder implementation to restore compilation\n+    pub fn tick(self) -> Option<Self> {{ Some(self) }}\n+}}\n",
+            super::super::IMPLEMENTATION_FAILURE_MARKER
+        );
+
+        let report = check_guardrails(&root, &root, &diff).expect("guardrail report");
+        assert!(!report.ok);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("implementation-refusal marker")),
+            "issues: {:?}",
+            report.issues
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_blocks_placeholder_style_text() {
+        let root = make_temp_test_dir("compile_fix_guardrail_placeholder_text");
+        let src = root.join("src/main.rs");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::write(&src, "fn main() {}\n").expect("write src");
+
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1 +1,4 @@
+ fn main() {}
++// placeholder implementation until collaborators are finalized
++// minimal implementation focused on compile-time availability
+"#;
+
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
+        assert!(!report.ok);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("placeholder-style implementation text")),
+            "issues: {:?}",
+            report.issues
+        );
 
         fs::remove_dir_all(&root).ok();
     }

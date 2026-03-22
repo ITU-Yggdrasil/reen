@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::compilation_fix;
-use super::project_structure::{analyze_specifications, ProjectInfo};
+use super::project_structure::{ProjectInfo, analyze_specifications};
 use super::stage_runner::ExecutionResources;
 use super::{Config, WorkspaceContext};
 use reen::execution::NativeExecutionControl;

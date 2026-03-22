@@ -35,3 +35,9 @@ jobs:
       - name: Build generated snake project
         working-directory: tests/snake
         run: cargo build 
+
+      - name: Smoke test generated snake app
+        working-directory: tests/snake
+        run: |
+          printf 's' | SNAKE_RENDERER=string cargo run --quiet >snake.stdout 2>snake.stderr
+          rg 'REEN_SNAKE_TEST_RESULT game_over score=' snake.stderr

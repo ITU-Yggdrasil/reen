@@ -314,11 +314,7 @@ fn to_pascal_case_title(s: &str) -> Option<String> {
         out.push_str(&token);
     }
 
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn detect_dependencies(content: &str, project_info: &mut ProjectInfo) {

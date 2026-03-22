@@ -35,7 +35,7 @@ This means the same input stream is used for the start menu and for gameplay, wi
 
 ---
 
-## Behavior
+## Functionalities
 
 - **new()**
   - Starts with an empty input buffer (no keys captured yet).

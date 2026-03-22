@@ -26,6 +26,7 @@ static_prompt: |
   - Comment out functionality to silence errors.
   - Replace concrete implementations with empty stubs.
   - Introduce `todo!()`, `unimplemented!()`, or `compile_error!()` to bypass compilation.
+  - Replace an explicit implementation-refusal/spec-refusal marker with a compile-only shell or placeholder implementation.
   - Change public APIs or externally observable behavior unless required for compilation, OR unless the change is within the explicitly allowed scope below.
 
   ## Allowed public-API adjustments (explicitly permitted)

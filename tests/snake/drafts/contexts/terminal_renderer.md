@@ -4,7 +4,14 @@
 
 TerminalRenderer draws the current game frame as text (ASCII) in the terminal.
 
-## Behavior
+It must use StringRenderer as the canonical formatter for each frame.
+
+## Roles
+
+- **string_renderer**
+  Formats the current game frame as plain text and returns the full frame string.
+
+## Functionalities
 
 - **render(board, score)**
   - Coordinate system is `(0,0)` bottom-left and `(width-1, height-1)` top-right.
@@ -13,11 +20,6 @@ TerminalRenderer draws the current game frame as text (ASCII) in the terminal.
     - `score`: current score (a whole number from 0 to 2,000,000,000).
 
   - Output rules:
-    - Rendering is in-place: clear terminal and move cursor to top-left before each frame.
-    - Print rows from top (`y=height-1`) to bottom (`y=0`).
-    - Within each row, print columns left-to-right (`x=0` to `x=width-1`).
-    - Each row starts at terminal column 0.
-    - After printing the last board row, print exactly one additional line for score at terminal column 0.
-    - Score line format is exactly `Score: <score>` where `<score>` is the score written in normal base-10 digits with no padding, separators, or extra decoration.
-    - End the score line with a newline.
-cargo build
+    - Call `string_renderer.render(board, score)` to obtain the full frame string.
+    - Rendering is in-place: clear terminal and move cursor to top-left before printing each frame.
+    - Print the returned frame string exactly as produced by StringRenderer.

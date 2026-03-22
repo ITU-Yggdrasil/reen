@@ -26,24 +26,26 @@ mod stage_runner;
 mod yaml_config;
 
 use agent_executor::{AgentExecutor, AgentResponse};
-use artifact_backend::{ArtifactCategory, ArtifactKind, ArtifactStore, BackendSelection, build_artifact_store};
+use artifact_backend::{
+    ArtifactCategory, ArtifactKind, ArtifactStore, BackendSelection, build_artifact_store,
+};
 use dependency_graph::{
-    build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
+    DependencyArtifact, ExecutionNode, build_execution_plan, expand_with_transitive_dependencies,
 };
 use external_api_expansion::{
-    parse_external_api_expansion, sanitize_generated_artifact_name, GeneratedDraftArtifact,
+    GeneratedDraftArtifact, parse_external_api_expansion, sanitize_generated_artifact_name,
 };
 use openapi_fetcher::is_external_api_draft_path;
 use patch_service::apply_draft_patches;
 use pipeline_context::{build_specification_context, fit_context_to_token_limit};
 use progress::ProgressIndicator;
 use project_structure::{
-    analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
+    ProjectInfo, analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files,
 };
 use reen::build_tracker::{BuildTracker, Stage};
 use reen::execution::{AgentModelRegistry, AgentRegistry, NativeExecutionControl};
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
-use stage_runner::{run_stage_items, CliExecutionControl, ExecutionResources, StageItem};
+use stage_runner::{CliExecutionControl, ExecutionResources, StageItem, run_stage_items};
 
 #[derive(Clone)]
 pub struct Config {
@@ -211,6 +213,8 @@ const BDD_CUCUMBER_VERSION: &str = "0.22.1";
 const BDD_TOKIO_SPEC: &str = r#"{ version = "1.40", features = ["macros", "rt-multi-thread"] }"#;
 const BDD_TEST_TARGETS_START: &str = "# reen:bdd-tests:start";
 const BDD_TEST_TARGETS_END: &str = "# reen:bdd-tests:end";
+pub(crate) const IMPLEMENTATION_FAILURE_MARKER: &str =
+    "ERROR: Cannot implement specification as written.";
 
 pub async fn create_specification(
     names: Vec<String>,
@@ -252,9 +256,10 @@ fn create_specification_inner(
     Box::pin(async move {
         let workspace = WorkspaceContext::resolve(&config)?;
         let names_provided = !names.is_empty();
-        let draft_artifacts = workspace
-            .store
-            .resolve_inputs(ArtifactKind::Draft, names, &filter)?;
+        let draft_artifacts =
+            workspace
+                .store
+                .resolve_inputs(ArtifactKind::Draft, names, &filter)?;
 
         if draft_artifacts.is_empty() {
             println!("No draft files found to process");
@@ -265,12 +270,14 @@ fn create_specification_inner(
             workspace
                 .store
                 .select_dependency_roots(draft_artifacts, names_provided, &filter)?;
-        let expanded_draft_files =
-            expand_with_transitive_dependencies(
-                dependency_roots.iter().map(|artifact| artifact.path.clone()).collect(),
-                &workspace.drafts_dir,
-                None,
-            )?;
+        let expanded_draft_files = expand_with_transitive_dependencies(
+            dependency_roots
+                .iter()
+                .map(|artifact| artifact.path.clone())
+                .collect(),
+            &workspace.drafts_dir,
+            None,
+        )?;
         let filtered_draft_files = if filter.is_active() {
             expanded_draft_files
                 .into_iter()
@@ -279,7 +286,8 @@ fn create_specification_inner(
         } else {
             expanded_draft_files
         };
-        let execution_levels = build_execution_plan(filtered_draft_files, &workspace.drafts_dir, None)?;
+        let execution_levels =
+            build_execution_plan(filtered_draft_files, &workspace.drafts_dir, None)?;
 
         // Load build tracker
         let mut tracker = BuildTracker::load()?;
@@ -305,8 +313,8 @@ fn create_specification_inner(
 
             let mut nodes_by_agent: HashMap<String, Vec<ExecutionNode>> = HashMap::new();
             for node in level_nodes {
-                let agent =
-                    determine_specification_agent(&node.input_path, &workspace.drafts_dir).to_string();
+                let agent = determine_specification_agent(&node.input_path, &workspace.drafts_dir)
+                    .to_string();
                 nodes_by_agent.entry(agent).or_default().push(node);
             }
 
@@ -362,18 +370,18 @@ fn create_specification_inner(
                         continue;
                     }
 
-                    let dependency_context = match build_dependency_context(
-                        &node,
-                        &workspace.drafts_dir,
-                        None,
-                    ) {
-                        Ok(context) => context,
-                        Err(e) => {
-                            progress.complete_item(&draft_name, false);
-                            eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
-                            continue;
-                        }
-                    };
+                    let dependency_context =
+                        match build_dependency_context(&node, &workspace.drafts_dir, None) {
+                            Ok(context) => context,
+                            Err(e) => {
+                                progress.complete_item(&draft_name, false);
+                                eprintln!(
+                                    "✗ Failed to create specification for {}: {}",
+                                    draft_name, e
+                                );
+                                continue;
+                            }
+                        };
 
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
                     let dependency_context = build_specification_context(
@@ -533,9 +541,10 @@ fn create_specification_inner(
 
 pub async fn check_specification(names: Vec<String>, config: &Config) -> Result<()> {
     let workspace = WorkspaceContext::resolve(config)?;
-    let draft_artifacts = workspace
-        .store
-        .resolve_inputs(ArtifactKind::Draft, names, &CategoryFilter::all())?;
+    let draft_artifacts =
+        workspace
+            .store
+            .resolve_inputs(ArtifactKind::Draft, names, &CategoryFilter::all())?;
     if draft_artifacts.is_empty() {
         println!("No draft files found to process");
         return Ok(());
@@ -543,12 +552,18 @@ pub async fn check_specification(names: Vec<String>, config: &Config) -> Result<
 
     let tracker = BuildTracker::load()?;
     let mut issues = 0usize;
-    println!("Checking specifications for {} draft(s)", draft_artifacts.len());
+    println!(
+        "Checking specifications for {} draft(s)",
+        draft_artifacts.len()
+    );
 
     for draft_artifact in draft_artifacts {
         let draft_file = draft_artifact.path.clone();
         let draft_name = draft_artifact.name.clone();
-        let Some(spec_artifact) = workspace.store.find_specification_for_draft(&draft_artifact)? else {
+        let Some(spec_artifact) = workspace
+            .store
+            .find_specification_for_draft(&draft_artifact)?
+        else {
             let spec_path = determine_specification_output_path(
                 &draft_file,
                 &workspace.drafts_dir,
@@ -692,12 +707,11 @@ async fn process_external_api_specification(
 
     clear_external_generated_output_dirs(&workspace.specifications_dir, &namespace)?;
 
-    let primary_context_path =
-        determine_specification_output_path(
-            draft_file,
-            &workspace.drafts_dir,
-            &workspace.specifications_dir,
-        )?;
+    let primary_context_path = determine_specification_output_path(
+        draft_file,
+        &workspace.drafts_dir,
+        &workspace.specifications_dir,
+    )?;
     let mut used_data_names = HashMap::new();
     let mut used_context_names = HashMap::new();
     let mut generated = Vec::new();
@@ -707,8 +721,11 @@ async fn process_external_api_specification(
             &sanitize_generated_artifact_name(&artifact.name),
             &mut used_data_names,
         );
-        let output_path =
-            external_generated_data_output_path(&workspace.specifications_dir, &namespace, &file_stem);
+        let output_path = external_generated_data_output_path(
+            &workspace.specifications_dir,
+            &namespace,
+            &file_stem,
+        );
         let result = generate_external_spec_artifact(
             &data_executor,
             artifact,
@@ -915,7 +932,10 @@ fn prune_generated_spec_context(
     context
 }
 
-fn clear_external_generated_output_dirs(specifications_dir: &str, api_namespace: &str) -> Result<()> {
+fn clear_external_generated_output_dirs(
+    specifications_dir: &str,
+    api_namespace: &str,
+) -> Result<()> {
     for dir in [
         PathBuf::from(specifications_dir)
             .join("data")
@@ -978,12 +998,11 @@ fn finalize_specification_output(
     additional_context: HashMap<String, serde_json::Value>,
 ) -> Result<ProcessSpecOutcome> {
     // Determine output path preserving folder structure
-    let output_path =
-        determine_specification_output_path(
-            draft_file,
-            &workspace.drafts_dir,
-            &workspace.specifications_dir,
-        )?;
+    let output_path = determine_specification_output_path(
+        draft_file,
+        &workspace.drafts_dir,
+        &workspace.specifications_dir,
+    )?;
 
     let spec_category = workspace
         .store
@@ -1050,15 +1069,19 @@ fn write_specification_output(
     match workspace.store.backend() {
         BackendSelection::File => {
             if let Some(parent) = output_path.parent() {
-                fs::create_dir_all(parent).context("Failed to create specification output directory")?;
+                fs::create_dir_all(parent)
+                    .context("Failed to create specification output directory")?;
             }
             fs::write(output_path, &spec_content).context("Failed to write specification file")?;
         }
         BackendSelection::GitHub { .. } => {
-            let draft_artifact = workspace
-                .store
-                .artifact_for_path(draft_file)
-                .with_context(|| format!("missing projected draft artifact {}", draft_file.display()))?;
+            let draft_artifact =
+                workspace
+                    .store
+                    .artifact_for_path(draft_file)
+                    .with_context(|| {
+                        format!("missing projected draft artifact {}", draft_file.display())
+                    })?;
             workspace.store.write_specification(
                 &draft_artifact,
                 display_name,
@@ -1236,13 +1259,12 @@ pub async fn create_implementation(
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    let dependency_roots =
-        select_dependency_roots(
-            context_files,
-            &workspace.specifications_dir,
-            names_provided,
-            filter,
-        )?;
+    let dependency_roots = select_dependency_roots(
+        context_files,
+        &workspace.specifications_dir,
+        names_provided,
+        filter,
+    )?;
     let execution_levels = build_implementation_execution_plan(
         dependency_roots,
         filter,
@@ -1322,7 +1344,10 @@ pub async fn create_implementation(
                 .any(|dep_name| updated_in_run.contains(dep_name));
             let (fingerprint_primary_root, fingerprint_fallback_root) =
                 if node.input_path.starts_with(&workspace.specifications_root) {
-                    (&workspace.specifications_dir, Some(workspace.drafts_dir.as_str()))
+                    (
+                        &workspace.specifications_dir,
+                        Some(workspace.drafts_dir.as_str()),
+                    )
                 } else {
                     (&workspace.drafts_dir, None)
                 };
@@ -1447,13 +1472,11 @@ pub async fn create_implementation(
                     }
 
                     progress.start_item(&context_name, Some(estimated));
-                    match executor
-                        .prepare_execution_options(
-                            &context_content,
-                            dependency_context.clone(),
-                            clear_cache,
-                        )?
-                    {
+                    match executor.prepare_execution_options(
+                        &context_content,
+                        dependency_context.clone(),
+                        clear_cache,
+                    )? {
                         reen::execution::PreparedExecutionState::Cached(output) => {
                             let result = finalize_implementation_output(
                                 &context_file,
@@ -1994,9 +2017,8 @@ fn extract_implementation_failure_message(code: &str) -> Option<String> {
         return Some(msg);
     }
 
-    const MARKER: &str = "ERROR: Cannot implement specification as written.";
-    if code.contains(MARKER) {
-        return Some(MARKER.to_string());
+    if code.contains(IMPLEMENTATION_FAILURE_MARKER) {
+        return Some(IMPLEMENTATION_FAILURE_MARKER.to_string());
     }
 
     None
@@ -2183,7 +2205,12 @@ fn is_no_issue_placeholder_bullet(text: &str) -> bool {
 fn is_external_specification_path(path: &Path) -> bool {
     let components: Vec<String> = path
         .components()
-        .filter_map(|component| component.as_os_str().to_str().map(|value| value.to_string()))
+        .filter_map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .map(|value| value.to_string())
+        })
         .collect();
     components.windows(3).any(|window| {
         window[0] == "specifications"
@@ -2207,7 +2234,10 @@ fn is_external_source_gap_detail(text: &str) -> bool {
         "diverge",
         "diverges",
     ];
-    if contradiction_markers.iter().any(|marker| lower.contains(marker)) {
+    if contradiction_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
         return false;
     }
 
@@ -2246,7 +2276,9 @@ fn extract_actionable_blocking_bullets_for_path(section: &str, path: Option<&Pat
     for i in 0..bullets.len() {
         actionable[i] = !is_language_or_paradigm_specific_detail(&bullets[i].1)
             && !is_no_issue_placeholder_bullet(&bullets[i].1);
-        if actionable[i] && ignore_external_source_gaps && is_external_source_gap_detail(&bullets[i].1)
+        if actionable[i]
+            && ignore_external_source_gaps
+            && is_external_source_gap_detail(&bullets[i].1)
         {
             actionable[i] = false;
         }
@@ -2315,13 +2347,12 @@ pub async fn create_tests(
         return Ok(());
     }
 
-    let dependency_roots =
-        select_dependency_roots(
-            context_files,
-            &workspace.specifications_dir,
-            names_provided,
-            filter,
-        )?;
+    let dependency_roots = select_dependency_roots(
+        context_files,
+        &workspace.specifications_dir,
+        names_provided,
+        filter,
+    )?;
     let execution_levels = build_execution_plan(
         dependency_roots,
         &workspace.specifications_dir,
@@ -2553,8 +2584,12 @@ fn clear_stage_agent_cache_entries_by_name(
 
     match stage {
         Stage::Specification => {
-            let files =
-                resolve_input_files(&workspace.drafts_dir, names_vec, "md", &CategoryFilter::all())?;
+            let files = resolve_input_files(
+                &workspace.drafts_dir,
+                names_vec,
+                "md",
+                &CategoryFilter::all(),
+            )?;
             let levels = build_execution_plan(files, &workspace.drafts_dir, None)?;
             for node in levels.into_iter().flatten() {
                 let draft_content = fs::read_to_string(&node.input_path).with_context(|| {
@@ -2562,7 +2597,8 @@ fn clear_stage_agent_cache_entries_by_name(
                 })?;
                 let additional = build_dependency_context(&node, &workspace.drafts_dir, None)?;
                 let agent_name =
-                    determine_specification_agent(&node.input_path, &workspace.drafts_dir).to_string();
+                    determine_specification_agent(&node.input_path, &workspace.drafts_dir)
+                        .to_string();
                 candidates.push((
                     agent_name,
                     CacheAgentInput {
@@ -3760,7 +3796,9 @@ fn determine_draft_input_path(
     if first == Some("contexts") && second == Some("external") {
         let remainder = PathBuf::from_iter(relative_path.components().skip(2));
         if remainder.components().count() <= 1 {
-            let external_apis_path = PathBuf::from(drafts_dir).join("external_apis").join(&remainder);
+            let external_apis_path = PathBuf::from(drafts_dir)
+                .join("external_apis")
+                .join(&remainder);
             if external_apis_path.exists() {
                 return Ok(external_apis_path);
             }
@@ -3781,7 +3819,9 @@ fn determine_draft_input_path(
         if external_apis_path.exists() {
             return Ok(external_apis_path);
         }
-        let apis_path = PathBuf::from(drafts_dir).join("apis").join(format!("{api_name}.md"));
+        let apis_path = PathBuf::from(drafts_dir)
+            .join("apis")
+            .join(format!("{api_name}.md"));
         if apis_path.exists() {
             return Ok(apis_path);
         }
@@ -3831,7 +3871,7 @@ fn infer_target_type_name(
             return Ok(spec_file
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .and_then(to_pascal_case_title))
+                .and_then(to_pascal_case_title));
         }
     };
 
@@ -3893,11 +3933,7 @@ fn to_pascal_case_title(s: &str) -> Option<String> {
         };
         out.push_str(&token);
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn relative_specification_path(context_file: &Path, specifications_dir: &str) -> Result<PathBuf> {
@@ -4196,16 +4232,15 @@ fn generated_project_structure_paths(project_info: &ProjectInfo) -> Vec<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dependency_drafts_from_context, build_dependency_manifest,
-        build_implementation_execution_plan, build_execution_plan,
-        build_implemented_dependency_manifest, determine_bdd_test_paths,
-        determine_draft_input_path, determine_implementation_output_path,
+        BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, CategoryFilter,
+        build_dependency_drafts_from_context, build_dependency_manifest, build_execution_plan,
+        build_implementation_execution_plan, build_implemented_dependency_manifest,
+        determine_bdd_test_paths, determine_draft_input_path, determine_implementation_output_path,
         determine_specification_output_path, ensure_dev_dependency_entry,
         external_generated_context_output_path, external_generated_data_output_path,
         extract_actionable_blocking_bullets_for_path, extract_compile_error_message,
         generated_project_structure_paths, parse_generated_files,
         resolve_implementation_dependency_inputs, resolve_input_files, sync_managed_block,
-        CategoryFilter, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -4335,8 +4370,7 @@ Problem:
         let specs = root.join("specifications");
         fs::create_dir_all(drafts.join("apis")).expect("mkdir drafts apis");
         fs::create_dir_all(specs.join("contexts/external")).expect("mkdir contexts external");
-        fs::create_dir_all(specs.join("data/external/aisstream"))
-            .expect("mkdir data external");
+        fs::create_dir_all(specs.join("data/external/aisstream")).expect("mkdir data external");
 
         let external_draft = drafts.join("apis/aisstream.md");
         let context_spec = specs.join("contexts/external/aisstream.md");
@@ -4402,7 +4436,10 @@ Problem:
             .expect("message node");
         assert_eq!(
             context_node.direct_dependency_names(),
-            vec!["AisStreamMessage".to_string(), "SubscriptionMessage".to_string()]
+            vec![
+                "AisStreamMessage".to_string(),
+                "SubscriptionMessage".to_string()
+            ]
         );
         assert_eq!(
             message_node.direct_dependency_names(),
@@ -4477,14 +4514,16 @@ Problem:
             &CategoryFilter::all(),
         )
         .expect("all files");
-        assert!(all
-            .iter()
-            .any(|p| p.ends_with("contexts/ui/terminal_renderer.md")));
+        assert!(
+            all.iter()
+                .any(|p| p.ends_with("contexts/ui/terminal_renderer.md"))
+        );
         assert!(all.iter().any(|p| p.ends_with("external_apis/stripe.md")));
         assert!(all.iter().any(|p| p.ends_with("apis/aisstream.md")));
-        assert!(all
-            .iter()
-            .any(|p| p.ends_with("data/payments/ledger_entry.md")));
+        assert!(
+            all.iter()
+                .any(|p| p.ends_with("data/payments/ledger_entry.md"))
+        );
 
         let by_stem = resolve_input_files(
             drafts.to_str().expect("drafts path"),

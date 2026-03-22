@@ -182,9 +182,7 @@ fn normalize_openapi_source_url(url: &str) -> String {
             let repo = parts[1];
             let branch = parts[3];
             let path = parts[4..].join("/");
-            return format!(
-                "https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}"
-            );
+            return format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}");
         }
     }
     url.to_string()
@@ -543,9 +541,9 @@ fn extract_endpoint_scope(section: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_external_api_symbol_inventory, fallback_operation_name, filter_openapi_to_scope,
-        is_external_api_draft_path, load_openapi_content, normalize_openapi_source_url,
-        parse_external_api_draft, ExternalApiDraftMetadata,
+        ExternalApiDraftMetadata, extract_external_api_symbol_inventory, fallback_operation_name,
+        filter_openapi_to_scope, is_external_api_draft_path, load_openapi_content,
+        normalize_openapi_source_url, parse_external_api_draft,
     };
     use serde_json::json;
     use std::fs;
@@ -830,9 +828,11 @@ paths:
             .collect();
 
         assert_eq!(names.len(), 2);
-        assert!(names
-            .iter()
-            .all(|name| name.starts_with("get_users_by_id_")));
+        assert!(
+            names
+                .iter()
+                .all(|name| name.starts_with("get_users_by_id_"))
+        );
         assert_ne!(names[0], names[1]);
 
         let _ = fs::remove_dir_all(root);

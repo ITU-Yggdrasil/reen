@@ -497,7 +497,7 @@ fn find_hunk_start_anywhere(lines: &[String], pattern: &[&str]) -> Option<usize>
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_hunks, apply_unified_diff, Hunk, HunkLine, HunkLineKind};
+    use super::{Hunk, HunkLine, HunkLineKind, apply_hunks, apply_unified_diff};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};

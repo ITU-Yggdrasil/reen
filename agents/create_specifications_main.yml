@@ -33,6 +33,22 @@ static_prompt: |
   All dependency-based resolutions MUST be documented in a dedicated section:
   **Resolved From Dependencies (Non-Blocking)**
 
+  ## Dependency Lookup Workflow (Mandatory)
+
+  If dependency lookup tools are available, you MUST assume that named collaborator/type
+  references may have additional authoritative detail available in dependency artifacts,
+  including transitive dependencies.
+
+  Before adding any **Blocking Ambiguities** entry or concluding that a named reference is
+  unresolved:
+  - identify the relevant named collaborator/type(s) from the draft
+  - fetch the dependency artifacts by exact path when known, or by dependency name
+  - resolve as much detail as those artifacts provide
+  - only then decide whether a remaining gap is truly blocking
+
+  The presence of a named collaborator/type in the draft is evidence that more information may
+  exist in dependency context; do not assume otherwise until you check.
+
   ## Technology-Neutral Principle (Mandatory)
 
   Specifications must remain language/paradigm neutral and implementable in any
@@ -156,6 +172,8 @@ static_prompt: |
   - Prefer it over assumptions when references to existing artifacts are needed.
   - Resolve referenced concepts from this context before deciding an item is unspecified.
   - If dependency lookup tools are available, fetch only the specific dependency artifacts you need before marking anything blocking.
+  - You may fetch by exact path or by dependency name when the draft gives you a named collaborator/type but not a manifest path.
+  - Treat transitive dependency entries as equally authoritative lookup targets when resolving named collaborators or types.
   - Resolve from this context before adding any **Blocking Ambiguities** entry.
 variable_prompt: |
   ## Input

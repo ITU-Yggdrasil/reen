@@ -2,7 +2,7 @@ use super::agent_spec_resolver::candidate_agent_spec_filenames;
 use crate::execution::{
     AgentModelRegistry, AgentRegistry, AgentSpecificationTemplate, ExecutionError, PopulateError,
 };
-use crate::registries::{embedded_agent_spec, FileAgentModelRegistry};
+use crate::registries::{FileAgentModelRegistry, embedded_agent_spec};
 
 /// File-based implementation of AgentRegistry
 /// Loads agent specifications from YAML files in the agents/ directory
@@ -153,9 +153,11 @@ description: Test agent
         let template = registry
             .get_specification("create_implementation")
             .expect("embedded spec should load");
-        assert!(template
-            .canonical_for_cache()
-            .contains("code implementation agent"));
+        assert!(
+            template
+                .canonical_for_cache()
+                .contains("code implementation agent")
+        );
     }
 
     #[test]
@@ -164,9 +166,11 @@ description: Test agent
         let template = registry
             .get_specification("create_implementation")
             .expect("spec load");
-        assert!(template
-            .canonical_for_cache()
-            .contains("Strict Specification Compliance"));
+        assert!(
+            template
+                .canonical_for_cache()
+                .contains("Strict Specification Compliance")
+        );
     }
 
     #[test]

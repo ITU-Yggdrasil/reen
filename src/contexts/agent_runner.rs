@@ -1,6 +1,6 @@
 use crate::execution::{
-    estimate_tokens, Cache, FileCache, NativeExecutionControl, NativeExecutionMetadata,
-    REQUEST_OVERHEAD_TOKENS,
+    Cache, FileCache, NativeExecutionControl, NativeExecutionMetadata, REQUEST_OVERHEAD_TOKENS,
+    estimate_tokens,
 };
 use serde::Serialize;
 use serde_json;
@@ -298,14 +298,14 @@ where
         if let Some(dependency_tool_context) = input_value.get("dependency_tool_context") {
             tools.push(serde_json::json!({
                 "name": "fetch_dependency_artifacts",
-                "description": "Fetch the full content for one or more dependency artifacts listed in the dependency manifest.",
+                "description": "Fetch the full content for one or more dependency artifacts listed in the dependency manifest. Queries may be exact artifact paths/spec paths or dependency names such as Board, Snake, or GameState.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "paths": {
                             "type": "array",
                             "items": { "type": "string" },
-                            "description": "Exact artifact paths from the dependency manifest."
+                            "description": "Exact artifact paths/spec paths from the dependency manifest, or dependency names from that manifest."
                         }
                     },
                     "required": ["paths"]

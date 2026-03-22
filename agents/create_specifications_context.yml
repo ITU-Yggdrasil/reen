@@ -57,6 +57,96 @@ static_prompt: |
   - Do NOT treat "whether the context updates/reassigns its role players or props" as a blocking ambiguity unless the draft explicitly states mutability.
   - Observable outputs of functionality may return new values (for example a new ledger value), but this does not imply in-place mutation of context fields.
 
+  ### Role Method Signature Scope (Mandatory)
+
+  Role methods in a specification describe **behavior**, not implementation signatures.
+
+  - Describe what the role method DOES: its observable effect or the value it produces.
+  - **Only specify a return type when the return value is explicitly consumed or named
+    in the use-case flow** (for example: "`head` returns the current position, which
+    is then used for collision detection in step 4").
+  - For role methods whose described behavior is purely about changing state
+    (for example: "moves the snake", "applies the new direction"), where no return
+    value is explicitly named in the flow, **do NOT specify a return type**.
+    The implementation agent will infer the appropriate signature.
+  - Signature mechanics (return types, parameter types, ownership, mutability) are
+    **always** implementation-level details and MUST be listed under
+    **Implementation Choices Left Open**, not hardcoded in the spec.
+
+  Rationale: specifying a concrete signature (like `-> ()`) may be incorrect under
+  the implementation agent's rules (e.g. immutable contexts require state-changing
+  methods to return updated values). Leaving signatures open avoids encoding an
+  implementation decision that would contradict other rules.
+
+  ## Public Collaborator Type Resolution (Mandatory)
+
+  For context specifications, role methods describe behavior implemented by the context.
+  They do NOT by themselves imply that the role player type already exposes same-named public methods.
+
+  However, if a role player appears in the public API surface of the context, its allowed type/form MUST still be resolvable.
+
+  Public API surface includes:
+  - constructor inputs (for example `new(board, role_player, ...)`)
+  - public functionality parameters
+  - public functionality return values
+
+  Resolution is acceptable when the draft or dependency context makes one of these clear:
+  - a concrete collaborator type name
+  - an explicitly allowed abstraction form (for example trait object, generic role trait, callback/function shape)
+  - an explicit "played by X" style statement where `X` is a concrete resolved type or allowed collaborator form
+
+  If a role player is part of the public API surface and its type/form cannot be determined from the draft plus dependency context:
+  - you MUST add a **Blocking Ambiguities** item
+  - you MUST NOT leave it only under **Implementation Choices Left Open**
+
+  Generic purpose descriptions alone (for example "produces food when needed") are NOT enough to resolve a public collaborator type.
+
+  ## Dependency Lookup Workflow (Mandatory)
+
+  If dependency lookup tools are available, you MUST assume that named collaborator/type
+  references may have additional authoritative detail available in dependency artifacts,
+  including transitive dependencies.
+
+  Before adding any **Blocking Ambiguities** entry or concluding that no more information can
+  be gained from dependencies:
+  - identify the named collaborator/type(s) implicated by the draft step
+    (for example `Board`, `Snake`, `GameState`, or `CommandInputContext`)
+  - fetch the relevant dependency artifacts by exact path when known, or by dependency name
+  - resolve as much of the missing detail as those artifacts allow
+  - only then decide whether the remaining gap is truly blocking
+
+  The presence of a named collaborator/type in the draft is evidence that more information may
+  exist in dependency context; do not assume otherwise until you check.
+
+  ## Functionality-to-Role-Method Coverage (Mandatory)
+
+  For every step of every public functionality, verify that every role player capability
+  invoked in that step has a corresponding entry in the role methods section.
+
+  This coverage rule applies to collaborator behaviors that the context draft explicitly
+  delegates or names as part of the interaction. It does NOT require you to duplicate every
+  ordinary accessor/helper already available on a resolved dependency type; those dependency
+  APIs may be relied on without restating them as context role methods.
+
+  If a functionality step implies calling a capability on a role player (for example
+  "capture pending keystrokes from `command`") but no matching role method exists:
+
+  1. **Role player type is known (from dependency context) AND exposes the capability:**
+     - ADD the missing role method to the role methods section, describing its behavior.
+     - Follow the Role Method Signature Scope rule: describe behavior, not signature.
+     - Document it in **Inferred Types or Structures** with the basis being the
+       functionality step that requires it and the dependency type that provides it.
+
+  2. **Role player type is unknown, OR known type does not expose the capability:**
+     - ADD a **Blocking Ambiguities** entry.
+     - Example wording: "The `tick` step 'Capture Input' requires a capture operation
+       on the `command` role, but no matching role method is listed and the role player
+       type does not expose this capability."
+
+  This check MUST run before finalising the specification. A functionality step that
+  invokes a role player capability without a corresponding role method is a
+  specification gap — it is NOT an "Implementation Choice Left Open".
+
   ## Conventional Rust Defaults (Allowed, Non-Blocking)
 
   The following conventions are allowed when the draft references them implicitly:
@@ -137,7 +227,8 @@ static_prompt: |
 
   Typical **Implementation Choices Left Open** examples:
   - Exact collection/sequence type (`Vec` vs alternatives)
-  - Signature mechanics (parameter names, ownership/borrowing) when behavior is unchanged
+  - Role method return types for state-changing behavior (e.g., whether `move(grow)` returns `Snake` or uses some other mechanism)
+  - Signature mechanics (parameter names, ownership/borrowing, mutability) when behavior is unchanged
   - Concrete crate/library choice
   - Formatting mechanics (`Display`/`Debug`, placeholder-level detail) when output behavior is still satisfied
   - Timestamp precision/storage granularity unless business rules depend on it
@@ -149,10 +240,14 @@ static_prompt: |
   - [ ] No new roles, rules, or flows were added
   - [ ] Names exactly match the draft
   - [ ] Referenced items in dependency context were resolved before marking unspecified/blocking
+  - [ ] Every role player used in the public API surface has a resolvable type or explicitly allowed abstraction form, otherwise it is listed under **Blocking Ambiguities**
   - [ ] All inferences are explicitly documented as inferred
   - [ ] Blocking ambiguities are truly behavior-impacting or contradictory
   - [ ] Non-blocking technical details are captured under **Implementation Choices Left Open**
   - [ ] A stakeholder could validate correctness against the draft
+  - [ ] Role method entries describe behavior only; return types for state-changing methods are NOT specified (left as Implementation Choices Left Open) unless explicitly consumed in the flow
+  - [ ] Every role player capability invoked by a functionality step has a corresponding role method entry; missing entries are either added (if type is known) or flagged as blocking
+  - [ ] Named collaborator/type references were checked via dependency artifacts before concluding that no more information was available
 
   ## Direct Dependency Context (Authoritative, Optional)
 
@@ -161,6 +256,8 @@ static_prompt: |
   - Prefer it over guesswork when referencing existing artifacts.
   - Do not duplicate already defined structures.
   - If dependency lookup tools are available, fetch only the specific dependency artifacts you need before marking anything blocking.
+  - You may fetch by exact path or by dependency name when the draft gives you a named collaborator/type but not a manifest path.
+  - Treat transitive dependency entries as equally authoritative lookup targets when resolving named collaborators or types.
   - Resolve from this context before adding any **Blocking Ambiguities** entry.
 variable_prompt: |
   ## Input

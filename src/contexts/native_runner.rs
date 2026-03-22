@@ -1,13 +1,14 @@
 use html2text::from_read;
+use reqwest::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, Response};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::env;
 use std::future::Future;
 use std::io::Cursor;
-use std::thread;
 use std::sync::Once;
+use std::thread;
 use std::time::Duration;
 
 use crate::execution::estimate_tokens;
@@ -926,7 +927,7 @@ fn execute_fetch_dependency_artifacts(
     arguments: &Value,
     tool_context: Option<&Value>,
 ) -> Result<String, String> {
-    let paths = match arguments.get("paths") {
+    let queries = match arguments.get("paths") {
         Some(Value::String(path)) => vec![path.clone()],
         Some(Value::Array(items)) => items
             .iter()
@@ -956,19 +957,61 @@ fn execute_fetch_dependency_artifacts(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let all_artifacts = dependency_artifacts
+        .iter()
+        .chain(implemented_dependency_artifacts.iter())
+        .cloned()
+        .collect::<Vec<_>>();
 
     let mut found = Vec::new();
     let mut missing = Vec::new();
-    for path in paths {
-        let artifact = dependency_artifacts
+    let mut seen_artifacts = HashSet::new();
+    for query in queries {
+        let exact_matches = all_artifacts
             .iter()
-            .chain(implemented_dependency_artifacts.iter())
-            .find(|artifact| artifact.get("path").and_then(Value::as_str) == Some(path.as_str()))
-            .cloned();
-        if let Some(artifact) = artifact {
-            found.push(artifact);
+            .filter(|artifact| {
+                artifact.get("path").and_then(Value::as_str) == Some(query.as_str())
+                    || artifact.get("spec_path").and_then(Value::as_str) == Some(query.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let name_matches = if exact_matches.is_empty() {
+            all_artifacts
+                .iter()
+                .filter(|artifact| {
+                    artifact
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(|name| name.eq_ignore_ascii_case(query.as_str()))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         } else {
-            missing.push(Value::String(path));
+            Vec::new()
+        };
+        let matches = if exact_matches.is_empty() {
+            name_matches
+        } else {
+            exact_matches
+        };
+
+        if matches.is_empty() {
+            missing.push(Value::String(query));
+            continue;
+        }
+
+        for artifact in matches {
+            let identity = artifact
+                .get("path")
+                .and_then(Value::as_str)
+                .or_else(|| artifact.get("spec_path").and_then(Value::as_str))
+                .or_else(|| artifact.get("name").and_then(Value::as_str))
+                .unwrap_or_default()
+                .to_string();
+            if seen_artifacts.insert(identity) {
+                found.push(artifact);
+            }
         }
     }
 
@@ -1179,13 +1222,13 @@ fn openai_supports_extended_cache(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
+        ANTHROPIC_PROMPT_CACHE_TTL, NativeExecutionControl, NativeRequestStep, NativeStepUsage,
         anthropic_system_blocks, coerce_tool_arguments, determine_provider,
         execute_fetch_dependency_artifacts, execute_openai_compatible_with_dispatch,
         normalize_request, openai_messages, openai_prompt_cache_enabled, openai_prompt_cache_key,
-        select_relevant_text, NativeExecutionControl, NativeRequestStep, NativeStepUsage,
-        ANTHROPIC_PROMPT_CACHE_TTL,
+        select_relevant_text,
     };
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -1269,6 +1312,32 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
         assert_eq!(parsed["artifacts"].as_array().map(Vec::len), Some(1));
         assert_eq!(parsed["missing_paths"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn dependency_tool_accepts_dependency_names() {
+        let result = execute_fetch_dependency_artifacts(
+            &json!({"paths": ["Board", "Snake", "unknown"]}),
+            Some(&json!({
+                "dependency_tool_context": {
+                    "dependency_artifacts": [
+                        {"name": "Board", "path": "drafts/data/Board.md", "content": "board"},
+                        {"name": "Snake", "path": "drafts/data/Snake.md", "content": "snake"}
+                    ],
+                    "implemented_dependency_artifacts": []
+                }
+            })),
+        )
+        .expect("tool call should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(parsed["artifacts"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            parsed["missing_paths"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            vec![json!("unknown")]
+        );
     }
 
     #[test]

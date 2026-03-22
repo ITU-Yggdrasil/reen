@@ -1201,10 +1201,12 @@ components:
             .flatten()
             .find(|node| node.input_path == stripe)
             .expect("stripe node");
-        assert!(stripe_node
-            .resolve_direct_dependencies()
-            .expect("deps")
-            .is_empty());
+        assert!(
+            stripe_node
+                .resolve_direct_dependencies()
+                .expect("deps")
+                .is_empty()
+        );
 
         let _ = fs::remove_dir_all(root);
     }

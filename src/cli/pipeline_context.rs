@@ -47,6 +47,34 @@ fn compact_dependency_entries(
     serde_json::Value::Array(compacted)
 }
 
+fn compact_dependency_manifest_entries(value: &serde_json::Value) -> serde_json::Value {
+    let Some(entries) = value.as_array() else {
+        return value.clone();
+    };
+    let compacted = entries
+        .iter()
+        .map(|entry| {
+            let Some(obj) = entry.as_object() else {
+                return entry.clone();
+            };
+            let mut out = serde_json::Map::new();
+            for key in [
+                "name",
+                "path",
+                "spec_path",
+                "artifact_type",
+                "dependency_kind",
+            ] {
+                if let Some(v) = obj.get(key) {
+                    out.insert(key.to_string(), v.clone());
+                }
+            }
+            serde_json::Value::Object(out)
+        })
+        .collect::<Vec<_>>();
+    serde_json::Value::Array(compacted)
+}
+
 fn build_context_variants(
     base_context: &HashMap<String, serde_json::Value>,
 ) -> Vec<HashMap<String, serde_json::Value>> {
@@ -56,18 +84,6 @@ fn build_context_variants(
         let mut without_impl = base_context.clone();
         without_impl.remove("implemented_dependencies");
         variants.push(without_impl);
-    }
-
-    if let Some(direct_only) = base_context.get("direct_dependencies_only") {
-        let mut direct_only_ctx = base_context.clone();
-        direct_only_ctx.insert("direct_dependencies".to_string(), direct_only.clone());
-        direct_only_ctx.insert("dependency_closure".to_string(), direct_only.clone());
-        direct_only_ctx.insert("mcp_context".to_string(), direct_only.clone());
-        variants.push(direct_only_ctx.clone());
-
-        let mut no_impl = direct_only_ctx;
-        no_impl.remove("implemented_dependencies");
-        variants.push(no_impl);
     }
 
     if let Some(openapi_content) = base_context.get("openapi_content").and_then(|v| v.as_str()) {
@@ -82,6 +98,32 @@ fn build_context_variants(
         };
         compact_openapi.insert("openapi_content".to_string(), json!(truncated));
         variants.push(compact_openapi);
+    }
+
+    let manifest_sources = [
+        "direct_dependencies",
+        "dependency_closure",
+        "mcp_context",
+        "implemented_dependencies",
+    ];
+    let mut compact_manifest = base_context.clone();
+    let mut compact_manifest_changed = false;
+    for key in manifest_sources {
+        if let Some(value) = compact_manifest.get(key).cloned() {
+            let reduced = compact_dependency_manifest_entries(&value);
+            if reduced != value {
+                compact_manifest.insert(key.to_string(), reduced);
+                compact_manifest_changed = true;
+            }
+        }
+    }
+    if compact_manifest_changed {
+        variants.push(compact_manifest.clone());
+        if compact_manifest.contains_key("implemented_dependencies") {
+            let mut no_impl = compact_manifest;
+            no_impl.remove("implemented_dependencies");
+            variants.push(no_impl);
+        }
     }
 
     let compact_sources = [
@@ -103,6 +145,27 @@ fn build_context_variants(
     }
     if changed {
         variants.push(compact);
+    }
+
+    if let Some(direct_only) = base_context.get("direct_dependencies_only") {
+        let mut direct_only_ctx = base_context.clone();
+        direct_only_ctx.insert(
+            "direct_dependencies".to_string(),
+            compact_dependency_manifest_entries(direct_only),
+        );
+        direct_only_ctx.insert(
+            "dependency_closure".to_string(),
+            compact_dependency_manifest_entries(direct_only),
+        );
+        direct_only_ctx.insert(
+            "mcp_context".to_string(),
+            compact_dependency_manifest_entries(direct_only),
+        );
+        variants.push(direct_only_ctx.clone());
+
+        let mut no_impl = direct_only_ctx;
+        no_impl.remove("implemented_dependencies");
+        variants.push(no_impl);
     }
 
     variants
@@ -166,4 +229,140 @@ pub(super) fn fit_context_to_token_limit(
     anyhow::bail!(
         "Estimated request size ({estimated} input tokens) exceeds configured token limit and could not be reduced automatically."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_context_variants;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn context_variants_prefer_full_closure_manifest_before_direct_only() {
+        let base = HashMap::from([
+            (
+                "direct_dependencies".to_string(),
+                json!([
+                    {
+                        "name": "command_input",
+                        "path": "drafts/contexts/command_input.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "a"
+                    },
+                    {
+                        "name": "Snake",
+                        "path": "drafts/data/Snake.md",
+                        "dependency_kind": "transitive",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "b"
+                    }
+                ]),
+            ),
+            (
+                "dependency_closure".to_string(),
+                json!([
+                    {
+                        "name": "command_input",
+                        "path": "drafts/contexts/command_input.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "a"
+                    },
+                    {
+                        "name": "Snake",
+                        "path": "drafts/data/Snake.md",
+                        "dependency_kind": "transitive",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "b"
+                    }
+                ]),
+            ),
+            (
+                "mcp_context".to_string(),
+                json!([
+                    {
+                        "name": "command_input",
+                        "path": "drafts/contexts/command_input.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "a"
+                    },
+                    {
+                        "name": "Snake",
+                        "path": "drafts/data/Snake.md",
+                        "dependency_kind": "transitive",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "b"
+                    }
+                ]),
+            ),
+            (
+                "direct_dependencies_only".to_string(),
+                json!([
+                    {
+                        "name": "command_input",
+                        "path": "drafts/contexts/command_input.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "a"
+                    }
+                ]),
+            ),
+            (
+                "implemented_dependencies".to_string(),
+                json!([
+                    {
+                        "name": "CommandInputContext",
+                        "path": "src/contexts/command_input.rs",
+                        "spec_path": "specifications/contexts/command_input.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "implementation_source",
+                        "sha256": "impl"
+                    }
+                ]),
+            ),
+        ]);
+
+        let variants = build_context_variants(&base);
+        let compact_manifest_index = variants
+            .iter()
+            .position(|variant| {
+                variant
+                    .get("direct_dependencies")
+                    .and_then(|value| value.as_array())
+                    .map(|items| items.len() == 2)
+                    .unwrap_or(false)
+                    && variant
+                        .get("direct_dependencies")
+                        .and_then(|value| value.as_array())
+                        .and_then(|items| items.get(1))
+                        .and_then(|item| item.get("dependency_kind"))
+                        .and_then(|value| value.as_str())
+                        == Some("transitive")
+                    && variant
+                        .get("direct_dependencies")
+                        .and_then(|value| value.as_array())
+                        .and_then(|items| items.first())
+                        .and_then(|item| item.get("sha256"))
+                        .is_none()
+            })
+            .expect("expected a compact full-closure variant");
+
+        let direct_only_index = variants
+            .iter()
+            .position(|variant| {
+                variant
+                    .get("direct_dependencies")
+                    .and_then(|value| value.as_array())
+                    .map(|items| items.len() == 1)
+                    .unwrap_or(false)
+            })
+            .expect("expected a direct-only fallback");
+
+        assert!(
+            compact_manifest_index < direct_only_index,
+            "full-closure compact variant should be tried before direct-only fallback"
+        );
+    }
 }

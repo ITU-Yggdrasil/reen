@@ -22,7 +22,8 @@ static_prompt: |
   2. **ONLY role methods listed in "Role Methods" section can exist**
      - These implement the internal logic
      - They MUST be private
-     - They MUST match the exact signatures specified
+     - They MUST match the exact signatures specified; when signatures are partially or
+       fully unspecified, infer them (see **Role Method Signature Inference** below)
      - They MUST be named as `<role>_<method_name>` (both in `snake_case`) to avoid collisions across roles
      - If the specification describes role and method separately (for example role=`source`, method=`withdraw`), the Rust method name MUST be composed as `source_withdraw`
      - A role method is allowed to read/call other role players via `self` when implementing specified behavior (cross-role access is allowed)
@@ -479,6 +480,105 @@ static_prompt: |
   - Change required business rules or externally observable behavior
   - Introduce contradictory semantics relative to the specification
 
+  ## Type Inference for Unspecified Types (MANDATORY)
+
+  When a specification does not define a concrete type, you MUST infer the most natural choice
+  rather than rejecting the specification. Unspecified types are **never** a reason to fail.
+
+  ### Integer types
+
+  - If a range like "0 to 2,000,000,000" or "never negative" is given, pick the smallest
+    fitting unsigned type (e.g. `u32` for 0–2 billion) unless the spec implies signed arithmetic.
+  - If no range is given and the type is a plain count or index, default to `usize` or `i32` as contextually appropriate.
+  - Do not ask for clarification; pick the obvious fit and proceed.
+
+  ### Platform-context types
+
+  Pick the obvious crate/type based on the deployment context visible from the specification:
+
+  | Context clue | Obvious choice |
+  |---|---|
+  | Terminal app reading raw keys | `crossterm` (or `termion`) for non-blocking stdin |
+  | Desktop app keyboard input | platform event loop (e.g. `winit`) |
+  | Web app keyboard input | `web-sys` KeyboardEvent |
+  | FIFO / queue of characters | `std::collections::VecDeque<char>` |
+  | 2D grid of characters | `Vec<Vec<char>>` |
+  | Duration / timestamp | `std::time::Duration` / `std::time::Instant` |
+  | Optional value | `Option<T>` with inferred `T` |
+
+  ### Role player types
+
+  - If a role player name matches another context or data type defined in the same specification
+    set (e.g. a role named `command` in `GameLoopContext` whose description says it is shared
+    with menus and is a `CommandInputContext`), use that type directly.
+  - If the description says "played by a RNG" or "produces random values", use an appropriate
+    RNG type (e.g. `rand::rngs::ThreadRng` via the `rand` crate, or a generic closure/function pointer).
+  - A role player whose type can be narrowed to a single concrete type from context is NOT
+    a blocking ambiguity; choose it and proceed.
+
+  ### Method parameter types
+
+  - If a parameter name unambiguously matches a named data type in the spec set (e.g.
+    `new_direction: Direction`, `grow: bool`), use that type.
+  - If a parameter or return value is described with words like "a whole number", "a count", or
+    "true/false", map to the obvious Rust primitive.
+
+  ### Role Method Signature Inference (When Unspecified)
+
+  Specifications describe role method **behavior**, not signatures. When a role method
+  entry does not specify a return type (or only describes the observable effect in prose),
+  you MUST infer the correct signature from context. This is NOT a spec deviation.
+
+  **State-changing role methods in an immutable context:**
+
+  If a role method's described behavior is to change the state of the role player
+  (signals: "moves", "applies direction", "sets", "updates"), AND the context is
+  immutable (the default), AND the functionality that calls this role method returns
+  a new context instance — then the role method MUST return the updated role player value.
+
+  Rationale: immutable context fields cannot be reassigned in place. The only compliant
+  way to carry updated role player state into a new context is for the role method to
+  return the updated value so the caller can thread it into the new instance.
+
+  Example:
+  - Spec: "`move(grow)`: Moves to `next()`. If `grow=true`, length increases by 1."
+    (no return type stated)
+  - Context is immutable; `tick` returns `Option<GameLoopContext>`.
+  - Infer: `fn snake_move(&self, grow: bool) -> Snake` — returns the updated `Snake`
+    so `tick` can construct the new `GameLoopContext` with the updated snake.
+
+  **Query role methods:**
+  - If the spec describes a role method as returning a specific value (e.g. "returns the
+    current head position"), that return type is specified or clearly inferable.
+  - If no return type is stated but the method is clearly a read (no state change), infer
+    `()` only as a last resort after confirming no value is consumed by the caller.
+
+  ### Collaborator API Resolution From Dependencies (MANDATORY)
+
+  Role methods constrain the private methods on the generated context itself. They do NOT
+  require the specification to restate every public method available on resolved collaborator
+  types from dependency context.
+
+  When a role player or prop resolves to a dependency-defined type:
+  - You MAY and SHOULD use that collaborator's fetched public API inside role methods or helpers.
+  - A dependency method such as `snake.body()`, `board.width()`, `game_state.food()`, or
+    `command.capture()` is allowed when it exists on fetched dependency artifacts, even if
+    that collaborator method is not mirrored under this context's "Role Methods" section.
+  - Do NOT treat an existing dependency API as "missing" merely because the context
+    specification does not duplicate it as a role method.
+  - Before failing for insufficient API or conflicting requirements, fetch the relevant
+    dependency artifacts for each named collaborator/type that could satisfy the behavior.
+  - If multiple dependency artifacts share a name, fetch the concrete candidates and choose
+    the one that best matches the specification context.
+
+  Only fail when the required behavior still cannot be implemented after dependency lookup.
+
+  ### When inference is genuinely ambiguous
+
+  If there are truly two equally plausible choices with materially different semantics (not just
+  `i32` vs `u32`), pick the safer/more conventional one, add a brief inline comment noting the
+  choice, and proceed. Do NOT fail or emit `compile_error!`.
+
   ## Tracing Instrumentation (REQUIRED)
 
   **All methods MUST be instrumented with tracing for observability.**
@@ -595,6 +695,10 @@ static_prompt: |
 
   ## When to Fail Instead of Implementing
 
+  **Note**: Unspecified types, integer signedness, internal data structures, or platform-specific
+  library choices are NEVER a reason to fail. Apply the **Type Inference** rules above and proceed.
+  Fail only for the conditions below, which concern externally observable behavior and public API.
+
   **STOP IMMEDIATELY and report the problem if**:
 
   1. **Missing Required Methods**:
@@ -606,11 +710,15 @@ static_prompt: |
      - The public methods can't be implemented with only the role methods provided
      - You would need changes to specified public API/externally visible behavior to make it work
      - The specification is logically incomplete
+     - Existing collaborator APIs discovered from dependency context do count; do not report
+       insufficiency until those fetched APIs have been checked
      - **Action**: Explain the gap in the specification
 
   3. **Conflicting Requirements**:
      - The specification describes behavior that requires methods not listed
      - The interactions described need additional methods to work
+     - Dependency-defined collaborator APIs are not "missing methods" for this check unless
+       they were fetched and still do not provide a compatible capability
      - **Action**: Point out the conflict
 
   4. **Impossible Constraints**:
@@ -661,7 +769,7 @@ static_prompt: |
   - ✓ **Tracing format correct**: `"[ContextName] [role] [method]"` for role methods, `"[ContextName] [method]"` for public methods
   - ✓ **Tracing dependency**: `tracing` added to `Cargo.toml`
   - ✓ **ONLY methods from "Functionality" are public**
-  - ✓ **ONLY methods from "Role Methods" exist as private methods**
+  - ✓ **All role methods from "Role Methods" are implemented as private methods** (additional private helpers are also allowed)
   - ✓ **Role method naming follows `<role>_<method_name>`**
   - ✓ **ALL role players from spec are struct fields**
   - ✓ **ALL props from spec are struct fields**
@@ -698,36 +806,37 @@ static_prompt: |
      - Compare with "Role Players" and "Props" in spec
      - They MUST match exactly (same names, same types)
 
-  5. **No Extras**:
-     - Verify no helper functions exist
-     - Verify no convenience methods exist
-     - Verify no additional fields exist
-     - If you added ANYTHING not in the spec, remove it
+  5. **No Unauthorized Extras**:
+     - Verify no **public** methods exist beyond those in "Functionality"
+     - Verify no **public** fields exist beyond those in "Role Players" and "Props"
+     - Verify no **private** role methods exist beyond those in "Role Methods" (private helpers are allowed)
+     - If you added a public method, field, or role method NOT in the spec, remove it
+     - Private helper functions and internal refactoring are explicitly allowed and encouraged
 
   ## Example of WRONG Implementation
 
   ```rust
-  // WRONG - has extra methods and fields not in spec
+  // WRONG - has extra public methods and fields not in spec
   pub struct MyContext {
       agent: String,           // ✓ From spec
       input: String,           // ✓ From spec
-      cache: Option<Cache>,    // ✗ NOT in spec - REMOVE
+      cache: Option<Cache>,    // ✗ NOT in spec - REMOVE (extra field)
   }
 
   impl MyContext {
       pub fn run(&self) { }         // ✓ In "Functionality"
-      pub fn quick_run(&self) { }   // ✗ NOT in spec - REMOVE
+      pub fn quick_run(&self) { }   // ✗ NOT in spec - REMOVE (extra public method)
 
       fn execute(&self) { }         // ✓ In "Role Methods"
-      fn validate(&self) { }        // ✗ NOT in spec - REMOVE
-      fn helper(&self) { }          // ✗ NOT in spec - REMOVE
+      fn validate(&self) { }        // ✗ NOT in spec as a role method - REMOVE
+                                    //   (if needed as internal helper, rename and keep private)
   }
   ```
 
   ## Example of CORRECT Implementation
 
   ```rust
-  // CORRECT - exactly matches spec
+  // CORRECT - exactly matches spec; private helpers are permitted
   pub struct MyContext {
       agent: String,    // From "Role Players"
       input: String,    // From "Props"
@@ -739,6 +848,9 @@ static_prompt: |
 
       // Private method from "Role Methods"
       fn execute(&self) { }
+
+      // Private helper - allowed for readability/testability, does NOT appear in spec
+      fn parse_input(&self) -> ParsedInput { }
   }
   ```
 
@@ -829,6 +941,8 @@ static_prompt: |
   - Prefer provided dependency artifacts over inference.
   - Reuse existing definitions from dependency context instead of creating duplicates.
   - If dependency lookup tools are available, fetch only the specific dependency artifacts you need instead of pulling everything eagerly.
+  - You may query dependency lookup by exact path/spec path or by dependency name when that is all the specification gives you.
+  - Treat transitive dependency entries in the manifest as equally eligible lookup targets when resolving collaborator APIs.
   - Avoid arbitrary file scraping when dependency context already provides structured metadata.
   - If `input.implemented_dependencies` is present, treat it as an authoritative manifest for already-implemented dependency APIs.
   - When implemented-dependency lookup tools are available, fetch only the source files you need before deciding an API shape.

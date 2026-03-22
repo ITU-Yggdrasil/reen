@@ -34,9 +34,7 @@ fn parse_repo_spec(repo_spec: &str) -> Result<(String, String)> {
     let owner = parts.next().unwrap_or_default().trim();
     let repo = parts.next().unwrap_or_default().trim();
     if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
-        bail!(
-            "invalid GitHub repository '{trimmed}', expected the form <owner>/<repo>"
-        );
+        bail!("invalid GitHub repository '{trimmed}', expected the form <owner>/<repo>");
     }
     Ok((owner.to_string(), repo.to_string()))
 }
@@ -191,7 +189,15 @@ impl ArtifactStore for FileArtifactStore {
             ArtifactKind::Draft => self.drafts_root(),
             ArtifactKind::Specification => self.specifications_root(),
         };
-        resolve_file_inputs(root, kind, names, filter, self.drafts_root(), self.specifications_root(), &self.id_namespace)
+        resolve_file_inputs(
+            root,
+            kind,
+            names,
+            filter,
+            self.drafts_root(),
+            self.specifications_root(),
+            &self.id_namespace,
+        )
     }
 
     fn select_dependency_roots(
@@ -214,9 +220,7 @@ impl ArtifactStore for FileArtifactStore {
                     self.specifications_root().to_string_lossy().into_owned()
                 }
             };
-            if !filter.is_active()
-                || filter.matches_path(&app.path, &base_dir)
-            {
+            if !filter.is_active() || filter.matches_path(&app.path, &base_dir) {
                 return Ok(vec![app.clone()]);
             }
         }
@@ -272,7 +276,8 @@ impl ArtifactStore for FileArtifactStore {
             self.specifications_root(),
         )?;
         if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent).context("Failed to create specification output directory")?;
+            fs::create_dir_all(parent)
+                .context("Failed to create specification output directory")?;
         }
         fs::write(&output_path, &content).context("Failed to write specification file")?;
         Ok(())
@@ -348,7 +353,10 @@ impl GitHubArtifactStore {
                     .with_context(|| format!("Failed to create {}", parent.display()))?;
             }
             fs::write(&record.artifact.path, &record.body).with_context(|| {
-                format!("Failed to write projected issue artifact {}", record.artifact.path.display())
+                format!(
+                    "Failed to write projected issue artifact {}",
+                    record.artifact.path.display()
+                )
             })?;
             by_path.insert(record.artifact.path.clone(), record.artifact.id.clone());
             if let Some(draft_id) = &record.artifact.source_draft_id {
@@ -366,7 +374,12 @@ impl GitHubArtifactStore {
         state.draft_to_specs = draft_to_specs;
         state.issue_number_to_id = issue_number_to_id
             .into_iter()
-            .map(|(number, _id)| (number, github_issue_artifact_id(&self.owner, &self.repo, number)))
+            .map(|(number, _id)| {
+                (
+                    number,
+                    github_issue_artifact_id(&self.owner, &self.repo, number),
+                )
+            })
             .collect();
         Ok(())
     }
@@ -460,9 +473,7 @@ impl ArtifactStore for GitHubArtifactStore {
                     self.specifications_root().to_string_lossy().into_owned()
                 }
             };
-            if !filter.is_active()
-                || filter.matches_path(&app.path, &base_dir)
-            {
+            if !filter.is_active() || filter.matches_path(&app.path, &base_dir) {
                 return Ok(vec![app.clone()]);
             }
         }
@@ -537,7 +548,11 @@ impl ArtifactStore for GitHubArtifactStore {
     }
 }
 
-fn filter_artifacts(artifacts: Vec<ArtifactRef>, filter: &CategoryFilter, root: &Path) -> Vec<ArtifactRef> {
+fn filter_artifacts(
+    artifacts: Vec<ArtifactRef>,
+    filter: &CategoryFilter,
+    root: &Path,
+) -> Vec<ArtifactRef> {
     if !filter.is_active() {
         return artifacts;
     }
@@ -594,7 +609,9 @@ fn collect_filtered_markdown_paths(root: &Path, filter: &CategoryFilter) -> Resu
         files.extend(collect_md_files_recursive(&root.join("apis"))?);
     }
     if filter.include_root() {
-        for entry in fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))? {
+        for entry in
+            fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))?
+        {
             let path = entry?.path();
             if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
                 files.push(path);
@@ -631,7 +648,10 @@ fn resolve_named_artifacts(
     }
     if filter.include_contexts() {
         files.extend(resolve_named_in_category(&root.join("contexts"), name)?);
-        files.extend(resolve_named_in_category(&root.join("external_apis"), name)?);
+        files.extend(resolve_named_in_category(
+            &root.join("external_apis"),
+            name,
+        )?);
         files.extend(resolve_named_in_category(&root.join("apis"), name)?);
     }
     if filter.include_root() {
@@ -649,7 +669,10 @@ fn resolve_named_in_category(root: &Path, name: &str) -> Result<Vec<PathBuf>> {
     }
     let mut matches = Vec::new();
     for entry in collect_md_files_recursive(root)? {
-        let stem = entry.file_stem().and_then(|value| value.to_str()).unwrap_or_default();
+        let stem = entry
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
         if stem == name {
             matches.push(entry);
         }
@@ -800,7 +823,11 @@ fn parse_issue_artifact(
     specs_root: &Path,
     issue: &GitHubIssuePayload,
 ) -> Result<Option<(ArtifactRef, Option<String>)>> {
-    let labels = issue.labels.iter().map(|label| label.as_str()).collect::<HashSet<_>>();
+    let labels = issue
+        .labels
+        .iter()
+        .map(|label| label.as_str())
+        .collect::<HashSet<_>>();
     let kind = if labels.contains("draft") {
         ArtifactKind::Draft
     } else if labels.contains("specification") {
@@ -1064,9 +1091,10 @@ mod tests {
             labels: vec!["draft".to_string(), "app".to_string()],
         };
 
-        let (artifact, _) = parse_issue_artifact("demo", "snake", &drafts_root, &specs_root, &issue)
-            .expect("parse issue")
-            .expect("artifact");
+        let (artifact, _) =
+            parse_issue_artifact("demo", "snake", &drafts_root, &specs_root, &issue)
+                .expect("parse issue")
+                .expect("artifact");
 
         assert_eq!(artifact.kind, ArtifactKind::Draft);
         assert_eq!(artifact.category, ArtifactCategory::Root);

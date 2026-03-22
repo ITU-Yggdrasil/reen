@@ -130,7 +130,10 @@ pub fn load_config() -> Result<ReenConfig> {
     let raw = match raw {
         Value::Null => Value::Mapping(Mapping::new()),
         Value::Mapping(_) => raw,
-        _ => anyhow::bail!("Config file '{}' must contain a YAML mapping", path.display()),
+        _ => anyhow::bail!(
+            "Config file '{}' must contain a YAML mapping",
+            path.display()
+        ),
     };
     serde_yaml::from_value::<ReenConfig>(raw)
         .with_context(|| format!("Failed to decode config '{}'", path.display()))
@@ -151,7 +154,7 @@ fn find_upwards(start: &Path, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReenConfig, Value, resolve_config_path_from, OptionalYamlValue};
+    use super::{OptionalYamlValue, ReenConfig, Value, resolve_config_path_from};
     use anyhow::{Context, Result};
     use serde_yaml::Mapping;
     use std::fs;
@@ -213,9 +216,8 @@ mod tests {
         match fix {
             OptionalYamlValue::Missing => false,
             OptionalYamlValue::Present(Value::Bool(enabled)) => *enabled,
-            OptionalYamlValue::Present(Value::Null) | OptionalYamlValue::Present(Value::Mapping(_)) => {
-                true
-            }
+            OptionalYamlValue::Present(Value::Null)
+            | OptionalYamlValue::Present(Value::Mapping(_)) => true,
             OptionalYamlValue::Present(_) => false,
         }
     }
@@ -246,7 +248,10 @@ create:
         let create = parsed.create.expect("create config");
         let specification = create.specification.expect("spec config");
         assert!(fix_value_enabled(&specification.fix));
-        assert_eq!(fix_mapping_u32(&specification.fix, "max-fix-attempts"), None);
+        assert_eq!(
+            fix_mapping_u32(&specification.fix, "max-fix-attempts"),
+            None
+        );
     }
 
     #[test]

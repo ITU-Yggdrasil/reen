@@ -75,7 +75,7 @@ Each tick (one step forward), it handles:
 
 ---
 
-## Behavior
+## Functionalities
 
 - **new(board, snake, command, food_dropper, game_state)**
   - Uses the provided collaborators.

@@ -3,7 +3,7 @@
 ## Description
 This is a simple Snake game application that runs in a terminal.
 
-Depends on: game_loop, command_input, terminal_renderer
+Depends on: game_loop, command_input, terminal_renderer, string_renderer
 
 The application is responsible for:
 - initializing game state,
@@ -19,6 +19,7 @@ Game progression logic itself is delegated to the GameLoopContext.
 The Primary Application uses these helpers (they must exist as part of the overall system):
 - **CommandInputContext**: captures key presses into one shared FIFO stream for the whole session.
 - **GameLoopContext**: holds the game rules and advances the game by one tick at a time.
+- **StringRenderer**: formats the board and score into a plain text frame string.
 - **TerminalRenderer**: draws the board and the score to the terminal.
 - **food_dropper**: chooses the next food placement on a free interior (non-wall, non-snake) cell.
 
@@ -52,11 +53,14 @@ When the game is started:
 
 ---
 
-### Behavior
+### Functionalities
 
 The application runs an outer loop with the following behavior:
 
 0. Terminal mode and startup checks:
+   - Read environment variable `SNAKE_RENDERER`.
+   - If `SNAKE_RENDERER=string`, use StringRenderer output mode.
+   - Otherwise use TerminalRenderer output mode.
    - Before entering the main loop, enable raw terminal input mode so single key presses are available immediately (without pressing Enter), and disable input echo.
    - On application exit (normal or error), restore the previous terminal mode.
    - Create one shared CommandInputContext before the loop and keep using the same shared input stream for the process lifetime (menus + gameplay).
@@ -73,6 +77,8 @@ The application runs an outer loop with the following behavior:
 
 2. If a GameLoopContext exists:
    - Render current frame using `gameLoopContext.current_board` and `gameLoopContext.get_score`.
+   - In terminal mode, TerminalRenderer must render by calling StringRenderer first and then printing the returned frame after clearing the terminal.
+   - In string mode, print the StringRenderer frame directly with no terminal-clearing behavior.
    - Call `gameLoopContext.tick()`
    - If the result is:
      - a new GameLoopContext → replace the current one and continue.
@@ -82,6 +88,7 @@ The application runs an outer loop with the following behavior:
    - Render final board state.
    - Render a "Game Over" message and final score.
    - Allow the user to start a new game.
+   - If `SNAKE_RENDERER=string`, also print `REEN_SNAKE_TEST_RESULT game_over score=<score>` to standard error and then exit with code `0`.
 
 The application continues until the user exits (`q` or `Q` while no game is active).
 

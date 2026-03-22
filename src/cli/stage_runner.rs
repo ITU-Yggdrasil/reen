@@ -6,10 +6,10 @@ use tokio::time::sleep;
 
 use reen::execution::{NativeExecutionControl, NativeRequestStep, NativeStepUsage, TokenLimiter};
 
+use super::Config;
 use super::agent_executor::AgentExecutor;
 use super::progress::ProgressIndicator;
 use super::rate_limiter::RateLimiter;
-use super::Config;
 
 #[derive(Clone)]
 pub(crate) struct CliExecutionControl {

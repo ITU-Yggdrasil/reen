@@ -173,8 +173,8 @@ fn extract_balanced_json_object(output: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_external_api_expansion, sanitize_generated_artifact_name, ExternalApiExpansion,
-        GeneratedDraftArtifact,
+        ExternalApiExpansion, GeneratedDraftArtifact, parse_external_api_expansion,
+        sanitize_generated_artifact_name,
     };
 
     #[test]

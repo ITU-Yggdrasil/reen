@@ -4,7 +4,7 @@ mod agent_spec_resolver;
 mod embedded_agent_assets;
 
 pub use agent_model_registry::{
-    resolve_registry_path_for_profile, validate_registry_profile, FileAgentModelRegistry,
+    FileAgentModelRegistry, resolve_registry_path_for_profile, validate_registry_profile,
 };
 pub use agent_registry::FileAgentRegistry;
 pub use agent_spec_resolver::{
