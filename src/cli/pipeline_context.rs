@@ -105,6 +105,7 @@ fn build_context_variants(
         "dependency_closure",
         "mcp_context",
         "implemented_dependencies",
+        "implemented_direct_dependencies",
     ];
     let mut compact_manifest = base_context.clone();
     let mut compact_manifest_changed = false;
@@ -131,6 +132,7 @@ fn build_context_variants(
         ("dependency_closure", 1200usize, 8usize),
         ("mcp_context", 1200usize, 8usize),
         ("implemented_dependencies", 800usize, 6usize),
+        ("implemented_direct_dependencies", 1600usize, 8usize),
     ];
     let mut compact = base_context.clone();
     let mut changed = false;
@@ -322,6 +324,19 @@ mod tests {
                     }
                 ]),
             ),
+            (
+                "implemented_direct_dependencies".to_string(),
+                json!([
+                    {
+                        "name": "CommandInputContext",
+                        "path": "src/contexts/command_input.rs",
+                        "spec_path": "drafts/contexts/command_input.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "implementation_source",
+                        "sha256": "impl"
+                    }
+                ]),
+            ),
         ]);
 
         let variants = build_context_variants(&base);
@@ -363,6 +378,15 @@ mod tests {
         assert!(
             compact_manifest_index < direct_only_index,
             "full-closure compact variant should be tried before direct-only fallback"
+        );
+
+        assert!(
+            variants.iter().any(|variant| variant
+                .get("implemented_direct_dependencies")
+                .and_then(|value| value.as_array())
+                .map(|items| items.len() == 1)
+                .unwrap_or(false)),
+            "direct implemented dependencies should be preserved in context variants"
         );
     }
 }

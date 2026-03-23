@@ -3017,6 +3017,27 @@ fn build_implemented_dependency_manifest(
         .collect()
 }
 
+fn filter_direct_implemented_dependencies(
+    implemented_dependencies: &[serde_json::Value],
+    direct_dependencies: &[DependencyArtifact],
+) -> Vec<serde_json::Value> {
+    let direct_paths: HashSet<&str> = direct_dependencies
+        .iter()
+        .map(|dep| dep.path.as_str())
+        .collect();
+
+    implemented_dependencies
+        .iter()
+        .filter(|item| {
+            item.get("spec_path")
+                .and_then(|v| v.as_str())
+                .map(|spec_path| direct_paths.contains(spec_path))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
+}
+
 fn build_dependency_context(
     node: &ExecutionNode,
     primary_root: &str,
@@ -3044,17 +3065,28 @@ fn build_dependency_context(
     context.insert("mcp_context".to_string(), json!(dependency_manifest));
 
     let implemented_dependencies = build_implemented_dependency_context(&dependency_closure)?;
+    let implemented_direct_dependencies =
+        filter_direct_implemented_dependencies(&implemented_dependencies, &direct_dependencies);
     let implemented_dependency_manifest =
         build_implemented_dependency_manifest(&implemented_dependencies, &direct_dependencies);
+    let implemented_direct_dependency_manifest = build_implemented_dependency_manifest(
+        &implemented_direct_dependencies,
+        &direct_dependencies,
+    );
     context.insert(
         "implemented_dependencies".to_string(),
         json!(implemented_dependency_manifest),
+    );
+    context.insert(
+        "implemented_direct_dependencies".to_string(),
+        json!(implemented_direct_dependency_manifest),
     );
     context.insert(
         "dependency_tool_context".to_string(),
         json!({
             "dependency_artifacts": dependency_closure,
             "implemented_dependency_artifacts": implemented_dependencies,
+            "implemented_direct_dependency_artifacts": implemented_direct_dependencies,
         }),
     );
     Ok(context)

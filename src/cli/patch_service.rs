@@ -103,9 +103,9 @@ pub(crate) fn parse_unified_diff(diff: &str) -> Result<Vec<FilePatch>> {
                         continue;
                     }
                     let (kind, text) = match hl.chars().next().unwrap() {
-                        ' ' => (HunkLineKind::Context, hl[1..].to_string()),
-                        '+' => (HunkLineKind::Add, hl[1..].to_string()),
-                        '-' => (HunkLineKind::Remove, hl[1..].to_string()),
+                        ' ' => (HunkLineKind::Context, strip_line_number_annotation(&hl[1..]).to_string()),
+                        '+' => (HunkLineKind::Add, strip_line_number_annotation(&hl[1..]).to_string()),
+                        '-' => (HunkLineKind::Remove, strip_line_number_annotation(&hl[1..]).to_string()),
                         _ => continue,
                     };
                     let h = HunkLine { kind, text };
@@ -238,6 +238,27 @@ fn normalize_patch_path(p: String) -> Option<String> {
     )
 }
 
+/// Returns true if `hunk_text` matches `file_line`, allowing for the case where
+/// the hunk has one extra leading space (double-space context marker from some LLMs).
+fn hunk_line_matches(hunk_text: &str, file_line: &str) -> bool {
+    hunk_text == file_line
+        || hunk_text
+            .strip_prefix(' ')
+            .map_or(false, |dedented| dedented == file_line)
+}
+
+/// Strips LLM-generated line-number annotations (e.g. `  75 | `) that appear
+/// when the model copies compiler error context verbatim into diff hunk lines.
+fn strip_line_number_annotation(text: &str) -> &str {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"^\s*\d+\s*\|\s?").unwrap());
+    if let Some(m) = re.find(text) {
+        &text[m.end()..]
+    } else {
+        text
+    }
+}
+
 fn parse_hunk_header(line: &str) -> Result<(usize, usize)> {
     let re = regex::Regex::new(r"^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@").unwrap();
     let cap = re
@@ -288,7 +309,7 @@ fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
                     let line = current
                         .get(pos)
                         .ok_or_else(|| anyhow::anyhow!("Context line beyond EOF at pos {}", pos))?;
-                    if line != &hl.text {
+                    if !hunk_line_matches(&hl.text, line) {
                         anyhow::bail!(
                             "Context mismatch at pos {}: expected {:?}, found {:?}",
                             pos,
@@ -303,7 +324,7 @@ fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
                     let line = current
                         .get(pos)
                         .ok_or_else(|| anyhow::anyhow!("Remove line beyond EOF at pos {}", pos))?;
-                    if line != &hl.text {
+                    if !hunk_line_matches(&hl.text, line) {
                         anyhow::bail!(
                             "Remove mismatch at pos {}: expected {:?}, found {:?}",
                             pos,
@@ -428,6 +449,26 @@ fn find_hunk_application(
         }
     }
 
+    // Final fallback: LLMs sometimes emit context lines with one extra leading space
+    // (double-space context marker instead of standard single space). Try with each
+    // pattern line dedented by one space.
+    for total_trim in 0..=max_fuzz {
+        let min_leading_trim = total_trim.saturating_sub(trailing_context);
+        let max_leading_trim = total_trim.min(leading_context);
+        for trim_leading in min_leading_trim..=max_leading_trim {
+            let trim_trailing = total_trim - trim_leading;
+            let effective_end = hunk.lines.len().saturating_sub(trim_trailing);
+            if trim_leading > effective_end {
+                continue;
+            }
+            let effective_lines = &hunk.lines[trim_leading..effective_end];
+            let pattern = hunk_preimage_pattern_for_lines(effective_lines);
+            if let Some(start) = find_hunk_start_anywhere_dedented(lines, &pattern) {
+                return Some((start, trim_leading, trim_trailing));
+            }
+        }
+    }
+
     None
 }
 
@@ -490,6 +531,42 @@ fn find_hunk_start_anywhere(lines: &[String], pattern: &[&str]) -> Option<usize>
         }
         for (j, needle) in pattern.iter().enumerate() {
             if lines[i + j].as_str() != *needle {
+                return false;
+            }
+        }
+        true
+    };
+
+    for i in 0..=lines.len().saturating_sub(pattern.len()) {
+        if try_at(i) {
+            return Some(i);
+        }
+    }
+
+    None
+}
+
+/// Like `find_hunk_start_anywhere` but also matches when each pattern line has one
+/// extra leading space compared to the file line (double-space context marker fallback).
+fn find_hunk_start_anywhere_dedented(lines: &[String], pattern: &[&str]) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+    if lines.len() < pattern.len() {
+        return None;
+    }
+
+    let try_at = |i: usize| -> bool {
+        if i + pattern.len() > lines.len() {
+            return false;
+        }
+        for (j, needle) in pattern.iter().enumerate() {
+            let file_line = lines[i + j].as_str();
+            let matches = file_line == *needle
+                || needle
+                    .strip_prefix(' ')
+                    .map_or(false, |dedented| file_line == dedented);
+            if !matches {
                 return false;
             }
         }

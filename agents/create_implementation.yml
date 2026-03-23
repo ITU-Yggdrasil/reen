@@ -573,6 +573,18 @@ static_prompt: |
 
   Only fail when the required behavior still cannot be implemented after dependency lookup.
 
+  Before choosing helper or private method parameter/return types for collaborator-derived values:
+  - Check `implemented_direct_dependencies` first, then `implemented_dependencies`, and use the
+    concrete collaborator API exactly as implemented there.
+  - Align helper signatures with the actual dependency methods you call. Example: if `Position::x()`
+    and `Position::y()` return `usize`, do not introduce a helper such as `is_boundary(i32, i32)`;
+    make it accept `usize` or convert explicitly at the call boundary when the dependency API
+    requires another type.
+  - Treat guessed signedness or container element types as a last resort only after dependency
+    artifacts have been checked.
+  - If two collaborating dependencies disagree on a type, add the minimal explicit conversion at
+    the boundary and keep the helper/API surface internally consistent with the concrete callers.
+
   ### When inference is genuinely ambiguous
 
   If there are truly two equally plausible choices with materially different semantics (not just
