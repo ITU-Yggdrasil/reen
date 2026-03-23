@@ -23,7 +23,7 @@ mod progress;
 mod project_structure;
 mod rate_limiter;
 mod stage_runner;
-mod yaml_config;
+pub mod yaml_config;
 
 use agent_executor::{AgentExecutor, AgentResponse};
 use artifact_backend::{

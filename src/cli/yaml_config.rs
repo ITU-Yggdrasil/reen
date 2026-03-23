@@ -68,6 +68,31 @@ impl OptionalYamlValue {
     fn is_missing(&self) -> bool {
         matches!(self, Self::Missing)
     }
+
+    /// Returns true if the value is present and not explicitly `false`.
+    /// `fix:` (null/mapping) and `fix: true` both count as enabled.
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            Self::Missing => false,
+            Self::Present(Value::Bool(b)) => *b,
+            Self::Present(Value::Null) | Self::Present(Value::Mapping(_)) => true,
+            Self::Present(_) => false,
+        }
+    }
+
+    /// Returns a `u32` from a named key inside a mapping value, if present.
+    /// Used to extract e.g. `max-compile-fix-attempts` from `fix: { ... }`.
+    pub fn mapping_u32(&self, key: &str) -> Option<u32> {
+        let mapping = match self {
+            Self::Present(Value::Mapping(m)) => m,
+            _ => return None,
+        };
+        let value = mapping.get(&Value::String(key.to_string()))?;
+        match value {
+            Value::Number(n) => n.as_u64().and_then(|v| u32::try_from(v).ok()),
+            _ => None,
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for OptionalYamlValue {

@@ -48,10 +48,9 @@ enum Commands {
     Fix {
         #[arg(
             long,
-            default_value_t = 3,
-            help = "Maximum automatic compilation-fix attempts"
+            help = "Maximum automatic compilation-fix attempts (default: 3, or from reen.yml fix.max-compile-fix-attempts)"
         )]
-        max_compile_fix_attempts: u32,
+        max_compile_fix_attempts: Option<u32>,
     },
 
     #[command(about = "Compile the generated project using cargo build")]
@@ -142,10 +141,9 @@ enum CreateCommands {
 
         #[arg(
             long,
-            default_value_t = 3,
-            help = "Max fix attempts per draft when --fix is used"
+            help = "Max fix attempts per draft when --fix is used (default: 3, or from reen.yml)"
         )]
-        max_fix_attempts: u32,
+        max_fix_attempts: Option<u32>,
     },
 
     #[command(about = "Create implementation from context files")]
@@ -158,10 +156,9 @@ enum CreateCommands {
 
         #[arg(
             long,
-            default_value_t = 3,
-            help = "Maximum automatic compilation-fix attempts when --fix is used"
+            help = "Maximum automatic compilation-fix attempts when --fix is used (default: 3, or from reen.yml)"
         )]
-        max_compile_fix_attempts: u32,
+        max_compile_fix_attempts: Option<u32>,
 
         #[arg(help = "Optional list of context names (without .md extension)")]
         names: Vec<String>,
@@ -219,42 +216,70 @@ enum CheckCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(profile) = cli.profile.as_deref() {
+
+    // Load reen.yml config; missing file yields an empty config (all fields None).
+    let reen_config = cli::yaml_config::load_config().unwrap_or_default();
+
+    // profile: CLI flag > reen.yml > none
+    let effective_profile = cli
+        .profile
+        .as_deref()
+        .or_else(|| reen_config.profile.as_deref());
+    if let Some(profile) = effective_profile {
         unsafe {
             std::env::set_var("REEN_PROFILE", profile);
         }
     }
-    reen::registries::validate_registry_profile(cli.profile.as_deref())
+    reen::registries::validate_registry_profile(effective_profile)
         .map_err(anyhow::Error::msg)?;
 
+    // verbose: CLI flag > reen.yml > false
+    let verbose = cli.verbose || reen_config.verbose.unwrap_or(false);
+
     let config = cli::Config {
-        verbose: cli.verbose,
+        verbose,
         dry_run: cli.dry_run,
         github_repo: cli::resolve_github_repo(cli.github.as_deref())?,
     };
 
     match cli.command {
         Commands::Create(create_args) => {
-            let category_filter = cli::CategoryFilter {
-                contexts: create_args.contexts,
-                data: create_args.data,
-            };
-            let rate_limit = cli::resolve_rate_limit(create_args.rate_limit);
-            let token_limit = cli::resolve_token_limit(create_args.token_limit);
+            let rc = reen_config.create.as_ref();
+
+            // Boolean flags: CLI true > reen.yml true > false
+            let clear_cache =
+                create_args.clear_cache || rc.and_then(|c| c.clear_cache).unwrap_or(false);
+            let contexts = create_args.contexts || rc.and_then(|c| c.contexts).unwrap_or(false);
+            let data = create_args.data || rc.and_then(|c| c.data).unwrap_or(false);
+
+            let category_filter = cli::CategoryFilter { contexts, data };
+
+            // rate/token limits: CLI > reen.yml > env > registry
+            let rate_limit =
+                cli::resolve_rate_limit(create_args.rate_limit.or_else(|| rc.and_then(|c| c.rate_limit)));
+            let token_limit =
+                cli::resolve_token_limit(create_args.token_limit.or_else(|| rc.and_then(|c| c.token_limit)));
+
             match create_args.command {
                 CreateCommands::Specification {
                     names,
                     fix,
                     max_fix_attempts,
                 } => {
+                    let spec_cfg = rc.and_then(|c| c.specification.as_ref());
+                    let fix = fix
+                        || spec_cfg.map_or(false, |s| s.fix.is_enabled());
+                    let max_fix_attempts = max_fix_attempts
+                        .or_else(|| spec_cfg.and_then(|s| s.fix.mapping_u32("max-compile-fix-attempts")))
+                        .unwrap_or(3) as usize;
                     cli::create_specification(
                         names,
-                        create_args.clear_cache,
+                        clear_cache,
                         &category_filter,
                         rate_limit,
                         token_limit,
                         fix,
-                        max_fix_attempts as usize,
+                        max_fix_attempts,
                         &config,
                     )
                     .await?;
@@ -264,11 +289,17 @@ async fn main() -> Result<()> {
                     max_compile_fix_attempts,
                     names,
                 } => {
+                    let impl_cfg = rc.and_then(|c| c.implementation.as_ref());
+                    let fix = fix
+                        || impl_cfg.map_or(false, |i| i.fix.is_enabled());
+                    let max_compile_fix_attempts = max_compile_fix_attempts
+                        .or_else(|| impl_cfg.and_then(|i| i.fix.mapping_u32("max-compile-fix-attempts")))
+                        .unwrap_or(3) as usize;
                     cli::create_implementation(
                         names,
                         fix,
-                        max_compile_fix_attempts as usize,
-                        create_args.clear_cache,
+                        max_compile_fix_attempts,
+                        clear_cache,
                         &category_filter,
                         rate_limit,
                         token_limit,
@@ -279,7 +310,7 @@ async fn main() -> Result<()> {
                 CreateCommands::Tests { names } => {
                     cli::create_tests(
                         names,
-                        create_args.clear_cache,
+                        clear_cache,
                         &category_filter,
                         rate_limit,
                         token_limit,
@@ -297,7 +328,10 @@ async fn main() -> Result<()> {
         Commands::Fix {
             max_compile_fix_attempts,
         } => {
-            cli::fix(max_compile_fix_attempts as usize, &config).await?;
+            let max_compile_fix_attempts = max_compile_fix_attempts
+                .or_else(|| reen_config.fix.and_then(|f| f.max_compile_fix_attempts))
+                .unwrap_or(3) as usize;
+            cli::fix(max_compile_fix_attempts, &config).await?;
         }
         Commands::Compile => {
             cli::compile(&config).await?;
