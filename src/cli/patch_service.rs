@@ -140,7 +140,7 @@ pub(crate) fn parse_unified_diff(diff: &str) -> Result<Vec<FilePatch>> {
 
 pub(crate) fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
     let patches = parse_unified_diff(diff)?;
-    let mut writes: Vec<(PathBuf, String)> = Vec::new();
+    let mut staged: Vec<(PathBuf, String)> = Vec::new();
 
     for fp in patches {
         if fp.is_deletion {
@@ -157,19 +157,29 @@ pub(crate) fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<Stri
             fs::create_dir_all(parent).ok();
         }
 
-        let original = if target_full.exists() {
+        let current_content = if let Some((_, content)) =
+            staged.iter().find(|(path, _)| path == &target_full)
+        {
+            content.clone()
+        } else if target_full.exists() {
             fs::read_to_string(&target_full)
                 .with_context(|| format!("Failed to read {}", target_full.display()))?
         } else {
             String::new()
         };
-        let orig_lines = split_lines_preserve_empty(&original);
+        let orig_lines = split_lines_preserve_empty(&current_content);
         let new_lines = apply_hunks(&orig_lines, &fp.hunks)
             .with_context(|| format!("Failed applying hunks to {}", target_rel))?;
-        writes.push((target_full, join_lines(&new_lines)));
+        let new_content = join_lines(&new_lines);
+
+        if let Some((_, content)) = staged.iter_mut().find(|(path, _)| path == &target_full) {
+            *content = new_content;
+        } else {
+            staged.push((target_full, new_content));
+        }
     }
 
-    for (target_full, new_content) in writes {
+    for (target_full, new_content) in staged {
         if let Some(parent) = target_full.parent() {
             fs::create_dir_all(parent).ok();
         }
@@ -966,6 +976,49 @@ fn snake_move(&self, grow: bool) -> Snake {
         assert!(updated.contains("pub struct GameLoopContext"));
         assert!(updated.contains("pub fn tick(mut self) -> Option<Self>"));
         assert!(updated.contains("fn snake_head(snake: &Snake) -> Position"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn apply_unified_diff_applies_multiple_patch_blocks_to_same_file() {
+        let root = make_temp_test_dir("patch_service_same_file_multi_block");
+        let file = root.join("src/contexts/command_input.rs");
+        fs::create_dir_all(file.parent().expect("parent")).expect("create dir");
+        fs::write(
+            &file,
+            "line 1\nline 2\nline 3\nline 4\nline 5\n",
+        )
+        .expect("write fixture");
+
+        let diff = r#"diff --git a/src/contexts/command_input.rs b/src/contexts/command_input.rs
+--- a/src/contexts/command_input.rs
++++ b/src/contexts/command_input.rs
+@@ -1,5 +1,5 @@
+ line 1
+-line 2
++line 2 updated
+ line 3
+ line 4
+ line 5
+diff --git a/src/contexts/command_input.rs b/src/contexts/command_input.rs
+--- a/src/contexts/command_input.rs
++++ b/src/contexts/command_input.rs
+@@ -1,5 +1,5 @@
+ line 1
+ line 2 updated
+ line 3
+-line 4
++line 4 updated
+ line 5
+"#;
+
+        apply_unified_diff(&root, diff).expect("patch should apply");
+
+        assert_eq!(
+            fs::read_to_string(&file).expect("read updated file"),
+            "line 1\nline 2 updated\nline 3\nline 4 updated\nline 5"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
