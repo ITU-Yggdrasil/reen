@@ -195,6 +195,7 @@ static_prompt: |
   - Reuse existing structures instead of redefining them.
   - If dependency lookup tools are available, fetch only the specific dependency artifacts you need before marking anything blocking.
   - Resolve from this context before adding any **Blocking Ambiguities** entry.
+  - If `input.tooling_symbols` is present, use it as the authoritative dependency crate API inventory before treating external types as unspecified.
 variable_prompt: |
   ## Input
 
@@ -203,5 +204,8 @@ variable_prompt: |
 
   Dependency manifest (optional):
   {{input.direct_dependencies?}}
+
+  Dependency symbol inventory (optional):
+  {{input.tooling_symbols?}}
 
   Please complete the task described above. Return only the final result.

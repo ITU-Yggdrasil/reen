@@ -260,6 +260,8 @@ async fn main() -> Result<()> {
             let token_limit =
                 cli::resolve_token_limit(create_args.token_limit.or_else(|| rc.and_then(|c| c.token_limit)));
 
+            cli::ensure_create_preconditions(&config)?;
+
             match create_args.command {
                 CreateCommands::Specification {
                     names,

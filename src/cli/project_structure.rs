@@ -3,6 +3,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use super::dependency_tooling::render_dependency_entries;
+
 /// Information about the project structure extracted from specifications
 #[derive(Debug, Default)]
 pub struct ProjectInfo {
@@ -390,15 +392,12 @@ pub fn generate_cargo_toml(project_info: &ProjectInfo, output_dir: &Path) -> Res
 
     // Add dependencies
     content.push_str("[dependencies]\n");
-    let mut deps: Vec<_> = project_info.dependencies.iter().collect();
-    deps.sort_by_key(|(k, _)| *k);
-    for (name, version) in deps {
-        if version.starts_with('{') {
-            content.push_str(&format!("{} = {}\n", name, version));
-        } else {
-            content.push_str(&format!("{} = \"{}\"\n", name, version));
-        }
-    }
+    let deps = project_info
+        .dependencies
+        .iter()
+        .map(|(name, version)| (name.clone(), version.clone()))
+        .collect();
+    content.push_str(&render_dependency_entries(&deps));
 
     content.push_str(
         "\n[dev-dependencies]\n\

@@ -175,6 +175,7 @@ static_prompt: |
   - You may fetch by exact path or by dependency name when the draft gives you a named collaborator/type but not a manifest path.
   - Treat transitive dependency entries as equally authoritative lookup targets when resolving named collaborators or types.
   - Resolve from this context before adding any **Blocking Ambiguities** entry.
+  - If `input.tooling_symbols` is present, use it as the authoritative dependency crate API inventory before treating external types as unspecified.
 variable_prompt: |
   ## Input
 
@@ -183,5 +184,8 @@ variable_prompt: |
 
   Dependency manifest (optional):
   {{input.direct_dependencies?}}
+
+  Dependency symbol inventory (optional):
+  {{input.tooling_symbols?}}
 
   Please complete the task described above. Return only the final result.

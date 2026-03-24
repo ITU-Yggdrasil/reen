@@ -15,6 +15,7 @@ mod artifact_backend;
 mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
+mod dependency_tooling;
 mod external_api_expansion;
 mod openapi_fetcher;
 mod patch_service;
@@ -31,6 +32,10 @@ use artifact_backend::{
 };
 use dependency_graph::{
     DependencyArtifact, ExecutionNode, build_execution_plan, expand_with_transitive_dependencies,
+};
+use dependency_tooling::{
+    ensure_tooling_artifacts_fresh, load_dependency_manifest, load_symbols_context,
+    merge_manifest_dependencies,
 };
 use external_api_expansion::{
     GeneratedDraftArtifact, parse_external_api_expansion, sanitize_generated_artifact_name,
@@ -90,6 +95,18 @@ pub fn resolve_github_repo(cli_github: Option<&str>) -> Result<Option<String>> {
         return Ok(Some(repo.trim().to_string()));
     }
     Ok(yaml_config::load_config()?.github)
+}
+
+pub fn ensure_create_preconditions(config: &Config) -> Result<()> {
+    if config.dry_run {
+        return Ok(());
+    }
+    let workspace = WorkspaceContext::resolve(config)?;
+    ensure_tooling_artifacts_fresh(
+        &workspace.drafts_root,
+        &workspace.artifact_workspace_root(),
+        config.verbose,
+    )
 }
 
 /// Resolves rate limit (requests per second) from CLI, env, or registry.
@@ -1284,8 +1301,11 @@ pub async fn create_implementation(
 
     let spec_dir = workspace.specifications_root.clone();
     let drafts_dir = workspace.drafts_root.clone();
-    let project_info = analyze_specifications(&spec_dir, Some(&drafts_dir))
+    let mut project_info = analyze_specifications(&spec_dir, Some(&drafts_dir))
         .context("Failed to analyze specifications")?;
+    if let Some(manifest) = load_dependency_manifest(&drafts_dir.join("dependencies.yml"))? {
+        merge_manifest_dependencies(&mut project_info.dependencies, &manifest);
+    }
 
     let output_dir = PathBuf::from(".");
 
@@ -3089,6 +3109,9 @@ fn build_dependency_context(
             "implemented_direct_dependency_artifacts": implemented_direct_dependencies,
         }),
     );
+    if let Some(tooling_symbols) = load_symbols_context(Path::new(primary_root))? {
+        context.insert("tooling_symbols".to_string(), tooling_symbols);
+    }
     Ok(context)
 }
 

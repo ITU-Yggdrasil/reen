@@ -149,4 +149,7 @@ variable_prompt: |
   Direct dependency context (optional):
   {{input.direct_dependencies?}}
 
+  Dependency symbol inventory (optional):
+  {{input.tooling_symbols?}}
+
   Please complete the task described above. Return only the final result.
