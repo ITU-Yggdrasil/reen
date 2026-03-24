@@ -10,3 +10,4 @@ tests/**/Cargo.*
 errors.txt
 .cursor/
 .claude/
+plans/
