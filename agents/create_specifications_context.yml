@@ -50,12 +50,13 @@ static_prompt: |
   Turing-complete ecosystem. Language-specific details can be useful notes, but
   they MUST NEVER be treated as blocking ambiguities.
 
-  ## Context Immutability Rule (Mandatory)
+  ## Context State Rule (Mandatory)
 
   For context specifications:
-  - Role Players and Props are immutable fields of the context instance after construction.
-  - Do NOT treat "whether the context updates/reassigns its role players or props" as a blocking ambiguity unless the draft explicitly states mutability.
-  - Observable outputs of functionality may return new values (for example a new ledger value), but this does not imply in-place mutation of context fields.
+  - Do NOT assume contexts are immutable by default.
+  - Do NOT assume contexts are mutable by default.
+  - Preserve behavioral hints such as "shared", "same instance", "one stream", "process lifetime", or "must not replace" as observable constraints.
+  - Mutability and ownership mechanics belong to planning/implementation unless the draft explicitly constrains them.
 
   ### Role Method Signature Scope (Mandatory)
 
@@ -74,7 +75,7 @@ static_prompt: |
     **Implementation Choices Left Open**, not hardcoded in the spec.
 
   Rationale: specifying a concrete signature (like `-> ()`) may be incorrect under
-  the implementation agent's rules (e.g. immutable contexts require state-changing
+  the implementation agent's rules (e.g. stateful contexts may require state-changing
   methods to return updated values). Leaving signatures open avoids encoding an
   implementation decision that would contradict other rules.
 

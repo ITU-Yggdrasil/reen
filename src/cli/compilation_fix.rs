@@ -16,6 +16,10 @@ use super::agent_executor::{AgentExecutor, AgentResponse};
 use super::patch_service::{
     HunkLineKind, apply_unified_diff, extract_unified_diff_from_agent_output, parse_unified_diff,
 };
+use super::planning::{PlanKind, build_default_plan, parse_plan_output, plan_to_context_value};
+use super::pipeline_quality::{
+    compare_verifier_reports, determine_spec_path_for_output, verify_generated_implementation,
+};
 use super::project_structure::ProjectInfo;
 use reen::execution::NativeExecutionControl;
 
@@ -131,7 +135,7 @@ pub async fn ensure_compiles_with_auto_fix(
         let mut max_errors_used = cfg.max_errors;
         let mut include_specs = true;
 
-        let additional_context = loop {
+        let mut additional_context = loop {
             let diagnostics = prioritize_and_cap_diagnostics(&all_diagnostics, max_errors_used);
             let truncated_stderr = truncate_stderr_for_diagnostics(&output.stderr, &diagnostics);
 
@@ -189,6 +193,32 @@ pub async fn ensure_compiles_with_auto_fix(
             }
         };
 
+        let plan_diagnostics = prioritize_and_cap_diagnostics(&all_diagnostics, max_errors_used);
+        let plan_truncated_stderr =
+            truncate_stderr_for_diagnostics(&output.stderr, &plan_diagnostics);
+        let plan_relevant_paths = collect_relevant_paths(
+            project_root,
+            &plan_diagnostics,
+            &output.stderr,
+            recent_generated_files,
+            max_paths,
+        )?;
+        let plan_specs_json = if include_specs {
+            snapshot_specs_json(project_root, artifact_root, &plan_relevant_paths)?
+        } else {
+            BTreeMap::new()
+        };
+        let semantic_repair_plan = generate_semantic_repair_plan(
+            config,
+            &plan_relevant_paths,
+            &plan_specs_json,
+            &plan_truncated_stderr,
+            &plan_diagnostics,
+            execution_control,
+        )
+        .await?;
+        additional_context.insert("semantic_repair_plan".to_string(), semantic_repair_plan.clone());
+
         if let Some(serde_json::Value::String(s)) = additional_context.get("diagnostics_json") {
             fs::write(attempt_dir.join("diagnostics.json"), s).ok();
         }
@@ -200,6 +230,12 @@ pub async fn ensure_compiles_with_auto_fix(
                 fs::write(attempt_dir.join("context_specs.json"), s).ok();
             }
         }
+        fs::write(
+            attempt_dir.join("semantic_repair_plan.json"),
+            serde_json::to_string_pretty(&semantic_repair_plan)
+                .unwrap_or_else(|_| "{}".to_string()),
+        )
+        .ok();
 
         let executor = AgentExecutor::new("resolve_compilation_errors", config)
             .context("Failed to create compilation error resolver agent")?;
@@ -245,9 +281,44 @@ pub async fn ensure_compiles_with_auto_fix(
             );
         }
 
+        let touched_paths = parse_unified_diff(&extracted)
+            .context("Invalid unified diff from compilation resolver")?
+            .into_iter()
+            .filter_map(|fp| fp.new_path.or(fp.old_path))
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let semantic_baseline = capture_verifier_reports(
+            project_root,
+            artifact_root,
+            &touched_paths,
+            &attempt_dir.join("semantic_before"),
+        )?;
+        let backups = snapshot_file_backups(project_root, &touched_paths)?;
+
         let applied_patch = apply_unified_diff(project_root, &extracted)
             .context("Failed to apply proposed patch")?;
         fs::write(attempt_dir.join("applied.patch"), &applied_patch).ok();
+
+        let semantic_after = capture_verifier_reports(
+            project_root,
+            artifact_root,
+            &touched_paths,
+            &attempt_dir.join("semantic_after"),
+        )?;
+        let regressions = compare_semantic_reports(semantic_baseline, semantic_after);
+        if !regressions.is_empty() {
+            restore_file_backups(project_root, backups)?;
+            fs::write(
+                attempt_dir.join("semantic_regressions.txt"),
+                regressions.join("\n"),
+            )
+            .ok();
+            anyhow::bail!(
+                "Compilation fix introduced semantic regressions:\n{}\nEscalating. Logs: {}",
+                regressions.join("\n"),
+                attempt_dir.display()
+            );
+        }
 
         output = run_cargo_build(project_root)?;
         if output.status_success {
@@ -299,6 +370,183 @@ fn write_attempt_compile_output(attempt_dir: &Path, output: &CompilationOutput) 
     fs::write(attempt_dir.join("cargo_stderr.txt"), &output.stderr)
         .context("Failed to write cargo stderr")?;
     Ok(())
+}
+
+async fn generate_semantic_repair_plan(
+    config: &Config,
+    relevant_paths: &[PathBuf],
+    specs_json: &BTreeMap<String, String>,
+    truncated_stderr: &str,
+    diagnostics: &[DiagnosticSpan],
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<serde_json::Value> {
+    let spec_path = specs_json
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "specifications/repair_bundle.md".to_string());
+    let spec_content = if specs_json.is_empty() {
+        String::new()
+    } else {
+        specs_json
+            .iter()
+            .map(|(path, content)| format!("<!-- {} -->\n{}", path, content))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let fallback = build_default_plan(
+        PlanKind::SemanticRepair,
+        Path::new(&spec_path),
+        &spec_content,
+        relevant_paths,
+        &HashMap::new(),
+        Some(truncated_stderr),
+    );
+
+    let mut context = HashMap::new();
+    context.insert("plan_kind".to_string(), json!(PlanKind::SemanticRepair.as_str()));
+    context.insert("default_plan".to_string(), plan_to_context_value(&fallback));
+    context.insert(
+        "target_output_paths".to_string(),
+        json!(
+            relevant_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+        ),
+    );
+    context.insert("diagnostics_text".to_string(), json!(truncated_stderr));
+    context.insert(
+        "diagnostics_json".to_string(),
+        json!(
+            serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())
+        ),
+    );
+
+    let planner = AgentExecutor::new("create_plan", config)?;
+    let response = planner
+        .execute_with_conversation_with_seed_options(
+            &spec_content,
+            "semantic_repair_plan",
+            context,
+            execution_control,
+            false,
+        )
+        .await?;
+    let plan = parse_plan_output(&response).unwrap_or(fallback);
+    Ok(plan_to_context_value(&plan))
+}
+
+fn capture_verifier_reports(
+    project_root: &Path,
+    artifact_root: &Path,
+    touched_paths: &[PathBuf],
+    report_dir: &Path,
+) -> Result<HashMap<PathBuf, super::pipeline_quality::StaticBehaviorVerifierReport>> {
+    fs::create_dir_all(report_dir)
+        .with_context(|| format!("Failed to create {}", report_dir.display()))?;
+    let mut reports = HashMap::new();
+    for rel in touched_paths {
+        let full = project_root.join(rel);
+        if !full.exists() {
+            continue;
+        }
+        let Some(spec_path) =
+            determine_spec_path_for_output(&full, &artifact_root.join("specifications"))
+        else {
+            continue;
+        };
+        if !spec_path.exists() {
+            continue;
+        }
+        let spec_content = fs::read_to_string(&spec_path)
+            .with_context(|| format!("Failed to read {}", spec_path.display()))?;
+        let report = verify_generated_implementation(project_root, &spec_path, &spec_content, &full)
+            .with_context(|| format!("Failed semantic verification for {}", full.display()))?;
+        let report_path = report_dir.join(
+            rel.to_string_lossy()
+                .replace('\\', "__")
+                .replace('/', "__")
+                + ".json",
+        );
+        fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string()),
+        )
+        .ok();
+        reports.insert(rel.clone(), report);
+    }
+    Ok(reports)
+}
+
+fn snapshot_file_backups(project_root: &Path, touched_paths: &[PathBuf]) -> Result<HashMap<PathBuf, Option<String>>> {
+    let mut backups = HashMap::new();
+    for rel in touched_paths {
+        let full = project_root.join(rel);
+        let content = if full.exists() {
+            Some(
+                fs::read_to_string(&full)
+                    .with_context(|| format!("Failed to read {}", full.display()))?,
+            )
+        } else {
+            None
+        };
+        backups.insert(rel.clone(), content);
+    }
+    Ok(backups)
+}
+
+fn restore_file_backups(project_root: &Path, backups: HashMap<PathBuf, Option<String>>) -> Result<()> {
+    for (rel, content) in backups {
+        let full = project_root.join(rel);
+        match content {
+            Some(value) => {
+                if let Some(parent) = full.parent() {
+                    fs::create_dir_all(parent).ok();
+                }
+                fs::write(&full, value)
+                    .with_context(|| format!("Failed restoring {}", full.display()))?;
+            }
+            None => {
+                if full.exists() {
+                    fs::remove_file(&full)
+                        .with_context(|| format!("Failed removing {}", full.display()))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compare_semantic_reports(
+    before: HashMap<PathBuf, super::pipeline_quality::StaticBehaviorVerifierReport>,
+    after: HashMap<PathBuf, super::pipeline_quality::StaticBehaviorVerifierReport>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    let mut keys: HashSet<PathBuf> = before.keys().cloned().collect();
+    keys.extend(after.keys().cloned());
+    let mut ordered: Vec<PathBuf> = keys.into_iter().collect();
+    ordered.sort();
+    for path in ordered {
+        match (before.get(&path), after.get(&path)) {
+            (Some(old), Some(new)) => {
+                let regression = compare_verifier_reports(old.clone(), new.clone());
+                if regression.worsened {
+                    for issue in regression.issues {
+                        issues.push(format!("{}: {}", path.display(), issue));
+                    }
+                }
+            }
+            (None, Some(new)) if !new.errors.is_empty() || !new.high_risk_findings.is_empty() => {
+                issues.push(format!(
+                    "{}: new semantic report contains verifier issues",
+                    path.display()
+                ));
+            }
+            _ => {}
+        }
+    }
+    issues
 }
 
 fn parse_rustc_diagnostics(stderr: &str) -> Vec<DiagnosticSpan> {

@@ -16,6 +16,10 @@ create_specifications_external_api:
   model: claude-sonnet-4-6
   parallel: false
   batch: false
+create_plan:
+  model: claude-sonnet-4-6
+  parallel: false
+  batch: false
 create_implementation:
   model: claude-sonnet-4-6
   parallel: true

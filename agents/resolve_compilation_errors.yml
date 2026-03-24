@@ -15,6 +15,7 @@ static_prompt: |
     Line numbers in snippets are approximate. The fix may be in a different file than the error
     (e.g. add missing `use` or definition in the importing file or in a shared module).
   - Relevant specification markdown for impacted modules (intent)
+  - Semantic repair plan describing the minimal repair scope and invariants that must not regress
   - Recent change context (files generated/updated in this run)
 
   ## Scope
@@ -91,5 +92,8 @@ variable_prompt: |
 
   ### Relevant specifications (JSON map: spec_path -> content)
   {{input.specs_json?}}
+
+  ### Semantic repair plan
+  {{input.semantic_repair_plan?}}
 
   Please complete the task described above. Return only the final result.

@@ -16,6 +16,10 @@ create_specifications_external_api:
   model: mistral/mistral-large-latest
   parallel: false
   batch: false
+create_plan:
+  model: mistral/mistral-large-latest
+  parallel: false
+  batch: false
 create_implementation:
   model: openai/gpt-5
   parallel: true

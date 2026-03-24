@@ -19,7 +19,9 @@ mod dependency_tooling;
 mod external_api_expansion;
 mod openapi_fetcher;
 mod patch_service;
+mod planning;
 mod pipeline_context;
+mod pipeline_quality;
 mod progress;
 mod project_structure;
 mod rate_limiter;
@@ -42,7 +44,15 @@ use external_api_expansion::{
 };
 use openapi_fetcher::is_external_api_draft_path;
 use patch_service::apply_draft_patches;
+use planning::{
+    ExecutionPlan, PlanKind, build_default_plan, parse_plan_output, plan_to_context_value,
+    validate_plan, validation_to_context_value,
+};
 use pipeline_context::{build_specification_context, fit_context_to_token_limit};
+use pipeline_quality::{
+    analyze_specification, contract_to_context_value, verify_generated_implementation,
+    write_json_report,
+};
 use progress::ProgressIndicator;
 use project_structure::{
     ProjectInfo, analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files,
@@ -213,6 +223,7 @@ struct PreparedImplementationBatchItem {
     context_file: PathBuf,
     output_path: PathBuf,
     dependency_fingerprint: String,
+    implementation_plan: ExecutionPlan,
     dependency_context: HashMap<String, serde_json::Value>,
     context_content: String,
     prepared: reen::execution::PreparedExecution,
@@ -909,6 +920,7 @@ async fn generate_external_spec_artifact(
     ignore_cache_reads: bool,
     execution_control: Option<CliExecutionControl>,
 ) -> Result<(String, WrittenSpecification)> {
+    let lint_context = additional_context.clone();
     let spec_content = executor
         .execute_with_conversation_with_seed_options(
             &artifact.draft_markdown,
@@ -928,8 +940,87 @@ async fn generate_external_spec_artifact(
         spec_category,
         &output_path,
         spec_content,
+        Some(&lint_context),
     )?;
     Ok((display_name.to_string(), written))
+}
+
+async fn generate_execution_plan_with_agent(
+    planner: &AgentExecutor,
+    plan_kind: PlanKind,
+    spec_path: &Path,
+    spec_content: &str,
+    output_paths: &[PathBuf],
+    dependency_context: &HashMap<String, serde_json::Value>,
+    diagnostic_text: Option<&str>,
+    token_limit: Option<f64>,
+    ignore_cache_reads: bool,
+    execution_control: Option<CliExecutionControl>,
+) -> Result<(ExecutionPlan, planning::PlanValidationReport)> {
+    let behavior_contract = analyze_specification(spec_path, spec_content, Some(dependency_context)).contract;
+    let fallback_plan = build_default_plan(
+        plan_kind,
+        spec_path,
+        spec_content,
+        output_paths,
+        dependency_context,
+        diagnostic_text,
+    );
+
+    let mut planning_context = dependency_context.clone();
+    planning_context.insert("plan_kind".to_string(), json!(plan_kind.as_str()));
+    planning_context.insert(
+        "behavior_contract".to_string(),
+        contract_to_context_value(&behavior_contract),
+    );
+    planning_context.insert(
+        "default_plan".to_string(),
+        plan_to_context_value(&fallback_plan),
+    );
+    planning_context.insert(
+        "target_output_paths".to_string(),
+        json!(
+            output_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+        ),
+    );
+    if let Some(text) = diagnostic_text {
+        if !text.trim().is_empty() {
+            planning_context.insert("diagnostics_text".to_string(), json!(text));
+        }
+    }
+
+    let (planning_context, _) = fit_context_to_token_limit(
+        planner,
+        spec_content,
+        planning_context,
+        token_limit,
+    )?;
+
+    let response = planner
+        .execute_with_conversation_with_seed_options(
+            spec_content,
+            &format!(
+                "{}::{}",
+                spec_path
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("plan"),
+                plan_kind.as_str()
+            ),
+            planning_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+            ignore_cache_reads,
+        )
+        .await?;
+
+    let plan = parse_plan_output(&response).unwrap_or(fallback_plan);
+    let validation = validate_plan(&plan, &behavior_contract, output_paths);
+    Ok((plan, validation))
 }
 
 fn prune_generated_spec_context(
@@ -1035,6 +1126,7 @@ fn finalize_specification_output(
         spec_category,
         &output_path,
         spec_content,
+        Some(&additional_context),
     )?;
 
     if written.has_blocking_ambiguities {
@@ -1059,6 +1151,7 @@ fn write_specification_output(
     spec_category: ArtifactCategory,
     output_path: &Path,
     spec_content: String,
+    dependency_context: Option<&HashMap<String, serde_json::Value>>,
 ) -> Result<WrittenSpecification> {
     let mut has_blocking_ambiguities = false;
     let mut actionable = Vec::new();
@@ -1081,6 +1174,40 @@ fn write_specification_output(
             }
             eprintln!();
         }
+    }
+
+    let artifact_root = workspace.artifact_workspace_root();
+    let lint_report = analyze_specification(output_path, &spec_content, dependency_context);
+    let _ = write_json_report(
+        &artifact_root,
+        "specification",
+        output_path,
+        "spec_lint_report.json",
+        &lint_report,
+    );
+    let _ = write_json_report(
+        &artifact_root,
+        "specification",
+        output_path,
+        "behavior_contract.json",
+        &lint_report.contract,
+    );
+    if !lint_report.errors.is_empty() {
+        has_blocking_ambiguities = true;
+        for issue in &lint_report.errors {
+            actionable.push(format!("- {}", issue));
+        }
+        eprintln!("error[spec:lint]:");
+        eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
+        eprintln!(
+            "  Specification lint failed for generated specification '{}'.",
+            draft_name
+        );
+        eprintln!();
+        for issue in &lint_report.errors {
+            eprintln!("  - {}", issue);
+        }
+        eprintln!();
     }
 
     match workspace.store.backend() {
@@ -1327,6 +1454,7 @@ pub async fn create_implementation(
     }
 
     // Step 2: Generate individual implementation files
+    let planner = Arc::new(AgentExecutor::new("create_plan", config)?);
     let executor = Arc::new(AgentExecutor::new("create_implementation", config)?);
     let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
@@ -1412,6 +1540,7 @@ pub async fn create_implementation(
                 &workspace.specifications_dir,
                 Some(&workspace.drafts_dir),
             )?;
+            let context_content = fs::read_to_string(&context_file).unwrap_or_default();
             if let Some(target_type_name) = infer_target_type_name(
                 &context_file,
                 &workspace.specifications_root,
@@ -1419,7 +1548,58 @@ pub async fn create_implementation(
             )? {
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
-            let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+            let (implementation_plan, plan_validation) = generate_execution_plan_with_agent(
+                &planner,
+                PlanKind::Implementation,
+                &context_file,
+                &context_content,
+                std::slice::from_ref(&output_path),
+                &dependency_context,
+                None,
+                token_limit,
+                clear_cache,
+                resources.execution_control.clone(),
+            )
+            .await?;
+            let _ = write_json_report(
+                Path::new("."),
+                "planning",
+                &output_path,
+                "implementation_plan.json",
+                &implementation_plan,
+            );
+            let _ = write_json_report(
+                Path::new("."),
+                "planning",
+                &output_path,
+                "plan_validation_report.json",
+                &plan_validation,
+            );
+            if !plan_validation.ok {
+                progress.complete_item(&context_name, false);
+                eprintln!("error[plan:validation]:");
+                eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
+                eprintln!("  Planning validation failed for '{}'.", context_name);
+                eprintln!();
+                for issue in &plan_validation.errors {
+                    eprintln!("  - {}", issue);
+                }
+                eprintln!();
+                continue;
+            }
+            let contract = analyze_specification(&context_file, &context_content, Some(&dependency_context)).contract;
+            dependency_context.insert(
+                "behavior_contract".to_string(),
+                contract_to_context_value(&contract),
+            );
+            dependency_context.insert(
+                "implementation_plan".to_string(),
+                plan_to_context_value(&implementation_plan),
+            );
+            dependency_context.insert(
+                "plan_validation".to_string(),
+                validation_to_context_value(&plan_validation),
+            );
             let (dependency_context, estimated) = fit_context_to_token_limit(
                 &executor,
                 &context_content,
@@ -1438,6 +1618,7 @@ pub async fn create_implementation(
                 context_name,
                 output_path,
                 dependency_fingerprint,
+                implementation_plan,
                 dependency_context,
                 context_content,
                 estimated,
@@ -1461,6 +1642,7 @@ pub async fn create_implementation(
                     context_name,
                     output_path,
                     dependency_fingerprint,
+                    implementation_plan,
                     dependency_context,
                     context_content,
                     estimated,
@@ -1477,6 +1659,7 @@ pub async fn create_implementation(
                             &workspace.specifications_dir,
                             &cfg,
                             clear_cache,
+                            &implementation_plan,
                             dependency_context,
                             resources.execution_control.clone(),
                         )
@@ -1503,6 +1686,7 @@ pub async fn create_implementation(
                                 &context_name,
                                 &workspace.specifications_dir,
                                 &cfg,
+                                &implementation_plan,
                                 output,
                             );
                             batch_results.push((
@@ -1519,6 +1703,7 @@ pub async fn create_implementation(
                                 context_file,
                                 output_path,
                                 dependency_fingerprint,
+                                implementation_plan,
                                 dependency_context,
                                 context_content,
                                 prepared,
@@ -1549,6 +1734,7 @@ pub async fn create_implementation(
                                         &item.context_name,
                                         &workspace.specifications_dir,
                                         &cfg,
+                                        &item.implementation_plan,
                                         output,
                                     )
                                 } else {
@@ -1564,6 +1750,7 @@ pub async fn create_implementation(
                                         &workspace.specifications_dir,
                                         &cfg,
                                         clear_cache,
+                                        &item.implementation_plan,
                                         item.dependency_context.clone(),
                                         resources.execution_control.clone(),
                                     )
@@ -1592,6 +1779,7 @@ pub async fn create_implementation(
                                     &workspace.specifications_dir,
                                     &cfg,
                                     clear_cache,
+                                    &item.implementation_plan,
                                     item.dependency_context,
                                     resources.execution_control.clone(),
                                 )
@@ -1653,6 +1841,7 @@ pub async fn create_implementation(
                             context_name,
                             output_path,
                             dependency_fingerprint,
+                            implementation_plan,
                             dependency_context,
                             context_content,
                             estimated,
@@ -1666,6 +1855,7 @@ pub async fn create_implementation(
                                 context_name,
                                 output_path,
                                 dependency_fingerprint,
+                                implementation_plan,
                                 dependency_context,
                                 context_content,
                             ),
@@ -1686,6 +1876,7 @@ pub async fn create_implementation(
                         context_name,
                         output_path,
                         dependency_fingerprint,
+                        implementation_plan,
                         dependency_context,
                         context_content,
                     ),
@@ -1702,6 +1893,7 @@ pub async fn create_implementation(
                                 &specifications_dir,
                                 &cfg,
                                 clear_cache,
+                                &implementation_plan,
                                 dependency_context,
                                 execution_control,
                             )
@@ -1756,6 +1948,7 @@ pub async fn create_implementation(
                         context_name,
                         output_path,
                         dependency_fingerprint,
+                        implementation_plan,
                         dependency_context,
                         context_content,
                         estimated,
@@ -1769,6 +1962,7 @@ pub async fn create_implementation(
                             context_name,
                             output_path,
                             dependency_fingerprint,
+                            implementation_plan,
                             dependency_context,
                             context_content,
                         ),
@@ -1790,6 +1984,7 @@ pub async fn create_implementation(
                     context_name,
                     output_path,
                     dependency_fingerprint,
+                    implementation_plan,
                     dependency_context,
                     context_content,
                 ),
@@ -1806,6 +2001,7 @@ pub async fn create_implementation(
                             &specifications_dir,
                             &cfg,
                             clear_cache,
+                            &implementation_plan,
                             dependency_context,
                             execution_control,
                         )
@@ -1891,6 +2087,7 @@ async fn process_implementation(
     specifications_dir: &str,
     config: &Config,
     ignore_cache_reads: bool,
+    implementation_plan: &ExecutionPlan,
     additional_context: HashMap<String, serde_json::Value>,
     execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
@@ -1924,6 +2121,7 @@ async fn process_implementation(
         context_name,
         specifications_dir,
         config,
+        implementation_plan,
         impl_result,
     )
 }
@@ -1933,6 +2131,7 @@ fn finalize_implementation_output(
     context_name: &str,
     specifications_dir: &str,
     config: &Config,
+    implementation_plan: &ExecutionPlan,
     impl_result: String,
 ) -> Result<()> {
     // Extract code from the agent output and write to file
@@ -1968,6 +2167,47 @@ fn finalize_implementation_output(
 
     if config.verbose {
         println!("✓ Written implementation to: {}", output_path.display());
+    }
+
+    let _ = write_json_report(
+        Path::new("."),
+        "implementation",
+        &output_path,
+        "implementation_plan.json",
+        implementation_plan,
+    );
+    let verifier_report = verify_generated_implementation(
+        Path::new("."),
+        context_file,
+        &fs::read_to_string(context_file).unwrap_or_default(),
+        &output_path,
+    )?;
+    let _ = write_json_report(
+        Path::new("."),
+        "implementation",
+        &output_path,
+        "static_verifier_report.json",
+        &verifier_report,
+    );
+    if !verifier_report.errors.is_empty() || !verifier_report.high_risk_findings.is_empty() {
+        eprintln!("error[impl:verify]:");
+        eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
+        eprintln!(
+            "  Generated implementation for '{}' failed behavioral verification.",
+            context_name
+        );
+        eprintln!();
+        for issue in &verifier_report.errors {
+            eprintln!("  - {}", issue);
+        }
+        for issue in &verifier_report.high_risk_findings {
+            eprintln!("  - {}", issue);
+        }
+        eprintln!();
+        return Err(anyhow::anyhow!(
+            "Generated implementation for '{}' failed behavioral verification",
+            context_name
+        ));
     }
 
     if implementation_failure.is_some() {
