@@ -53,7 +53,7 @@ use pipeline_quality::{
     analyze_specification, contract_to_context_value, verify_generated_implementation,
     write_json_report,
 };
-use progress::ProgressIndicator;
+use progress::{ProgressIndicator, print_timed_status};
 use project_structure::{
     ProjectInfo, analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files,
 };
@@ -949,6 +949,7 @@ async fn generate_execution_plan_with_agent(
     planner: &AgentExecutor,
     plan_kind: PlanKind,
     spec_path: &Path,
+    display_name: &str,
     spec_content: &str,
     output_paths: &[PathBuf],
     dependency_context: &HashMap<String, serde_json::Value>,
@@ -957,6 +958,12 @@ async fn generate_execution_plan_with_agent(
     ignore_cache_reads: bool,
     execution_control: Option<CliExecutionControl>,
 ) -> Result<(ExecutionPlan, planning::PlanValidationReport)> {
+    let status_label = match plan_kind {
+        PlanKind::Implementation => "Planning implementation",
+        PlanKind::SemanticRepair => "Planning repair",
+    };
+    print_timed_status(status_label, display_name);
+
     let behavior_contract = analyze_specification(spec_path, spec_content, Some(dependency_context)).contract;
     let fallback_plan = build_default_plan(
         plan_kind,
@@ -969,6 +976,7 @@ async fn generate_execution_plan_with_agent(
 
     let mut planning_context = dependency_context.clone();
     planning_context.insert("plan_kind".to_string(), json!(plan_kind.as_str()));
+    planning_context.insert("context_content".to_string(), json!(spec_content));
     planning_context.insert(
         "behavior_contract".to_string(),
         contract_to_context_value(&behavior_contract),
@@ -1552,6 +1560,7 @@ pub async fn create_implementation(
                 &planner,
                 PlanKind::Implementation,
                 &context_file,
+                &context_name,
                 &context_content,
                 std::slice::from_ref(&output_path),
                 &dependency_context,

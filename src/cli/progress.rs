@@ -9,6 +9,11 @@ pub struct ProgressIndicator {
     start_time: Instant,
 }
 
+pub fn print_timed_status(label: &str, name: &str) {
+    let timestamp = Local::now().format("%H:%M:%S");
+    println!("{}: {} [{}]", label, name, timestamp);
+}
+
 impl ProgressIndicator {
     pub fn new(total: usize) -> Self {
         Self {
@@ -34,10 +39,10 @@ impl ProgressIndicator {
 
     fn start_item_with_label(&self, label: &str, name: &str, estimated_tokens: Option<usize>) {
         let current = self.completed + self.failed + 1;
-        let timestamp = Local::now().format("%H:%M:%S");
         let token_info = estimated_tokens
             .map(|n| format!(" [~{} tokens]", n))
             .unwrap_or_default();
+        let timestamp = Local::now().format("%H:%M:%S");
         println!(
             "{}: {} ({}/{}){} [{}]",
             label, name, current, self.total, token_info, timestamp

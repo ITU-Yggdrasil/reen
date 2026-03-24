@@ -17,6 +17,7 @@ use super::patch_service::{
     HunkLineKind, apply_unified_diff, extract_unified_diff_from_agent_output, parse_unified_diff,
 };
 use super::planning::{PlanKind, build_default_plan, parse_plan_output, plan_to_context_value};
+use super::progress::print_timed_status;
 use super::pipeline_quality::{
     compare_verifier_reports, determine_spec_path_for_output, verify_generated_implementation,
 };
@@ -380,6 +381,23 @@ async fn generate_semantic_repair_plan(
     diagnostics: &[DiagnosticSpan],
     execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<serde_json::Value> {
+    let target_summary = if relevant_paths.is_empty() {
+        "compilation diagnostics".to_string()
+    } else {
+        let shown = relevant_paths
+            .iter()
+            .take(3)
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        let remaining = relevant_paths.len().saturating_sub(shown.len());
+        if remaining == 0 {
+            shown.join(", ")
+        } else {
+            format!("{}, +{} more", shown.join(", "), remaining)
+        }
+    };
+    print_timed_status("Planning repair", &target_summary);
+
     let spec_path = specs_json
         .keys()
         .next()
@@ -405,6 +423,7 @@ async fn generate_semantic_repair_plan(
 
     let mut context = HashMap::new();
     context.insert("plan_kind".to_string(), json!(PlanKind::SemanticRepair.as_str()));
+    context.insert("context_content".to_string(), json!(spec_content));
     context.insert("default_plan".to_string(), plan_to_context_value(&fallback));
     context.insert(
         "target_output_paths".to_string(),
