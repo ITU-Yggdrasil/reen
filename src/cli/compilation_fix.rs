@@ -13,6 +13,9 @@ use std::sync::OnceLock;
 
 use super::Config;
 use super::agent_executor::{AgentExecutor, AgentResponse};
+use super::contracts::{
+    build_contract_artifact, compact_contract_artifact_value, contract_artifact_to_context_value,
+};
 use super::patch_service::{
     HunkLineKind, apply_unified_diff, extract_unified_diff_from_agent_output, parse_unified_diff,
 };
@@ -424,6 +427,16 @@ async fn generate_semantic_repair_plan(
     let mut context = HashMap::new();
     context.insert("plan_kind".to_string(), json!(PlanKind::SemanticRepair.as_str()));
     context.insert("context_content".to_string(), json!(spec_content));
+    let contract_artifact = build_contract_artifact(
+        Path::new(&spec_path),
+        &spec_content,
+        relevant_paths.first().map(PathBuf::as_path),
+        None,
+    );
+    context.insert(
+        "contract_artifact".to_string(),
+        contract_artifact_to_context_value(&contract_artifact),
+    );
     context.insert("default_plan".to_string(), plan_to_context_value(&fallback));
     context.insert(
         "target_output_paths".to_string(),
@@ -1084,6 +1097,20 @@ fn build_agent_context(
         ctx.insert(
             "specs_json".to_string(),
             json!(serde_json::to_string_pretty(specs_json).unwrap_or_else(|_| "{}".to_string())),
+        );
+        let contract_artifacts = specs_json
+            .iter()
+            .map(|(spec_path, spec_content)| {
+                let artifact = build_contract_artifact(Path::new(spec_path), spec_content, None, None);
+                (spec_path.clone(), compact_contract_artifact_value(&artifact))
+            })
+            .collect::<BTreeMap<_, _>>();
+        ctx.insert(
+            "contract_artifacts_json".to_string(),
+            json!(
+                serde_json::to_string_pretty(&contract_artifacts)
+                    .unwrap_or_else(|_| "{}".to_string())
+            ),
         );
     }
     ctx.insert(

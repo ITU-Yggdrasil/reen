@@ -950,14 +950,14 @@ static_prompt: |
 
   You MUST:
   - Treat `input.direct_dependencies` as an authoritative dependency manifest.
+  - Treat `input.contract_artifact` as the authoritative machine-readable contract for the target module when present.
   - Prefer provided dependency artifacts over inference.
   - Reuse existing definitions from dependency context instead of creating duplicates.
-  - If dependency lookup tools are available, fetch only the specific dependency artifacts you need instead of pulling everything eagerly.
-  - You may query dependency lookup by exact path/spec path or by dependency name when that is all the specification gives you.
-  - Treat transitive dependency entries in the manifest as equally eligible lookup targets when resolving collaborator APIs.
+  - Prefer `input.direct_dependency_contracts` and `input.implemented_direct_role_capsules` over broad file scraping when resolving role APIs.
+  - Treat transitive dependency entries in the manifest as equally eligible lookup targets when resolving role APIs.
   - Avoid arbitrary file scraping when dependency context already provides structured metadata.
   - If `input.implemented_dependencies` is present, treat it as an authoritative manifest for already-implemented dependency APIs.
-  - When implemented-dependency lookup tools are available, fetch only the source files you need before deciding an API shape.
+  - When implemented role capsules are present, use their public methods, role methods, and snippets before inferring missing API details.
   - When specification wording and implemented dependency API details differ in low-level shape, prefer compatibility with fetched `input.implemented_dependencies` artifacts while preserving specified behavior.
   - If `input.tooling_symbols` is present, treat it as the authoritative crate/type inventory for dependencies declared in `drafts/dependencies.yml`.
   - Prefer the provided symbol inventory over guessing which types, traits, or functions a dependency crate exposes.
@@ -975,6 +975,15 @@ variable_prompt: |
 
   Implemented dependency source manifest (optional, authoritative for existing APIs):
   {{input.implemented_dependencies?}}
+
+  Direct dependency contracts (optional, compact):
+  {{input.direct_dependency_contracts?}}
+
+  Implemented direct role capsules (optional, compact):
+  {{input.implemented_direct_role_capsules?}}
+
+  Contract artifact (optional, authoritative):
+  {{input.contract_artifact?}}
 
   Behavior contract (optional, authoritative):
   {{input.behavior_contract?}}

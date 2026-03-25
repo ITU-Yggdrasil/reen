@@ -374,18 +374,6 @@ pub(crate) fn verify_generated_implementation(
             Regex::new(r"\bunimplemented!\s*\(").unwrap(),
             "Contains unimplemented! placeholder",
         ),
-        (
-            Regex::new(r"\bVec(?:::<[^>]+>)?::new\s*\(").unwrap(),
-            "Contains Vec::new() placeholder",
-        ),
-        (
-            Regex::new(r"\bString::new\s*\(").unwrap(),
-            "Contains String::new() placeholder",
-        ),
-        (
-            Regex::new(r"\breturn\s+None\b").unwrap(),
-            "Contains return None placeholder",
-        ),
         (Regex::new(r"//\s*no-op").unwrap(), "Contains explicit no-op comment"),
         (Regex::new(r"//\s*stub").unwrap(), "Contains explicit stub comment"),
     ];
@@ -403,6 +391,17 @@ pub(crate) fn verify_generated_implementation(
             } else {
                 warnings.push(message.to_string());
             }
+        }
+    }
+    for finding in detect_trivial_obligation_stubs(&code, &plan.contract.role_method_names) {
+        if behavior_sensitive {
+            high_risk_findings.push(format!(
+                "{} in behavior-sensitive implementation {}",
+                finding,
+                output_path.display()
+            ));
+        } else {
+            warnings.push(finding);
         }
     }
 
@@ -452,6 +451,86 @@ pub(crate) fn compare_verifier_reports(
         before,
         after,
     }
+}
+
+fn detect_trivial_obligation_stubs(code: &str, role_method_names: &[String]) -> Vec<String> {
+    if role_method_names.is_empty() {
+        return Vec::new();
+    }
+
+    let fn_re = Regex::new(r"(?s)fn\s+([A-Za-z0-9_]+)[^{]*\{([^{}]*)\}").unwrap();
+    let vec_new_re = Regex::new(r"^Vec(?:::<[^>]+>)?::new\s*\(\)\s*;?$").unwrap();
+    let string_new_re = Regex::new(r"^String::new\s*\(\)\s*;?$").unwrap();
+    let none_re = Regex::new(r"^(?:return\s+)?None\s*;?$").unwrap();
+
+    let normalized_role_names = role_method_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut findings = Vec::new();
+
+    for captures in fn_re.captures_iter(code) {
+        let Some(name_match) = captures.get(1) else {
+            continue;
+        };
+        let Some(body_match) = captures.get(2) else {
+            continue;
+        };
+
+        let fn_name = name_match.as_str();
+        let fn_name_lower = fn_name.to_ascii_lowercase();
+        let is_obligation_method = normalized_role_names.iter().any(|role_name| {
+            fn_name_lower == *role_name
+                || fn_name_lower.ends_with(&format!("_{}", role_name))
+                || fn_name_lower.contains(role_name)
+        });
+        if !is_obligation_method {
+            continue;
+        }
+
+        let normalized_body = normalize_stub_candidate_body(body_match.as_str());
+        if normalized_body.is_empty() {
+            continue;
+        }
+
+        let finding = if vec_new_re.is_match(&normalized_body) {
+            Some(format!(
+                "Role method '{}' has a trivial body returning Vec::new()",
+                fn_name
+            ))
+        } else if string_new_re.is_match(&normalized_body) {
+            Some(format!(
+                "Role method '{}' has a trivial body returning String::new()",
+                fn_name
+            ))
+        } else if none_re.is_match(&normalized_body) {
+            Some(format!(
+                "Role method '{}' has a trivial body returning None",
+                fn_name
+            ))
+        } else {
+            None
+        };
+
+        if let Some(message) = finding {
+            findings.push(message);
+        }
+    }
+
+    findings
+}
+
+fn normalize_stub_candidate_body(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("//"))
+        .filter(|line| !line.starts_with("tracing::"))
+        .filter(|line| !line.starts_with("log::"))
+        .filter(|line| !line.starts_with("println!"))
+        .filter(|line| !line.starts_with("eprintln!"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn determine_spec_path_for_output(output_path: &Path, specifications_root: &Path) -> Option<PathBuf> {
@@ -542,18 +621,18 @@ fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> Spe
     let path = spec_path.to_string_lossy().to_ascii_lowercase();
     if path.ends_with("/app.md")
         || spec_content.to_ascii_lowercase().contains("application")
-        || sections.iter().any(|section| section.title == "Behavior")
+        || has_section(sections, "Behavior")
     {
         return SpecificationKind::App;
     }
-    if sections.iter().any(|section| section.title == "Roles")
-        || sections.iter().any(|section| section.title == "Role Methods")
-        || sections.iter().any(|section| section.title == "Functionality")
+    if has_section(sections, "Roles")
+        || has_section(sections, "Role Methods")
+        || has_section(sections, "Functionality")
+        || has_section(sections, "Props")
     {
         return SpecificationKind::Context;
     }
-    if sections.iter().any(|section| section.title == "Functionalities")
-        || sections.iter().any(|section| section.title == "Properties")
+    if has_section(sections, "Functionalities") || has_section(sections, "Properties")
     {
         return SpecificationKind::Data;
     }
@@ -591,7 +670,14 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
 }
 
 fn find_section<'a>(sections: &'a [Section], title: &str) -> Option<&'a Section> {
-    sections.iter().find(|section| section.title == title)
+    let expected = normalize_section_title(title);
+    sections
+        .iter()
+        .find(|section| normalize_section_title(&section.title) == expected)
+}
+
+fn has_section(sections: &[Section], title: &str) -> bool {
+    find_section(sections, title).is_some()
 }
 
 fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
@@ -612,7 +698,31 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
         }
     }
 
-    for title in ["Collaborators", "Roles", "Helpers the App Uses"] {
+    if let Some(section) = find_section(sections, "Roles") {
+        let role_lines = section.body.lines().collect::<Vec<_>>();
+        let uses_subheadings = role_lines
+            .iter()
+            .any(|line| line.trim().starts_with("### "));
+
+        for line in role_lines {
+            let trimmed = line.trim();
+            let candidate = if uses_subheadings {
+                trimmed
+                    .strip_prefix("### ")
+                    .map(normalize_symbol_name)
+                    .unwrap_or_default()
+            } else if trimmed.starts_with('-') {
+                extract_bullet_name(trimmed)
+            } else {
+                String::new()
+            };
+            if collaborator_name_is_actionable(&candidate) {
+                names.insert(candidate);
+            }
+        }
+    }
+
+    for title in ["Collaborators", "Helpers the App Uses"] {
         if let Some(section) = find_section(sections, title) {
             for line in section.body.lines() {
                 let trimmed = line.trim();
@@ -620,7 +730,7 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
                     continue;
                 }
                 let candidate = extract_bullet_name(trimmed);
-                if !candidate.is_empty() {
+                if collaborator_name_is_actionable(&candidate) {
                     names.insert(candidate);
                 }
             }
@@ -769,6 +879,7 @@ fn extract_shared_state_requirements(content: &str) -> Vec<String> {
 fn extract_role_method_names(sections: &[Section]) -> Vec<String> {
     let mut names = Vec::new();
     if let Some(section) = find_section(sections, "Role Methods") {
+        let table_method_re = Regex::new(r"^\|\s*\*\*([^*|`]+)\*\*").unwrap();
         for line in section.body.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("- **") && trimmed.contains("**") {
@@ -776,8 +887,11 @@ fn extract_role_method_names(sections: &[Section]) -> Vec<String> {
                 if !name.is_empty() {
                     names.push(name);
                 }
-            } else if let Some(rest) = trimmed.strip_prefix("### ") {
-                let name = normalize_symbol_name(rest);
+            } else if trimmed.starts_with('|') && !trimmed.contains("---") {
+                let name = table_method_re
+                    .captures(trimmed)
+                    .and_then(|captures| captures.get(1).map(|matched| normalize_symbol_name(matched.as_str())))
+                    .unwrap_or_default();
                 if !name.is_empty() {
                     names.push(name);
                 }
@@ -859,7 +973,64 @@ fn normalize_symbol_name(value: &str) -> String {
         .to_string()
 }
 
+fn normalize_section_title(title: &str) -> String {
+    let trimmed = title.trim().trim_end_matches(':').trim();
+    let normalized = if trimmed
+        .chars()
+        .next()
+        .map(|ch| ch.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        trimmed.trim_start_matches(|ch: char| {
+            ch.is_ascii_digit() || matches!(ch, '.' | ')' | ':' | '-' | ' ')
+        })
+    } else {
+        trimmed
+    };
+    normalized.to_ascii_lowercase()
+}
+
+fn collaborator_name_is_actionable(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    !is_documentation_label(name)
+}
+
+fn is_documentation_label(name: &str) -> bool {
+    matches!(
+        name,
+        "Behavior"
+            | "Basis"
+            | "Description"
+            | "Ends"
+            | "Example"
+            | "Examples"
+            | "Functionalities"
+            | "Functionality"
+            | "Inference"
+            | "Input"
+            | "Inputs"
+            | "Location"
+            | "Methods"
+            | "Note"
+            | "Notes"
+            | "Output"
+            | "Outputs"
+            | "Produces"
+            | "Properties"
+            | "Purpose"
+            | "Returns"
+            | "Role"
+            | "Roles"
+            | "Rules"
+    )
+}
+
 fn is_probably_domain_type(name: &str) -> bool {
+    if is_documentation_label(name) {
+        return false;
+    }
     let first = name.chars().next();
     first.map(|c| c.is_ascii_uppercase()).unwrap_or(false)
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -921,7 +1092,7 @@ Unspecified in draft - no environment variables referenced.
     }
 
     #[test]
-    fn verifier_flags_missing_env_var_and_placeholders() {
+    fn verifier_flags_missing_env_var_without_flagging_normal_vec_new_usage() {
         let root = make_temp_dir("pipeline_quality_verifier");
         let specs = root.join("specifications");
         let src = root.join("src");
@@ -948,7 +1119,53 @@ Unspecified in draft - no environment variables referenced.
             verify_generated_implementation(&root, &spec_path, &fs::read_to_string(&spec_path).unwrap(), &output)
                 .expect("verify");
         assert!(report.errors.iter().any(|item| item.contains("FOO_MODE")));
-        assert!(!report.high_risk_findings.is_empty());
+        assert!(report.high_risk_findings.is_empty());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_flags_trivial_role_method_stub_returns() {
+        let root = make_temp_dir("pipeline_quality_role_stub");
+        let specs = root.join("specifications").join("contexts");
+        let src = root.join("src").join("contexts");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("command_input.md");
+        fs::write(
+            &spec_path,
+            r#"# CommandInputContext
+
+## Description
+- Reads stdin without blocking.
+
+## Roles
+- **stdin_source**
+  Provides non-blocking reads from standard input.
+
+## Role Methods
+### stdin_source
+- **read_available**
+  Returns all currently available keystrokes in arrival order without blocking.
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("command_input.rs");
+        fs::write(
+            &output,
+            r#"fn stdin_source_read_available(&self) -> Vec<char> { Vec::new() }"#,
+        )
+        .expect("write impl");
+
+        let report =
+            verify_generated_implementation(&root, &spec_path, &fs::read_to_string(&spec_path).unwrap(), &output)
+                .expect("verify");
+        assert!(report
+            .high_risk_findings
+            .iter()
+            .any(|item| item.contains("stdin_source_read_available")));
 
         fs::remove_dir_all(root).ok();
     }
@@ -979,6 +1196,64 @@ Unspecified in draft - no environment variables referenced.
 "#;
         let report = analyze_specification(Path::new("specifications/app.md"), content, None);
         assert_eq!(report.contract.env_vars, vec!["SNAKE_RENDERER".to_string()]);
+    }
+
+    #[test]
+    fn collaborator_extraction_ignores_role_metadata_labels() {
+        let content = r#"# Terminal Renderer
+
+## Roles
+
+### `string_renderer`
+- **Purpose**: Formats the current game frame as plain text.
+- **Methods**:
+  - `render(board, score)`
+    - **Behavior**:
+      - Produces a fully formatted frame string.
+    - **Input**:
+      - `board`: A 2D char grid.
+    - **Output**: Returns a single string.
+"#;
+        let report = analyze_specification(
+            Path::new("specifications/contexts/terminal_renderer.md"),
+            content,
+            None,
+        );
+        assert_eq!(
+            report.contract.collaborators,
+            vec!["string_renderer".to_string()]
+        );
+    }
+
+    #[test]
+    fn section_matching_handles_numbering_case_and_colons() {
+        let content = r#"# GameLoopContext
+
+## 2. Roles
+
+- **command**
+  Provides input.
+
+## 3. Props:
+
+- **board**
+  Holds board state.
+
+## 4. Role methods:
+
+### command
+
+- **next**
+  Returns the next command.
+"#;
+        let report = analyze_specification(
+            Path::new("specifications/contexts/game_loop.md"),
+            content,
+            None,
+        );
+        assert_eq!(report.contract.kind, SpecificationKind::Context);
+        assert_eq!(report.contract.collaborators, vec!["command".to_string()]);
+        assert_eq!(report.contract.role_method_names, vec!["next".to_string()]);
     }
 
     #[test]

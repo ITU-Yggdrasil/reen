@@ -14,9 +14,11 @@ mod agent_executor;
 mod artifact_backend;
 mod cargo_commands;
 mod compilation_fix;
+mod contracts;
 mod dependency_graph;
 mod dependency_tooling;
 mod external_api_expansion;
+mod interface_capsules;
 mod openapi_fetcher;
 mod patch_service;
 mod planning;
@@ -32,6 +34,10 @@ use agent_executor::{AgentExecutor, AgentResponse};
 use artifact_backend::{
     ArtifactCategory, ArtifactKind, ArtifactStore, BackendSelection, build_artifact_store,
 };
+use contracts::{
+    ContractArtifact, build_contract_artifact, contract_artifact_to_context_value,
+    contract_validation_to_context_value, validate_contract_artifact,
+};
 use dependency_graph::{
     DependencyArtifact, ExecutionNode, build_execution_plan, expand_with_transitive_dependencies,
 };
@@ -42,6 +48,7 @@ use dependency_tooling::{
 use external_api_expansion::{
     GeneratedDraftArtifact, parse_external_api_expansion, sanitize_generated_artifact_name,
 };
+use interface_capsules::{InterfaceCapsule, build_interface_capsule};
 use openapi_fetcher::is_external_api_draft_path;
 use patch_service::apply_draft_patches;
 use planning::{
@@ -60,7 +67,10 @@ use project_structure::{
 use reen::build_tracker::{BuildTracker, Stage};
 use reen::execution::{AgentModelRegistry, AgentRegistry, NativeExecutionControl};
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
-use stage_runner::{CliExecutionControl, ExecutionResources, StageItem, run_stage_items};
+use stage_runner::{
+    CliExecutionControl, ExecutionResources, StageItem, is_rate_limit_error,
+    prepare_rate_limit_retry, run_stage_items,
+};
 
 #[derive(Clone)]
 pub struct Config {
@@ -965,6 +975,14 @@ async fn generate_execution_plan_with_agent(
     print_timed_status(status_label, display_name);
 
     let behavior_contract = analyze_specification(spec_path, spec_content, Some(dependency_context)).contract;
+    let contract_artifact = build_contract_artifact(
+        spec_path,
+        spec_content,
+        output_paths.first().map(PathBuf::as_path),
+        Some(dependency_context),
+    );
+    let contract_validation =
+        validate_contract_artifact(&contract_artifact, spec_path, spec_content, Some(dependency_context));
     let fallback_plan = build_default_plan(
         plan_kind,
         spec_path,
@@ -974,9 +992,17 @@ async fn generate_execution_plan_with_agent(
         diagnostic_text,
     );
 
-    let mut planning_context = dependency_context.clone();
+    let mut planning_context = compact_agent_dependency_context(dependency_context);
     planning_context.insert("plan_kind".to_string(), json!(plan_kind.as_str()));
     planning_context.insert("context_content".to_string(), json!(spec_content));
+    planning_context.insert(
+        "contract_artifact".to_string(),
+        contract_artifact_to_context_value(&contract_artifact),
+    );
+    planning_context.insert(
+        "contract_validation".to_string(),
+        contract_validation_to_context_value(&contract_validation),
+    );
     planning_context.insert(
         "behavior_contract".to_string(),
         contract_to_context_value(&behavior_contract),
@@ -1000,31 +1026,60 @@ async fn generate_execution_plan_with_agent(
         }
     }
 
-    let (planning_context, _) = fit_context_to_token_limit(
+    let (planning_context, estimated) = fit_context_to_token_limit(
         planner,
         spec_content,
         planning_context,
         token_limit,
     )?;
 
-    let response = planner
+    let execution_seed = format!(
+        "{}::{}",
+        spec_path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("plan"),
+        plan_kind.as_str()
+    );
+    let execution_control_ref = execution_control
+        .as_ref()
+        .map(|control| control as &dyn NativeExecutionControl);
+    let mut response = planner
         .execute_with_conversation_with_seed_options(
             spec_content,
-            &format!(
-                "{}::{}",
-                spec_path
-                    .file_stem()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or("plan"),
-                plan_kind.as_str()
-            ),
-            planning_context,
-            execution_control
-                .as_ref()
-                .map(|control| control as &dyn NativeExecutionControl),
+            &execution_seed,
+            planning_context.clone(),
+            execution_control_ref,
             ignore_cache_reads,
         )
-        .await?;
+        .await;
+    if let Err(ref error) = response {
+        if is_rate_limit_error(error)
+            && prepare_rate_limit_retry(
+                error,
+                display_name,
+                estimated,
+                execution_control
+                    .as_ref()
+                    .and_then(CliExecutionControl::token_limiter),
+                execution_control
+                    .as_ref()
+                    .and_then(CliExecutionControl::rate_limiter),
+            )
+            .await
+        {
+            response = planner
+                .execute_with_conversation_with_seed_options(
+                    spec_content,
+                    &execution_seed,
+                    planning_context,
+                    execution_control_ref,
+                    ignore_cache_reads,
+                )
+                .await;
+        }
+    }
+    let response = response?;
 
     let plan = parse_plan_output(&response).unwrap_or(fallback_plan);
     let validation = validate_plan(&plan, &behavior_contract, output_paths);
@@ -1186,6 +1241,19 @@ fn write_specification_output(
 
     let artifact_root = workspace.artifact_workspace_root();
     let lint_report = analyze_specification(output_path, &spec_content, dependency_context);
+    let contract_output_path = determine_implementation_output_path(output_path, SPECIFICATIONS_DIR).ok();
+    let contract_artifact = build_contract_artifact(
+        output_path,
+        &spec_content,
+        contract_output_path.as_deref(),
+        dependency_context,
+    );
+    let contract_validation = validate_contract_artifact(
+        &contract_artifact,
+        output_path,
+        &spec_content,
+        dependency_context,
+    );
     let _ = write_json_report(
         &artifact_root,
         "specification",
@@ -1199,6 +1267,20 @@ fn write_specification_output(
         output_path,
         "behavior_contract.json",
         &lint_report.contract,
+    );
+    let _ = write_json_report(
+        &artifact_root,
+        "contracts",
+        output_path,
+        "contract_artifact.json",
+        &contract_artifact,
+    );
+    let _ = write_json_report(
+        &artifact_root,
+        "contracts",
+        output_path,
+        "contract_validation_report.json",
+        &contract_validation,
     );
     if !lint_report.errors.is_empty() {
         has_blocking_ambiguities = true;
@@ -1549,6 +1631,32 @@ pub async fn create_implementation(
                 Some(&workspace.drafts_dir),
             )?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+            let target_contract = build_contract_artifact(
+                &context_file,
+                &context_content,
+                Some(&output_path),
+                Some(&dependency_context),
+            );
+            let target_contract_validation = validate_contract_artifact(
+                &target_contract,
+                &context_file,
+                &context_content,
+                Some(&dependency_context),
+            );
+            let _ = write_json_report(
+                Path::new("."),
+                "contracts",
+                &output_path,
+                "contract_artifact.json",
+                &target_contract,
+            );
+            let _ = write_json_report(
+                Path::new("."),
+                "contracts",
+                &output_path,
+                "contract_validation_report.json",
+                &target_contract_validation,
+            );
             if let Some(target_type_name) = infer_target_type_name(
                 &context_file,
                 &workspace.specifications_root,
@@ -1598,6 +1706,14 @@ pub async fn create_implementation(
             }
             let contract = analyze_specification(&context_file, &context_content, Some(&dependency_context)).contract;
             dependency_context.insert(
+                "contract_artifact".to_string(),
+                contract_artifact_to_context_value(&target_contract),
+            );
+            dependency_context.insert(
+                "contract_validation".to_string(),
+                contract_validation_to_context_value(&target_contract_validation),
+            );
+            dependency_context.insert(
                 "behavior_contract".to_string(),
                 contract_to_context_value(&contract),
             );
@@ -1609,10 +1725,11 @@ pub async fn create_implementation(
                 "plan_validation".to_string(),
                 validation_to_context_value(&plan_validation),
             );
+            let compact_dependency_context = compact_agent_dependency_context(&dependency_context);
             let (dependency_context, estimated) = fit_context_to_token_limit(
                 &executor,
                 &context_content,
-                dependency_context,
+                compact_dependency_context,
                 token_limit,
             )?;
             let cache_hit = if clear_cache {
@@ -3336,6 +3453,13 @@ fn build_dependency_context(
     let implemented_dependencies = build_implemented_dependency_context(&dependency_closure)?;
     let implemented_direct_dependencies =
         filter_direct_implemented_dependencies(&implemented_dependencies, &direct_dependencies);
+    let dependency_contracts = build_dependency_contract_artifacts(&dependency_closure)?;
+    let direct_dependency_contracts =
+        filter_direct_contract_artifacts(&dependency_contracts, &direct_dependencies);
+    let implemented_role_capsules =
+        build_role_capsules_for_implemented_dependencies(&implemented_dependencies)?;
+    let implemented_direct_role_capsules =
+        filter_direct_role_capsules(&implemented_role_capsules, &direct_dependencies);
     let implemented_dependency_manifest =
         build_implemented_dependency_manifest(&implemented_dependencies, &direct_dependencies);
     let implemented_direct_dependency_manifest = build_implemented_dependency_manifest(
@@ -3349,6 +3473,22 @@ fn build_dependency_context(
     context.insert(
         "implemented_direct_dependencies".to_string(),
         json!(implemented_direct_dependency_manifest),
+    );
+    context.insert(
+        "dependency_contracts".to_string(),
+        json!(dependency_contracts),
+    );
+    context.insert(
+        "direct_dependency_contracts".to_string(),
+        json!(direct_dependency_contracts),
+    );
+    context.insert(
+        "implemented_role_capsules".to_string(),
+        json!(implemented_role_capsules),
+    );
+    context.insert(
+        "implemented_direct_role_capsules".to_string(),
+        json!(implemented_direct_role_capsules),
     );
     context.insert(
         "dependency_tool_context".to_string(),
@@ -3501,6 +3641,123 @@ fn build_implemented_dependency_context(
     });
 
     Ok(artifacts)
+}
+
+fn resolve_dependency_spec_path(raw_path: &str) -> Result<Option<PathBuf>> {
+    let mut spec_path = PathBuf::from(raw_path);
+    if spec_path.starts_with(DRAFTS_DIR) {
+        let mapped = determine_specification_output_path(&spec_path, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+        if mapped.exists() {
+            spec_path = mapped;
+        }
+    }
+    if spec_path.starts_with(SPECIFICATIONS_DIR) && spec_path.exists() {
+        Ok(Some(spec_path))
+    } else {
+        Ok(None)
+    }
+}
+
+fn build_dependency_contract_artifacts(
+    dependency_closure: &[DependencyArtifact],
+) -> Result<Vec<ContractArtifact>> {
+    let mut contracts = Vec::new();
+
+    for dependency in dependency_closure {
+        let Some(spec_path) = resolve_dependency_spec_path(&dependency.path)? else {
+            continue;
+        };
+        let spec_content = fs::read_to_string(&spec_path)
+            .with_context(|| format!("failed reading dependency specification: {}", spec_path.display()))?;
+        let output_hint = determine_implementation_output_path(&spec_path, SPECIFICATIONS_DIR).ok();
+        contracts.push(build_contract_artifact(
+            &spec_path,
+            &spec_content,
+            output_hint.as_deref(),
+            None,
+        ));
+    }
+
+    contracts.sort_by(|a, b| a.source_spec_path.cmp(&b.source_spec_path));
+    Ok(contracts)
+}
+
+fn filter_direct_contract_artifacts(
+    contracts: &[ContractArtifact],
+    direct_dependencies: &[DependencyArtifact],
+) -> Vec<ContractArtifact> {
+    let direct_paths = direct_dependencies
+        .iter()
+        .filter_map(|dependency| resolve_dependency_spec_path(&dependency.path).ok().flatten())
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<HashSet<_>>();
+
+    contracts
+        .iter()
+        .filter(|contract| direct_paths.contains(&contract.source_spec_path))
+        .cloned()
+        .collect()
+}
+
+fn build_role_capsules_for_implemented_dependencies(
+    implemented_dependencies: &[serde_json::Value],
+) -> Result<Vec<InterfaceCapsule>> {
+    let mut capsules = Vec::new();
+
+    for item in implemented_dependencies {
+        let Some(spec_path_raw) = item.get("spec_path").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let Some(spec_path) = resolve_dependency_spec_path(spec_path_raw)? else {
+            continue;
+        };
+        let spec_content = fs::read_to_string(&spec_path)
+            .with_context(|| format!("failed reading dependency specification: {}", spec_path.display()))?;
+        let source_path = item
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from);
+        let source_content = item.get("content").and_then(|value| value.as_str());
+        let contract = build_contract_artifact(
+            &spec_path,
+            &spec_content,
+            source_path.as_deref(),
+            None,
+        );
+        capsules.push(build_interface_capsule(
+            &contract,
+            source_path.as_deref(),
+            source_content,
+        ));
+    }
+
+    capsules.sort_by(|a, b| a.spec_path.cmp(&b.spec_path));
+    Ok(capsules)
+}
+
+fn filter_direct_role_capsules(
+    capsules: &[InterfaceCapsule],
+    direct_dependencies: &[DependencyArtifact],
+) -> Vec<InterfaceCapsule> {
+    let direct_paths = direct_dependencies
+        .iter()
+        .filter_map(|dependency| resolve_dependency_spec_path(&dependency.path).ok().flatten())
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<HashSet<_>>();
+
+    capsules
+        .iter()
+        .filter(|capsule| direct_paths.contains(&capsule.spec_path))
+        .cloned()
+        .collect()
+}
+
+fn compact_agent_dependency_context(
+    context: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    let mut compact = context.clone();
+    compact.remove("dependency_tool_context");
+    compact
 }
 
 pub async fn compile(config: &Config) -> Result<()> {

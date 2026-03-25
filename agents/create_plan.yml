@@ -10,7 +10,8 @@ static_prompt: |
   ## Core rules
 
   - Be provider-agnostic. Do not assume tools like TodoWrite exist.
-  - Treat the supplied behavior contract as authoritative.
+  - Treat the supplied contract artifact as authoritative.
+  - Use the supplied behavior contract as a compatibility fallback when the richer contract omits a low-level detail.
   - The plan must remain implementation-oriented, not specification-oriented.
   - For `plan_kind=implementation`, optimize for complete realization of the required behavior.
   - For `plan_kind=semantic_repair`, optimize for minimal repair scope and preservation of behavior.
@@ -57,7 +58,7 @@ static_prompt: |
 
   ## Planning quality rules
 
-  - Include all required collaborators from the contract.
+  - Include all required roles from the contract in `required_collaborators` for schema compatibility.
   - Include explicit verification targets.
   - If the contract mentions shared identity, do not allow plans that casually clone/replace state.
   - If `plan_kind=semantic_repair`, keep the task list tightly scoped to the diagnostics and forbid semantic hollowing.
@@ -77,6 +78,9 @@ variable_prompt: |
   Specification content:
   {{input.context_content}}
 
+  Contract artifact:
+  {{input.contract_artifact?}}
+
   Behavior contract:
   {{input.behavior_contract}}
 
@@ -86,8 +90,11 @@ variable_prompt: |
   Target output paths:
   {{input.target_output_paths}}
 
-  Dependency context:
-  {{input.dependency_tool_context?}}
+  Direct dependency contracts (optional, compact):
+  {{input.direct_dependency_contracts?}}
+
+  Implemented direct role capsules (optional, compact):
+  {{input.implemented_direct_role_capsules?}}
 
   Diagnostics:
   {{input.diagnostics_text?}}

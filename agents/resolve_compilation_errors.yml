@@ -15,6 +15,7 @@ static_prompt: |
     Line numbers in snippets are approximate. The fix may be in a different file than the error
     (e.g. add missing `use` or definition in the importing file or in a shared module).
   - Relevant specification markdown for impacted modules (intent)
+  - Contract artifacts for impacted modules (compact obligations and role surfaces)
   - Semantic repair plan describing the minimal repair scope and invariants that must not regress
   - Recent change context (files generated/updated in this run)
 
@@ -92,6 +93,9 @@ variable_prompt: |
 
   ### Relevant specifications (JSON map: spec_path -> content)
   {{input.specs_json?}}
+
+  ### Contract artifacts (JSON map: spec_path -> compact contract)
+  {{input.contract_artifacts_json?}}
 
   ### Semantic repair plan
   {{input.semantic_repair_plan?}}

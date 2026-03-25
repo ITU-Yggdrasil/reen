@@ -1,5 +1,7 @@
 use html2text::from_read;
-use reqwest::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{
+    ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER,
+};
 use reqwest::{Client, Response};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -846,15 +848,52 @@ where
 
 async fn decode_json_response(response: Response, url: &str) -> Result<Value, String> {
     let status = response.status();
+    let headers = response.headers().clone();
     let payload = response
         .text()
         .await
         .map_err(|e| format!("Failed to read response body from {url}: {e}"))?;
     if !status.is_success() {
-        return Err(format!("HTTP {} for {url}: {}", status.as_u16(), payload));
+        let rate_limit_headers = format_rate_limit_headers(&headers);
+        return Err(format!(
+            "HTTP {} for {url}: {}{}",
+            status.as_u16(),
+            payload,
+            rate_limit_headers
+        ));
     }
     serde_json::from_str(&payload)
         .map_err(|e| format!("Failed to parse JSON response from {url}: {e}. Body: {payload}"))
+}
+
+fn format_rate_limit_headers(headers: &HeaderMap) -> String {
+    let mut details = Vec::new();
+    if let Some(value) = header_to_string(headers, RETRY_AFTER) {
+        details.push(format!("Retry-After: {value}"));
+    }
+    for (name, value) in headers.iter() {
+        let key = name.as_str().to_ascii_lowercase();
+        if key.starts_with("x-ratelimit-reset")
+            || key.starts_with("ratelimit-reset")
+            || key.starts_with("retry-after-ms")
+        {
+            if let Ok(value_str) = value.to_str() {
+                details.push(format!("{name}: {value_str}"));
+            }
+        }
+    }
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" [rate-limit headers: {}]", details.join(", "))
+    }
+}
+
+fn header_to_string(headers: &HeaderMap, name: HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
 }
 
 fn convert_tools_for_openai(tools: Option<&[Value]>) -> Vec<Value> {
