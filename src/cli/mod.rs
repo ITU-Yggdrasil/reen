@@ -1,31 +1,46 @@
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::pin::Pin;
 use std::sync::Arc;
 
 mod agent_executor;
+mod brand_specs;
+mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
+mod openapi_fetcher;
+mod patch_service;
+mod pipeline_context;
 mod progress;
 mod project_structure;
+mod rate_limiter;
+mod stage_runner;
 
-use agent_executor::AgentExecutor;
+use agent_executor::{AgentExecutor, AgentResponse};
+use brand_specs::{
+    is_brand_draft_path, is_brand_spec_path, unresolved_brand_token_references,
+    validate_brand_spec_content,
+};
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
 };
+use patch_service::apply_draft_patches;
+use pipeline_context::{build_specification_context, fit_context_to_token_limit};
 use progress::ProgressIndicator;
 use project_structure::{
     analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
 };
 use reen::build_tracker::{BuildTracker, Stage};
-use reen::contexts::{AgentModelRegistry, AgentRegistry};
+use reen::execution::{AgentModelRegistry, AgentRegistry, NativeExecutionControl};
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
+use stage_runner::{run_stage_items, CliExecutionControl, ExecutionResources, StageItem};
 
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -33,12 +48,42 @@ pub struct Config {
     pub dry_run: bool,
 }
 
+/// Resolves rate limit (requests per second) from CLI, env, or registry.
+/// Precedence: cli_arg > REEN_RATE_LIMIT env > agent_model_registry.yml rate_limit.
+pub fn resolve_rate_limit(cli_arg: Option<f64>) -> Option<f64> {
+    if let Some(r) = cli_arg {
+        return Some(r);
+    }
+    if let Ok(s) = env::var("REEN_RATE_LIMIT") {
+        if let Ok(r) = s.parse::<f64>() {
+            return Some(r);
+        }
+    }
+    FileAgentModelRegistry::new(None, None, None).get_rate_limit()
+}
+
+/// Resolves token limit (tokens per minute) from CLI, env, or registry.
+/// Precedence: cli_arg > REEN_TOKEN_LIMIT env > agent_model_registry.yml token_limit.
+pub fn resolve_token_limit(cli_arg: Option<f64>) -> Option<f64> {
+    if let Some(t) = cli_arg {
+        return Some(t);
+    }
+    if let Ok(s) = env::var("REEN_TOKEN_LIMIT") {
+        if let Ok(t) = s.parse::<f64>() {
+            return Some(t);
+        }
+    }
+    FileAgentModelRegistry::new(None, None, None).get_token_limit()
+}
+
 /// Controls which draft categories are included when resolving input files.
 /// When both fields are false, all categories are included (no filter).
 /// When one or both are true, only the selected categories are included.
+#[derive(Clone, Copy)]
 pub struct CategoryFilter {
     pub contexts: bool,
     pub data: bool,
+    pub brands: bool,
     pub visuals: bool,
 }
 
@@ -47,114 +92,232 @@ impl CategoryFilter {
         Self {
             contexts: false,
             data: false,
+            brands: false,
             visuals: false,
         }
     }
 
+    fn is_active(&self) -> bool {
+        self.contexts || self.data || self.brands || self.visuals
+    }
+
     fn include_data(&self) -> bool {
-        (!self.contexts && !self.data && !self.visuals) || self.data
+        !self.is_active() || self.data
     }
 
     fn include_contexts(&self) -> bool {
-        (!self.contexts && !self.data && !self.visuals) || self.contexts
+        !self.is_active() || self.contexts
+    }
+
+    fn include_brands(&self) -> bool {
+        !self.is_active() || self.brands
     }
 
     fn include_visuals(&self) -> bool {
-        (!self.contexts && !self.data && !self.visuals) || self.visuals
+        !self.is_active() || self.visuals
     }
 
     fn include_root(&self) -> bool {
-        !self.contexts && !self.data && !self.visuals
+        !self.is_active()
+    }
+
+    /// Returns true if the given path (relative to a base dir like "drafts" or
+    /// "specifications") belongs to a category this filter includes.
+    fn matches_path(&self, path: &Path, base_dir: &str) -> bool {
+        if !self.is_active() {
+            return true;
+        }
+        let base = PathBuf::from(base_dir);
+        if let Ok(relative) = path.strip_prefix(&base) {
+            if let Some(first) = relative.components().next() {
+                let component = first.as_os_str().to_string_lossy();
+                return match component.as_ref() {
+                    "data" => self.include_data(),
+                    "contexts" | "external_apis" => self.include_contexts(),
+                    "brands" => self.include_brands(),
+                    "visuals" => self.include_visuals(),
+                    _ => self.include_root(),
+                };
+            }
+        }
+        self.include_root()
     }
 }
 
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
 
-fn collect_files_recursive(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<()> {
-    if !dir.exists() || !dir.is_dir() {
-        return Ok(());
-    }
-
-    let entries = fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files_recursive(&path, extension, files)?;
-            continue;
-        }
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
-            files.push(path);
-        }
-    }
-    Ok(())
+/// Outcome of processing a single draft for specification creation.
+#[derive(Debug)]
+pub enum ProcessSpecOutcome {
+    Success,
+    BlockingAmbiguities {
+        draft_file: PathBuf,
+        draft_name: String,
+        draft_content: String,
+        spec_content: String,
+        actionable: Vec<String>,
+        additional_context: HashMap<String, serde_json::Value>,
+    },
 }
+
+fn print_blocking_items(path: &Path, label: &str, headline: &str, items: &[String]) {
+    eprintln!("error[{}]:", label);
+    eprintln!("\u{001b}[31m{}\u{001b}[0m", path.display());
+    eprintln!("  {}", headline);
+    eprintln!();
+    for item in items {
+        eprintln!("  {}", item);
+    }
+    eprintln!();
+}
+
+fn check_brand_references_in_spec_content(path: &Path, content: &str) -> Result<Vec<String>> {
+    unresolved_brand_token_references(content, SPECIFICATIONS_DIR).with_context(|| {
+        format!(
+            "failed to validate brand token references in {}",
+            path.display()
+        )
+    })
+}
+
+struct PreparedImplementationBatchItem {
+    context_name: String,
+    context_file: PathBuf,
+    output_path: PathBuf,
+    dependency_fingerprint: String,
+    dependency_context: HashMap<String, serde_json::Value>,
+    context_content: String,
+    prepared: reen::execution::PreparedExecution,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BddTestPaths {
+    feature_path: PathBuf,
+    steps_path: PathBuf,
+    runner_path: PathBuf,
+    runner_test_name: String,
+}
+
+const BDD_CUCUMBER_VERSION: &str = "0.22.1";
+const BDD_TOKIO_SPEC: &str = r#"{ version = "1.40", features = ["macros", "rt-multi-thread"] }"#;
+const BDD_TEST_TARGETS_START: &str = "# reen:bdd-tests:start";
+const BDD_TEST_TARGETS_END: &str = "# reen:bdd-tests:end";
 
 pub async fn create_specification(
     names: Vec<String>,
     clear_cache: bool,
     filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    fix: bool,
+    max_fix_attempts: usize,
     config: &Config,
 ) -> Result<()> {
-    let names_for_clear = names.clone();
-    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", filter)?;
+    create_specification_inner(
+        names,
+        clear_cache,
+        filter,
+        rate_limit,
+        token_limit,
+        fix,
+        max_fix_attempts,
+        0,
+        config,
+    )
+    .await
+}
 
-    if draft_files.is_empty() {
-        println!("No draft files found to process");
-        return Ok(());
-    }
+fn create_specification_inner(
+    names: Vec<String>,
+    clear_cache: bool,
+    filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    fix: bool,
+    max_fix_attempts: usize,
+    fix_attempt: usize,
+    config: &Config,
+) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+    let filter = *filter;
+    let config = *config;
+    Box::pin(async move {
+        let names_provided = !names.is_empty();
+        let names_for_clear = names.clone();
+        let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &filter)?;
 
-    let expanded_draft_files = expand_with_transitive_dependencies(draft_files, DRAFTS_DIR, None)?;
-    let execution_levels = build_execution_plan(expanded_draft_files, DRAFTS_DIR, None)?;
-
-    // Load build tracker
-    let mut tracker = BuildTracker::load()?;
-    if clear_cache {
-        clear_tracker_stage(&mut tracker, Stage::Specification, &names_for_clear, config)?;
-    }
-
-    let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
-    println!("Creating specifications for {} draft(s)", total_count);
-
-    let mut progress = ProgressIndicator::new(total_count);
-    let mut updated_count = 0;
-    let mut updated_in_run: HashSet<String> = HashSet::new();
-    let mut executors: HashMap<String, Arc<AgentExecutor>> = HashMap::new();
-
-    for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
-        if config.verbose {
-            println!(
-                "Processing dependency level {} ({} item(s))",
-                level_idx,
-                level_nodes.len()
-            );
+        if draft_files.is_empty() {
+            println!("No draft files found to process");
+            return Ok(());
         }
 
-        let mut nodes_by_agent: HashMap<String, Vec<ExecutionNode>> = HashMap::new();
-        for node in level_nodes {
-            let agent = determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
-            nodes_by_agent.entry(agent).or_default().push(node);
+        let dependency_roots =
+            select_dependency_roots(draft_files, DRAFTS_DIR, names_provided, &filter)?;
+        let expanded_draft_files =
+            expand_with_transitive_dependencies(dependency_roots, DRAFTS_DIR, None)?;
+        let filtered_draft_files = if filter.is_active() {
+            expanded_draft_files
+                .into_iter()
+                .filter(|f| filter.matches_path(f, DRAFTS_DIR))
+                .collect()
+        } else {
+            expanded_draft_files
+        };
+        let execution_levels = build_execution_plan(filtered_draft_files, DRAFTS_DIR, None)?;
+
+        // Load build tracker
+        let mut tracker = BuildTracker::load()?;
+        if clear_cache {
+            clear_tracker_stage(
+                &mut tracker,
+                Stage::Specification,
+                &names_for_clear,
+                &config,
+            )?;
         }
 
-        for (agent_name, nodes) in nodes_by_agent {
-            if !executors.contains_key(&agent_name) {
-                executors.insert(
-                    agent_name.clone(),
-                    Arc::new(AgentExecutor::new(&agent_name, config)?),
+        let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
+        println!("Creating specifications for {} draft(s)", total_count);
+
+        let resources = ExecutionResources::new(rate_limit, token_limit);
+
+        let mut progress = ProgressIndicator::new(total_count);
+        let mut updated_count = 0;
+        let mut updated_in_run: HashSet<String> = HashSet::new();
+        let mut executors: HashMap<String, Arc<AgentExecutor>> = HashMap::new();
+
+        for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
+            if config.verbose {
+                println!(
+                    "Processing dependency level {} ({} item(s))",
+                    level_idx,
+                    level_nodes.len()
                 );
             }
-            let executor = executors
-                .get(&agent_name)
-                .cloned()
-                .context("missing specification executor")?;
-            let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
-            if can_parallel {
-                if config.verbose {
+            let mut nodes_by_agent: HashMap<String, Vec<ExecutionNode>> = HashMap::new();
+            for node in level_nodes {
+                let agent = determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
+                nodes_by_agent.entry(agent).or_default().push(node);
+            }
+
+            for (agent_name, nodes) in nodes_by_agent {
+                if !executors.contains_key(&agent_name) {
+                    executors.insert(
+                        agent_name.clone(),
+                        Arc::new(AgentExecutor::new(&agent_name, &config)?),
+                    );
+                }
+                let executor = executors
+                    .get(&agent_name)
+                    .cloned()
+                    .context("missing specification executor")?;
+                let can_parallel = executor.can_run_parallel().unwrap_or(false);
+                if can_parallel && config.verbose {
                     println!("Parallel execution enabled for {}", agent_name);
                 }
-                let mut tasks = Vec::new();
+
+                let mut stage_items = Vec::new();
                 for node in nodes {
                     let draft_file = node.input_path.clone();
                     let draft_name = node.name.clone();
@@ -169,7 +332,6 @@ pub async fn create_specification(
                         DRAFTS_DIR,
                         SPECIFICATIONS_DIR,
                     )?;
-                    progress.start_item(&draft_name);
 
                     let needs_update = if dependency_invalidated {
                         true
@@ -183,6 +345,7 @@ pub async fn create_specification(
                         )?
                     };
                     if !needs_update {
+                        progress.start_item_up_to_date(&draft_name);
                         if config.verbose {
                             println!("⊚ Skipping {} (up to date)", draft_name);
                         }
@@ -191,7 +354,7 @@ pub async fn create_specification(
                     }
 
                     let dependency_context = match build_dependency_context(&node) {
-                        Ok(c) => c,
+                        Ok(context) => context,
                         Err(e) => {
                             progress.complete_item(&draft_name, false);
                             eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
@@ -199,32 +362,79 @@ pub async fn create_specification(
                         }
                     };
 
-                    let cfg = *config;
-                    let executor_clone = executor.clone();
-                    tasks.push(tokio::task::spawn(async move {
-                        let result = process_specification(
-                            &executor_clone,
-                            &draft_file,
-                            &draft_name,
-                            &cfg,
-                            dependency_context,
-                        )
-                        .await;
-                        (
+                    let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
+                    let dependency_context = build_specification_context(
+                        &draft_file,
+                        &draft_content,
+                        dependency_context,
+                    )?;
+                    let (dependency_context, estimated) = fit_context_to_token_limit(
+                        &executor,
+                        &draft_content,
+                        dependency_context,
+                        token_limit,
+                    )?;
+                    let cache_hit = executor
+                        .is_cache_hit(&draft_content, dependency_context.clone())
+                        .unwrap_or(false);
+                    stage_items.push(StageItem {
+                        name: draft_name.clone(),
+                        estimated,
+                        cache_hit,
+                        payload: (
+                            draft_file,
                             draft_name,
+                            output_path,
+                            dependency_fingerprint,
+                            draft_content,
+                            dependency_context,
+                        ),
+                    });
+                }
+
+                let cfg = config;
+                let executor_clone = executor.clone();
+                let results = run_stage_items(
+                    stage_items,
+                    can_parallel,
+                    &mut progress,
+                    &resources,
+                    &config,
+                    move |(
+                        draft_file,
+                        draft_name,
+                        output_path,
+                        dependency_fingerprint,
+                        draft_content,
+                        dependency_context,
+                    ),
+                          execution_control| {
+                        let executor = executor_clone.clone();
+                        async move {
+                            let result = process_specification(
+                                &executor,
+                                &draft_content,
+                                &draft_file,
+                                &draft_name,
+                                &cfg,
+                                dependency_context,
+                                execution_control,
+                            )
+                            .await?;
+                            Ok((draft_file, output_path, dependency_fingerprint, result))
+                        }
+                    },
+                )
+                .await?;
+
+                for (draft_name, result) in results {
+                    match result {
+                        Ok((
                             draft_file,
                             output_path,
                             dependency_fingerprint,
-                            result,
-                        )
-                    }));
-                }
-
-                for task in tasks {
-                    let (draft_name, draft_file, output_path, dependency_fingerprint, result) =
-                        task.await?;
-                    match result {
-                        Ok(_) => {
+                            ProcessSpecOutcome::Success,
+                        )) => {
                             tracker.record(
                                 Stage::Specification,
                                 &draft_name,
@@ -232,6 +442,7 @@ pub async fn create_specification(
                                 &output_path,
                                 &dependency_fingerprint,
                             )?;
+                            tracker.save()?;
                             updated_count += 1;
                             updated_in_run.insert(draft_name.clone());
                             progress.complete_item(&draft_name, true);
@@ -239,93 +450,62 @@ pub async fn create_specification(
                                 println!("✓ Successfully created specification for {}", draft_name);
                             }
                         }
-                        Err(e) => {
+                        Ok((
+                            _draft_file,
+                            _output_path,
+                            _dependency_fingerprint,
+                            ProcessSpecOutcome::BlockingAmbiguities {
+                                draft_file: ba_draft_file,
+                                draft_name: ba_draft_name,
+                                draft_content: ba_draft_content,
+                                spec_content: ba_spec_content,
+                                actionable: ba_actionable,
+                                additional_context: ba_context,
+                            },
+                        )) => {
                             progress.complete_item(&draft_name, false);
-                            eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
-                        }
-                    }
-                }
-            } else {
-                for node in nodes {
-                    let draft_file = node.input_path.clone();
-                    let draft_name = node.name.clone();
-                    let dependency_invalidated = node
-                        .direct_dependency_names()
-                        .iter()
-                        .any(|dep_name| updated_in_run.contains(dep_name));
-                    let dependency_fingerprint =
-                        dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
-                    let output_path = determine_specification_output_path(
-                        &draft_file,
-                        DRAFTS_DIR,
-                        SPECIFICATIONS_DIR,
-                    )?;
-
-                    progress.start_item(&draft_name);
-                    let needs_update = if dependency_invalidated {
-                        true
-                    } else {
-                        tracker.needs_update(
-                            Stage::Specification,
-                            &draft_name,
-                            &draft_file,
-                            &output_path,
-                            &dependency_fingerprint,
-                        )?
-                    };
-                    if !needs_update {
-                        if config.verbose {
-                            println!("⊚ Skipping {} (up to date)", draft_name);
-                        }
-                        progress.complete_item(&draft_name, true);
-                        continue;
-                    }
-
-                    let dependency_context = build_dependency_context(&node)?;
-                    match process_specification(
-                        &executor,
-                        &draft_file,
-                        &draft_name,
-                        config,
-                        dependency_context,
-                    )
-                    .await
-                    {
-                        Ok(_) => {
-                            tracker.record(
-                                Stage::Specification,
-                                &draft_name,
-                                &draft_file,
-                                &output_path,
-                                &dependency_fingerprint,
-                            )?;
-                            updated_count += 1;
-                            updated_in_run.insert(draft_name.clone());
-                            progress.complete_item(&draft_name, true);
-                            if config.verbose {
-                                println!("✓ Successfully created specification for {}", draft_name);
+                            if fix && fix_attempt < max_fix_attempts {
+                                return try_fix_and_retry(
+                                    &ba_draft_file,
+                                    &ba_draft_name,
+                                    &ba_draft_content,
+                                    &ba_spec_content,
+                                    &ba_actionable,
+                                    ba_context,
+                                    fix_attempt,
+                                    max_fix_attempts,
+                                    &filter,
+                                    rate_limit,
+                                    token_limit,
+                                    &config,
+                                    resources.execution_control.clone(),
+                                )
+                                .await;
                             }
+                            eprintln!("✗ Blocking ambiguities (use --fix to auto-fix drafts)");
+                            anyhow::bail!("generated specification contains blocking ambiguities");
                         }
                         Err(e) => {
                             progress.complete_item(&draft_name, false);
                             eprintln!("✗ Failed to create specification for {}: {}", draft_name, e);
+                            anyhow::bail!("{}", e);
                         }
                     }
                 }
             }
         }
-    }
 
-    // Save tracker
-    tracker.save()?;
+        // Save tracker
+        tracker.save()?;
 
-    progress.finish();
+        progress.finish();
 
-    if updated_count == 0 && config.verbose {
-        println!("All specifications are up to date");
-    }
+        if updated_count == 0 && config.verbose {
+            println!("All specifications are up to date");
+        }
 
-    Ok(())
+        Ok(())
+    })
 }
 
 pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result<()> {
@@ -367,22 +547,66 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
         let spec_content = fs::read_to_string(&spec_path).with_context(|| {
             format!("Failed to read specification file: {}", spec_path.display())
         })?;
+        if is_brand_spec_path(&spec_path, SPECIFICATIONS_DIR)
+            || is_brand_draft_path(&draft_file, DRAFTS_DIR)
+        {
+            match validate_brand_spec_content(&spec_content) {
+                Ok(validation) => {
+                    if !validation.blocking_ambiguities.is_empty() {
+                        issues += 1;
+                        print_blocking_items(
+                            &draft_file,
+                            "spec:blocking",
+                            &format!(
+                                "Blocking ambiguities detected in specification for '{}'.",
+                                draft_name
+                            ),
+                            &validation.blocking_ambiguities,
+                        );
+                    }
+                }
+                Err(err) => {
+                    issues += 1;
+                    eprintln!("error[spec:invalid-brand]:");
+                    eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
+                    eprintln!(
+                        "  Invalid brand specification for '{}': {}",
+                        draft_name, err
+                    );
+                    eprintln!();
+                }
+            }
+            continue;
+        }
+
         if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
             let actionable = extract_actionable_blocking_bullets(&blocking);
             if !actionable.is_empty() {
                 issues += 1;
-                eprintln!("error[spec:blocking]:");
-                eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
-                eprintln!(
-                    "  Blocking Ambiguities detected in specification for '{}'.",
-                    draft_name
+                print_blocking_items(
+                    &draft_file,
+                    "spec:blocking",
+                    &format!(
+                        "Blocking ambiguities detected in specification for '{}'.",
+                        draft_name
+                    ),
+                    &actionable,
                 );
-                eprintln!();
-                for bullet in actionable {
-                    eprintln!("  {}", bullet);
-                }
-                eprintln!();
             }
+        }
+
+        let unresolved = check_brand_references_in_spec_content(&spec_path, &spec_content)?;
+        if !unresolved.is_empty() {
+            issues += 1;
+            print_blocking_items(
+                &draft_file,
+                "spec:brand-token",
+                &format!(
+                    "Undefined brand token references detected in specification for '{}'.",
+                    draft_name
+                ),
+                &unresolved,
+            );
         }
     }
 
@@ -394,843 +618,101 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
     Ok(())
 }
 
-struct ReviewIssue {
-    origin_draft_path: PathBuf,
-    error_source: PathBuf,
-    error_section: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct ReviewFixOptions {
-    pub fix: bool,
-    pub interactive: bool,
-    pub all: bool,
-    pub step: bool,
-    pub max: Option<usize>,
-    pub file_filters: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct ReviewTarget {
-    draft_path: PathBuf,
-    ownership_reason: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ReviewDeltaEnvelope {
-    changes: Vec<ReviewDelta>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ReviewDelta {
-    section: String,
-    change_type: String,
-    before: Option<String>,
-    after: String,
-    reason: Option<String>,
-    #[serde(default)]
-    style_intent: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct AppliedReviewChange {
-    section: String,
-    change_type: String,
-    preview: String,
-    style_intent: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct ReviewSuggestion {
-    draft_path: PathBuf,
-    delta: ReviewDelta,
-    error_source: PathBuf,
-    ownership_reason: String,
-}
-
-#[derive(Clone, Debug)]
-struct RejectedSuggestion {
-    draft_path: PathBuf,
-    reason: String,
-    delta: ReviewDelta,
-}
-
-pub async fn review_specification(
-    names: Vec<String>,
-    fix_options: ReviewFixOptions,
-    config: &Config,
-) -> Result<()> {
-    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &CategoryFilter::all())?;
-    if draft_files.is_empty() {
-        println!("No draft files found to process");
-        return Ok(());
-    }
-
-    let mut issues = Vec::new();
-    for draft_file in draft_files {
-        let spec_path =
-            determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
-        if !spec_path.exists() {
-            continue;
-        }
-
-        let spec_content = fs::read_to_string(&spec_path).with_context(|| {
-            format!("Failed to read specification file: {}", spec_path.display())
-        })?;
-        if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-            let actionable = extract_actionable_blocking_bullets(&blocking);
-            if !actionable.is_empty() {
-                issues.push(ReviewIssue {
-                    origin_draft_path: draft_file.clone(),
-                    error_source: spec_path,
-                    error_section: actionable.join("\n"),
-                });
-            }
-        }
-    }
-
-    if issues.is_empty() {
-        println!("✓ All good: no blocking ambiguities found");
-        return Ok(());
-    }
-
-    review_issues_with_agent("specification", issues, fix_options, config).await
-}
-
-pub async fn review_implementation(
-    names: Vec<String>,
-    fix_options: ReviewFixOptions,
-    config: &Config,
-) -> Result<()> {
-    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", &CategoryFilter::all())?;
-    if context_files.is_empty() {
-        println!("No specification files found to process");
-        return Ok(());
-    }
-
-    let mut issues = Vec::new();
-    for context_file in context_files {
-        let implementation_path =
-            determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
-        if !implementation_path.exists() {
-            continue;
-        }
-
-        let implementation_code = fs::read_to_string(&implementation_path).with_context(|| {
-            format!(
-                "Failed to read implementation file: {}",
-                implementation_path.display()
-            )
-        })?;
-
-        let Some(error_section) = extract_implementation_review_error_section(&implementation_code)
-        else {
-            continue;
-        };
-
-        let draft_path =
-            determine_specification_output_path(&context_file, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
-        if !draft_path.exists() {
-            continue;
-        }
-
-        issues.push(ReviewIssue {
-            origin_draft_path: draft_path,
-            error_source: implementation_path,
-            error_section,
-        });
-    }
-
-    if issues.is_empty() {
-        println!("✓ All good: no implementation error markers found");
-        return Ok(());
-    }
-
-    review_issues_with_agent("implementation", issues, fix_options, config).await
-}
-
-async fn review_issues_with_agent(
-    stage: &str,
-    issues: Vec<ReviewIssue>,
-    fix_options: ReviewFixOptions,
-    config: &Config,
-) -> Result<()> {
-    let executor = AgentExecutor::new("review_draft_errors", config)?;
-    let mut suggestions: Vec<ReviewSuggestion> = Vec::new();
-
-    for issue in issues {
-        let targets = resolve_review_targets(&issue.origin_draft_path, &issue.error_section)?;
-        let mut emitted_source_header = false;
-
-        for target in targets {
-            let draft_content = fs::read_to_string(&target.draft_path).with_context(|| {
-                format!("Failed to read draft file: {}", target.draft_path.display())
-            })?;
-
-            let mut additional_context = HashMap::new();
-            additional_context.insert("stage".to_string(), json!(stage));
-            additional_context.insert(
-                "error_source".to_string(),
-                json!(issue.error_source.display().to_string()),
-            );
-            additional_context.insert("error_section".to_string(), json!(issue.error_section));
-            additional_context.insert("fix_mode".to_string(), json!(fix_options.fix));
-            additional_context.insert(
-                "target_draft".to_string(),
-                json!(target.draft_path.display().to_string()),
-            );
-            additional_context.insert(
-                "ownership_reason".to_string(),
-                json!(target.ownership_reason.clone()),
-            );
-            additional_context.insert(
-                "draft_sections".to_string(),
-                json!(extract_draft_section_names(&draft_content)),
-            );
-            additional_context.insert(
-                "style_constraints".to_string(),
-                json!(
-                    "Use specification style. Prefer concise requirement bullets. Avoid implementation details."
-                ),
-            );
-
-            let response = executor
-                .execute_with_context(&draft_content, additional_context)
-                .await?;
-            let output = match response {
-                agent_executor::AgentResponse::Final(s) => s,
-                agent_executor::AgentResponse::Questions(q) => q,
-            };
-
-            if fix_options.fix {
-                let deltas = parse_review_delta_envelope(&output)?;
-                for delta in deltas.changes {
-                    suggestions.push(ReviewSuggestion {
-                        draft_path: target.draft_path.clone(),
-                        delta,
-                        error_source: issue.error_source.clone(),
-                        ownership_reason: target.ownership_reason.clone(),
-                    });
-                }
-            } else {
-                if !emitted_source_header {
-                    eprintln!("\u{001b}[31m{}\u{001b}[0m", issue.error_source.display());
-                    emitted_source_header = true;
-                }
-                println!(
-                    "  target: {} ({})",
-                    target.draft_path.display(),
-                    target.ownership_reason
-                );
-                println!("\u{001b}[32m{}\u{001b}[0m", output.trim());
-            }
-        }
-    }
-
-    if !fix_options.fix {
-        return Ok(());
-    }
-    if !fix_options.file_filters.is_empty() {
-        suggestions.retain(|suggestion| {
-            suggestion_matches_file_filter(&suggestion.draft_path, &fix_options.file_filters)
-        });
-    }
-    if suggestions.is_empty() {
-        if fix_options.file_filters.is_empty() {
-            println!("No suggestions generated for --fix");
-        } else {
-            println!("No suggestions matched --file filters");
-        }
-        return Ok(());
-    }
-
-    let selected_indices = select_suggestions(&suggestions, fix_options)?;
-    if selected_indices.is_empty() {
-        println!("No suggestions applied");
-        return Ok(());
-    }
-
-    let mut grouped: BTreeMap<PathBuf, Vec<ReviewDelta>> = BTreeMap::new();
-    for idx in selected_indices {
-        if let Some(s) = suggestions.get(idx) {
-            grouped
-                .entry(s.draft_path.clone())
-                .or_default()
-                .push(s.delta.clone());
-        }
-    }
-
-    let mut change_report: BTreeMap<PathBuf, Vec<AppliedReviewChange>> = BTreeMap::new();
-    let mut rejected = Vec::<RejectedSuggestion>::new();
-    for (path, deltas) in grouped {
-        let draft_content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read draft file: {}", path.display()))?;
-        let (applied, rejected_for_file) =
-            apply_review_deltas(&path, &draft_content, deltas, config.dry_run)?;
-        if !applied.is_empty() {
-            change_report.insert(path.clone(), applied);
-        }
-        rejected.extend(
-            rejected_for_file
-                .into_iter()
-                .map(|(delta, reason)| RejectedSuggestion {
-                    draft_path: path.clone(),
-                    reason,
-                    delta,
-                }),
-        );
-    }
-
-    for (path, changes) in &change_report {
-        println!("{}", path.display());
-        for change in changes {
-            if let Some(style_intent) = &change.style_intent {
-                println!(
-                    "  - {} [{}]: {} ({})",
-                    change.section, change.change_type, change.preview, style_intent
-                );
-            } else {
-                println!(
-                    "  - {} [{}]: {}",
-                    change.section, change.change_type, change.preview
-                );
-            }
-        }
-    }
-    for item in rejected {
-        println!(
-            "rejected: {} [{} {}] - {}",
-            item.draft_path.display(),
-            item.delta.section,
-            item.delta.change_type,
-            item.reason
-        );
-    }
-
-    Ok(())
-}
-
-fn resolve_review_targets(
-    origin_draft_path: &Path,
-    error_section: &str,
-) -> Result<Vec<ReviewTarget>> {
-    let candidates = build_review_candidates(origin_draft_path)?;
-    let mut scored = Vec::new();
-    for (path, is_dependency, is_reverse_dependency) in candidates {
-        let (score, reason) = score_review_candidate(
-            &path,
-            origin_draft_path,
-            error_section,
-            is_dependency,
-            is_reverse_dependency,
-        );
-        scored.push((path, score, reason));
-    }
-
-    if scored.is_empty() {
-        return Ok(vec![ReviewTarget {
-            draft_path: origin_draft_path.to_path_buf(),
-            ownership_reason: "fallback_origin".to_string(),
-        }]);
-    }
-
-    let max_score = scored.iter().map(|(_, score, _)| *score).max().unwrap_or(0);
-    if max_score <= 0 {
-        return Ok(vec![ReviewTarget {
-            draft_path: origin_draft_path.to_path_buf(),
-            ownership_reason: "fallback_origin".to_string(),
-        }]);
-    }
-
-    let mut targets = Vec::new();
-    for (path, score, reason) in scored {
-        if score == max_score {
-            targets.push(ReviewTarget {
-                draft_path: path,
-                ownership_reason: reason,
-            });
-        }
-    }
-    if targets.is_empty() {
-        targets.push(ReviewTarget {
-            draft_path: origin_draft_path.to_path_buf(),
-            ownership_reason: "fallback_origin".to_string(),
-        });
-    }
-    Ok(targets)
-}
-
-fn build_review_candidates(origin_draft_path: &Path) -> Result<Vec<(PathBuf, bool, bool)>> {
-    let mut candidates: HashMap<PathBuf, (bool, bool)> = HashMap::new();
-    candidates.insert(origin_draft_path.to_path_buf(), (false, false));
-
-    let origin_levels =
-        build_execution_plan(vec![origin_draft_path.to_path_buf()], DRAFTS_DIR, None)?;
-    if let Some(origin_node) = origin_levels.into_iter().flatten().next() {
-        for dep in origin_node.resolve_dependency_closure(DRAFTS_DIR, None)? {
-            let path = PathBuf::from(dep.path);
-            if path.exists() {
-                let entry = candidates.entry(path).or_insert((false, false));
-                entry.0 = true;
-            }
-        }
-    }
-
-    let all_drafts = resolve_input_files(DRAFTS_DIR, Vec::new(), "md", &CategoryFilter::all())?;
-    for draft in all_drafts {
-        if draft == origin_draft_path {
-            continue;
-        }
-        let levels = build_execution_plan(vec![draft.clone()], DRAFTS_DIR, None)?;
-        let Some(node) = levels.into_iter().flatten().next() else {
-            continue;
-        };
-        let depends_on_origin = node
-            .resolve_dependency_closure(DRAFTS_DIR, None)?
-            .iter()
-            .any(|artifact| Path::new(&artifact.path) == origin_draft_path);
-        if depends_on_origin {
-            let entry = candidates.entry(draft).or_insert((false, false));
-            entry.1 = true;
-        }
-    }
-
-    let mut result = candidates
-        .into_iter()
-        .map(|(path, (is_dependency, is_reverse_dependency))| {
-            (path, is_dependency, is_reverse_dependency)
-        })
-        .collect::<Vec<_>>();
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(result)
-}
-
-fn score_review_candidate(
-    candidate_path: &Path,
-    origin_draft_path: &Path,
-    error_section: &str,
-    is_dependency: bool,
-    is_reverse_dependency: bool,
-) -> (i32, String) {
-    let mut score = 0;
-    let mut reason = "fallback_origin".to_string();
-    let error_lower = error_section.to_ascii_lowercase();
-    let compact_error: String = error_lower
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-    let stem = candidate_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let compact_stem: String = stem.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-
-    if candidate_path == origin_draft_path {
-        score += 10;
-        reason = "origin".to_string();
-    }
-    if is_dependency {
-        score += 25;
-        reason = "dependency".to_string();
-    }
-    if is_reverse_dependency {
-        score += 5;
-    }
-    if !compact_stem.is_empty() && compact_error.contains(&compact_stem) {
-        score += 45;
-        reason = "error_mentions_draft_name".to_string();
-    }
-    if !compact_stem.is_empty() && compact_error.contains(&(compact_stem.clone() + "context")) {
-        score += 70;
-        reason = "error_mentions_context_symbol".to_string();
-    }
-
-    (score, reason)
-}
-
-fn parse_review_delta_envelope(output: &str) -> Result<ReviewDeltaEnvelope> {
-    let trimmed = output.trim();
-    if let Ok(parsed) = serde_json::from_str::<ReviewDeltaEnvelope>(trimmed) {
-        return Ok(parsed);
-    }
-
-    if let Some(json_payload) = extract_fenced_json_payload(trimmed) {
-        return serde_json::from_str::<ReviewDeltaEnvelope>(&json_payload)
-            .context("Failed to parse fenced JSON review delta payload");
-    }
-
-    anyhow::bail!("Fix mode expected structured JSON delta output from review agent");
-}
-
-fn extract_draft_section_names(content: &str) -> Vec<String> {
-    let mut sections = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            let section = trimmed.trim_start_matches('#').trim();
-            if !section.is_empty() {
-                sections.push(section.to_string());
-            }
-        }
-    }
-    sections
-}
-
-fn suggestion_matches_file_filter(path: &Path, filters: &[String]) -> bool {
-    let full_path = path
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let file_stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    filters.iter().any(|raw_filter| {
-        let normalized = raw_filter.trim().replace('\\', "/").to_ascii_lowercase();
-        if normalized.is_empty() {
-            return false;
-        }
-        let normalized_stem = normalized
-            .strip_suffix(".md")
-            .or_else(|| normalized.strip_suffix(".rs"))
-            .unwrap_or(&normalized);
-
-        full_path.ends_with(&normalized)
-            || file_name == normalized
-            || file_stem == normalized
-            || file_stem == normalized_stem
-    })
-}
-
-fn select_suggestions(
-    suggestions: &[ReviewSuggestion],
-    mut options: ReviewFixOptions,
-) -> Result<Vec<usize>> {
-    if options.max == Some(0) {
-        return Ok(Vec::new());
-    }
-    if !options.fix {
-        return Ok(Vec::new());
-    }
-    if !options.all && !options.interactive && !options.step {
-        options.interactive = true;
-    }
-
-    let mut selected = if options.all {
-        (0..suggestions.len()).collect::<Vec<_>>()
-    } else if options.step {
-        select_suggestions_step_mode(suggestions)?
-    } else {
-        select_suggestions_interactive(suggestions)?
-    };
-
-    if let Some(limit) = options.max {
-        selected.truncate(limit);
-    }
-    Ok(selected)
-}
-
-fn select_suggestions_step_mode(suggestions: &[ReviewSuggestion]) -> Result<Vec<usize>> {
-    let mut selected = Vec::new();
-    for (idx, suggestion) in suggestions.iter().enumerate() {
-        println!(
-            "[{}] {} | {} [{}] {}",
-            idx + 1,
-            suggestion.draft_path.display(),
-            suggestion.delta.section,
-            suggestion.delta.change_type,
-            suggestion.delta.after
-        );
-        print!("Apply this suggestion? [y]es/[n]o/[q]uit: ");
-        io::stdout().flush().ok();
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let answer = input.trim().to_ascii_lowercase();
-        if answer == "q" {
-            break;
-        }
-        if answer.is_empty() || answer == "y" || answer == "yes" {
-            selected.push(idx);
-        }
-    }
-    Ok(selected)
-}
-
-fn select_suggestions_interactive(suggestions: &[ReviewSuggestion]) -> Result<Vec<usize>> {
-    println!("Suggested changes:");
-    for (idx, suggestion) in suggestions.iter().enumerate() {
-        println!(
-            "  {}. {} | {} [{}] {}",
-            idx + 1,
-            suggestion.draft_path.display(),
-            suggestion.delta.section,
-            suggestion.delta.change_type,
-            suggestion.delta.after
-        );
-        println!(
-            "     source: {} ({})",
-            suggestion.error_source.display(),
-            suggestion.ownership_reason
-        );
-    }
-    print!("Select indices/ranges (e.g. 1,3-5), 'all', or 'none': ");
-    io::stdout().flush().ok();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    parse_selection_input(input.trim(), suggestions.len())
-}
-
-fn parse_selection_input(input: &str, total: usize) -> Result<Vec<usize>> {
-    let normalized = input.trim().to_ascii_lowercase();
-    if normalized == "none" || normalized.is_empty() {
-        return Ok(Vec::new());
-    }
-    if normalized == "all" {
-        return Ok((0..total).collect());
-    }
-
-    let mut out = HashSet::new();
-    for token in normalized.split(',') {
-        let t = token.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if let Some((a, b)) = t.split_once('-') {
-            let start = a.trim().parse::<usize>().context("Invalid range start")?;
-            let end = b.trim().parse::<usize>().context("Invalid range end")?;
-            if start == 0 || end == 0 || start > end || end > total {
-                anyhow::bail!("Range out of bounds: {}", t);
-            }
-            for i in start..=end {
-                out.insert(i - 1);
-            }
-        } else {
-            let idx = t.parse::<usize>().context("Invalid index")?;
-            if idx == 0 || idx > total {
-                anyhow::bail!("Index out of bounds: {}", idx);
-            }
-            out.insert(idx - 1);
-        }
-    }
-    let mut values: Vec<usize> = out.into_iter().collect();
-    values.sort_unstable();
-    Ok(values)
-}
-
-fn extract_fenced_json_payload(text: &str) -> Option<String> {
-    let start = text.find("```json")?;
-    let rest = &text[start + "```json".len()..];
-    let end = rest.find("```")?;
-    Some(rest[..end].trim().to_string())
-}
-
-fn apply_review_deltas(
-    draft_path: &Path,
-    original_content: &str,
-    deltas: Vec<ReviewDelta>,
-    dry_run: bool,
-) -> Result<(Vec<AppliedReviewChange>, Vec<(ReviewDelta, String)>)> {
-    let mut working = original_content.to_string();
-    let mut applied = Vec::new();
-    let mut rejected = Vec::new();
-
-    for delta in deltas {
-        if delta.after.trim().is_empty() {
-            rejected.push((delta, "empty_after".to_string()));
-            continue;
-        }
-        let Some((start, end)) = find_section_bounds(&working, &delta.section) else {
-            rejected.push((delta, "missing_section".to_string()));
-            continue;
-        };
-        let (next, did_apply) = apply_single_review_delta(&working, start, end, &delta)?;
-        if did_apply {
-            working = next;
-            let _ = delta.reason.as_deref();
-            applied.push(AppliedReviewChange {
-                section: delta.section.clone(),
-                change_type: delta.change_type.clone(),
-                preview: delta.after.trim().chars().take(100).collect(),
-                style_intent: delta.style_intent.clone(),
-            });
-        } else {
-            rejected.push((delta, "no_op_or_invalid".to_string()));
-        }
-    }
-
-    if !dry_run && !applied.is_empty() {
-        fs::write(draft_path, &working)
-            .with_context(|| format!("Failed to update draft file: {}", draft_path.display()))?;
-    }
-
-    Ok((applied, rejected))
-}
-
-fn apply_single_review_delta(
-    content: &str,
-    section_start: usize,
-    section_end: usize,
-    delta: &ReviewDelta,
-) -> Result<(String, bool)> {
-    let mut lines: Vec<String> = content.lines().map(|line| line.to_string()).collect();
-    let section_slice = &lines[section_start..section_end];
-    let change_type = delta.change_type.trim().to_ascii_lowercase();
-
-    let mut applied = false;
-    match change_type.as_str() {
-        "append_bullet" => {
-            let bullet = format!("- {}", delta.after.trim());
-            if !section_slice
-                .iter()
-                .any(|line| line.trim() == bullet.trim())
-            {
-                lines.insert(section_end, bullet);
-                applied = true;
-            }
-        }
-        "insert_paragraph" => {
-            let paragraph = delta.after.trim().to_string();
-            if !paragraph.is_empty() && !section_slice.iter().any(|line| line.trim() == paragraph) {
-                lines.insert(section_end, paragraph);
-                applied = true;
-            }
-        }
-        "replace_bullet" => {
-            let Some(before) = delta.before.as_deref() else {
-                return Ok((content.to_string(), false));
-            };
-            let replacement = format!("- {}", delta.after.trim());
-            for idx in section_start..section_end {
-                if lines[idx].trim_start().starts_with("- ") && lines[idx].contains(before.trim()) {
-                    lines[idx] = replacement.clone();
-                    applied = true;
-                    break;
-                }
-            }
-        }
-        _ => {}
-    }
-
-    if !applied {
-        return Ok((content.to_string(), false));
-    }
-
-    let mut updated = lines.join("\n");
-    if content.ends_with('\n') {
-        updated.push('\n');
-    }
-    Ok((updated, true))
-}
-
-fn find_section_bounds(content: &str, requested_section: &str) -> Option<(usize, usize)> {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut heading_idx = None;
-
-    for (idx, line) in lines.iter().enumerate() {
-        if section_heading_matches(line, requested_section) {
-            heading_idx = Some(idx);
-            break;
-        }
-    }
-
-    let heading_idx = heading_idx?;
-    let start = heading_idx + 1;
-    let mut end = lines.len();
-    for (idx, line) in lines.iter().enumerate().skip(start) {
-        if line.trim_start().starts_with('#') {
-            end = idx;
-            break;
-        }
-    }
-    Some((start, end))
-}
-
-fn section_heading_matches(line: &str, requested_section: &str) -> bool {
-    let heading = normalize_section_label(line);
-    let requested = normalize_section_label(requested_section);
-    if heading.is_empty() || requested.is_empty() {
-        return false;
-    }
-    heading == requested
-        || (requested == "functionality" && heading == "functionalities")
-        || (requested == "functionalities" && heading == "functionality")
-        || (requested == "role methods" && heading == "role method")
-        || (requested == "role method" && heading == "role methods")
-        || (requested == "props" && heading == "properties")
-        || (requested == "properties" && heading == "props")
-}
-
-fn normalize_section_label(input: &str) -> String {
-    let stripped = input
-        .trim()
-        .trim_start_matches('#')
-        .trim()
-        .trim_end_matches(':');
-    stripped
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == ' ' {
-                c.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 async fn process_specification(
     executor: &AgentExecutor,
+    draft_content: &str,
     draft_file: &Path,
     draft_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
-) -> Result<()> {
-    let draft_content = fs::read_to_string(draft_file).context("Failed to read draft file")?;
-
+    execution_control: Option<CliExecutionControl>,
+) -> Result<ProcessSpecOutcome> {
     if config.dry_run {
         println!("[DRY RUN] Would create specification for: {}", draft_name);
-        return Ok(());
+        return Ok(ProcessSpecOutcome::Success);
     }
 
     // Use conversational execution to handle questions
     let spec_content = executor
-        .execute_with_conversation_with_seed(&draft_content, draft_name, additional_context)
+        .execute_with_conversation_with_seed(
+            &draft_content,
+            draft_name,
+            additional_context.clone(),
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
         .await?;
 
+    finalize_specification_output(
+        draft_content,
+        draft_file,
+        draft_name,
+        spec_content,
+        additional_context,
+    )
+}
+
+fn finalize_specification_output(
+    draft_content: &str,
+    draft_file: &Path,
+    draft_name: &str,
+    spec_content: String,
+    additional_context: HashMap<String, serde_json::Value>,
+) -> Result<ProcessSpecOutcome> {
     // Determine output path preserving folder structure
     let output_path =
         determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
     let mut has_blocking_ambiguities = false;
+    let mut actionable = Vec::new();
 
-    // Report Blocking Ambiguities immediately if present in generated spec
-    if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-        let actionable = extract_actionable_blocking_bullets(&blocking);
-        if !actionable.is_empty() {
-            has_blocking_ambiguities = true;
-            eprintln!("error[spec:blocking]:");
-            // Print source input path (draft) so IDEs can navigate to where fixes are needed.
-            eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
-            eprintln!(
-                "  Blocking Ambiguities detected in generated specification for '{}'.",
+    if is_brand_draft_path(draft_file, DRAFTS_DIR) {
+        let validation = validate_brand_spec_content(&spec_content).with_context(|| {
+            format!(
+                "generated brand specification for '{}' is invalid",
                 draft_name
+            )
+        })?;
+        actionable = validation.blocking_ambiguities;
+        has_blocking_ambiguities = !actionable.is_empty();
+
+        if has_blocking_ambiguities {
+            print_blocking_items(
+                draft_file,
+                "spec:blocking",
+                &format!(
+                    "Blocking ambiguities detected in generated specification for '{}'.",
+                    draft_name
+                ),
+                &actionable,
             );
-            eprintln!();
-            for bullet in actionable {
-                eprintln!("  {}", bullet);
+        }
+    } else {
+        // Report Blocking Ambiguities immediately if present in generated spec
+        if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
+            actionable = extract_actionable_blocking_bullets(&blocking);
+            if !actionable.is_empty() {
+                has_blocking_ambiguities = true;
+                print_blocking_items(
+                    draft_file,
+                    "spec:blocking",
+                    &format!(
+                        "Blocking ambiguities detected in generated specification for '{}'.",
+                        draft_name
+                    ),
+                    &actionable,
+                );
             }
-            eprintln!();
+        }
+
+        let unresolved = check_brand_references_in_spec_content(&output_path, &spec_content)?;
+        if !unresolved.is_empty() {
+            anyhow::bail!(
+                "generated specification for '{}' references undefined brand token(s): {}",
+                draft_name,
+                unresolved.join(", ")
+            );
         }
     }
 
@@ -1239,22 +721,175 @@ async fn process_specification(
         fs::create_dir_all(parent).context("Failed to create specification output directory")?;
     }
 
-    fs::write(&output_path, spec_content).context("Failed to write specification file")?;
+    fs::write(&output_path, &spec_content).context("Failed to write specification file")?;
 
     if has_blocking_ambiguities {
-        anyhow::bail!("generated specification contains blocking ambiguities");
+        return Ok(ProcessSpecOutcome::BlockingAmbiguities {
+            draft_file: draft_file.to_path_buf(),
+            draft_name: draft_name.to_string(),
+            draft_content: draft_content.to_string(),
+            spec_content,
+            actionable,
+            additional_context,
+        });
     }
 
-    Ok(())
+    Ok(ProcessSpecOutcome::Success)
+}
+
+fn build_dependency_drafts_from_context(
+    context: &HashMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    let closure: Vec<serde_json::Value> = if let Some(values) = context
+        .get("dependency_tool_context")
+        .and_then(|v| v.get("dependency_artifacts"))
+        .and_then(|v| v.as_array())
+    {
+        values.clone()
+    } else if let Some(values) = context.get("dependency_closure").and_then(|v| v.as_array()) {
+        values.clone()
+    } else if let Some(values) = context
+        .get("direct_dependencies")
+        .and_then(|v| v.as_array())
+    {
+        values.clone()
+    } else {
+        Vec::new()
+    };
+
+    let mut map = serde_json::Map::new();
+    for item in closure {
+        if let Some(obj) = item.as_object() {
+            let path = obj.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let content = obj.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            if !path.is_empty() && path.starts_with("drafts/") {
+                map.insert(
+                    path.to_string(),
+                    serde_json::Value::String(content.to_string()),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+async fn try_fix_and_retry(
+    draft_file: &Path,
+    draft_name: &str,
+    draft_content: &str,
+    spec_content: &str,
+    actionable: &[String],
+    additional_context: HashMap<String, serde_json::Value>,
+    fix_attempt: usize,
+    max_fix_attempts: usize,
+    filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    config: &Config,
+    execution_control: Option<CliExecutionControl>,
+) -> Result<()> {
+    let dependency_drafts = build_dependency_drafts_from_context(&additional_context);
+
+    let mut fix_context = HashMap::new();
+    fix_context.insert(
+        "blocking_ambiguities".to_string(),
+        serde_json::Value::String(actionable.join("\n")),
+    );
+    fix_context.insert(
+        "failed_draft_path".to_string(),
+        serde_json::Value::String(draft_file.display().to_string()),
+    );
+    fix_context.insert(
+        "failed_draft_content".to_string(),
+        serde_json::Value::String(draft_content.to_string()),
+    );
+    fix_context.insert(
+        "failed_spec_content".to_string(),
+        serde_json::Value::String(spec_content.to_string()),
+    );
+    fix_context.insert(
+        "dependency_drafts".to_string(),
+        serde_json::Value::String(
+            serde_json::to_string_pretty(&dependency_drafts).unwrap_or_else(|_| "{}".to_string()),
+        ),
+    );
+
+    let fix_executor = Arc::new(AgentExecutor::new("fix_draft_blockers", config)?);
+    let agent_response = fix_executor
+        .execute_with_context(
+            "",
+            fix_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
+        .await
+        .context("Failed to execute fix_draft_blockers agent")?;
+
+    let patch_output = match agent_response {
+        AgentResponse::Final(s) => s,
+        AgentResponse::Questions(q) => {
+            anyhow::bail!(
+                "Fix agent requested clarification; cannot auto-fix. Output: {}",
+                q
+            );
+        }
+    };
+
+    let project_root = Path::new(".");
+    let patched_paths = apply_draft_patches(project_root, &patch_output)
+        .context("Failed to apply draft patches")?;
+
+    let mut affected_names: HashSet<String> = patched_paths
+        .iter()
+        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(String::from))
+        .collect();
+    affected_names.insert(draft_name.to_string());
+
+    if config.verbose {
+        println!(
+            "✓ Applied fix patches to {} draft(s); retrying (attempt {}/{})",
+            patched_paths.len(),
+            fix_attempt + 1,
+            max_fix_attempts
+        );
+    }
+
+    let affected_names_vec: Vec<String> = affected_names.into_iter().collect();
+
+    let mut tracker = BuildTracker::load()?;
+    clear_tracker_stage(
+        &mut tracker,
+        Stage::Specification,
+        &affected_names_vec,
+        config,
+    )?;
+
+    create_specification_inner(
+        affected_names_vec,
+        true,
+        filter,
+        rate_limit,
+        token_limit,
+        true,
+        max_fix_attempts,
+        fix_attempt + 1,
+        config,
+    )
+    .await
 }
 
 pub async fn create_implementation(
     names: Vec<String>,
+    fix: bool,
     max_compile_fix_attempts: usize,
     clear_cache: bool,
     filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let names_provided = !names.is_empty();
     let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
@@ -1279,9 +914,14 @@ pub async fn create_implementation(
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    let execution_levels = build_implementation_execution_plan(context_files)?;
+    let dependency_roots =
+        select_dependency_roots(context_files, SPECIFICATIONS_DIR, names_provided, filter)?;
+    let execution_levels = build_implementation_execution_plan(dependency_roots, filter)?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
-    println!("Creating implementation for {} context(s)", total_count);
+    println!(
+        "Creating implementation for {} specification(s)",
+        total_count
+    );
 
     // Step 1: Generate project structure (Cargo.toml, lib.rs, mod.rs files)
     if config.verbose {
@@ -1306,12 +946,7 @@ pub async fn create_implementation(
     }
 
     let mut recent_generated_files: Vec<PathBuf> = Vec::new();
-    for p in [
-        PathBuf::from("Cargo.toml"),
-        PathBuf::from("src/lib.rs"),
-        PathBuf::from("src/contexts/mod.rs"),
-        PathBuf::from("src/data/mod.rs"),
-    ] {
+    for p in generated_project_structure_paths(&project_info) {
         if p.exists() {
             recent_generated_files.push(p);
         }
@@ -1329,6 +964,8 @@ pub async fn create_implementation(
             can_parallel
         );
     }
+
+    let resources = ExecutionResources::new(rate_limit, token_limit);
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
@@ -1354,10 +991,10 @@ pub async fn create_implementation(
             let dependency_fingerprint = dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
             let output_path =
                 determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
-            progress.start_item(&context_name);
 
             if has_unfinished_specification(&context_file, &context_name, "implementation")? {
                 had_unspecified = true;
+                progress.start_item(&context_name, None);
                 progress.complete_item(&context_name, false);
                 continue;
             }
@@ -1375,6 +1012,7 @@ pub async fn create_implementation(
             };
 
             if !needs_update {
+                progress.start_item_up_to_date(&context_name);
                 if config.verbose {
                     println!("⊚ Skipping {} (up to date)", context_name);
                 }
@@ -1386,12 +1024,25 @@ pub async fn create_implementation(
             if let Some(target_type_name) = infer_target_type_name(&context_file)? {
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
+            let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+            let (dependency_context, estimated) = fit_context_to_token_limit(
+                &executor,
+                &context_content,
+                dependency_context,
+                token_limit,
+            )?;
+            let cache_hit = executor
+                .is_cache_hit(&context_content, dependency_context.clone())
+                .unwrap_or(false);
             runnable.push((
                 context_file,
                 context_name,
                 output_path,
                 dependency_fingerprint,
                 dependency_context,
+                context_content,
+                estimated,
+                cache_hit,
             ));
         }
 
@@ -1400,88 +1051,355 @@ pub async fn create_implementation(
                 println!("Parallel execution enabled for create_implementation");
             }
             let cfg = *config;
-            let mut tasks = Vec::new();
-            for (
-                context_file,
-                context_name,
-                output_path,
-                dependency_fingerprint,
-                dependency_context,
-            ) in runnable
-            {
-                let executor_clone = executor.clone();
-                tasks.push(tokio::task::spawn(async move {
-                    let result = process_implementation(
-                        &executor_clone,
-                        &context_file,
-                        &context_name,
-                        &cfg,
-                        dependency_context,
-                    )
-                    .await;
-                    (
-                        context_name,
-                        context_file,
-                        output_path,
-                        dependency_fingerprint,
-                        result,
-                    )
-                }));
-            }
-            for task in tasks {
-                let (context_name, context_file, output_path, dependency_fingerprint, result) =
-                    task.await?;
-                match result {
-                    Ok(_) => {
-                        tracker.record(
-                            Stage::Implementation,
-                            &context_name,
+            let use_batch = executor.can_use_batch().unwrap_or(false);
+            if use_batch {
+                let mut batch_items: Vec<PreparedImplementationBatchItem> = Vec::new();
+                let mut batch_results: Vec<(String, PathBuf, PathBuf, String, Result<()>)> =
+                    Vec::new();
+
+                for (
+                    context_file,
+                    context_name,
+                    output_path,
+                    dependency_fingerprint,
+                    dependency_context,
+                    context_content,
+                    estimated,
+                    cache_hit,
+                ) in runnable
+                {
+                    if cache_hit {
+                        progress.start_item_cached(&context_name);
+                        let result = process_implementation(
+                            &executor,
+                            &context_content,
                             &context_file,
-                            &output_path,
-                            &dependency_fingerprint,
-                        )?;
-                        updated_count += 1;
-                        updated_in_run.insert(context_name.clone());
-                        recent_generated_files.push(output_path.clone());
-                        progress.complete_item(&context_name, true);
-                        if config.verbose {
-                            println!("✓ Successfully created implementation for {}", context_name);
+                            &context_name,
+                            &cfg,
+                            dependency_context,
+                            resources.execution_control.clone(),
+                        )
+                        .await;
+                        batch_results.push((
+                            context_name,
+                            context_file,
+                            output_path,
+                            dependency_fingerprint,
+                            result,
+                        ));
+                        continue;
+                    }
+
+                    progress.start_item(&context_name, Some(estimated));
+                    match executor
+                        .prepare_execution(&context_content, dependency_context.clone())?
+                    {
+                        reen::execution::PreparedExecutionState::Cached(output) => {
+                            let result = finalize_implementation_output(
+                                &context_file,
+                                &context_name,
+                                &cfg,
+                                output,
+                            );
+                            batch_results.push((
+                                context_name,
+                                context_file,
+                                output_path,
+                                dependency_fingerprint,
+                                result,
+                            ));
+                        }
+                        reen::execution::PreparedExecutionState::Ready(prepared) => {
+                            batch_items.push(PreparedImplementationBatchItem {
+                                context_name,
+                                context_file,
+                                output_path,
+                                dependency_fingerprint,
+                                dependency_context,
+                                context_content,
+                                prepared,
+                            });
                         }
                     }
-                    Err(e) => {
-                        if e.to_string().contains("unfinished specification") {
-                            had_unspecified = true;
+                }
+
+                if !batch_items.is_empty() {
+                    let batch_request = batch_items
+                        .iter()
+                        .map(|item| (item.context_name.clone(), item.prepared.clone()))
+                        .collect::<Vec<_>>();
+                    match executor.execute_batch(
+                        batch_request,
+                        resources
+                            .execution_control
+                            .as_ref()
+                            .map(|control| control as &dyn NativeExecutionControl),
+                    ) {
+                        Ok(outputs) => {
+                            for item in batch_items {
+                                let result = if let Some(output) =
+                                    outputs.get(&item.context_name).cloned()
+                                {
+                                    finalize_implementation_output(
+                                        &item.context_file,
+                                        &item.context_name,
+                                        &cfg,
+                                        output,
+                                    )
+                                } else {
+                                    eprintln!(
+                                        "Batch execution returned no output for {}; falling back to sequential execution for that item.",
+                                        item.context_name
+                                    );
+                                    process_implementation(
+                                        &executor,
+                                        &item.context_content,
+                                        &item.context_file,
+                                        &item.context_name,
+                                        &cfg,
+                                        item.dependency_context.clone(),
+                                        resources.execution_control.clone(),
+                                    )
+                                    .await
+                                };
+                                batch_results.push((
+                                    item.context_name,
+                                    item.context_file,
+                                    item.output_path,
+                                    item.dependency_fingerprint,
+                                    result,
+                                ));
+                            }
                         }
-                        progress.complete_item(&context_name, false);
-                        eprintln!(
-                            "✗ Failed to create implementation for {}: {}",
-                            context_name, e
-                        );
+                        Err(batch_error) => {
+                            eprintln!(
+                                "Batch execution failed for create_implementation; falling back to sequential execution: {}",
+                                batch_error
+                            );
+                            for item in batch_items {
+                                let result = process_implementation(
+                                    &executor,
+                                    &item.context_content,
+                                    &item.context_file,
+                                    &item.context_name,
+                                    &cfg,
+                                    item.dependency_context,
+                                    resources.execution_control.clone(),
+                                )
+                                .await;
+                                batch_results.push((
+                                    item.context_name,
+                                    item.context_file,
+                                    item.output_path,
+                                    item.dependency_fingerprint,
+                                    result,
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                for (context_name, context_file, output_path, dependency_fingerprint, result) in
+                    batch_results
+                {
+                    match result {
+                        Ok(_) => {
+                            tracker.record(
+                                Stage::Implementation,
+                                &context_name,
+                                &context_file,
+                                &output_path,
+                                &dependency_fingerprint,
+                            )?;
+                            tracker.save()?;
+                            updated_count += 1;
+                            updated_in_run.insert(context_name.clone());
+                            recent_generated_files.push(output_path.clone());
+                            progress.complete_item(&context_name, true);
+                            if config.verbose {
+                                println!(
+                                    "✓ Successfully created implementation for {}",
+                                    context_name
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if e.to_string().contains("unfinished specification") {
+                                had_unspecified = true;
+                            }
+                            progress.complete_item(&context_name, false);
+                            eprintln!(
+                                "✗ Failed to create implementation for {}: {}",
+                                context_name, e
+                            );
+                        }
+                    }
+                }
+            } else {
+                let stage_items = runnable
+                    .into_iter()
+                    .map(
+                        |(
+                            context_file,
+                            context_name,
+                            output_path,
+                            dependency_fingerprint,
+                            dependency_context,
+                            context_content,
+                            estimated,
+                            cache_hit,
+                        )| StageItem {
+                            name: context_name.clone(),
+                            estimated,
+                            cache_hit,
+                            payload: (
+                                context_file,
+                                context_name,
+                                output_path,
+                                dependency_fingerprint,
+                                dependency_context,
+                                context_content,
+                            ),
+                        },
+                    )
+                    .collect::<Vec<_>>();
+
+                let executor_clone = executor.clone();
+                let results = run_stage_items(
+                    stage_items,
+                    true,
+                    &mut progress,
+                    &resources,
+                    config,
+                    move |(
+                        context_file,
+                        context_name,
+                        output_path,
+                        dependency_fingerprint,
+                        dependency_context,
+                        context_content,
+                    ),
+                          execution_control| {
+                        let executor = executor_clone.clone();
+                        async move {
+                            process_implementation(
+                                &executor,
+                                &context_content,
+                                &context_file,
+                                &context_name,
+                                &cfg,
+                                dependency_context,
+                                execution_control,
+                            )
+                            .await?;
+                            Ok((context_file, output_path, dependency_fingerprint))
+                        }
+                    },
+                )
+                .await?;
+
+                for (context_name, result) in results {
+                    match result {
+                        Ok((context_file, output_path, dependency_fingerprint)) => {
+                            tracker.record(
+                                Stage::Implementation,
+                                &context_name,
+                                &context_file,
+                                &output_path,
+                                &dependency_fingerprint,
+                            )?;
+                            tracker.save()?;
+                            updated_count += 1;
+                            updated_in_run.insert(context_name.clone());
+                            recent_generated_files.push(output_path.clone());
+                            progress.complete_item(&context_name, true);
+                            if config.verbose {
+                                println!(
+                                    "✓ Successfully created implementation for {}",
+                                    context_name
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if e.to_string().contains("unfinished specification") {
+                                had_unspecified = true;
+                            }
+                            progress.complete_item(&context_name, false);
+                            eprintln!(
+                                "✗ Failed to create implementation for {}: {}",
+                                context_name, e
+                            );
+                        }
                     }
                 }
             }
         } else {
-            for (
-                context_file,
-                context_name,
-                output_path,
-                dependency_fingerprint,
-                dependency_context,
-            ) in runnable
-            {
-                if config.verbose {
-                    println!("Processing context: {}", context_name);
-                }
-                match process_implementation(
-                    &executor,
-                    &context_file,
-                    &context_name,
-                    config,
-                    dependency_context,
+            let stage_items = runnable
+                .into_iter()
+                .map(
+                    |(
+                        context_file,
+                        context_name,
+                        output_path,
+                        dependency_fingerprint,
+                        dependency_context,
+                        context_content,
+                        estimated,
+                        cache_hit,
+                    )| StageItem {
+                        name: context_name.clone(),
+                        estimated,
+                        cache_hit,
+                        payload: (
+                            context_file,
+                            context_name,
+                            output_path,
+                            dependency_fingerprint,
+                            dependency_context,
+                            context_content,
+                        ),
+                    },
                 )
-                .await
-                {
-                    Ok(_) => {
+                .collect::<Vec<_>>();
+
+            let executor_clone = executor.clone();
+            let cfg = *config;
+            let results = run_stage_items(
+                stage_items,
+                false,
+                &mut progress,
+                &resources,
+                config,
+                move |(
+                    context_file,
+                    context_name,
+                    output_path,
+                    dependency_fingerprint,
+                    dependency_context,
+                    context_content,
+                ),
+                      execution_control| {
+                    let executor = executor_clone.clone();
+                    async move {
+                        process_implementation(
+                            &executor,
+                            &context_content,
+                            &context_file,
+                            &context_name,
+                            &cfg,
+                            dependency_context,
+                            execution_control,
+                        )
+                        .await?;
+                        Ok((context_file, output_path, dependency_fingerprint))
+                    }
+                },
+            )
+            .await?;
+
+            for (context_name, result) in results {
+                match result {
+                    Ok((context_file, output_path, dependency_fingerprint)) => {
                         tracker.record(
                             Stage::Implementation,
                             &context_name,
@@ -1489,6 +1407,7 @@ pub async fn create_implementation(
                             &output_path,
                             &dependency_fingerprint,
                         )?;
+                        tracker.save()?;
                         updated_count += 1;
                         updated_in_run.insert(context_name.clone());
                         recent_generated_files.push(output_path.clone());
@@ -1512,22 +1431,23 @@ pub async fn create_implementation(
         }
     }
 
-    if !config.dry_run {
-        validate_generated_rust_layout(Path::new("."))?;
+    // Always compile after generation. Auto-fix is opt-in via --fix.
+    if fix {
+        compilation_fix::ensure_compiles_with_auto_fix(
+            config,
+            max_compile_fix_attempts,
+            Path::new("."),
+            &project_info,
+            &recent_generated_files,
+            resources
+                .execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
+        .await?;
+    } else {
+        cargo_commands::compile(config).await?;
     }
-
-    // Automatic compile + bounded auto-fix loop to restore build validity.
-    compilation_fix::ensure_compiles_with_auto_fix(
-        config,
-        max_compile_fix_attempts,
-        Path::new("."),
-        &project_info,
-        &recent_generated_files,
-    )
-    .await?;
-
-    // Save tracker
-    tracker.save()?;
 
     progress.finish();
 
@@ -1544,17 +1464,16 @@ pub async fn create_implementation(
 
 async fn process_implementation(
     executor: &AgentExecutor,
+    context_content: &str,
     context_file: &Path,
     context_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
+    execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
     if has_unfinished_specification(context_file, context_name, "implementation")? {
         anyhow::bail!("unfinished specification");
     }
-
-    let context_content =
-        fs::read_to_string(context_file).context("Failed to read context file")?;
 
     if config.dry_run {
         println!(
@@ -1566,9 +1485,25 @@ async fn process_implementation(
 
     // Use conversational execution to handle questions
     let impl_result = executor
-        .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
+        .execute_with_conversation_with_seed(
+            &context_content,
+            context_name,
+            additional_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
         .await?;
 
+    finalize_implementation_output(context_file, context_name, config, impl_result)
+}
+
+fn finalize_implementation_output(
+    context_file: &Path,
+    context_name: &str,
+    config: &Config,
+    impl_result: String,
+) -> Result<()> {
     // Extract code from the agent output and write to file
     // The agent output may contain markdown code blocks or raw code
     let code = extract_code_from_output(&impl_result, context_name);
@@ -1674,64 +1609,6 @@ fn extract_implementation_failure_message(code: &str) -> Option<String> {
     const MARKER: &str = "ERROR: Cannot implement specification as written.";
     if code.contains(MARKER) {
         return Some(MARKER.to_string());
-    }
-
-    None
-}
-
-fn extract_implementation_review_error_section(code: &str) -> Option<String> {
-    if let Some(msg) = extract_compile_error_message(code) {
-        return Some(msg);
-    }
-    extract_legacy_implementation_error_message(code)
-}
-
-fn extract_legacy_implementation_error_message(code: &str) -> Option<String> {
-    const MARKER: &str = "ERROR: Cannot implement specification as written.";
-    if !code.contains(MARKER) {
-        return None;
-    }
-
-    let mut lines = Vec::new();
-    for line in code.lines() {
-        let trimmed = line.trim();
-        if !trimmed.contains("push_str(") {
-            continue;
-        }
-        if let Some(unescaped) = extract_first_quoted_string(trimmed) {
-            lines.push(unescaped);
-        }
-    }
-
-    if lines.is_empty() {
-        return Some(MARKER.to_string());
-    }
-    Some(lines.join(""))
-}
-
-fn extract_first_quoted_string(s: &str) -> Option<String> {
-    let start = s.find('"')?;
-    let bytes = s.as_bytes();
-    let mut idx = start + 1;
-    let mut out = String::new();
-
-    while idx < bytes.len() {
-        let c = bytes[idx] as char;
-        if c == '\\' {
-            if idx + 1 >= bytes.len() {
-                out.push('\\');
-                break;
-            }
-            out.push('\\');
-            out.push(bytes[idx + 1] as char);
-            idx += 2;
-            continue;
-        }
-        if c == '"' {
-            return Some(unescape_common_rust_string_escapes(&out));
-        }
-        out.push(c);
-        idx += 1;
     }
 
     None
@@ -1972,6 +1849,20 @@ fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &st
         }
         return Ok(true);
     }
+
+    let unresolved = check_brand_references_in_spec_content(path, &content)?;
+    if !unresolved.is_empty() {
+        print_blocking_items(
+            path,
+            "spec:brand-token",
+            &format!(
+                "Specification references undefined brand token(s); skipping {} for '{}'.",
+                stage_name, context_name
+            ),
+            &unresolved,
+        );
+        return Ok(true);
+    }
     Ok(false)
 }
 
@@ -1979,8 +1870,11 @@ pub async fn create_tests(
     names: Vec<String>,
     clear_cache: bool,
     filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let names_provided = !names.is_empty();
     let names_for_clear = names.clone();
     let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
 
@@ -2000,13 +1894,17 @@ pub async fn create_tests(
         }
     }
 
+    let dependency_roots =
+        select_dependency_roots(context_files, SPECIFICATIONS_DIR, names_provided, filter)?;
     let execution_levels =
-        build_execution_plan(context_files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
+        build_execution_plan(dependency_roots, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!("Creating tests for {} context(s)", total_count);
 
     let executor = Arc::new(AgentExecutor::new("create_test", config)?);
     let can_parallel = executor.can_run_parallel().unwrap_or(false);
+
+    let resources = ExecutionResources::new(rate_limit, token_limit);
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut had_unspecified = false;
@@ -2023,82 +1921,84 @@ pub async fn create_tests(
         for node in level_nodes {
             let context_file = node.input_path.clone();
             let context_name = node.name.clone();
-            let dependency_context = build_dependency_context(&node)?;
-            progress.start_item(&context_name);
-            runnable.push((context_file, context_name, dependency_context));
+            let mut dependency_context = build_dependency_context(&node)?;
+            augment_test_generation_context(&context_file, &mut dependency_context)?;
+            let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+            let (dependency_context, estimated) = fit_context_to_token_limit(
+                &executor,
+                &context_content,
+                dependency_context,
+                token_limit,
+            )?;
+            let cache_hit = executor
+                .is_cache_hit(&context_content, dependency_context.clone())
+                .unwrap_or(false);
+            runnable.push(StageItem {
+                name: context_name.clone(),
+                estimated,
+                cache_hit,
+                payload: (
+                    context_file,
+                    context_name.clone(),
+                    dependency_context,
+                    context_content,
+                ),
+            });
         }
 
-        if can_parallel {
-            if config.verbose {
-                println!("Parallel execution enabled for create_test");
-            }
-            let cfg = *config;
-            let mut tasks = Vec::new();
-            for (context_file, context_name, dependency_context) in runnable {
-                let executor_clone = executor.clone();
-                tasks.push(tokio::task::spawn(async move {
-                    let result = process_tests(
-                        &executor_clone,
+        if can_parallel && config.verbose {
+            println!("Parallel execution enabled for create_test");
+        }
+        let cfg = *config;
+        let executor_clone = executor.clone();
+        let results = run_stage_items(
+            runnable,
+            can_parallel,
+            &mut progress,
+            &resources,
+            config,
+            move |(context_file, context_name, dependency_context, context_content),
+                  execution_control| {
+                let executor = executor_clone.clone();
+                async move {
+                    process_tests(
+                        &executor,
+                        &context_content,
                         &context_file,
                         &context_name,
                         &cfg,
                         dependency_context,
+                        execution_control,
                     )
-                    .await;
-                    (context_name, result)
-                }));
-            }
-            for task in tasks {
-                let (context_name, result): (String, Result<()>) = task.await?;
-                match result {
-                    Ok(_) => {
-                        progress.complete_item(&context_name, true);
-                        if config.verbose {
-                            println!("✓ Successfully created tests for {}", context_name);
-                        }
-                    }
-                    Err(e) => {
-                        if e.to_string().contains("unfinished specification") {
-                            had_unspecified = true;
-                        }
-                        progress.complete_item(&context_name, false);
-                        eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
+                    .await
+                }
+            },
+        )
+        .await?;
+
+        for (context_name, result) in results {
+            match result {
+                Ok(_) => {
+                    progress.complete_item(&context_name, true);
+                    if config.verbose {
+                        println!("✓ Successfully created tests for {}", context_name);
                     }
                 }
-            }
-        } else {
-            for (context_file, context_name, dependency_context) in runnable {
-                if config.verbose {
-                    println!("Processing context: {}", context_name);
-                }
-                match process_tests(
-                    &executor,
-                    &context_file,
-                    &context_name,
-                    config,
-                    dependency_context,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        progress.complete_item(&context_name, true);
-                        if config.verbose {
-                            println!("✓ Successfully created tests for {}", context_name);
-                        }
+                Err(e) => {
+                    if e.to_string().contains("unfinished specification") {
+                        had_unspecified = true;
                     }
-                    Err(e) => {
-                        if e.to_string().contains("unfinished specification") {
-                            had_unspecified = true;
-                        }
-                        progress.complete_item(&context_name, false);
-                        eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
-                    }
+                    progress.complete_item(&context_name, false);
+                    eprintln!("✗ Failed to create tests for {}: {}", context_name, e);
                 }
             }
         }
     }
 
     progress.finish();
+    if !config.dry_run {
+        sync_bdd_cargo_support(config)?;
+    }
     if had_unspecified {
         anyhow::bail!("Unfinished specifications were detected. Aborting.");
     } else {
@@ -2197,7 +2097,7 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
 
     for agent_name in agents {
         let instructions = match agent_registry.get_specification(agent_name) {
-            Ok(s) => s,
+            Ok(template) => template.canonical_for_cache(),
             Err(e) => {
                 if config.verbose {
                     eprintln!(
@@ -2268,8 +2168,9 @@ fn clear_stage_agent_cache_entries_by_name(
             }
         }
         Stage::Implementation => {
-            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
-            let levels = build_implementation_execution_plan(files)?;
+            let files =
+                resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
+            let levels = build_implementation_execution_plan(files, &CategoryFilter::all())?;
             for node in levels.into_iter().flatten() {
                 let context_file = resolve_implementation_context_file(&node.input_path)?;
                 let context_content = fs::read_to_string(&context_file).with_context(|| {
@@ -2293,7 +2194,8 @@ fn clear_stage_agent_cache_entries_by_name(
             }
         }
         Stage::Tests => {
-            let files = resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
+            let files =
+                resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
             let levels = build_execution_plan(files, SPECIFICATIONS_DIR, Some(DRAFTS_DIR))?;
             for node in levels.into_iter().flatten() {
                 let context_content = fs::read_to_string(&node.input_path).with_context(|| {
@@ -2302,7 +2204,8 @@ fn clear_stage_agent_cache_entries_by_name(
                         node.input_path.display()
                     )
                 })?;
-                let additional = build_dependency_context(&node)?;
+                let mut additional = build_dependency_context(&node)?;
+                augment_test_generation_context(&node.input_path, &mut additional)?;
                 candidates.push((
                     "create_test".to_string(),
                     CacheAgentInput {
@@ -2351,7 +2254,7 @@ fn clear_single_agent_cache_entry(
     config: &Config,
 ) -> Result<bool> {
     let instructions = match agent_registry.get_specification(agent_name) {
-        Ok(s) => s,
+        Ok(template) => template.canonical_for_cache(),
         Err(e) => {
             if config.verbose {
                 eprintln!(
@@ -2405,33 +2308,219 @@ fn instructions_model_hash(agent_instructions: &str, model_name: &str) -> String
 
 async fn process_tests(
     executor: &AgentExecutor,
+    context_content: &str,
     context_file: &Path,
     context_name: &str,
     config: &Config,
     additional_context: HashMap<String, serde_json::Value>,
+    execution_control: Option<CliExecutionControl>,
 ) -> Result<()> {
     if has_unfinished_specification(context_file, context_name, "tests")? {
         anyhow::bail!("unfinished specification");
     }
 
-    let context_content =
-        fs::read_to_string(context_file).context("Failed to read context file")?;
+    let test_paths = determine_bdd_test_paths(context_file, SPECIFICATIONS_DIR)?;
 
     if config.dry_run {
-        println!("[DRY RUN] Would create tests for: {}", context_name);
+        println!(
+            "[DRY RUN] Would create BDD tests for {}: {}, {}, {}",
+            context_name,
+            test_paths.feature_path.display(),
+            test_paths.steps_path.display(),
+            test_paths.runner_path.display()
+        );
         return Ok(());
     }
 
-    // Use conversational execution to handle questions
     let test_result = executor
-        .execute_with_conversation_with_seed(&context_content, context_name, additional_context)
+        .execute_with_conversation_with_seed(
+            &context_content,
+            context_name,
+            additional_context,
+            execution_control
+                .as_ref()
+                .map(|control| control as &dyn NativeExecutionControl),
+        )
         .await?;
 
-    if config.verbose {
-        println!("Test creation result: {}", test_result);
+    finalize_test_output(context_name, &test_paths, config, &test_result)
+}
+
+fn finalize_test_output(
+    context_name: &str,
+    test_paths: &BddTestPaths,
+    config: &Config,
+    test_result: &str,
+) -> Result<()> {
+    let artifacts = parse_generated_files(test_result)?;
+    let expected_paths = HashSet::from([
+        test_paths.feature_path.clone(),
+        test_paths.steps_path.clone(),
+        test_paths.runner_path.clone(),
+    ]);
+    let actual_paths: HashSet<PathBuf> = artifacts
+        .iter()
+        .map(|artifact| artifact.0.clone())
+        .collect();
+
+    if actual_paths != expected_paths {
+        let expected = expected_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let actual = actual_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "Generated BDD artifacts for '{}' did not match expected paths. Expected [{}], got [{}].",
+            context_name,
+            expected,
+            actual
+        );
+    }
+
+    for (path, content) in artifacts {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create BDD output directory {}", parent.display())
+            })?;
+        }
+        fs::write(&path, content).with_context(|| {
+            format!("Failed to write generated BDD artifact {}", path.display())
+        })?;
+        if config.verbose {
+            println!("✓ Written BDD artifact: {}", path.display());
+        }
     }
 
     Ok(())
+}
+
+fn parse_generated_files(output: &str) -> Result<Vec<(PathBuf, String)>> {
+    let re = regex::Regex::new(r#"(?s)<file path="([^"]+)">\n?(.*?)\n?</file>"#)
+        .context("Failed to compile BDD artifact parser regex")?;
+    let mut files = Vec::new();
+
+    for captures in re.captures_iter(output) {
+        let path = captures
+            .get(1)
+            .map(|m| PathBuf::from(m.as_str()))
+            .context("Generated BDD artifact missing path")?;
+        let raw = captures
+            .get(2)
+            .map(|m| m.as_str())
+            .context("Generated BDD artifact missing content")?;
+        let trimmed_start = raw.strip_prefix('\n').unwrap_or(raw);
+        let content = trimmed_start
+            .strip_suffix('\n')
+            .unwrap_or(trimmed_start)
+            .to_string();
+        files.push((path, content));
+    }
+
+    if files.is_empty() {
+        anyhow::bail!("Generated BDD test output did not contain any <file path=\"...\"> blocks");
+    }
+
+    let mut unique_paths = HashSet::new();
+    for (path, _) in &files {
+        if !unique_paths.insert(path.clone()) {
+            anyhow::bail!(
+                "Generated BDD output contained duplicate file path {}",
+                path.display()
+            );
+        }
+    }
+
+    Ok(files)
+}
+
+fn augment_test_generation_context(
+    context_file: &Path,
+    additional_context: &mut HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    let test_paths = determine_bdd_test_paths(context_file, SPECIFICATIONS_DIR)?;
+    additional_context.insert(
+        "feature_output_path".to_string(),
+        json!(test_paths.feature_path.to_string_lossy().to_string()),
+    );
+    additional_context.insert(
+        "steps_output_path".to_string(),
+        json!(test_paths.steps_path.to_string_lossy().to_string()),
+    );
+    additional_context.insert(
+        "runner_output_path".to_string(),
+        json!(test_paths.runner_path.to_string_lossy().to_string()),
+    );
+    additional_context.insert(
+        "runner_test_name".to_string(),
+        json!(test_paths.runner_test_name),
+    );
+    if let Some(target_type_name) = infer_target_type_name(context_file)? {
+        additional_context.insert("target_type_name".to_string(), json!(target_type_name));
+    }
+    Ok(())
+}
+
+fn build_dependency_manifest(
+    dependency_closure: &[DependencyArtifact],
+    direct_dependencies: &[DependencyArtifact],
+) -> Vec<serde_json::Value> {
+    let direct_paths: HashSet<&str> = direct_dependencies
+        .iter()
+        .map(|dep| dep.path.as_str())
+        .collect();
+
+    dependency_closure
+        .iter()
+        .map(|dep| {
+            json!({
+                "name": dep.name,
+                "path": dep.path,
+                "source": dep.source,
+                "sha256": dep.sha256,
+                "artifact_type": "draft_or_spec",
+                "dependency_kind": if direct_paths.contains(dep.path.as_str()) {
+                    "direct"
+                } else {
+                    "transitive"
+                }
+            })
+        })
+        .collect()
+}
+
+fn build_implemented_dependency_manifest(
+    implemented_dependencies: &[serde_json::Value],
+    direct_dependencies: &[DependencyArtifact],
+) -> Vec<serde_json::Value> {
+    let direct_paths: HashSet<&str> = direct_dependencies
+        .iter()
+        .map(|dep| dep.path.as_str())
+        .collect();
+
+    implemented_dependencies
+        .iter()
+        .filter_map(|item| {
+            let spec_path = item.get("spec_path")?.as_str()?;
+            let path = item.get("path")?.as_str()?;
+            Some(json!({
+                "name": item.get("name").cloned().unwrap_or(serde_json::Value::Null),
+                "spec_path": spec_path,
+                "path": path,
+                "sha256": item.get("sha256").cloned().unwrap_or(serde_json::Value::Null),
+                "artifact_type": "implementation_source",
+                "dependency_kind": if direct_paths.contains(spec_path) {
+                    "direct"
+                } else {
+                    "transitive"
+                }
+            }))
+        })
+        .collect()
 }
 
 fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serde_json::Value>> {
@@ -2443,29 +2532,44 @@ fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serd
         (DRAFTS_DIR, None)
     };
     let dependency_closure = node.resolve_dependency_closure(primary_root, fallback_root)?;
-
-    // Expose full closure via direct_dependencies so existing agent prompts
-    // receive transitive context without prompt/template changes.
-    let value = json!(dependency_closure);
-    context.insert("direct_dependencies".to_string(), value.clone());
+    let dependency_manifest = build_dependency_manifest(&dependency_closure, &direct_dependencies);
+    let direct_dependency_manifest =
+        build_dependency_manifest(&direct_dependencies, &direct_dependencies);
+    context.insert(
+        "direct_dependencies".to_string(),
+        json!(dependency_manifest.clone()),
+    );
     context.insert(
         "direct_dependencies_only".to_string(),
-        json!(direct_dependencies),
+        json!(direct_dependency_manifest),
     );
-    context.insert("dependency_closure".to_string(), value.clone());
+    context.insert(
+        "dependency_closure".to_string(),
+        json!(dependency_manifest.clone()),
+    );
     // Backward compatibility with agent prompts that still reference mcp_context
-    context.insert("mcp_context".to_string(), value);
+    context.insert("mcp_context".to_string(), json!(dependency_manifest));
 
     let implemented_dependencies = build_implemented_dependency_context(&dependency_closure)?;
+    let implemented_dependency_manifest =
+        build_implemented_dependency_manifest(&implemented_dependencies, &direct_dependencies);
     context.insert(
         "implemented_dependencies".to_string(),
-        json!(implemented_dependencies),
+        json!(implemented_dependency_manifest),
+    );
+    context.insert(
+        "dependency_tool_context".to_string(),
+        json!({
+            "dependency_artifacts": dependency_closure,
+            "implemented_dependency_artifacts": implemented_dependencies,
+        }),
     );
     Ok(context)
 }
 
 fn build_implementation_execution_plan(
     spec_files: Vec<PathBuf>,
+    filter: &CategoryFilter,
 ) -> Result<Vec<Vec<ExecutionNode>>> {
     let mut draft_inputs = Vec::new();
     for spec_file in spec_files {
@@ -2478,7 +2582,15 @@ fn build_implementation_execution_plan(
     }
 
     let expanded_inputs = expand_with_transitive_dependencies(draft_inputs, DRAFTS_DIR, None)?;
-    build_execution_plan(expanded_inputs, DRAFTS_DIR, None)
+    let filtered_inputs = if filter.is_active() {
+        expanded_inputs
+            .into_iter()
+            .filter(|f| filter.matches_path(f, DRAFTS_DIR))
+            .collect()
+    } else {
+        expanded_inputs
+    };
+    build_execution_plan(filtered_inputs, DRAFTS_DIR, None)
 }
 
 fn dependency_fingerprint_for_node(
@@ -2567,141 +2679,19 @@ fn build_implemented_dependency_context(
 }
 
 pub async fn compile(config: &Config) -> Result<()> {
-    println!("Compiling project with cargo build...");
-
-    if config.dry_run {
-        println!("[DRY RUN] Would run: cargo build");
-        return Ok(());
-    }
-
-    let output = Command::new("cargo")
-        .arg("build")
-        .output()
-        .context("Failed to execute cargo build")?;
-
-    if config.verbose || !output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        println!("✓ Build successful");
-        Ok(())
-    } else {
-        anyhow::bail!("Build failed");
-    }
+    cargo_commands::compile(config).await
 }
 
 pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()> {
-    println!(
-        "Attempting to restore compilation (max_attempts={})...",
-        max_compile_fix_attempts
-    );
-
-    if config.dry_run {
-        println!("[DRY RUN] Would run compilation-fix loop");
-        return Ok(());
-    }
-
-    let project_root = Path::new(".");
-    let spec_dir = PathBuf::from(SPECIFICATIONS_DIR);
-    let drafts_dir = PathBuf::from(DRAFTS_DIR);
-
-    let project_info = if spec_dir.exists() && spec_dir.is_dir() {
-        analyze_specifications(&spec_dir, Some(&drafts_dir))
-            .context("Failed to analyze specifications for fix loop")?
-    } else {
-        // If specs are missing, still allow the loop to run from compiler diagnostics alone.
-        ProjectInfo::default()
-    };
-
-    let mut recent_files: Vec<PathBuf> = Vec::new();
-    for p in [
-        PathBuf::from("Cargo.toml"),
-        PathBuf::from("src/lib.rs"),
-        PathBuf::from("src/main.rs"),
-        PathBuf::from("src/contexts/mod.rs"),
-        PathBuf::from("src/data/mod.rs"),
-    ] {
-        if p.exists() {
-            recent_files.push(p);
-        }
-    }
-
-    compilation_fix::ensure_compiles_with_auto_fix(
-        config,
-        max_compile_fix_attempts,
-        project_root,
-        &project_info,
-        &recent_files,
-    )
-    .await
+    cargo_commands::fix(max_compile_fix_attempts, config).await
 }
 
 pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
-    println!("Building and running project with cargo run...");
-
-    if config.dry_run {
-        let args_str = if args.is_empty() {
-            String::new()
-        } else {
-            format!(" -- {}", args.join(" "))
-        };
-        println!("[DRY RUN] Would run: cargo run{}", args_str);
-        return Ok(());
-    }
-
-    let mut cmd = Command::new("cargo");
-    cmd.arg("run");
-
-    // Add separator and arguments if any were provided
-    if !args.is_empty() {
-        cmd.arg("--");
-        cmd.args(&args);
-    }
-
-    let output = cmd.output().context("Failed to execute cargo run")?;
-
-    if config.verbose || !output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        // Don't print success message if not verbose, as cargo run already shows output
-        if config.verbose {
-            println!("✓ Run successful");
-        }
-        Ok(())
-    } else {
-        anyhow::bail!("Run failed");
-    }
+    cargo_commands::run(args, config).await
 }
 
 pub async fn test(config: &Config) -> Result<()> {
-    println!("Testing project with cargo test...");
-
-    if config.dry_run {
-        println!("[DRY RUN] Would run: cargo test");
-        return Ok(());
-    }
-
-    let output = Command::new("cargo")
-        .arg("test")
-        .output()
-        .context("Failed to execute cargo test")?;
-
-    if config.verbose || !output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if output.status.success() {
-        println!("✓ Tests passed");
-        Ok(())
-    } else {
-        anyhow::bail!("Tests failed");
-    }
+    cargo_commands::test(config).await
 }
 
 pub async fn clear_cache(target: &str, names: Vec<String>, config: &Config) -> Result<()> {
@@ -2787,11 +2777,13 @@ fn clear_specification_artifacts(names: Vec<String>, config: &Config) -> Result<
         return Ok(());
     }
 
-    let spec_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", &CategoryFilter::all())?;
+    let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &CategoryFilter::all())?;
     let mut removed = 0usize;
     let mut found = 0usize;
-    for spec_file in spec_files {
+    for draft_file in draft_files {
         found += 1;
+        let spec_file =
+            determine_specification_output_path(&draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
         if spec_file.exists() {
             if config.dry_run {
                 println!("[DRY RUN] Would remove {}", spec_file.display());
@@ -2851,8 +2843,8 @@ fn clear_implementation_artifacts(names: Vec<String>, config: &Config) -> Result
             );
         }
     } else {
-        remove_dir_if_empty(Path::new("src/data"))?;
-        remove_dir_if_empty(Path::new("src/contexts"))?;
+        remove_empty_dirs_upward(Path::new("src/data"), Path::new("src"))?;
+        remove_empty_dirs_upward(Path::new("src/contexts"), Path::new("src"))?;
         if removed == 0 {
             println!("No matching implementation artifacts found");
         } else {
@@ -2876,21 +2868,22 @@ fn clear_test_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
 
     for spec_file in spec_files {
         found += 1;
-        let Some(stem) = spec_file.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        candidates.push(PathBuf::from("tests").join(format!("{}.rs", stem)));
-        candidates.push(PathBuf::from("tests").join(format!("{}_test.rs", stem)));
-        candidates.push(PathBuf::from("tests/generated").join(format!("{}.rs", stem)));
-        candidates.push(PathBuf::from("tests/generated").join(format!("{}_test.rs", stem)));
+        let test_paths = determine_bdd_test_paths(&spec_file, SPECIFICATIONS_DIR)?;
+        candidates.push(test_paths.feature_path);
+        candidates.push(test_paths.steps_path);
+        candidates.push(test_paths.runner_path);
     }
 
     let mut removed = 0usize;
+    let mut parent_dirs = Vec::new();
     for file in candidates {
         if file.exists() {
             if config.dry_run {
                 println!("[DRY RUN] Would remove {}", file.display());
             } else {
+                if let Some(parent) = file.parent() {
+                    parent_dirs.push(parent.to_path_buf());
+                }
                 fs::remove_file(&file)
                     .with_context(|| format!("Failed to remove {}", file.display()))?;
                 removed += 1;
@@ -2905,7 +2898,16 @@ fn clear_test_artifacts(names: Vec<String>, config: &Config) -> Result<()> {
             println!("[DRY RUN] Would remove {} test artifact file(s)", removed);
         }
     } else {
-        remove_dir_if_empty(Path::new("tests/generated"))?;
+        sync_bdd_cargo_support(config)?;
+        parent_dirs.sort();
+        parent_dirs.dedup();
+        for dir in parent_dirs {
+            if dir.starts_with(Path::new("tests/features"))
+                || dir.starts_with(Path::new("tests/steps"))
+            {
+                remove_empty_dirs_upward(&dir, Path::new("tests"))?;
+            }
+        }
         if removed == 0 {
             println!("No matching test artifacts found");
         } else {
@@ -2929,6 +2931,86 @@ fn remove_dir_if_empty(path: &Path) -> Result<()> {
             .with_context(|| format!("Failed to remove empty directory {}", path.display()))?;
     }
     Ok(())
+}
+
+fn remove_empty_dirs_upward(path: &Path, stop_at: &Path) -> Result<()> {
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        if dir == stop_at {
+            remove_dir_if_empty(dir)?;
+            break;
+        }
+        remove_dir_if_empty(dir)?;
+        current = dir.parent();
+    }
+    Ok(())
+}
+
+fn collect_files_recursive(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() || !dir.is_dir() {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, extension, files)?;
+        } else if path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|ext| ext == extension)
+            .unwrap_or(false)
+        {
+            files.push(path);
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_md_files_recursive(dir: &Path, extension: &str) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    collect_files_recursive(dir, extension, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn resolve_named_input_in_category(
+    category_dir: &Path,
+    name: &str,
+    extension: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut matches = Vec::new();
+    if !category_dir.exists() || !category_dir.is_dir() {
+        return Ok(matches);
+    }
+
+    let direct_path = category_dir.join(format!("{}.{}", name, extension));
+    if direct_path.exists() {
+        matches.push(direct_path);
+        return Ok(matches);
+    }
+
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+
+    for path in collect_md_files_recursive(category_dir, extension)? {
+        if path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|candidate| candidate == stem)
+            .unwrap_or(false)
+        {
+            matches.push(path);
+        }
+    }
+
+    matches.sort();
+    matches.dedup();
+    Ok(matches)
 }
 
 /// Resolves input files in a structured order:
@@ -2956,42 +3038,24 @@ fn resolve_input_files(
 
         if filter.include_data() {
             let data_dir = dir_path.join("data");
-            if data_dir.exists() && data_dir.is_dir() {
-                let entries = fs::read_dir(&data_dir)
-                    .context(format!("Failed to read {}/data directory", dir))?;
-                for entry in entries {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_file()
-                        && path.extension().and_then(|s| s.to_str()) == Some(extension)
-                    {
-                        files.push(path);
-                    }
-                }
-            }
+            files.extend(collect_md_files_recursive(&data_dir, extension)?);
         }
 
         if filter.include_contexts() {
             let contexts_dir = dir_path.join("contexts");
-            if contexts_dir.exists() && contexts_dir.is_dir() {
-                let entries = fs::read_dir(&contexts_dir)
-                    .context(format!("Failed to read {}/contexts directory", dir))?;
-                for entry in entries {
-                    let entry = entry?;
-                    let path = entry.path();
-                    if path.is_file()
-                        && path.extension().and_then(|s| s.to_str()) == Some(extension)
-                    {
-                        files.push(path);
-                    }
-                }
-            }
+            files.extend(collect_md_files_recursive(&contexts_dir, extension)?);
+            let external_dir = dir_path.join("external_apis");
+            files.extend(collect_md_files_recursive(&external_dir, extension)?);
+        }
+
+        if filter.include_brands() {
+            let brands_dir = dir_path.join("brands");
+            files.extend(collect_md_files_recursive(&brands_dir, extension)?);
         }
 
         if filter.include_visuals() {
             let visuals_dir = dir_path.join("visuals");
-            collect_files_recursive(&visuals_dir, extension, &mut files)
-                .context(format!("Failed to scan {}/visuals directory", dir))?;
+            files.extend(collect_md_files_recursive(&visuals_dir, extension)?);
         }
 
         if filter.include_root() {
@@ -3000,14 +3064,14 @@ fn resolve_input_files(
             for entry in entries {
                 let entry = entry?;
                 let path = entry.path();
-                if path.is_file()
-                    && path.extension().and_then(|s| s.to_str()) == Some(extension)
-                {
+                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(extension) {
                     files.push(path);
                 }
             }
         }
 
+        files.sort();
+        files.dedup();
         Ok(files)
     } else {
         let mut files = Vec::new();
@@ -3015,21 +3079,38 @@ fn resolve_input_files(
             let mut found = false;
 
             if filter.include_data() {
-                let data_path = dir_path
-                    .join("data")
-                    .join(format!("{}.{}", name, extension));
-                if data_path.exists() {
-                    files.push(data_path);
+                let data_matches =
+                    resolve_named_input_in_category(&dir_path.join("data"), &name, extension)?;
+                if !data_matches.is_empty() {
+                    files.extend(data_matches);
                     found = true;
                 }
             }
 
             if !found && filter.include_contexts() {
-                let contexts_path = dir_path
-                    .join("contexts")
-                    .join(format!("{}.{}", name, extension));
-                if contexts_path.exists() {
-                    files.push(contexts_path);
+                let context_matches =
+                    resolve_named_input_in_category(&dir_path.join("contexts"), &name, extension)?;
+                if !context_matches.is_empty() {
+                    files.extend(context_matches);
+                    found = true;
+                } else {
+                    let external_matches = resolve_named_input_in_category(
+                        &dir_path.join("external_apis"),
+                        &name,
+                        extension,
+                    )?;
+                    if !external_matches.is_empty() {
+                        files.extend(external_matches);
+                        found = true;
+                    }
+                }
+            }
+
+            if !found && filter.include_brands() {
+                let brand_matches =
+                    resolve_named_input_in_category(&dir_path.join("brands"), &name, extension)?;
+                if !brand_matches.is_empty() {
+                    files.extend(brand_matches);
                     found = true;
                 }
             }
@@ -3060,22 +3141,42 @@ fn resolve_input_files(
             }
 
             if !found {
-                let searched = match (
-                    filter.include_data(),
-                    filter.include_contexts(),
-                    filter.include_visuals(),
-                    filter.include_root(),
-                ) {
-                    (true, true, true, true) => "data/, contexts/, visuals/, and root",
-                    (true, true, true, false) => "data/, contexts/, and visuals/",
-                    (true, true, false, false) => "data/ and contexts/",
-                    (true, false, true, false) => "data/ and visuals/",
-                    (false, true, true, false) => "contexts/ and visuals/",
-                    (true, false, false, false) => "data/",
-                    (false, true, false, false) => "contexts/",
-                    (false, false, true, false) => "visuals/",
-                    (false, false, false, true) => "root",
-                    _ => "data/, contexts/, visuals/, and root",
+                let searched = {
+                    let mut parts: Vec<&str> = Vec::new();
+                    if filter.include_data() {
+                        parts.push("data/");
+                    }
+                    if filter.include_contexts() {
+                        parts.push("contexts/");
+                    }
+                    if filter.include_brands() {
+                        parts.push("brands/");
+                    }
+                    if filter.include_visuals() {
+                        parts.push("visuals/");
+                    }
+                    if filter.include_root() {
+                        parts.push("root");
+                    }
+                    match parts.len() {
+                        0 => "no categories".to_string(),
+                        1 => parts[0].to_string(),
+                        2 => format!("{} and {}", parts[0], parts[1]),
+                        _ => {
+                            let mut s = String::new();
+                            for (i, p) in parts.iter().enumerate() {
+                                if i > 0 {
+                                    if i == parts.len() - 1 {
+                                        s.push_str(" and ");
+                                    } else {
+                                        s.push_str(", ");
+                                    }
+                                }
+                                s.push_str(p);
+                            }
+                            s
+                        }
+                    }
                 };
                 eprintln!(
                     "Warning: File not found: {}.{} (searched in {})",
@@ -3083,8 +3184,28 @@ fn resolve_input_files(
                 );
             }
         }
+        files.sort();
+        files.dedup();
         Ok(files)
     }
+}
+
+fn select_dependency_roots(
+    selected_inputs: Vec<PathBuf>,
+    base_dir: &str,
+    names_provided: bool,
+    filter: &CategoryFilter,
+) -> Result<Vec<PathBuf>> {
+    if names_provided {
+        return Ok(selected_inputs);
+    }
+
+    let app_path = PathBuf::from(base_dir).join("app.md");
+    if app_path.exists() && filter.matches_path(&app_path, base_dir) {
+        return Ok(vec![app_path]);
+    }
+
+    Ok(selected_inputs)
 }
 
 /// Determines the specification output path preserving folder structure
@@ -3092,6 +3213,7 @@ fn resolve_input_files(
 /// Maps:
 /// - drafts/data/X.md → specifications/data/X.md
 /// - drafts/contexts/X.md → specifications/contexts/X.md
+/// - drafts/external_apis/X.md → specifications/contexts/external/X.md
 /// - drafts/X.md → specifications/X.md
 fn determine_specification_output_path(
     draft_file: &Path,
@@ -3136,6 +3258,28 @@ fn determine_specification_output_path(
         }
     };
 
+    if relative_path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("external_apis")
+    {
+        let remainder = PathBuf::from_iter(relative_path.components().skip(1));
+        return Ok(PathBuf::from(specifications_dir)
+            .join("contexts")
+            .join("external")
+            .join(remainder));
+    }
+
+    if relative_path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("brands")
+    {
+        return Ok(PathBuf::from(specifications_dir).join(relative_path));
+    }
+
     // Build output path in specifications directory
     let output_path = PathBuf::from(specifications_dir).join(relative_path);
     Ok(output_path)
@@ -3146,6 +3290,7 @@ fn determine_specification_output_path(
 /// Maps:
 /// - specifications/data/X.md → drafts/data/X.md
 /// - specifications/contexts/X.md → drafts/contexts/X.md
+/// - specifications/contexts/external/X.md → drafts/external_apis/X.md
 /// - specifications/X.md → drafts/X.md
 fn determine_draft_input_path(
     specification_file: &Path,
@@ -3183,6 +3328,22 @@ fn determine_draft_input_path(
         }
     };
 
+    let mut components = relative_path.components();
+    let first = components.next().and_then(|c| c.as_os_str().to_str());
+    let second = components.next().and_then(|c| c.as_os_str().to_str());
+    if first == Some("contexts") && second == Some("external") {
+        let remainder = PathBuf::from_iter(relative_path.components().skip(2));
+        return Ok(PathBuf::from(drafts_dir)
+            .join("external_apis")
+            .join(remainder));
+    }
+
+    if first == Some("brands") {
+        return Ok(PathBuf::from(drafts_dir)
+            .join(relative_path)
+            .with_extension("md"));
+    }
+
     Ok(PathBuf::from(drafts_dir).join(relative_path))
 }
 
@@ -3191,7 +3352,7 @@ fn determine_draft_input_path(
 /// Returns:
 /// - "create_specifications_data" for files in data/ folder
 /// - "create_specifications_context" for files in contexts/ folder
-/// - "create_specifications_visual_components" for files in visuals/ folder
+/// - "create_specifications_external_api" for files in external_apis/ folder
 /// - "create_specifications_main" for files in root folder
 fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'static str {
     let draft_path = draft_file.to_path_buf();
@@ -3206,7 +3367,8 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
         match component_str.as_ref() {
             "data" => "create_specifications_data",
             "contexts" => "create_specifications_context",
-            "visuals" => "create_specifications_visual_components",
+            "external_apis" => "create_specifications_external_api",
+            "brands" => "create_specifications_brand",
             _ => "create_specifications_main",
         }
     } else {
@@ -3291,144 +3453,239 @@ fn to_pascal_case_title(s: &str) -> Option<String> {
     }
 }
 
-fn validate_generated_rust_layout(project_root: &Path) -> Result<()> {
-    let src_dir = project_root.join("src");
-    if !src_dir.exists() {
-        return Ok(());
-    }
+fn relative_specification_path(context_file: &Path, specifications_dir: &str) -> Result<PathBuf> {
+    let context_path = context_file.to_path_buf();
+    let specifications_path = PathBuf::from(specifications_dir);
 
-    let mut issues = Vec::new();
-    let mut needs_base64 = false;
-    let mut needs_sha2 = false;
+    let relative_path = match context_path.strip_prefix(&specifications_path) {
+        Ok(rel) => rel.to_path_buf(),
+        Err(_) => {
+            let context_components: Vec<_> = context_path.components().collect();
+            let specifications_components: Vec<_> = specifications_path.components().collect();
 
-    for module_dir in [src_dir.join("data"), src_dir.join("contexts")] {
-        let mod_rs = module_dir.join("mod.rs");
-        if mod_rs.exists() {
-            validate_mod_exports(&mod_rs, &mut issues)?;
+            if context_components.len() > specifications_components.len()
+                && context_components
+                    .iter()
+                    .zip(specifications_components.iter())
+                    .all(|(a, b)| a == b)
+            {
+                PathBuf::from_iter(
+                    context_components
+                        .iter()
+                        .skip(specifications_components.len()),
+                )
+            } else {
+                let context_str = context_file.to_str().unwrap_or("");
+                let specifications_str = specifications_dir;
+                if context_str.starts_with(specifications_str) {
+                    let rel_str = &context_str[specifications_str.len()..].trim_start_matches('/');
+                    PathBuf::from(rel_str)
+                } else {
+                    context_path
+                        .file_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_default()
+                }
+            }
         }
-    }
-
-    let rust_files = collect_rust_files(&src_dir)?;
-    for file in rust_files {
-        let content = fs::read_to_string(&file)
-            .with_context(|| format!("Failed to read generated source: {}", file.display()))?;
-
-        if content.contains("crate::types::") {
-            issues.push(format!(
-                "{} uses `crate::types::...`; project structure uses `crate::data`/`crate::contexts`.",
-                file.display()
-            ));
-        }
-
-        if content.contains("base64::") {
-            needs_base64 = true;
-        }
-        if content.contains("sha2::") {
-            needs_sha2 = true;
-        }
-    }
-
-    let cargo_toml = project_root.join("Cargo.toml");
-    if cargo_toml.exists() {
-        let cargo_content = fs::read_to_string(&cargo_toml)
-            .with_context(|| format!("Failed to read {}", cargo_toml.display()))?;
-        if needs_base64 && !cargo_content.contains("\nbase64") {
-            issues.push(
-                "Cargo.toml is missing dependency `base64` while generated code references it."
-                    .to_string(),
-            );
-        }
-        if needs_sha2 && !cargo_content.contains("\nsha2") {
-            issues.push(
-                "Cargo.toml is missing dependency `sha2` while generated code references it."
-                    .to_string(),
-            );
-        }
-    }
-
-    if issues.is_empty() {
-        return Ok(());
-    }
-
-    let mut msg = String::from("Generated implementation layout validation failed:\n");
-    for issue in issues {
-        msg.push_str(&format!("  - {}\n", issue));
-    }
-    anyhow::bail!(msg.trim_end().to_string())
-}
-
-fn validate_mod_exports(mod_file: &Path, issues: &mut Vec<String>) -> Result<()> {
-    let content = fs::read_to_string(mod_file)
-        .with_context(|| format!("Failed to read {}", mod_file.display()))?;
-    let Some(parent) = mod_file.parent() else {
-        return Ok(());
     };
 
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !(trimmed.starts_with("pub use ") && trimmed.ends_with(';')) {
+    Ok(relative_path)
+}
+
+fn determine_bdd_test_paths(context_file: &Path, specifications_dir: &str) -> Result<BddTestPaths> {
+    let relative_path = relative_specification_path(context_file, specifications_dir)?;
+    let file_stem = relative_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .context("Invalid specification filename")?;
+
+    let mut feature_relative = relative_path.clone();
+    feature_relative.set_extension("feature");
+
+    let mut steps_relative = relative_path.clone();
+    steps_relative.set_file_name(format!("{}_steps.rs", file_stem.to_ascii_lowercase()));
+
+    let runner_slug = relative_path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(|part| {
+            part.chars()
+                .map(|ch| {
+                    if ch.is_ascii_alphanumeric() {
+                        ch.to_ascii_lowercase()
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("_")
+        .trim_end_matches("_md")
+        .to_string();
+    let runner_test_name = format!("bdd_{}", runner_slug);
+
+    Ok(BddTestPaths {
+        feature_path: PathBuf::from("tests/features").join(feature_relative),
+        steps_path: PathBuf::from("tests/steps").join(steps_relative),
+        runner_path: PathBuf::from("tests").join(format!("{}.rs", runner_test_name)),
+        runner_test_name,
+    })
+}
+
+fn sync_bdd_cargo_support(config: &Config) -> Result<()> {
+    let cargo_toml = PathBuf::from("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Ok(());
+    }
+
+    let mut runner_paths = Vec::new();
+    collect_bdd_runner_paths(Path::new("tests"), &mut runner_paths)?;
+    runner_paths.sort();
+    runner_paths.dedup();
+
+    let content = fs::read_to_string(&cargo_toml)
+        .with_context(|| format!("Failed to read {}", cargo_toml.display()))?;
+    let content = ensure_dev_dependency_entry(
+        &content,
+        "cucumber",
+        &format!("\"{}\"", BDD_CUCUMBER_VERSION),
+    );
+    let content = ensure_dev_dependency_entry(&content, "tokio", BDD_TOKIO_SPEC);
+    let content = sync_managed_block(
+        &content,
+        BDD_TEST_TARGETS_START,
+        BDD_TEST_TARGETS_END,
+        &render_bdd_test_targets(&runner_paths),
+    );
+    fs::write(&cargo_toml, content)
+        .with_context(|| format!("Failed to update {}", cargo_toml.display()))?;
+
+    if config.verbose {
+        println!(
+            "✓ Synchronized Cargo.toml for {} BDD runner(s)",
+            runner_paths.len()
+        );
+    }
+
+    Ok(())
+}
+
+fn collect_bdd_runner_paths(dir: &Path, runner_paths: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() || !dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_bdd_runner_paths(&path, runner_paths)?;
             continue;
         }
-        let path = trimmed
-            .trim_start_matches("pub use ")
-            .trim_end_matches(';')
-            .trim();
-        let Some((module_name, type_name)) = path.split_once("::") else {
-            continue;
-        };
-
-        let module_file = parent.join(format!("{}.rs", module_name));
-        if !module_file.exists() {
-            issues.push(format!(
-                "{} exports `{}` but module file {} does not exist.",
-                mod_file.display(),
-                path,
-                module_file.display()
-            ));
-            continue;
-        }
-
-        let module_content = fs::read_to_string(&module_file)
-            .with_context(|| format!("Failed to read {}", module_file.display()))?;
-        let candidates = [
-            format!("pub struct {}", type_name),
-            format!("pub enum {}", type_name),
-            format!("pub type {}", type_name),
-            format!("pub trait {}", type_name),
-        ];
-        if !candidates
-            .iter()
-            .any(|needle| module_content.contains(needle))
-        {
-            issues.push(format!(
-                "{} exports `{}` but {} does not declare a matching public type.",
-                mod_file.display(),
-                path,
-                module_file.display()
-            ));
+        let is_runner = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|name| name.starts_with("bdd_") && name.ends_with(".rs"))
+            .unwrap_or(false);
+        if is_runner {
+            runner_paths.push(path);
         }
     }
 
     Ok(())
 }
 
-fn collect_rust_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    if !root.exists() {
-        return Ok(files);
-    }
+fn ensure_dev_dependency_entry(content: &str, name: &str, spec: &str) -> String {
+    let mut lines = content.lines().map(ToString::to_string).collect::<Vec<_>>();
+    let section_idx = lines
+        .iter()
+        .position(|line| line.trim() == "[dev-dependencies]");
 
-    for entry in fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() {
-            files.extend(collect_rust_files(&path)?);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
-            files.push(path);
+    match section_idx {
+        Some(idx) => {
+            let section_end = lines
+                .iter()
+                .enumerate()
+                .skip(idx + 1)
+                .find(|(_, line)| {
+                    let trimmed = line.trim();
+                    trimmed.starts_with('[') && trimmed.ends_with(']')
+                })
+                .map(|(index, _)| index)
+                .unwrap_or(lines.len());
+            let new_line = format!("{name} = {spec}");
+            if let Some(existing_idx) = (idx + 1..section_end).find(|line_idx| {
+                lines[*line_idx]
+                    .split('=')
+                    .next()
+                    .map(|candidate| candidate.trim() == name)
+                    .unwrap_or(false)
+            }) {
+                lines[existing_idx] = new_line;
+            } else {
+                lines.insert(section_end, new_line);
+            }
+        }
+        None => {
+            if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push("[dev-dependencies]".to_string());
+            lines.push(format!("{name} = {spec}"));
         }
     }
 
-    Ok(files)
+    format!("{}\n", lines.join("\n"))
+}
+
+fn render_bdd_test_targets(runner_paths: &[PathBuf]) -> String {
+    runner_paths
+        .iter()
+        .filter_map(|path| {
+            let test_name = path.file_stem()?.to_str()?;
+            Some(format!(
+                "[[test]]\nname = \"{}\"\npath = \"{}\"\nharness = false",
+                test_name,
+                path.to_string_lossy()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn sync_managed_block(content: &str, start_marker: &str, end_marker: &str, body: &str) -> String {
+    let replacement = if body.trim().is_empty() {
+        format!("{start_marker}\n{end_marker}")
+    } else {
+        format!("{start_marker}\n{body}\n{end_marker}")
+    };
+
+    match (content.find(start_marker), content.find(end_marker)) {
+        (Some(start), Some(end)) if start <= end => {
+            let end_idx = end + end_marker.len();
+            let mut updated = String::new();
+            updated.push_str(&content[..start]);
+            if !updated.ends_with('\n') && !updated.is_empty() {
+                updated.push('\n');
+            }
+            updated.push_str(&replacement);
+            updated.push_str(&content[end_idx..]);
+            if !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated
+        }
+        _ => {
+            let mut updated = content.trim_end().to_string();
+            if !updated.is_empty() {
+                updated.push_str("\n\n");
+            }
+            updated.push_str(&replacement);
+            updated.push('\n');
+            updated
+        }
+    }
 }
 
 /// Determines the implementation output path preserving folder structure
@@ -3441,65 +3698,8 @@ fn determine_implementation_output_path(
     context_file: &Path,
     specifications_dir: &str,
 ) -> Result<PathBuf> {
-    let context_path = context_file.to_path_buf();
-    let specifications_path = PathBuf::from(specifications_dir);
+    let relative_path = relative_specification_path(context_file, specifications_dir)?;
 
-    // Get relative path from specifications directory by comparing components
-    let relative_path = match context_path.strip_prefix(&specifications_path) {
-        Ok(rel) => rel.to_path_buf(),
-        Err(_) => {
-            // If strip_prefix fails, try component-based approach
-            let context_components: Vec<_> = context_path.components().collect();
-            let specifications_components: Vec<_> = specifications_path.components().collect();
-
-            // Check if context_path starts with specifications_path components
-            if context_components.len() > specifications_components.len()
-                && context_components
-                    .iter()
-                    .zip(specifications_components.iter())
-                    .all(|(a, b)| a == b)
-            {
-                // Build path from remaining components
-                PathBuf::from_iter(
-                    context_components
-                        .iter()
-                        .skip(specifications_components.len()),
-                )
-            } else {
-                // Use string-based fallback
-                let context_str = context_file.to_str().unwrap_or("");
-                let specifications_str = specifications_dir;
-                if context_str.starts_with(specifications_str) {
-                    let rel_str = &context_str[specifications_str.len()..].trim_start_matches('/');
-                    PathBuf::from(rel_str)
-                } else {
-                    // Just use the filename
-                    context_path
-                        .file_name()
-                        .map(|n| PathBuf::from(n))
-                        .unwrap_or_else(|| PathBuf::from(""))
-                }
-            }
-        }
-    };
-
-    // Determine output directory based on source folder
-    // Check if relative_path starts with "data" or "contexts" by looking at first component
-    let output_dir = if let Some(first_comp) = relative_path.components().next() {
-        if let Some(comp_str) = first_comp.as_os_str().to_str() {
-            match comp_str {
-                "data" => PathBuf::from("src/data"),
-                "contexts" => PathBuf::from("src/contexts"),
-                _ => PathBuf::from("src"),
-            }
-        } else {
-            PathBuf::from("src")
-        }
-    } else {
-        PathBuf::from("src")
-    };
-
-    // Get the filename and change extension to .rs
     let file_stem = relative_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -3509,23 +3709,57 @@ fn determine_implementation_output_path(
     let output_filename = if file_stem.eq_ignore_ascii_case("app") {
         "main.rs"
     } else {
-        &format!("{}.rs", file_stem.to_ascii_lowercase())
+        let mut output_rel = relative_path.to_path_buf();
+        output_rel.set_file_name(format!("{}.rs", file_stem.to_ascii_lowercase()));
+        return Ok(PathBuf::from("src").join(output_rel));
     };
 
-    let output_path = output_dir.join(output_filename);
+    let output_path = PathBuf::from("src").join(output_filename);
     Ok(output_path)
+}
+
+fn generated_project_structure_paths(project_info: &ProjectInfo) -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from("Cargo.toml"), PathBuf::from("src/lib.rs")];
+
+    let mut folders: Vec<_> = project_info.modules.keys().cloned().collect();
+    folders.sort();
+    folders.dedup();
+
+    for folder in folders {
+        if folder.is_empty() {
+            continue;
+        }
+        paths.push(PathBuf::from("src").join(&folder).join("mod.rs"));
+        if let Some(modules) = project_info.modules.get(&folder) {
+            for module in modules {
+                paths.push(
+                    PathBuf::from("src")
+                        .join(&folder)
+                        .join(format!("{}.rs", module)),
+                );
+            }
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_review_deltas, determine_specification_output_path,
+        build_dependency_drafts_from_context, build_dependency_manifest,
+        build_implemented_dependency_manifest, determine_bdd_test_paths,
+        determine_draft_input_path, determine_implementation_output_path,
+        determine_specification_output_path, ensure_dev_dependency_entry,
         extract_actionable_blocking_bullets, extract_compile_error_message,
-        extract_implementation_review_error_section, parse_review_delta_envelope,
-        parse_selection_input, resolve_input_files, score_review_candidate, select_suggestions,
-        suggestion_matches_file_filter, AppliedReviewChange, CategoryFilter, ReviewDelta,
-        ReviewFixOptions, ReviewSuggestion,
+        generated_project_structure_paths, parse_generated_files, resolve_input_files,
+        sync_managed_block, CategoryFilter, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
     };
+    use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
+    use crate::cli::project_structure::ProjectInfo;
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3561,21 +3795,6 @@ Problem:
     }
 
     #[test]
-    fn extracts_legacy_review_error_message_from_push_str_source() {
-        let code = r#"
-let mut msg = String::new();
-msg.push_str("ERROR: Cannot implement specification as written.\n\n");
-msg.push_str("Problems:\n");
-msg.push_str("- Missing constructor.\n");
-msg.push_str("- Missing accessor.\n");
-"#;
-        let msg = extract_implementation_review_error_section(code).expect("legacy message");
-        assert!(msg.contains("ERROR: Cannot implement specification as written."));
-        assert!(msg.contains("Missing constructor."));
-        assert!(msg.contains("Missing accessor."));
-    }
-
-    #[test]
     fn maps_specification_path_back_to_draft_path() {
         let path = determine_specification_output_path(
             Path::new("specifications/contexts/game_loop.md"),
@@ -3587,79 +3806,330 @@ msg.push_str("- Missing accessor.\n");
     }
 
     #[test]
-    fn score_prefers_dependency_when_error_mentions_context_symbol() {
-        let origin = Path::new("drafts/app.md");
-        let candidate = Path::new("drafts/contexts/game_loop.md");
-        let (score, reason) = score_review_candidate(
-            candidate,
-            origin,
-            "GameLoopContext exposes no public constructor",
-            true,
-            false,
+    fn maps_nested_specification_path_back_to_draft_path() {
+        let path = determine_specification_output_path(
+            Path::new("specifications/contexts/ui/terminal_renderer.md"),
+            "specifications",
+            "drafts",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("drafts/contexts/ui/terminal_renderer.md"));
+    }
+
+    #[test]
+    fn maps_external_api_draft_to_contexts_external_specification_path() {
+        let path = determine_specification_output_path(
+            Path::new("drafts/external_apis/stripe.md"),
+            "drafts",
+            "specifications",
+        )
+        .expect("path mapping");
+        assert_eq!(
+            path,
+            Path::new("specifications/contexts/external/stripe.md")
         );
-        assert!(score > 70);
-        assert_eq!(reason, "error_mentions_context_symbol");
     }
 
     #[test]
-    fn parse_fix_mode_delta_payload() {
-        let payload = r#"{
-  "changes": [
-    {
-      "section": "Functionality",
-      "change_type": "append_bullet",
-      "before": null,
-      "after": "Add getter for score",
-      "reason": "public API needed by app"
-    }
-  ]
-}"#;
-        let parsed = parse_review_delta_envelope(payload).expect("parsed");
-        assert_eq!(parsed.changes.len(), 1);
-        assert_eq!(parsed.changes[0].section, "Functionality");
-        assert_eq!(parsed.changes[0].change_type, "append_bullet");
+    fn maps_brand_draft_to_brand_specification_path() {
+        let path = determine_specification_output_path(
+            Path::new("drafts/brands/acme.md"),
+            "drafts",
+            "specifications",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("specifications/brands/acme.md"));
     }
 
     #[test]
-    fn apply_review_deltas_updates_only_target_section() {
-        let original = r#"# GameLoopContext
-
-## Description
-- Existing description line
-
-## Functionality
-- Existing behavior
-
-## Error handling
-- Existing error handling
-"#;
-        let deltas = vec![ReviewDelta {
-            section: "Functionality".to_string(),
-            change_type: "append_bullet".to_string(),
-            before: None,
-            after: "Expose read-only getter for score".to_string(),
-            reason: Some("public API".to_string()),
-            style_intent: Some("specification wording".to_string()),
-        }];
-        let tmp_path = PathBuf::from("drafts/contexts/_tmp_review_test.md");
-        let (applied, rejected) =
-            apply_review_deltas(&tmp_path, original, deltas, true).expect("applied");
-        assert_eq!(applied.len(), 1);
-        assert!(rejected.is_empty());
-        assert_eq!(applied[0].section, "Functionality");
-        assert_eq!(applied[0].change_type, "append_bullet");
-        assert!(applied[0].preview.contains("Expose read-only getter"));
+    fn maps_contexts_external_specification_back_to_external_api_draft_path() {
+        let path = determine_draft_input_path(
+            Path::new("specifications/contexts/external/stripe.md"),
+            "specifications",
+            "drafts",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("drafts/external_apis/stripe.md"));
     }
 
     #[test]
-    fn detailed_fix_output_record_shape() {
-        let report = AppliedReviewChange {
-            section: "Functionality".to_string(),
-            change_type: "replace_bullet".to_string(),
-            preview: "Replace run bullet to use dependency getter".to_string(),
-            style_intent: Some("specification wording".to_string()),
+    fn maps_brand_specification_back_to_draft_path() {
+        let path = determine_draft_input_path(
+            Path::new("specifications/brands/acme.md"),
+            "specifications",
+            "drafts",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("drafts/brands/acme.md"));
+    }
+
+    #[test]
+    fn determine_implementation_output_path_preserves_nested_hierarchy() {
+        let path = determine_implementation_output_path(
+            Path::new("specifications/contexts/ui/terminal_renderer.md"),
+            "specifications",
+        )
+        .expect("implementation path");
+        assert_eq!(path, Path::new("src/contexts/ui/terminal_renderer.rs"));
+    }
+
+    #[test]
+    fn resolve_input_files_discovers_nested_paths_and_stems() {
+        let root = temp_root("nested_inputs");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts/ui")).expect("mkdir");
+        fs::create_dir_all(drafts.join("external_apis")).expect("mkdir");
+        fs::create_dir_all(drafts.join("brands")).expect("mkdir");
+        fs::create_dir_all(drafts.join("data/payments")).expect("mkdir");
+        fs::write(
+            drafts.join("contexts/ui/terminal_renderer.md"),
+            "# Terminal Renderer",
+        )
+        .expect("write");
+        fs::write(drafts.join("external_apis/stripe.md"), "# Stripe API").expect("write");
+        fs::write(drafts.join("brands/acme.md"), "# Acme Brand").expect("write");
+        fs::write(
+            drafts.join("data/payments/ledger_entry.md"),
+            "# Ledger Entry",
+        )
+        .expect("write");
+
+        let all = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            Vec::new(),
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("all files");
+        assert!(all
+            .iter()
+            .any(|p| p.ends_with("contexts/ui/terminal_renderer.md")));
+        assert!(all.iter().any(|p| p.ends_with("external_apis/stripe.md")));
+        assert!(all.iter().any(|p| p.ends_with("brands/acme.md")));
+        assert!(all
+            .iter()
+            .any(|p| p.ends_with("data/payments/ledger_entry.md")));
+
+        let by_stem = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["terminal_renderer".to_string()],
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("stem lookup");
+        assert_eq!(by_stem.len(), 1);
+        assert!(by_stem[0].ends_with("contexts/ui/terminal_renderer.md"));
+
+        let by_external_name = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["stripe".to_string()],
+            "md",
+            &CategoryFilter {
+                contexts: true,
+                data: false,
+                brands: false,
+                visuals: false,
+            },
+        )
+        .expect("external lookup");
+        assert_eq!(by_external_name.len(), 1);
+        assert!(by_external_name[0].ends_with("external_apis/stripe.md"));
+
+        let by_nested_name = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["payments/ledger_entry".to_string()],
+            "md",
+            &CategoryFilter {
+                contexts: false,
+                data: true,
+                brands: false,
+                visuals: false,
+            },
+        )
+        .expect("nested lookup");
+        assert_eq!(by_nested_name.len(), 1);
+        assert!(by_nested_name[0].ends_with("data/payments/ledger_entry.md"));
+
+        let by_brand_name = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["acme".to_string()],
+            "md",
+            &CategoryFilter {
+                contexts: false,
+                data: false,
+                brands: true,
+                visuals: false,
+            },
+        )
+        .expect("brand lookup");
+        assert_eq!(by_brand_name.len(), 1);
+        assert!(by_brand_name[0].ends_with("brands/acme.md"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_project_structure_paths_include_nested_mod_files() {
+        let mut modules = HashMap::new();
+        modules.insert("contexts".to_string(), vec!["account".to_string()]);
+        modules.insert(
+            "contexts/ui".to_string(),
+            vec!["terminal_renderer".to_string()],
+        );
+
+        let project_info = ProjectInfo {
+            modules,
+            ..Default::default()
         };
-        assert!(report.preview.contains("dependency getter"));
+
+        let paths = generated_project_structure_paths(&project_info);
+        assert!(paths.contains(&PathBuf::from("Cargo.toml")));
+        assert!(paths.contains(&PathBuf::from("src/lib.rs")));
+        assert!(paths.contains(&PathBuf::from("src/contexts/mod.rs")));
+        assert!(paths.contains(&PathBuf::from("src/contexts/account.rs")));
+        assert!(paths.contains(&PathBuf::from("src/contexts/ui/mod.rs")));
+        assert!(paths.contains(&PathBuf::from("src/contexts/ui/terminal_renderer.rs")));
+    }
+
+    #[test]
+    fn determine_bdd_test_paths_preserves_feature_hierarchy() {
+        let paths = determine_bdd_test_paths(
+            Path::new("specifications/contexts/ui/terminal_renderer.md"),
+            "specifications",
+        )
+        .expect("bdd test paths");
+        assert_eq!(
+            paths.feature_path,
+            PathBuf::from("tests/features/contexts/ui/terminal_renderer.feature")
+        );
+        assert_eq!(
+            paths.steps_path,
+            PathBuf::from("tests/steps/contexts/ui/terminal_renderer_steps.rs")
+        );
+        assert_eq!(
+            paths.runner_path,
+            PathBuf::from("tests/bdd_contexts_ui_terminal_renderer.rs")
+        );
+        assert_eq!(paths.runner_test_name, "bdd_contexts_ui_terminal_renderer");
+    }
+
+    #[test]
+    fn parse_generated_files_reads_xml_style_blocks() {
+        let output = r#"<file path="tests/features/account.feature">
+Feature: Account
+
+  Scenario: Open an account
+    Given an account exists
+</file>
+<file path="tests/steps/account_steps.rs">
+use super::GeneratedWorld;
+</file>
+<file path="tests/bdd_account.rs">
+fn main() {}
+</file>"#;
+
+        let files = parse_generated_files(output).expect("parse generated files");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].0, PathBuf::from("tests/features/account.feature"));
+        assert!(files[0].1.contains("Feature: Account"));
+        assert_eq!(files[1].0, PathBuf::from("tests/steps/account_steps.rs"));
+        assert_eq!(files[2].0, PathBuf::from("tests/bdd_account.rs"));
+    }
+
+    #[test]
+    fn cargo_support_helpers_insert_dev_deps_and_managed_targets() {
+        let content = "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+        let updated = ensure_dev_dependency_entry(content, "cucumber", "\"0.22.1\"");
+        let updated = ensure_dev_dependency_entry(
+            &updated,
+            "tokio",
+            r#"{ version = "1.40", features = ["macros", "rt-multi-thread"] }"#,
+        );
+        let updated = sync_managed_block(
+            &updated,
+            BDD_TEST_TARGETS_START,
+            BDD_TEST_TARGETS_END,
+            "[[test]]\nname = \"bdd_account\"\npath = \"tests/bdd_account.rs\"\nharness = false",
+        );
+
+        assert!(updated.contains("[dev-dependencies]"));
+        assert!(updated.contains("cucumber = \"0.22.1\""));
+        assert!(updated.contains(
+            "tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"
+        ));
+        assert!(updated.contains(BDD_TEST_TARGETS_START));
+        assert!(updated.contains("name = \"bdd_account\""));
+        assert!(updated.contains(BDD_TEST_TARGETS_END));
+    }
+
+    #[test]
+    fn dependency_manifest_uses_metadata_only_and_marks_directness() {
+        let direct = DependencyArtifact {
+            name: "amount".to_string(),
+            path: "drafts/data/amount.md".to_string(),
+            source: DependencySource::Primary,
+            content: "full amount content".to_string(),
+            sha256: "abc123".to_string(),
+        };
+        let transitive = DependencyArtifact {
+            name: "currency".to_string(),
+            path: "drafts/data/currency.md".to_string(),
+            source: DependencySource::Primary,
+            content: "full currency content".to_string(),
+            sha256: "def456".to_string(),
+        };
+
+        let manifest = build_dependency_manifest(&[direct.clone(), transitive], &[direct]);
+        assert_eq!(manifest.len(), 2);
+        assert!(manifest[0].get("content").is_none());
+        assert_eq!(manifest[0]["dependency_kind"], "direct");
+        assert_eq!(manifest[1]["dependency_kind"], "transitive");
+    }
+
+    #[test]
+    fn implemented_dependency_manifest_uses_metadata_only() {
+        let direct = DependencyArtifact {
+            name: "amount".to_string(),
+            path: "specifications/data/amount.md".to_string(),
+            source: DependencySource::Primary,
+            content: "spec".to_string(),
+            sha256: "abc123".to_string(),
+        };
+        let implemented = serde_json::json!([
+            {
+                "name": "amount",
+                "spec_path": "specifications/data/amount.md",
+                "path": "src/data/amount.rs",
+                "content": "pub struct Amount;",
+                "sha256": "impl123"
+            }
+        ]);
+
+        let manifest = build_implemented_dependency_manifest(
+            implemented.as_array().expect("array"),
+            &[direct],
+        );
+        assert_eq!(manifest.len(), 1);
+        assert!(manifest[0].get("content").is_none());
+        assert_eq!(manifest[0]["dependency_kind"], "direct");
+    }
+
+    #[test]
+    fn build_dependency_drafts_uses_hidden_tool_context_when_available() {
+        let context = HashMap::from([(
+            "dependency_tool_context".to_string(),
+            serde_json::json!({
+                "dependency_artifacts": [
+                    {
+                        "path": "drafts/data/amount.md",
+                        "content": "Amount draft"
+                    }
+                ]
+            }),
+        )]);
+
+        let drafts = build_dependency_drafts_from_context(&context);
+        assert_eq!(drafts["drafts/data/amount.md"], "Amount draft");
     }
 
     #[test]
@@ -3682,106 +4152,5 @@ msg.push_str("- Missing accessor.\n");
         let actionable = extract_actionable_blocking_bullets(section);
         assert_eq!(actionable.len(), 1);
         assert!(actionable[0].contains("Missing required role method"));
-    }
-
-    #[test]
-    fn parses_selection_ranges_and_indices() {
-        let selected = parse_selection_input("1,3-4", 5).expect("selection");
-        assert_eq!(selected, vec![0, 2, 3]);
-    }
-
-    #[test]
-    fn select_suggestions_all_with_max_applies_limit() {
-        let suggestions = vec![
-            ReviewSuggestion {
-                draft_path: PathBuf::from("drafts/app.md"),
-                delta: ReviewDelta {
-                    section: "Functionality".to_string(),
-                    change_type: "append_bullet".to_string(),
-                    before: None,
-                    after: "a".to_string(),
-                    reason: None,
-                    style_intent: None,
-                },
-                error_source: PathBuf::from("src/main.rs"),
-                ownership_reason: "origin".to_string(),
-            },
-            ReviewSuggestion {
-                draft_path: PathBuf::from("drafts/app.md"),
-                delta: ReviewDelta {
-                    section: "Functionality".to_string(),
-                    change_type: "append_bullet".to_string(),
-                    before: None,
-                    after: "b".to_string(),
-                    reason: None,
-                    style_intent: None,
-                },
-                error_source: PathBuf::from("src/main.rs"),
-                ownership_reason: "origin".to_string(),
-            },
-        ];
-        let selected = select_suggestions(
-            &suggestions,
-            ReviewFixOptions {
-                fix: true,
-                interactive: false,
-                all: true,
-                step: false,
-                max: Some(1),
-                file_filters: Vec::new(),
-            },
-        )
-        .expect("selected");
-        assert_eq!(selected, vec![0]);
-    }
-
-    #[test]
-    fn file_filter_matches_stem_or_path_suffix() {
-        let path = Path::new("drafts/contexts/game_loop.md");
-        assert!(suggestion_matches_file_filter(
-            path,
-            &[String::from("game_loop")]
-        ));
-        assert!(suggestion_matches_file_filter(
-            path,
-            &[String::from("contexts/game_loop.md")]
-        ));
-        assert!(!suggestion_matches_file_filter(
-            path,
-            &[String::from("app")]
-        ));
-    }
-
-    #[test]
-    fn resolve_input_files_includes_visuals_when_unfiltered() {
-        let root = temp_root("resolve_visuals");
-        let drafts = root.join("drafts");
-        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
-        fs::create_dir_all(drafts.join("visuals").join("components")).expect("mkdir visuals");
-
-        let app = drafts.join("app.md");
-        let context = drafts.join("contexts").join("game_loop.md");
-        let visual = drafts
-            .join("visuals")
-            .join("components")
-            .join("button.md");
-
-        fs::write(&app, "# App").expect("write app");
-        fs::write(&context, "# GameLoop").expect("write context");
-        fs::write(&visual, "# Button").expect("write visual");
-
-        let files = resolve_input_files(
-            drafts.to_str().expect("draft path"),
-            Vec::new(),
-            "md",
-            &CategoryFilter::all(),
-        )
-        .expect("resolve files");
-
-        assert!(files.contains(&app));
-        assert!(files.contains(&context));
-        assert!(files.contains(&visual));
-
-        let _ = fs::remove_dir_all(root);
     }
 }

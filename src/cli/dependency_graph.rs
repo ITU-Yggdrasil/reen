@@ -100,6 +100,8 @@ impl ExecutionNode {
         };
         let primary_by_canonical = index_by_canonical(&primary_index);
         let fallback_by_canonical = index_by_canonical(&fallback_index);
+        let primary_root_path = PathBuf::from(primary_root);
+        let fallback_root_path = fallback_root.map(PathBuf::from);
 
         let mut queue = self.direct_dependencies.clone();
         let mut seen_paths = HashSet::new();
@@ -135,6 +137,9 @@ impl ExecutionNode {
                 sha256,
             });
 
+            let from_category =
+                categorize_artifact(&path, &primary_root_path, fallback_root_path.as_deref());
+
             let canonicals =
                 extract_dependency_canonicals(&content, &primary_index, &fallback_index);
             for canonical in canonicals {
@@ -153,6 +158,15 @@ impl ExecutionNode {
                             continue;
                         }
 
+                        let to_category = categorize_artifact(
+                            &candidate.path,
+                            &primary_root_path,
+                            fallback_root_path.as_deref(),
+                        );
+                        if !dependency_allowed(from_category, to_category) {
+                            continue;
+                        }
+
                         queue.push(DependencyLocator {
                             name: candidate.name.clone(),
                             primary_path: Some(candidate.path.clone()),
@@ -162,6 +176,14 @@ impl ExecutionNode {
                 } else {
                     for candidate in fallback_candidates {
                         if candidate.path == path || candidate.path == self.input_path {
+                            continue;
+                        }
+                        let to_category = categorize_artifact(
+                            &candidate.path,
+                            &primary_root_path,
+                            fallback_root_path.as_deref(),
+                        );
+                        if !dependency_allowed(from_category, to_category) {
                             continue;
                         }
                         queue.push(DependencyLocator {
@@ -216,6 +238,75 @@ struct IndexedArtifact {
     token_len: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtifactCategory {
+    Brands,
+    App,
+    Contexts,
+    Data,
+    Other,
+}
+
+fn categorize_artifact(
+    path: &Path,
+    primary_root: &Path,
+    fallback_root: Option<&Path>,
+) -> ArtifactCategory {
+    let rel = if path.starts_with(primary_root) {
+        path.strip_prefix(primary_root).ok()
+    } else {
+        fallback_root.and_then(|r| path.strip_prefix(r).ok())
+    }
+    .unwrap_or(path);
+
+    // `app.md` is only the top-level app when it is directly under the root.
+    if rel
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.eq_ignore_ascii_case("app.md"))
+        .unwrap_or(false)
+        && rel
+            .parent()
+            .map(|p| p.as_os_str().is_empty())
+            .unwrap_or(false)
+    {
+        return ArtifactCategory::App;
+    }
+
+    let mut comps = rel.components();
+    let first = comps
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .unwrap_or("");
+    match first {
+        "brands" => ArtifactCategory::Brands,
+        "contexts" | "external_apis" => ArtifactCategory::Contexts,
+        "data" => ArtifactCategory::Data,
+        _ => ArtifactCategory::Other,
+    }
+}
+
+fn dependency_allowed(from: ArtifactCategory, to: ArtifactCategory) -> bool {
+    match from {
+        ArtifactCategory::Brands => matches!(to, ArtifactCategory::Brands),
+        // Architectural rule: data is pure and cannot depend on contexts or app.
+        ArtifactCategory::Data => matches!(to, ArtifactCategory::Data | ArtifactCategory::Brands),
+        // Contexts may depend on data and other contexts, but never on the app entrypoint.
+        ArtifactCategory::Contexts => {
+            matches!(
+                to,
+                ArtifactCategory::Contexts | ArtifactCategory::Data | ArtifactCategory::Brands
+            )
+        }
+        // The app entrypoint can depend on contexts and data.
+        ArtifactCategory::App => matches!(
+            to,
+            ArtifactCategory::Contexts | ArtifactCategory::Data | ArtifactCategory::Brands
+        ),
+        ArtifactCategory::Other => true,
+    }
+}
+
 pub fn build_execution_plan(
     selected_inputs: Vec<PathBuf>,
     primary_root: &str,
@@ -234,6 +325,8 @@ pub fn build_execution_plan(
     let primary_by_canonical = index_by_canonical(&primary_index);
     let fallback_by_canonical = index_by_canonical(&fallback_index);
     let selected_set: HashSet<PathBuf> = selected_inputs.iter().cloned().collect();
+    let primary_root_path = PathBuf::from(primary_root);
+    let fallback_root_path = fallback_root.map(PathBuf::from);
 
     let mut nodes = Vec::new();
     let mut edges: Vec<Vec<usize>> = Vec::new();
@@ -251,6 +344,12 @@ pub fn build_execution_plan(
             .context("invalid input filename")?;
         let content = fs::read_to_string(input_path)
             .with_context(|| format!("failed reading input file: {}", input_path.display()))?;
+
+        let from_category = categorize_artifact(
+            input_path,
+            &primary_root_path,
+            fallback_root_path.as_deref(),
+        );
 
         let mut direct_dependencies = Vec::new();
         let mut edge_targets = Vec::new();
@@ -276,6 +375,15 @@ pub fn build_execution_plan(
                         continue;
                     }
 
+                    let to_category = categorize_artifact(
+                        &candidate.path,
+                        &primary_root_path,
+                        fallback_root_path.as_deref(),
+                    );
+                    if !dependency_allowed(from_category, to_category) {
+                        continue;
+                    }
+
                     direct_dependencies.push(DependencyLocator {
                         name: candidate.name.clone(),
                         primary_path: Some(candidate.path.clone()),
@@ -291,6 +399,15 @@ pub fn build_execution_plan(
             } else {
                 for candidate in fallback_candidates {
                     if candidate.path == *input_path {
+                        continue;
+                    }
+
+                    let to_category = categorize_artifact(
+                        &candidate.path,
+                        &primary_root_path,
+                        fallback_root_path.as_deref(),
+                    );
+                    if !dependency_allowed(from_category, to_category) {
                         continue;
                     }
 
@@ -504,6 +621,14 @@ fn build_index(root: &str) -> Result<Vec<IndexedArtifact>> {
         };
         let canonical = canonicalize(&name);
         if canonical.is_empty() {
+            continue;
+        }
+
+        // The repository-level `app.md` is a root artifact (entrypoint), not a reusable
+        // building block. Business writing frequently contains the word "app", and implicit
+        // token-based dependency discovery would otherwise create inverted dependencies like
+        // `game_loop -> app -> terminal_renderer/...`.
+        if canonical == "app" && path.parent() == Some(root_path.as_path()) {
             continue;
         }
 
@@ -770,6 +895,131 @@ mod tests {
         assert_eq!(levels.len(), 2);
         assert_eq!(levels[0][0].input_path, game_loop);
         assert_eq!(levels[1][0].input_path, app);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn data_does_not_depend_on_contexts_or_app() {
+        let root = temp_root("category_data");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+
+        let amount = drafts.join("data").join("amount.md");
+        let game_loop = drafts.join("contexts").join("game_loop.md");
+        let app = drafts.join("app.md");
+
+        fs::write(&amount, "Mentions game_loop and app").expect("write");
+        fs::write(&game_loop, "tick").expect("write");
+        fs::write(&app, "start").expect("write");
+
+        let levels = build_execution_plan(
+            vec![amount.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+        let closure = levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("closure");
+        let paths: Vec<String> = closure.iter().map(|d| d.path.clone()).collect();
+
+        assert!(!paths.iter().any(|p| p.ends_with("contexts/game_loop.md")));
+        assert!(!paths.iter().any(|p| p.ends_with("app.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn contexts_do_not_depend_on_app() {
+        let root = temp_root("category_contexts");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+
+        let game_loop = drafts.join("contexts").join("game_loop.md");
+        let app = drafts.join("app.md");
+        fs::write(&game_loop, "The App drives the loop").expect("write");
+        fs::write(&app, "Depends on: game_loop").expect("write");
+
+        let levels = build_execution_plan(
+            vec![game_loop.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+        let closure = levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("closure");
+        let paths: Vec<String> = closure.iter().map(|d| d.path.clone()).collect();
+
+        assert!(!paths.iter().any(|p| p.ends_with("app.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn app_and_contexts_can_depend_on_brands_but_data_cannot_escape_foundations() {
+        let root = temp_root("category_brands");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("brands")).expect("mkdir");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+
+        let brand = drafts.join("brands").join("acme.md");
+        let context = drafts.join("contexts").join("landing_page.md");
+        let data = drafts.join("data").join("palette.md");
+        let app = drafts.join("app.md");
+
+        fs::write(&brand, "Primary color and typography").expect("write");
+        fs::write(&context, "Depends on: acme").expect("write");
+        fs::write(&data, "Depends on: acme").expect("write");
+        fs::write(&app, "Depends on: landing_page").expect("write");
+
+        let context_levels = build_execution_plan(
+            vec![context.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("context plan");
+        let context_closure = context_levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("context closure");
+        let context_paths: Vec<String> = context_closure.iter().map(|d| d.path.clone()).collect();
+        assert!(context_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("brands/acme.md")));
+
+        let app_levels =
+            build_execution_plan(vec![app.clone()], drafts.to_str().unwrap_or("drafts"), None)
+                .expect("app plan");
+        let app_closure = app_levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("app closure");
+        let app_paths: Vec<String> = app_closure.iter().map(|d| d.path.clone()).collect();
+        assert!(app_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("contexts/landing_page.md")));
+
+        let data_levels = build_execution_plan(
+            vec![data.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("data plan");
+        let data_closure = data_levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("data closure");
+        let data_paths: Vec<String> = data_closure.iter().map(|d| d.path.clone()).collect();
+        assert!(data_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("brands/acme.md")));
+        assert!(!data_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("contexts/landing_page.md")));
+        assert!(!data_paths
+            .iter()
+            .any(|p| p.replace('\\', "/").ends_with("app.md")));
 
         let _ = fs::remove_dir_all(root);
     }

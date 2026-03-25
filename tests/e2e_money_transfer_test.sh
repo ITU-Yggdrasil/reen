@@ -34,16 +34,6 @@ if [ ! -d "$TEST_DIR" ]; then
     exit 1
 fi
 
-# Setup Python venv if needed
-echo -e "${YELLOW}Step 0: Setting up Python virtual environment...${NC}"
-if [ -f "$ROOT_DIR/setup_venv.sh" ]; then
-    bash "$ROOT_DIR/setup_venv.sh" > /dev/null 2>&1
-    echo -e "${GREEN}✓ Python virtual environment ready${NC}"
-else
-    echo -e "${YELLOW}⚠ setup_venv.sh not found, skipping venv setup${NC}"
-fi
-echo ""
-
 # Build reen first
 echo -e "${YELLOW}Step 1: Building reen...${NC}"
 cargo build --release
@@ -79,27 +69,6 @@ elif [ ! -L "agents" ] || [ ! -e "agents" ]; then
     fi
     ln -s "$ROOT_DIR/agents" agents
     echo -e "${GREEN}✓ Recreated symlink to agents directory${NC}"
-fi
-
-# Create symlink to runner.py so reen can find it
-if [ ! -e "runner.py" ]; then
-    if [ ! -f "$ROOT_DIR/runner.py" ]; then
-        echo -e "${RED}Error: runner.py not found at $ROOT_DIR/runner.py${NC}"
-        exit 1
-    fi
-    ln -s "$ROOT_DIR/runner.py" runner.py
-    echo -e "${GREEN}✓ Created symlink to runner.py${NC}"
-elif [ ! -L "runner.py" ] || [ ! -e "runner.py" ]; then
-    # Symlink exists but is broken or not a symlink
-    if [ -L "runner.py" ]; then
-        rm "runner.py"
-    fi
-    if [ ! -f "$ROOT_DIR/runner.py" ]; then
-        echo -e "${RED}Error: runner.py not found at $ROOT_DIR/runner.py${NC}"
-        exit 1
-    fi
-    ln -s "$ROOT_DIR/runner.py" runner.py
-    echo -e "${GREEN}✓ Recreated symlink to runner.py${NC}"
 fi
 
 # Step 2: Create specifications from drafts
@@ -161,16 +130,23 @@ fi
 echo ""
 
 # Step 4: Create tests
-echo -e "${YELLOW}Step 4: Creating tests from specifications...${NC}"
+echo -e "${YELLOW}Step 4: Creating BDD tests from specifications...${NC}"
 echo "Running: reen create tests"
 
-#if  "$REEN_BIN" create tests; then
-#    echo -e "${GREEN}✓ Tests created successfully${NC}"
-#else
-#    echo -e "${RED}✗ Failed to create tests${NC}"
-#    exit 1
-#fi
-#echo ""
+if "$REEN_BIN" create tests; then
+    echo -e "${GREEN}✓ BDD tests created successfully${NC}"
+else
+    echo -e "${RED}✗ Failed to create tests${NC}"
+    exit 1
+fi
+
+if [ -f "tests/features/contexts/account.feature" ] && [ -f "tests/bdd_contexts_account.rs" ]; then
+    echo -e "${GREEN}✓ Verified generated Gherkin feature and Cucumber runner${NC}"
+else
+    echo -e "${RED}✗ Expected BDD artifacts were not generated${NC}"
+    exit 1
+fi
+echo ""
 
 # Step 5: Compile the project
 echo -e "${YELLOW}Step 5: Compiling the generated code...${NC}"
@@ -186,7 +162,7 @@ fi
 echo ""
 
 # Step 6: Run the generated tests
-echo -e "${YELLOW}Step 6: Running generated tests...${NC}"
+echo -e "${YELLOW}Step 6: Running generated BDD tests...${NC}"
 echo "Running: cargo test"
 
 if cargo test; then
@@ -291,7 +267,7 @@ if cargo test test_transfer_between_accounts -- --nocapture; then
     echo "Summary:"
     echo "  ✓ Specifications created from drafts"
     echo "  ✓ Implementation generated"
-    echo "  ✓ Tests generated"
+    echo "  ✓ BDD tests generated"
     echo "  ✓ Code compiled successfully"
     echo "  ✓ Transfer of 100 from account A to B verified"
     echo ""

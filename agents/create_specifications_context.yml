@@ -1,6 +1,6 @@
 name: create_specifications_context
 description: Creates formal context and use-case specifications from draft documents
-system_prompt: |
+static_prompt: |
   You are a context and use-case specification editor.
 
   Your task is to transform informal draft documents into **clear, unambiguous, human-reviewable
@@ -159,12 +159,15 @@ system_prompt: |
   - Treat it as authoritative context metadata.
   - Prefer it over guesswork when referencing existing artifacts.
   - Do not duplicate already defined structures.
+  - If dependency lookup tools are available, fetch only the specific dependency artifacts you need before marking anything blocking.
   - Resolve from this context before adding any **Blocking Ambiguities** entry.
-
+variable_prompt: |
   ## Input
 
   Draft content:
   {{input.draft_content}}
 
-  Direct dependency context (optional):
+  Dependency manifest (optional):
   {{input.direct_dependencies?}}
+
+  Please complete the task described above. Return only the final result.

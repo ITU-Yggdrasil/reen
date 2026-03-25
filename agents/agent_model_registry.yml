@@ -1,24 +1,38 @@
+# Active registry profile loaded at runtime and embedded into the binary at build time.
+# Swap this file explicitly when you want a different provider preset.
 create_specifications_data:
-  model: qwen2.5:3b
+  model: mistral/mistral-large-latest
   parallel: false
+  batch: false
 create_specifications_context:
-  model: qwen2.5:3b
+  model: mistral/mistral-large-latest
   parallel: false
+  batch: false
 create_specifications_main:
-  model: qwen2.5:3b
+  model: mistral/mistral-large-latest
   parallel: false
+  batch: false
+create_specifications_external_api:
+  model: mistral/mistral-large-latest
+  parallel: false
+  batch: false
+create_specifications_brand:
+  model: mistral/mistral-large-latest
+  parallel: false
+  batch: false
 create_implementation:
-  model: qwen2.5:3b
-  parallel: false 
+  model: openai/gpt-5
+  parallel: true
+  batch: false
 create_test:
-  model: qwen2.5:3b
+  model: mistral/codestral-latest
   parallel: false
+  batch: false
 resolve_compilation_errors:
-  model: qwen2.5:3b
+  model: openai/gpt-5
   parallel: false
-review_draft_errors:
-  model: qwen2.5:3b
+  batch: false
+fix_draft_blockers:
+  model: mistral/mistral-large-latest
   parallel: false
-create_visual_specifications_components:
-  model: qwen2.5:7b # gpt-5
-  parallel: false
+  batch: false

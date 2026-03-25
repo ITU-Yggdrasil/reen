@@ -1,17 +1,57 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use reen::execution::estimate_request_tokens;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
 use super::agent_executor::{AgentExecutor, AgentResponse};
+use super::patch_service::{
+    apply_unified_diff, extract_unified_diff_from_agent_output, parse_unified_diff, HunkLineKind,
+};
 use super::project_structure::ProjectInfo;
 use super::Config;
+use reen::execution::NativeExecutionControl;
+
+/// Configuration for compilation fix context size, read from env vars:
+/// - REEN_COMPILE_FIX_MAX_ERRORS (default 10): max errors per agent round
+/// - REEN_COMPILE_FIX_MAX_TOKENS (default 120000): token budget for context
+/// - REEN_COMPILE_FIX_SNIPPET_LINES (default 20): lines around each error span
+/// - REEN_COMPILE_FIX_MAX_FILES (default 20): max files to include
+fn compile_fix_config() -> CompileFixConfig {
+    CompileFixConfig {
+        max_errors: env::var("REEN_COMPILE_FIX_MAX_ERRORS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10),
+        max_tokens: env::var("REEN_COMPILE_FIX_MAX_TOKENS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(120_000),
+        snippet_lines: env::var("REEN_COMPILE_FIX_SNIPPET_LINES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20),
+        max_files: env::var("REEN_COMPILE_FIX_MAX_FILES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CompileFixConfig {
+    max_errors: usize,
+    max_tokens: usize,
+    snippet_lines: usize,
+    max_files: usize,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagnosticSpan {
@@ -47,6 +87,7 @@ pub async fn ensure_compiles_with_auto_fix(
     project_root: &Path,
     project_info: &ProjectInfo,
     recent_generated_files: &[PathBuf],
+    execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<()> {
     if config.dry_run {
         return Ok(());
@@ -67,6 +108,8 @@ pub async fn ensure_compiles_with_auto_fix(
         max_attempts, session_dir_display
     );
 
+    let cfg = compile_fix_config();
+
     for attempt in 1..=max_attempts {
         let attempt_dir = session_dir.join(format!("attempt_{}", attempt));
         fs::create_dir_all(&attempt_dir)
@@ -74,42 +117,80 @@ pub async fn ensure_compiles_with_auto_fix(
 
         write_attempt_compile_output(&attempt_dir, &output)?;
 
-        let diagnostics = parse_rustc_diagnostics(&output.stderr);
-        let relevant_paths = collect_relevant_paths(
-            project_root,
-            &diagnostics,
-            &output.stderr,
-            recent_generated_files,
-        )?;
+        let all_diagnostics = parse_rustc_diagnostics(&output.stderr);
+        let mut max_paths = Some(cfg.max_files);
+        let mut snippet_lines = cfg.snippet_lines;
+        let mut max_errors_used = cfg.max_errors;
+        let mut include_specs = true;
 
-        let files_json = snapshot_files_json(project_root, &relevant_paths)?;
-        let specs_json = snapshot_specs_json(project_root, &relevant_paths)?;
+        let additional_context = loop {
+            let diagnostics = prioritize_and_cap_diagnostics(&all_diagnostics, max_errors_used);
+            let truncated_stderr = truncate_stderr_for_diagnostics(&output.stderr, &diagnostics);
 
-        let additional_context = build_agent_context(
-            &output,
-            &diagnostics,
-            &files_json,
-            &specs_json,
-            recent_generated_files,
-            project_info,
-        )?;
+            let relevant_paths = collect_relevant_paths(
+                project_root,
+                &diagnostics,
+                &output.stderr,
+                recent_generated_files,
+                max_paths,
+            )?;
 
-        fs::write(
-            attempt_dir.join("diagnostics.json"),
-            serde_json::to_string_pretty(&diagnostics).unwrap_or_else(|_| "[]".to_string()),
-        )
-        .ok();
-        fs::write(
-            attempt_dir.join("context_files.json"),
-            serde_json::to_string_pretty(&files_json).unwrap_or_else(|_| "{}".to_string()),
-        )
-        .ok();
-        if !specs_json.is_empty() {
-            fs::write(
-                attempt_dir.join("context_specs.json"),
-                serde_json::to_string_pretty(&specs_json).unwrap_or_else(|_| "{}".to_string()),
-            )
-            .ok();
+            let files_json = snapshot_files_json_snippets(
+                project_root,
+                &relevant_paths,
+                &diagnostics,
+                snippet_lines,
+            )?;
+            let specs_json = if include_specs {
+                snapshot_specs_json(project_root, &relevant_paths)?
+            } else {
+                BTreeMap::new()
+            };
+
+            let ctx = build_agent_context(
+                &output,
+                &truncated_stderr,
+                &diagnostics,
+                &files_json,
+                &specs_json,
+                recent_generated_files,
+                project_info,
+            )?;
+
+            let estimated =
+                estimate_request_tokens("Compilation failed; propose minimal fix patch.", &ctx);
+            if estimated <= cfg.max_tokens {
+                break ctx;
+            }
+            if max_errors_used > 3 {
+                max_errors_used = max_errors_used / 2;
+            } else if snippet_lines > 5 {
+                snippet_lines = snippet_lines / 2;
+            } else if include_specs {
+                include_specs = false;
+            } else if max_paths.map(|m| m > 5).unwrap_or(false) {
+                max_paths = max_paths.map(|m| m / 2);
+            } else {
+                anyhow::bail!(
+                    "Compilation fix context exceeds token budget ({} > {}). \
+                     Try REEN_COMPILE_FIX_MAX_TOKENS or fix errors manually. Logs: {}",
+                    estimated,
+                    cfg.max_tokens,
+                    attempt_dir.display()
+                );
+            }
+        };
+
+        if let Some(serde_json::Value::String(s)) = additional_context.get("diagnostics_json") {
+            fs::write(attempt_dir.join("diagnostics.json"), s).ok();
+        }
+        if let Some(serde_json::Value::String(s)) = additional_context.get("files_json") {
+            fs::write(attempt_dir.join("context_files.json"), s).ok();
+        }
+        if let Some(serde_json::Value::String(s)) = additional_context.get("specs_json") {
+            if !s.is_empty() && s != "null" {
+                fs::write(attempt_dir.join("context_specs.json"), s).ok();
+            }
         }
 
         let executor = AgentExecutor::new("resolve_compilation_errors", config)
@@ -119,6 +200,7 @@ pub async fn ensure_compiles_with_auto_fix(
             .execute_with_context(
                 "Compilation failed; propose minimal fix patch.",
                 additional_context,
+                execution_control,
             )
             .await
             .context("Failed to execute compilation error resolver agent")?;
@@ -136,7 +218,7 @@ pub async fn ensure_compiles_with_auto_fix(
 
         fs::write(attempt_dir.join("proposed.patch"), &patch_text).ok();
 
-        let extracted = extract_unified_diff(&patch_text)
+        let extracted = extract_unified_diff_from_agent_output(&patch_text)
             .context("Resolver output did not contain a unified diff starting with 'diff --git'")?;
 
         let guardrail = check_guardrails(project_root, &extracted)?;
@@ -250,24 +332,183 @@ fn parse_rustc_diagnostics(stderr: &str) -> Vec<DiagnosticSpan> {
     spans
 }
 
+/// Error codes that often cause cascading errors; prioritize these first.
+const ROOT_CAUSE_ERROR_CODES: &[&str] = &["E0412", "E0433", "E0583", "E0407", "E0405"];
+
+/// File path priority: root/mod files before leaf modules.
+fn file_priority(path: &str) -> u8 {
+    if path == "src/lib.rs" || path == "src/main.rs" {
+        0
+    } else if path.ends_with("/mod.rs") {
+        1
+    } else {
+        2
+    }
+}
+
+fn prioritize_and_cap_diagnostics(
+    diagnostics: &[DiagnosticSpan],
+    max_errors: usize,
+) -> Vec<DiagnosticSpan> {
+    if diagnostics.len() <= max_errors {
+        return diagnostics.to_vec();
+    }
+    let mut indexed: Vec<(usize, &DiagnosticSpan)> = diagnostics.iter().enumerate().collect();
+    indexed.sort_by(|(i_a, a), (i_b, b)| {
+        let code_pri_a = a
+            .code
+            .as_ref()
+            .map(|c| {
+                if ROOT_CAUSE_ERROR_CODES.contains(&c.as_str()) {
+                    0
+                } else {
+                    1
+                }
+            })
+            .unwrap_or(1);
+        let code_pri_b = b
+            .code
+            .as_ref()
+            .map(|c| {
+                if ROOT_CAUSE_ERROR_CODES.contains(&c.as_str()) {
+                    0
+                } else {
+                    1
+                }
+            })
+            .unwrap_or(1);
+        code_pri_a
+            .cmp(&code_pri_b)
+            .then_with(|| file_priority(&a.file).cmp(&file_priority(&b.file)))
+            .then_with(|| i_a.cmp(i_b))
+    });
+    indexed
+        .into_iter()
+        .take(max_errors)
+        .map(|(_, d)| d.clone())
+        .collect()
+}
+
+/// Truncates stderr to keep only error blocks matching the prioritized diagnostics.
+fn truncate_stderr_for_diagnostics(stderr: &str, diagnostics: &[DiagnosticSpan]) -> String {
+    if diagnostics.is_empty() {
+        return stderr.to_string();
+    }
+    let diagnostic_set: HashSet<(String, u32)> = diagnostics
+        .iter()
+        .map(|d| (d.file.clone(), d.line))
+        .collect();
+    let re_span = Regex::new(r"(?m)^\s*-->\s+([^\s:][^:]*):(\d+):(\d+)\s*$").ok();
+    let re_error = Regex::new(r"(?m)^\s*error\[(E\d+)\]:").ok();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut current_block = String::new();
+    let mut block_matches = false;
+    let mut in_block = false;
+
+    for line in stderr.lines() {
+        let is_error_start = re_error.as_ref().map_or(false, |r| r.is_match(line));
+        let is_span = re_span.as_ref().map_or(false, |r| r.is_match(line));
+
+        if is_error_start {
+            if in_block && block_matches {
+                blocks.push(current_block.clone());
+            }
+            current_block = format!("{}\n", line);
+            in_block = true;
+            block_matches = false;
+        } else if in_block {
+            current_block.push_str(line);
+            current_block.push('\n');
+            if is_span {
+                if let Some(re) = &re_span {
+                    if let Some(cap) = re.captures(line) {
+                        let file = cap.get(1).map(|m| m.as_str()).unwrap_or("").to_string();
+                        let line_no = cap
+                            .get(2)
+                            .and_then(|m| m.as_str().parse::<u32>().ok())
+                            .unwrap_or(0);
+                        if diagnostic_set.contains(&(file, line_no)) {
+                            block_matches = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if in_block && block_matches {
+        blocks.push(current_block);
+    } else if blocks.is_empty() {
+        return stderr.to_string();
+    }
+    blocks.join("")
+}
+
+/// Extracts paths from `mod` lines in Rust source (best-effort).
+/// For `mod foo;` we add parent/foo.rs and parent/foo/mod.rs.
+fn extract_imports_from_file(content: &str, current_file_rel: &str) -> Vec<String> {
+    let re_mod = Regex::new(r"\bmod\s+([a-zA-Z0-9_]+)\s*;").ok();
+    let mut out: Vec<String> = Vec::new();
+    let parent = Path::new(current_file_rel)
+        .parent()
+        .unwrap_or(Path::new("."));
+    for line in content.lines() {
+        if let Some(re) = &re_mod {
+            if let Some(cap) = re.captures(line) {
+                if let Some(m) = cap.get(1) {
+                    let module = m.as_str();
+                    let sibling = parent.join(format!("{}.rs", module));
+                    out.push(sibling.to_string_lossy().to_string());
+                    let submod = parent.join(module).join("mod.rs");
+                    out.push(submod.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    out.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
 fn collect_relevant_paths(
     project_root: &Path,
     diagnostics: &[DiagnosticSpan],
     stderr: &str,
     recent_generated_files: &[PathBuf],
+    max_paths: Option<usize>,
 ) -> Result<Vec<PathBuf>> {
     let mut paths: HashSet<PathBuf> = HashSet::new();
+    let diagnostic_files: HashSet<String> = diagnostics
+        .iter()
+        .map(|d| d.file.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let recent_set: HashSet<String> = recent_generated_files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(project_root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
 
-    // Always include Cargo.toml and src/lib.rs if present.
-    for always in [
-        "Cargo.toml",
+    // Cargo.toml always (small, needed for deps).
+    let cargo = project_root.join("Cargo.toml");
+    if cargo.exists() {
+        paths.insert(cargo);
+    }
+
+    // Only include lib.rs, mod.rs if in diagnostics or recent.
+    for candidate in [
         "src/lib.rs",
+        "src/main.rs",
+        "src/execution/mod.rs",
         "src/contexts/mod.rs",
         "src/data/mod.rs",
     ] {
-        let p = project_root.join(always);
-        if p.exists() {
-            paths.insert(p);
+        if diagnostic_files.contains(candidate) || recent_set.contains(candidate) {
+            let p = project_root.join(candidate);
+            if p.exists() {
+                paths.insert(p);
+            }
         }
     }
 
@@ -306,11 +547,65 @@ fn collect_relevant_paths(
         }
     }
 
+    // Import-based: for files with errors, parse use/mod and add dependencies.
+    for path in paths.clone() {
+        let rel = path
+            .strip_prefix(project_root)
+            .unwrap_or(&path)
+            .to_string_lossy();
+        if !rel.ends_with(".rs") {
+            continue;
+        }
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        for dep in extract_imports_from_file(&content, &rel) {
+            let full = project_root.join(&dep);
+            if full.exists() {
+                paths.insert(full);
+            }
+        }
+    }
+
     let mut out: Vec<PathBuf> = paths.into_iter().collect();
     out.sort();
+
+    if let Some(max) = max_paths {
+        if out.len() > max {
+            let diagnostic_paths: HashSet<PathBuf> = diagnostics
+                .iter()
+                .filter_map(|d| {
+                    let p = project_root.join(d.file.trim());
+                    if p.exists() {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let recent_paths: HashSet<PathBuf> = recent_generated_files
+                .iter()
+                .map(|p| {
+                    if p.is_absolute() {
+                        p.clone()
+                    } else {
+                        project_root.join(p)
+                    }
+                })
+                .filter(|p| p.exists())
+                .collect();
+            let priority: HashSet<PathBuf> =
+                diagnostic_paths.union(&recent_paths).cloned().collect();
+            out.sort_by(|a, b| {
+                let a_pri = priority.contains(a);
+                let b_pri = priority.contains(b);
+                b_pri.cmp(&a_pri).then_with(|| a.cmp(b))
+            });
+            out.truncate(max);
+        }
+    }
     Ok(out)
 }
 
+#[allow(dead_code)]
 fn snapshot_files_json(project_root: &Path, paths: &[PathBuf]) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     for p in paths {
@@ -325,6 +620,97 @@ fn snapshot_files_json(project_root: &Path, paths: &[PathBuf]) -> Result<BTreeMa
         let content =
             fs::read_to_string(p).with_context(|| format!("Failed to read {}", p.display()))?;
         map.insert(rel, content);
+    }
+    Ok(map)
+}
+
+const SMALL_FILE_LINE_THRESHOLD: usize = 100;
+const HEAD_LINES_FOR_NON_ERROR_FILE: usize = 50;
+
+/// Snapshot files as snippets: around error spans for files with diagnostics,
+/// first N lines for others. Small files and Cargo.toml get full content.
+fn snapshot_files_json_snippets(
+    project_root: &Path,
+    paths: &[PathBuf],
+    diagnostics: &[DiagnosticSpan],
+    snippet_lines: usize,
+) -> Result<BTreeMap<String, String>> {
+    let diagnostics_by_file: HashMap<String, Vec<u32>> =
+        diagnostics.iter().fold(HashMap::new(), |mut acc, d| {
+            if !d.file.trim().is_empty() {
+                acc.entry(d.file.trim().to_string())
+                    .or_default()
+                    .push(d.line);
+            }
+            acc
+        });
+
+    let mut map = BTreeMap::new();
+    for p in paths {
+        if !p.exists() || p.is_dir() {
+            continue;
+        }
+        let rel = p
+            .strip_prefix(project_root)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .to_string();
+        let content =
+            fs::read_to_string(p).with_context(|| format!("Failed to read {}", p.display()))?;
+        let lines: Vec<&str> = content.lines().collect();
+        let line_count = lines.len();
+
+        let snippet = if rel == "Cargo.toml" || line_count <= SMALL_FILE_LINE_THRESHOLD {
+            content
+        } else if let Some(error_lines) = diagnostics_by_file.get(&rel) {
+            let mut ranges: Vec<(usize, usize)> = error_lines
+                .iter()
+                .map(|&ln| {
+                    let ln_usize = ln as usize;
+                    let start = ln_usize.saturating_sub(snippet_lines + 1);
+                    let end = (ln_usize + snippet_lines).min(line_count);
+                    (start, end)
+                })
+                .collect();
+            ranges.sort_by_key(|(a, _)| *a);
+            let mut merged: Vec<(usize, usize)> = Vec::new();
+            for (start, end) in ranges {
+                if let Some(last) = merged.last_mut() {
+                    if start <= last.1 + 1 {
+                        last.1 = last.1.max(end);
+                    } else {
+                        merged.push((start, end));
+                    }
+                } else {
+                    merged.push((start, end));
+                }
+            }
+            let mut result = String::new();
+            for (start, end) in merged {
+                let end = end.min(line_count);
+                for (i, line) in lines.iter().enumerate().take(end).skip(start) {
+                    result.push_str(&format!("{:4} | {}\n", i + 1, line));
+                }
+                if !result.ends_with('\n') {
+                    result.push('\n');
+                }
+            }
+            if result.is_empty() {
+                content
+            } else {
+                format!("(snippet around error lines)\n{}", result)
+            }
+        } else {
+            let take = HEAD_LINES_FOR_NON_ERROR_FILE.min(line_count);
+            let head: String = lines
+                .iter()
+                .take(take)
+                .enumerate()
+                .map(|(i, l)| format!("{:4} | {}\n", i + 1, l))
+                .collect();
+            format!("(first {} lines)\n{}", take, head)
+        };
+        map.insert(rel, snippet);
     }
     Ok(map)
 }
@@ -365,7 +751,9 @@ fn snapshot_specs_json(
 fn map_src_to_spec(src_rel: &str) -> Option<String> {
     // Best-effort mapping. This is intentionally conservative.
     // src/contexts/x.rs -> specifications/contexts/x.md
+    // src/contexts/ui/x.rs -> specifications/contexts/ui/x.md
     // src/data/x.rs -> specifications/data/x.md
+    // src/data/payments/x.rs -> specifications/data/payments/x.md
     // src/main.rs -> specifications/app.md
     if let Some(stem) = src_rel
         .strip_prefix("src/contexts/")
@@ -387,6 +775,7 @@ fn map_src_to_spec(src_rel: &str) -> Option<String> {
 
 fn build_agent_context(
     output: &CompilationOutput,
+    truncated_stderr: &str,
     diagnostics: &[DiagnosticSpan],
     files_json: &BTreeMap<String, String>,
     specs_json: &BTreeMap<String, String>,
@@ -395,7 +784,7 @@ fn build_agent_context(
 ) -> Result<HashMap<String, serde_json::Value>> {
     let mut ctx = HashMap::new();
     ctx.insert("compiler_stdout".to_string(), json!(output.stdout));
-    ctx.insert("compiler_stderr".to_string(), json!(output.stderr));
+    ctx.insert("compiler_stderr".to_string(), json!(truncated_stderr));
     ctx.insert(
         "diagnostics_json".to_string(),
         json!(serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())),
@@ -420,21 +809,6 @@ fn build_agent_context(
     );
     ctx.insert("project_info".to_string(), json!(project_info.package_name));
     Ok(ctx)
-}
-
-fn extract_unified_diff(text: &str) -> Option<String> {
-    if let Some(idx) = text.find("diff --git ") {
-        return Some(text[idx..].trim().to_string());
-    }
-
-    // Also allow raw patches that start with ---/+++ (less preferred)
-    if let Some(idx) = text.find("\n--- ") {
-        return Some(text[idx + 1..].trim().to_string());
-    }
-    if text.trim_start().starts_with("--- ") {
-        return Some(text.trim().to_string());
-    }
-    None
 }
 
 fn guardrail_to_json(r: &GuardrailReport) -> serde_json::Value {
@@ -548,10 +922,13 @@ fn check_guardrails(project_root: &Path, diff: &str) -> Result<GuardrailReport> 
             }
         }
 
+        let allowed_public_methods = spec_declared_public_methods(project_root, &target);
+
         issues.extend(evaluate_public_api_changes(
             &target,
             &removed_pub_fns,
             &added_pub_fns,
+            &allowed_public_methods,
         ));
 
         // Also ensure target resolves within root when joined.
@@ -704,7 +1081,35 @@ fn parse_pub_fn_signature(line: &str) -> Option<FnSig> {
     })
 }
 
-fn evaluate_public_api_changes(target: &str, removed: &[FnSig], added: &[FnSig]) -> Vec<String> {
+fn spec_declared_public_methods(project_root: &Path, target: &str) -> HashSet<String> {
+    let Some(spec_rel) = map_src_to_spec(target) else {
+        return HashSet::new();
+    };
+    let spec_path = project_root.join(spec_rel);
+    let Ok(spec_text) = fs::read_to_string(spec_path) else {
+        return HashSet::new();
+    };
+
+    let mut methods = HashSet::new();
+    for caps in spec_method_code_re().captures_iter(&spec_text) {
+        if let Some(name) = caps.get(1) {
+            methods.insert(name.as_str().to_string());
+        }
+    }
+    for caps in spec_method_bold_re().captures_iter(&spec_text) {
+        if let Some(name) = caps.get(1) {
+            methods.insert(name.as_str().to_string());
+        }
+    }
+    methods
+}
+
+fn evaluate_public_api_changes(
+    target: &str,
+    removed: &[FnSig],
+    added: &[FnSig],
+    allowed_public_methods: &HashSet<String>,
+) -> Vec<String> {
     let mut issues = Vec::new();
 
     let mut removed_by_name: HashMap<&str, Vec<&FnSig>> = HashMap::new();
@@ -741,8 +1146,9 @@ fn evaluate_public_api_changes(target: &str, removed: &[FnSig], added: &[FnSig])
                 ));
             }
             (None, Some(a)) => {
+                let allowed = is_allowed_new_public_method(a, allowed_public_methods);
                 // Allow adding getters; block setters and other public additions.
-                if !is_allowed_new_public_method(a) {
+                if !allowed {
                     issues.push(format!(
                         "{}: patch adds new public function `{}` outside allowed patterns (getter-only additions are allowed; setters are not).",
                         target, name
@@ -765,7 +1171,14 @@ fn evaluate_public_api_changes(target: &str, removed: &[FnSig], added: &[FnSig])
     issues
 }
 
-fn is_allowed_new_public_method(sig: &FnSig) -> bool {
+fn is_allowed_new_public_method(sig: &FnSig, allowed_public_methods: &HashSet<String>) -> bool {
+    if is_constructor_name(&sig.name) {
+        // Constructors are always safe to add as associated functions.
+        return matches!(sig.receiver, ReceiverKind::Other);
+    }
+    if is_spec_allowed_public_method_name(&sig.name, allowed_public_methods) {
+        return true;
+    }
     // Allowed:
     // - adding getters (no args except receiver, no mut receiver), and not a setter
     // - adding constructors: `new` / `try_new` (associated functions; no `self` receiver)
@@ -778,27 +1191,56 @@ fn is_allowed_new_public_method(sig: &FnSig) -> bool {
     ) {
         return false;
     }
-    if matches!(sig.name.as_str(), "new" | "try_new") {
-        // Constructors should be associated functions; allow args.
-        return matches!(sig.receiver, ReceiverKind::Other);
-    }
-
     // Otherwise, allow only getter-shaped additions.
     sig.non_self_param_types.is_empty()
+}
+
+fn is_spec_allowed_public_method_name(
+    name: &str,
+    allowed_public_methods: &HashSet<String>,
+) -> bool {
+    if allowed_public_methods.contains(name) {
+        return true;
+    }
+    if let Some(raw_name) = name.strip_prefix("r#") {
+        return allowed_public_methods.contains(raw_name);
+    }
+    if let Some((base, _alias_suffix)) = name.split_once('_') {
+        if rust_keyword_names().contains(base) && allowed_public_methods.contains(base) {
+            return true;
+        }
+    }
+    false
+}
+
+fn rust_keyword_names() -> &'static HashSet<&'static str> {
+    static KEYWORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    KEYWORDS.get_or_init(|| {
+        HashSet::from([
+            "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+            "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+            "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+            "unsafe", "use", "where", "while", "async", "await", "dyn", "abstract", "become",
+            "box", "do", "final", "macro", "override", "priv", "try", "typeof", "unsized",
+            "virtual", "yield",
+        ])
+    })
 }
 
 fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
     if old.name != new.name {
         return Some("function name changed".to_string());
     }
-    if matches!(
-        old.receiver,
-        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
-    ) || matches!(
-        new.receiver,
-        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
-    ) {
+    if matches!(new.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf) {
         return Some("introduces mutable receiver (`&mut self`/`mut self`)".to_string());
+    }
+    if matches!(old.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
+        && !is_allowed_immutable_receiver_transition(old, new)
+    {
+        return Some(
+            "changes a mutable receiver outside the allowed immutable transform patterns"
+                .to_string(),
+        );
     }
     if old.non_self_param_types.len() != new.non_self_param_types.len() {
         return Some("parameter count changed".to_string());
@@ -830,6 +1272,13 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
     None
 }
 
+fn is_allowed_immutable_receiver_transition(old: &FnSig, new: &FnSig) -> bool {
+    matches!(old.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
+        && !matches!(new.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
+        && is_self_family_return(&old.return_type)
+        && is_self_family_return(&new.return_type)
+}
+
 fn is_ref_value_equivalent(a: &str, b: &str) -> bool {
     // Allow &T <-> T at the top-level only; block &mut and other structural changes.
     if a.contains("&mut") || b.contains("&mut") {
@@ -858,6 +1307,21 @@ fn strip_top_level_ref(t: &str) -> String {
     s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+fn is_constructor_name(name: &str) -> bool {
+    matches!(name.strip_prefix("r#").unwrap_or(name), "new" | "try_new")
+}
+
+fn is_self_family_return(return_type: &Option<String>) -> bool {
+    let Some(return_type) = return_type else {
+        return false;
+    };
+    let normalized = return_type.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    normalized == "Self"
+        || normalized.starts_with("Result<Self,")
+        || normalized.starts_with("core::result::Result<Self,")
+        || normalized.starts_with("std::result::Result<Self,")
+}
+
 fn public_fn_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\s*pub(\s*\(crate\))?\s+fn\s+").expect("valid regex"))
@@ -870,329 +1334,297 @@ fn stub_macro_re() -> &'static Regex {
     })
 }
 
-#[derive(Debug, Clone)]
-struct FilePatch {
-    old_path: Option<String>,
-    new_path: Option<String>,
-    hunks: Vec<Hunk>,
-    hunk_lines: Vec<HunkLine>,
-    is_new_file: bool,
-    is_deletion: bool,
+fn spec_method_code_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"`([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^`\n]*\))?`").expect("valid regex")
+    })
 }
 
-#[derive(Debug, Clone)]
-struct Hunk {
-    old_start: usize,
-    lines: Vec<HunkLine>,
+fn spec_method_bold_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"\*\*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^*\n]*\))?\*\*").expect("valid regex")
+    })
 }
 
-#[derive(Debug, Clone)]
-struct HunkLine {
-    kind: HunkLineKind,
-    text: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::{check_guardrails, map_src_to_spec};
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HunkLineKind {
-    Context,
-    Add,
-    Remove,
-}
-
-fn parse_unified_diff(diff: &str) -> Result<Vec<FilePatch>> {
-    let mut lines = diff.lines().peekable();
-    let mut patches = Vec::new();
-
-    while let Some(line) = lines.next() {
-        if !line.starts_with("diff --git ") {
-            continue;
-        }
-
-        // Next lines include --- and +++.
-        let mut old_path: Option<String> = None;
-        let mut new_path: Option<String> = None;
-        let mut is_new_file = false;
-        let mut is_deletion = false;
-        let mut hunks = Vec::new();
-        let mut hunk_lines_flat = Vec::new();
-
-        while let Some(peek) = lines.peek() {
-            let p = *peek;
-            if p.starts_with("diff --git ") {
-                break;
-            }
-            let l = lines.next().unwrap();
-            if l.starts_with("new file mode") {
-                is_new_file = true;
-            } else if l.starts_with("deleted file mode") {
-                is_deletion = true;
-            } else if l.starts_with("--- ") {
-                old_path = Some(extract_patch_path(l, "--- ")?);
-                if old_path.as_deref() == Some("/dev/null") {
-                    old_path = None;
-                    is_new_file = true;
-                }
-            } else if l.starts_with("+++ ") {
-                new_path = Some(extract_patch_path(l, "+++ ")?);
-                if new_path.as_deref() == Some("/dev/null") {
-                    new_path = None;
-                    is_deletion = true;
-                }
-            } else if l.starts_with("@@ ") {
-                let (old_start, _new_start) = parse_hunk_header(l)?;
-                let mut h_lines = Vec::new();
-                while let Some(next) = lines.peek() {
-                    let nl = *next;
-                    if nl.starts_with("diff --git ") || nl.starts_with("@@ ") {
-                        break;
-                    }
-                    let hl = lines.next().unwrap();
-                    if hl.starts_with("\\ No newline") {
-                        continue;
-                    }
-                    if hl.is_empty() {
-                        // Empty context line is valid; treat as context.
-                        h_lines.push(HunkLine {
-                            kind: HunkLineKind::Context,
-                            text: String::new(),
-                        });
-                        continue;
-                    }
-                    let (kind, text) = match hl.chars().next().unwrap() {
-                        ' ' => (HunkLineKind::Context, hl[1..].to_string()),
-                        '+' => (HunkLineKind::Add, hl[1..].to_string()),
-                        '-' => (HunkLineKind::Remove, hl[1..].to_string()),
-                        _ => continue,
-                    };
-                    let h = HunkLine { kind, text };
-                    hunk_lines_flat.push(h.clone());
-                    h_lines.push(h);
-                }
-                hunks.push(Hunk {
-                    old_start,
-                    lines: h_lines,
-                });
-            }
-        }
-
-        let old_path_norm = old_path.and_then(normalize_patch_path);
-        let new_path_norm = new_path.and_then(normalize_patch_path);
-
-        patches.push(FilePatch {
-            old_path: old_path_norm,
-            new_path: new_path_norm,
-            hunks,
-            hunk_lines: hunk_lines_flat,
-            is_new_file,
-            is_deletion,
-        });
+    #[test]
+    fn map_src_to_spec_supports_nested_context_paths() {
+        assert_eq!(
+            map_src_to_spec("src/contexts/ui/terminal_renderer.rs"),
+            Some("specifications/contexts/ui/terminal_renderer.md".to_string())
+        );
     }
 
-    if patches.is_empty() {
-        anyhow::bail!("No file patches found");
-    }
-    Ok(patches)
-}
-
-fn extract_patch_path(line: &str, prefix: &str) -> Result<String> {
-    let raw = line.strip_prefix(prefix).unwrap_or("").trim();
-    // Paths may include trailing metadata (timestamps) separated by whitespace.
-    // Keep only the first token.
-    Ok(raw.split_whitespace().next().unwrap_or("").to_string())
-}
-
-fn normalize_patch_path(p: String) -> Option<String> {
-    // Strip "a/" and "b/" prefixes used in git diffs.
-    if p == "/dev/null" {
-        return None;
-    }
-    Some(
-        p.strip_prefix("a/")
-            .or_else(|| p.strip_prefix("b/"))
-            .unwrap_or(&p)
-            .to_string(),
-    )
-}
-
-fn parse_hunk_header(line: &str) -> Result<(usize, usize)> {
-    // @@ -oldStart,oldCount +newStart,newCount @@
-    let re = Regex::new(r"^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@").unwrap();
-    let cap = re
-        .captures(line)
-        .ok_or_else(|| anyhow::anyhow!("Invalid hunk header: {}", line))?;
-    let old_start = cap.get(1).unwrap().as_str().parse::<usize>()?;
-    let new_start = cap.get(2).unwrap().as_str().parse::<usize>()?;
-    Ok((old_start, new_start))
-}
-
-fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
-    let patches = parse_unified_diff(diff)?;
-    for fp in patches {
-        if fp.is_deletion {
-            anyhow::bail!("Refusing to apply deletion patch");
-        }
-        let target_rel = fp
-            .new_path
-            .clone()
-            .or(fp.old_path.clone())
-            .ok_or_else(|| anyhow::anyhow!("Patch missing file path"))?;
-
-        let target_full = project_root.join(&target_rel);
-        if let Some(parent) = target_full.parent() {
-            fs::create_dir_all(parent).ok();
-        }
-
-        let original = if target_full.exists() {
-            fs::read_to_string(&target_full)
-                .with_context(|| format!("Failed to read {}", target_full.display()))?
-        } else {
-            String::new()
-        };
-        let orig_lines = split_lines_preserve_empty(&original);
-        let new_lines = apply_hunks(&orig_lines, &fp.hunks)
-            .with_context(|| format!("Failed applying hunks to {}", target_rel))?;
-
-        let new_content = join_lines(&new_lines);
-        fs::write(&target_full, &new_content)
-            .with_context(|| format!("Failed to write {}", target_full.display()))?;
-    }
-    Ok(diff.trim().to_string())
-}
-
-fn split_lines_preserve_empty(s: &str) -> Vec<String> {
-    if s.is_empty() {
-        return Vec::new();
-    }
-    // `split_terminator` matches patch semantics better than `split` because it
-    // doesn't create a trailing empty line when the file ends with '\n'.
-    s.split_terminator('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
-        .collect()
-}
-
-fn join_lines(lines: &[String]) -> String {
-    // Preserve trailing newline if file had one is not tracked; write with \n join.
-    lines.join("\n")
-}
-
-fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
-    // Apply hunks using a fuzzy context search (similar to `patch`), since
-    // agent-produced diffs can have slightly-stale line numbers or shifted context.
-    let mut current: Vec<String> = orig.to_vec();
-
-    for h in hunks {
-        let (pattern, pattern_len) = hunk_preimage_pattern(h);
-        let preferred = h.old_start.saturating_sub(1);
-
-        let start = find_hunk_start(&current, &pattern, preferred).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not locate hunk context (preferred_start={}, pattern_len={})",
-                preferred,
-                pattern_len
-            )
-        })?;
-
-        let mut pos = start;
-        let mut segment: Vec<String> = Vec::new();
-        for hl in &h.lines {
-            match hl.kind {
-                HunkLineKind::Context => {
-                    let line = current
-                        .get(pos)
-                        .ok_or_else(|| anyhow::anyhow!("Context line beyond EOF at pos {}", pos))?;
-                    if line != &hl.text {
-                        anyhow::bail!(
-                            "Context mismatch at pos {}: expected {:?}, found {:?}",
-                            pos,
-                            hl.text,
-                            line
-                        );
-                    }
-                    segment.push(line.clone());
-                    pos += 1;
-                }
-                HunkLineKind::Remove => {
-                    let line = current
-                        .get(pos)
-                        .ok_or_else(|| anyhow::anyhow!("Remove line beyond EOF at pos {}", pos))?;
-                    if line != &hl.text {
-                        anyhow::bail!(
-                            "Remove mismatch at pos {}: expected {:?}, found {:?}",
-                            pos,
-                            hl.text,
-                            line
-                        );
-                    }
-                    pos += 1;
-                }
-                HunkLineKind::Add => {
-                    segment.push(hl.text.clone());
-                }
-            }
-        }
-
-        let mut next: Vec<String> = Vec::with_capacity(current.len() + segment.len());
-        next.extend_from_slice(&current[..start]);
-        next.extend(segment);
-        next.extend_from_slice(&current[pos..]);
-        current = next;
+    #[test]
+    fn map_src_to_spec_supports_nested_data_paths() {
+        assert_eq!(
+            map_src_to_spec("src/data/payments/ledger_entry.rs"),
+            Some("specifications/data/payments/ledger_entry.md".to_string())
+        );
     }
 
-    Ok(current)
-}
+    #[test]
+    fn check_guardrails_allows_public_methods_declared_in_spec() {
+        let root = make_temp_test_dir("compile_fix_guardrail_spec_allow");
+        let src = root.join("src/data/gamestate.rs");
+        let spec = root.join("specifications/data/gamestate.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameState;\nimpl GameState {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "## Functionalities\n- **place_food**: takes Some(food) or None and returns a new GameState\n- **increment_score**: takes a positive whole number\n",
+        )
+        .expect("write spec");
 
-fn hunk_preimage_pattern(h: &Hunk) -> (Vec<&str>, usize) {
-    // Pre-image = context + removed lines in order.
-    let mut pattern: Vec<&str> = Vec::new();
-    for hl in &h.lines {
-        match hl.kind {
-            HunkLineKind::Context | HunkLineKind::Remove => pattern.push(hl.text.as_str()),
-            HunkLineKind::Add => {}
-        }
-    }
-    let len = pattern.len();
-    (pattern, len)
-}
+        let diff = r#"diff --git a/src/data/gamestate.rs b/src/data/gamestate.rs
+--- a/src/data/gamestate.rs
++++ b/src/data/gamestate.rs
+@@ -1,3 +1,9 @@
+ pub struct GameState;
+ impl GameState {
+     pub fn new() -> Self { Self }
++    pub fn place_food(&self) -> Self { Self }
++    pub fn increment_score(&self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(Self) }
+ }
+"#;
 
-fn find_hunk_start(lines: &[String], pattern: &[&str], preferred: usize) -> Option<usize> {
-    if pattern.is_empty() {
-        return Some(preferred.min(lines.len()));
-    }
-    if lines.len() < pattern.len() {
-        return None;
-    }
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
 
-    // Try preferred first, then search with a bounded fuzz window, then fall back to full scan.
-    let try_at = |i: usize| -> bool {
-        if i + pattern.len() > lines.len() {
-            return false;
-        }
-        for (j, needle) in pattern.iter().enumerate() {
-            if lines[i + j].as_str() != *needle {
-                return false;
-            }
-        }
-        true
-    };
-
-    if try_at(preferred) {
-        return Some(preferred);
+        fs::remove_dir_all(&root).ok();
     }
 
-    let fuzz: usize = 100;
-    let start = preferred.saturating_sub(fuzz);
-    let end = (preferred + fuzz).min(lines.len().saturating_sub(pattern.len()));
-    for i in start..=end {
-        if try_at(i) {
-            return Some(i);
-        }
+    #[test]
+    fn check_guardrails_blocks_public_methods_missing_from_spec() {
+        let root = make_temp_test_dir("compile_fix_guardrail_spec_block");
+        let src = root.join("src/contexts/game_loop.rs");
+        let spec = root.join("specifications/contexts/game_loop.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameLoopContext;\nimpl GameLoopContext {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "## Functionalities\n- **current_board**: returns the current board\n",
+        )
+        .expect("write spec");
+
+        let diff = r#"diff --git a/src/contexts/game_loop.rs b/src/contexts/game_loop.rs
+--- a/src/contexts/game_loop.rs
++++ b/src/contexts/game_loop.rs
+@@ -1,3 +1,8 @@
+ pub struct GameLoopContext;
+ impl GameLoopContext {
+     pub fn new() -> Self { Self }
++    pub fn tick(mut self) -> Option<Self> { Some(self) }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(!report.ok);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("patch adds new public function `tick`")),
+            "issues: {:?}",
+            report.issues
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
-    for i in 0..=lines.len().saturating_sub(pattern.len()) {
-        if try_at(i) {
-            return Some(i);
-        }
+    #[test]
+    fn check_guardrails_allows_keyword_safe_alias_from_spec() {
+        let root = make_temp_test_dir("compile_fix_guardrail_keyword_alias");
+        let src = root.join("src/data/snake.rs");
+        let snake_spec = root.join("specifications/data/snake.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(snake_spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct Snake;\nimpl Snake {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &snake_spec,
+            "# Snake\n\n## Functionalities\n- **new**: Constructs a Snake\n- **move(grow)**: Moves to next().\n",
+        )
+        .expect("write snake spec");
+
+        let diff = r#"diff --git a/src/data/snake.rs b/src/data/snake.rs
+--- a/src/data/snake.rs
++++ b/src/data/snake.rs
+@@ -1,3 +1,4 @@
+ pub struct Snake;
+ impl Snake {
+     pub fn new() -> Self { Self }
++    pub fn move_snake(mut self, grow: bool) -> Self { let _ = grow; self }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
     }
 
-    None
+    #[test]
+    fn check_guardrails_blocks_data_methods_sourced_only_from_context_roles() {
+        let root = make_temp_test_dir("compile_fix_guardrail_data_role_leak");
+        let src = root.join("src/data/snake.rs");
+        let snake_spec = root.join("specifications/data/snake.md");
+        let game_loop_spec = root.join("specifications/contexts/game_loop.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(snake_spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::create_dir_all(game_loop_spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct Snake;\nimpl Snake {\n    pub fn new() -> Self { Self }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &snake_spec,
+            "# Snake\n\n## Functionalities\n- **new**: Constructs a Snake\n",
+        )
+        .expect("write snake spec");
+        fs::write(
+            &game_loop_spec,
+            "### snake\n| Method | Description |\n|---|---|\n| **move(grow)** | Moves to next(). |\n",
+        )
+        .expect("write game loop spec");
+
+        let diff = r#"diff --git a/src/data/snake.rs b/src/data/snake.rs
+--- a/src/data/snake.rs
++++ b/src/data/snake.rs
+@@ -1,3 +1,4 @@
+ pub struct Snake;
+ impl Snake {
+     pub fn new() -> Self { Self }
++    pub fn move_snake(&self, grow: bool) -> Self { let _ = grow; Self }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(!report.ok);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("patch adds new public function `move_snake`")),
+            "issues: {:?}",
+            report.issues
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_constructor_additions_even_if_not_declared() {
+        let root = make_temp_test_dir("compile_fix_guardrail_constructor_add");
+        let src = root.join("src/data/board.rs");
+        let spec = root.join("specifications/data/board.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(&src, "pub struct Board;\n").expect("write src");
+        fs::write(&spec, "# Board\n\n## Functionalities\n").expect("write spec");
+
+        let diff = r#"diff --git a/src/data/board.rs b/src/data/board.rs
+--- a/src/data/board.rs
++++ b/src/data/board.rs
+@@ -1 +1,5 @@
+ pub struct Board;
++impl Board {
++    pub fn new(width: u32, height: u32) -> Self { let _ = (width, height); Self }
++}
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_mut_self_to_borrowed_self_for_self_returning_api() {
+        let root = make_temp_test_dir("compile_fix_guardrail_immutable_transform");
+        let src = root.join("src/data/gamestate.rs");
+        let spec = root.join("specifications/data/gamestate.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameState;\nimpl GameState {\n    pub fn increment_score(mut self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(self) }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "# GameState\n\n## Functionalities\n- **increment_score**: returns a new GameState with score increased\n",
+        )
+        .expect("write spec");
+
+        let diff = r#"diff --git a/src/data/gamestate.rs b/src/data/gamestate.rs
+--- a/src/data/gamestate.rs
++++ b/src/data/gamestate.rs
+@@ -1,3 +1,3 @@
+ pub struct GameState;
+ impl GameState {
+-    pub fn increment_score(mut self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(self) }
++    pub fn increment_score(&self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(Self) }
+ }
+"#;
+
+        let report = check_guardrails(&root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn keyword_alias_rule_only_applies_to_keywords() {
+        let allowed = HashSet::from(["move".to_string(), "type".to_string(), "score".to_string()]);
+
+        assert!(super::is_spec_allowed_public_method_name(
+            "move_snake",
+            &allowed
+        ));
+        assert!(super::is_spec_allowed_public_method_name(
+            "type_name",
+            &allowed
+        ));
+        assert!(super::is_spec_allowed_public_method_name(
+            "r#move", &allowed
+        ));
+        assert!(!super::is_spec_allowed_public_method_name(
+            "score_value",
+            &allowed
+        ));
+    }
+
+    fn make_temp_test_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}_{}", prefix, nanos));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 }

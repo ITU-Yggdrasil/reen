@@ -1,52 +1,160 @@
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use sha2::Digest;
+use crate::execution::{
+    estimate_tokens, Cache, FileCache, NativeExecutionControl, NativeExecutionMetadata,
+    REQUEST_OVERHEAD_TOKENS,
+};
+use serde::Serialize;
+use serde_json;
+use sha2::{Digest, Sha256};
+use std::fmt;
 
-#[derive(Debug, Clone)]
-pub struct FileCache {
-    folder: Option<PathBuf>,
-    cache: Mutex<HashMap<String, PathBuf>>,
+/// Errors that can occur during agent population
+#[derive(Debug)]
+pub enum PopulateError {
+    MissingMandatoryPlaceholder(String),
+    InvalidPlaceholderPath(String),
+    AgentNotFound(String),
+    InvalidSpecification(String),
 }
 
-impl FileCache {
-    pub fn new(folder: Option<String>) -> Self {
-        FileCache {
-            folder: folder.map(PathBuf::from),
-            cache: Mutex::new(HashMap::new()),
+impl fmt::Display for PopulateError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            PopulateError::MissingMandatoryPlaceholder(ph) => {
+                write!(f, "Required placeholder '{}' could not be resolved", ph)
+            }
+            PopulateError::InvalidPlaceholderPath(path) => {
+                write!(f, "Invalid path '{}' in placeholder", path)
+            }
+            PopulateError::AgentNotFound(name) => {
+                write!(f, "Agent '{}' not found in registry", name)
+            }
+            PopulateError::InvalidSpecification(details) => {
+                write!(f, "Agent specification is invalid: {}", details)
+            }
         }
     }
+}
 
-    pub fn add(&self, key: String, value: PathBuf) -> Result<(), String> {
-        let mut cache = self.cache.lock().unwrap();
-        cache.insert(key, value);
-        Ok(())
-    }
+impl std::error::Error for PopulateError {}
 
-    pub fn get(&self, key: String) -> Result<PathBuf, String> {
-        let cache = self.cache.lock().unwrap();
-        cache.get(&key).cloned().ok_or_else(|| format!("Key not found: {}", key))
-    }
+/// Errors that can occur during agent execution
+#[derive(Debug)]
+pub enum ExecutionError {
+    ModelNotFound(String),
+    ExecutionFailed(String),
+    RunnerError(String),
+}
 
-    pub fn remove(&self, key: String) -> Result<(), String> {
-        let mut cache = self.cache.lock().unwrap();
-        cache.remove(&key).map_err(|_| format!("Key not found: {}", key))
-    }
-
-    pub fn flush(&self) {
-        self.cache.lock().unwrap().clear();
+impl fmt::Display for ExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ExecutionError::ModelNotFound(name) => {
+                write!(f, "Model for agent '{}' not found", name)
+            }
+            ExecutionError::ExecutionFailed(details) => {
+                write!(f, "Agent execution failed: {}", details)
+            }
+            ExecutionError::RunnerError(details) => {
+                write!(f, "Failed to execute model runner: {}", details)
+            }
+        }
     }
 }
 
+impl std::error::Error for ExecutionError {}
+
+/// Errors that can occur in the agent runner
+#[derive(Debug)]
+pub enum AgentRunnerError {
+    Populate(PopulateError),
+    Execution(ExecutionError),
+}
+
+impl fmt::Display for AgentRunnerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            AgentRunnerError::Populate(e) => write!(f, "{}", e),
+            AgentRunnerError::Execution(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for AgentRunnerError {}
+
+impl From<PopulateError> for AgentRunnerError {
+    fn from(e: PopulateError) -> Self {
+        AgentRunnerError::Populate(e)
+    }
+}
+
+impl From<ExecutionError> for AgentRunnerError {
+    fn from(e: ExecutionError) -> Self {
+        AgentRunnerError::Execution(e)
+    }
+}
+
+/// Template format for agent specifications (from registry, before population)
 #[derive(Debug, Clone)]
-pub struct AgentInstructions {
-    // Define the structure of agent instructions
-    // For example:
-    // pub agent_id: u32,
-    // pub model_name: String,
-    // pub input_json: serde_json::Value,
-    // ...
+pub enum AgentSpecificationTemplate {
+    /// Legacy: single template with placeholders (populated as whole)
+    Legacy(String),
+    /// Cache-optimized: static instructions + variable section with placeholders
+    Split {
+        static_prompt: String,
+        variable_prompt: String,
+    },
+}
+
+impl AgentSpecificationTemplate {
+    /// Returns a canonical string for cache key/hash purposes.
+    /// For legacy: the full template. For split: static + variable (unpopulated).
+    pub fn canonical_for_cache(&self) -> String {
+        match self {
+            AgentSpecificationTemplate::Legacy(s) => s.clone(),
+            AgentSpecificationTemplate::Split {
+                static_prompt,
+                variable_prompt,
+            } => format!("{}\n{}", static_prompt, variable_prompt),
+        }
+    }
+}
+
+/// A populated agent specification ready for execution
+#[derive(Debug, Clone)]
+pub struct AgentSpecification {
+    /// Legacy: full populated prompt (when split format not used)
+    pub system_prompt: Option<String>,
+    /// Cache-optimized: static instructions (system message)
+    pub static_prompt: Option<String>,
+    /// Cache-optimized: populated variable content (user message)
+    pub variable_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecutionResult {
+    pub output: String,
+    pub cached: bool,
+    pub usage: Option<NativeExecutionMetadata>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedExecution {
+    pub request: serde_json::Value,
+    pub cache_key: String,
+    pub cache: FileCache,
+    pub estimated_input_tokens: usize,
+}
+
+#[derive(Debug, Clone)]
+pub enum PreparedExecutionState {
+    Cached(String),
+    Ready(PreparedExecution),
+}
+
+impl PreparedExecution {
+    pub fn store_output(&self, output: &str) {
+        self.cache.set(&self.cache_key, output);
+    }
 }
 
 /// A model that can execute an agent
@@ -57,8 +165,12 @@ pub struct Model {
 
 /// Trait for loading agent specifications by name
 pub trait AgentRegistry {
-    /// Load an agent specification template by agent name
-    fn get_specification(&self, agent_name: &str) -> Result<String, PopulateError>;
+    /// Load an agent specification template by agent name.
+    /// Returns either a legacy full template or a split (static + variable) template.
+    fn get_specification(
+        &self,
+        agent_name: &str,
+    ) -> Result<AgentSpecificationTemplate, PopulateError>;
 }
 
 /// Trait for resolving execution models by agent name
@@ -114,19 +226,33 @@ where
         // Load the specification template from the registry
         let template = self.agent_registry.get_specification(&self.agent)?;
 
-        // For now, we implement basic placeholder replacement
-        // A full implementation would need a proper template engine
-        let populated = self.replace_placeholders(&template)?;
-
-        Ok(AgentSpecification {
-            system_prompt: populated,
-        })
+        match &template {
+            AgentSpecificationTemplate::Legacy(t) => {
+                let populated = self.replace_placeholders(t)?;
+                Ok(AgentSpecification {
+                    system_prompt: Some(populated),
+                    static_prompt: None,
+                    variable_prompt: None,
+                })
+            }
+            AgentSpecificationTemplate::Split {
+                static_prompt,
+                variable_prompt,
+            } => {
+                let populated = self.replace_placeholders(variable_prompt)?;
+                Ok(AgentSpecification {
+                    system_prompt: None,
+                    static_prompt: Some(static_prompt.clone()),
+                    variable_prompt: Some(populated),
+                })
+            }
+        }
     }
 
     /// Role method: agent.execute
     ///
     /// Executes the agent using the populated specification and resolved model.
-    /// Can execute in Rust or via Python runner using stdio.
+    /// Executes through the native Rust model runner.
     ///
     /// Note: This is a single-shot execution. For conversational agents,
     /// the conversation handling is managed at a higher level (in agent_executor.rs)
@@ -135,102 +261,144 @@ where
         &self,
         specification: &AgentSpecification,
         model: &Model,
+        execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<ExecutionResult, ExecutionError> {
-        // Execute via Python runner using stdio
-        self.execute_via_python(specification, model)
+        self.execute_via_rust(specification, model, execution_control)
     }
 
-    /// Executes the agent via Python runner using stdio communication
-    fn execute_via_python(
+    /// Executes the agent via the native Rust model runner.
+    fn execute_via_rust(
         &self,
         specification: &AgentSpecification,
         model: &Model,
+        execution_control: Option<&dyn NativeExecutionControl>,
     ) -> Result<ExecutionResult, ExecutionError> {
-        use crate::registries::embedded_runner_py;
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-
-        // Write the embedded runner script to a temp file
-        let runner_path = std::env::temp_dir().join("reen_runner.py");
-        std::fs::write(&runner_path, embedded_runner_py()).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to write embedded runner: {}", e))
-        })?;
-
-        // Prepare the request JSON
-        let request = serde_json::json!({
-            "model": model.name,
-            "system_prompt": specification.system_prompt
-        });
-
-        let request_json = serde_json::to_string(&request).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to serialize request: {}", e))
-        })?;
-
-        // Spawn the Python runner from the embedded temp file.
-        // Pass the current working directory so the script can find .env and .venv
-        // even though it runs from a temp location.
-        let mut child = Command::new("python3")
-            .arg(&runner_path)
-            .env("REEN_PROJECT_DIR", std::env::current_dir().unwrap_or_default())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                ExecutionError::PythonRunnerError(format!("Failed to spawn Python runner: {}", e))
-            })?;
-
-        // Write the request to stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(request_json.as_bytes()).map_err(|e| {
-                ExecutionError::PythonRunnerError(format!(
-                    "Failed to write to Python runner stdin: {}",
-                    e
-                ))
-            })?;
-        }
-
-        // Wait for the process to complete and capture output
-        let output = child.wait_with_output().map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to read Python runner output: {}", e))
-        })?;
-
-        // Check if the process succeeded
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(ExecutionError::PythonRunnerError(format!(
-                "Python runner failed. Stdout: {} Stderr: {}",
-                stdout, stderr
-            )));
-        }
-
-        // Parse the response JSON
-        let response_json = String::from_utf8(output.stdout).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Invalid UTF-8 in response: {}", e))
-        })?;
-
-        let response: serde_json::Value = serde_json::from_str(&response_json).map_err(|e| {
-            ExecutionError::PythonRunnerError(format!("Failed to parse response JSON: {}", e))
-        })?;
-
-        // Check if execution was successful
-        if !response["success"].as_bool().unwrap_or(false) {
-            let error = response["error"].as_str().unwrap_or("Unknown error");
-            return Err(ExecutionError::ExecutionFailed(error.to_string()));
-        }
-
-        // Extract the output
-        let output_text = response["output"]
-            .as_str()
-            .ok_or_else(|| ExecutionError::PythonRunnerError("No output in response".to_string()))?
-            .to_string();
-
-        let _ = std::fs::remove_file(&runner_path);
+        let request = self.build_request_json(specification, model)?;
+        let native_result =
+            crate::execution::execute_native_request_with_metadata(&request, execution_control)
+                .map_err(ExecutionError::RunnerError)?;
 
         Ok(ExecutionResult {
-            output: output_text,
+            output: native_result.output,
+            cached: false,
+            usage: Some(native_result.metadata),
         })
+    }
+
+    fn build_tooling_json(
+        &self,
+    ) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), ExecutionError> {
+        let input_value = serde_json::to_value(&self.input).map_err(|e| {
+            ExecutionError::RunnerError(format!("Failed to serialize tool context: {}", e))
+        })?;
+        let mut tools = Vec::new();
+        let mut tool_context = serde_json::Map::new();
+
+        if let Some(dependency_tool_context) = input_value.get("dependency_tool_context") {
+            tools.push(serde_json::json!({
+                "name": "fetch_dependency_artifacts",
+                "description": "Fetch the full content for one or more dependency artifacts listed in the dependency manifest.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Exact artifact paths from the dependency manifest."
+                        }
+                    },
+                    "required": ["paths"]
+                }
+            }));
+            tool_context.insert(
+                "dependency_tool_context".to_string(),
+                dependency_tool_context.clone(),
+            );
+        }
+
+        if self.agent == "create_specifications_external_api" {
+            let documentation_urls = input_value
+                .get("documentation_urls")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            if !documentation_urls.is_empty() {
+                tools.push(serde_json::json!({
+                    "name": "fetch_documentation",
+                    "description": "Fetch and extract relevant sections from an external API documentation page.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "One of the documentation URLs provided in the draft input."
+                            },
+                            "section_hint": {
+                                "type": "string",
+                                "description": "Short hint describing the relevant section to extract, for example authentication or pagination.",
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                }));
+                tool_context.insert(
+                    "documentation_urls".to_string(),
+                    serde_json::json!(documentation_urls),
+                );
+            }
+        }
+
+        if tools.is_empty() {
+            Ok((None, None))
+        } else {
+            Ok((
+                Some(serde_json::Value::Array(tools)),
+                Some(serde_json::Value::Object(tool_context)),
+            ))
+        }
+    }
+
+    fn build_request_json(
+        &self,
+        specification: &AgentSpecification,
+        model: &Model,
+    ) -> Result<serde_json::Value, ExecutionError> {
+        let (tools, tool_context) = self.build_tooling_json()?;
+        let mut request = if let (Some(static_p), Some(variable_p)) =
+            (&specification.static_prompt, &specification.variable_prompt)
+        {
+            serde_json::json!({
+                "model": model.name,
+                "static_prompt": static_p,
+                "variable_prompt": variable_p,
+                "agent_name": self.agent,
+            })
+        } else if let Some(system_p) = &specification.system_prompt {
+            serde_json::json!({
+                "model": model.name,
+                "system_prompt": system_p,
+            })
+        } else {
+            return Err(ExecutionError::RunnerError(
+                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
+                    .to_string(),
+            ));
+        };
+
+        if let Some(tools) = tools {
+            request["tools"] = tools;
+        }
+        if let Some(tool_context) = tool_context {
+            request["tool_context"] = tool_context;
+        }
+
+        Ok(request)
     }
 
     /// Generates a hash of agent instructions + model name for folder structure
@@ -254,8 +422,33 @@ where
     /// The cache key is a hash of agent_instructions + input_json, ensuring that
     /// changes to either the instructions or input will result in a cache miss.
     fn generate_cache_key(&self, agent_instructions: &str) -> String {
-        // Serialize the input to JSON to get a stable representation
-        let input_json = serde_json::to_string(&self.input).unwrap_or_else(|_| "{}".to_string());
+        fn canonicalize_json_value(v: serde_json::Value) -> serde_json::Value {
+            match v {
+                serde_json::Value::Array(items) => serde_json::Value::Array(
+                    items
+                        .into_iter()
+                        .map(canonicalize_json_value)
+                        .collect::<Vec<_>>(),
+                ),
+                serde_json::Value::Object(map) => {
+                    let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+                    entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    let mut out = serde_json::Map::new();
+                    for (k, val) in entries {
+                        out.insert(k, canonicalize_json_value(val));
+                    }
+                    serde_json::Value::Object(out)
+                }
+                other => other,
+            }
+        }
+
+        // Serialize the input to JSON in a stable way (sorted object keys), so cache keys
+        // do not depend on HashMap iteration order.
+        let input_json = serde_json::to_value(&self.input)
+            .map(canonicalize_json_value)
+            .and_then(|v| serde_json::to_string(&v))
+            .unwrap_or_else(|_| "{}".to_string());
 
         // Create a composite key from agent instructions and input
         let composite = format!("{}:{}", agent_instructions, input_json);
@@ -267,6 +460,64 @@ where
 
         // Return hex-encoded hash
         hex::encode(result)
+    }
+
+    /// Returns true if this agent+input combination already exists in the on-disk cache.
+    pub fn is_cache_hit(&self) -> Result<bool, AgentRunnerError> {
+        let agent_template = self.agent_registry.get_specification(&self.agent)?;
+        let model = self.agent_model_registry.get_model(&self.agent)?;
+        let canonical = agent_template.canonical_for_cache();
+        let cache_key = self.generate_cache_key(&canonical);
+        let cache = self.get_cached_artefact(&canonical, &model.name)?;
+        Ok(cache.get(&cache_key).is_some())
+    }
+
+    /// Estimates the populated input token count for the request that would be sent.
+    pub fn estimate_input_tokens(&self) -> Result<usize, AgentRunnerError> {
+        const LEGACY_USER_PROMPT: &str = "Please complete the task described in the system prompt.";
+
+        let specification = self.populate()?;
+        let estimate = if let (Some(static_prompt), Some(variable_prompt)) = (
+            specification.static_prompt.as_deref(),
+            specification.variable_prompt.as_deref(),
+        ) {
+            estimate_tokens(static_prompt) + estimate_tokens(variable_prompt)
+        } else if let Some(system_prompt) = specification.system_prompt.as_deref() {
+            estimate_tokens(system_prompt) + estimate_tokens(LEGACY_USER_PROMPT)
+        } else {
+            return Err(AgentRunnerError::Execution(ExecutionError::ExecutionFailed(
+                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
+                    .to_string(),
+            )));
+        };
+
+        Ok(estimate + REQUEST_OVERHEAD_TOKENS)
+    }
+
+    /// Prepares a native-runner request and cache metadata without executing it.
+    pub fn prepare_execution(self) -> Result<PreparedExecutionState, AgentRunnerError> {
+        let agent_template = self
+            .agent_registry
+            .get_specification(&self.agent)
+            .map_err(AgentRunnerError::Populate)?;
+        let model = self.agent_model_registry.get_model(&self.agent)?;
+        let canonical = agent_template.canonical_for_cache();
+        let cache_key = self.generate_cache_key(&canonical);
+        let cache = self.get_cached_artefact(&canonical, &model.name)?;
+        if let Some(cached_value) = cache.get(&cache_key) {
+            return Ok(PreparedExecutionState::Cached(cached_value));
+        }
+
+        let specification = self.populate()?;
+        let request = self.build_request_json(&specification, &model)?;
+        let estimated_input_tokens = self.estimate_input_tokens()?;
+
+        Ok(PreparedExecutionState::Ready(PreparedExecution {
+            request,
+            cache_key,
+            cache,
+            estimated_input_tokens,
+        }))
     }
 
     /// Role method: cache.get_cached_artefact
@@ -384,7 +635,10 @@ where
     ///
     /// Activates the agent by orchestrating the complete execution lifecycle
     /// with persistent caching.
-    pub fn run(self) -> Result<ExecutionResult, AgentRunnerError> {
+    pub fn run_with_control(
+        self,
+        execution_control: Option<&dyn NativeExecutionControl>,
+    ) -> Result<ExecutionResult, AgentRunnerError> {
         // Step 1: Load agent template (instructions) before populating
         // This is needed to generate the cache folder hash
         let agent_template = self
@@ -396,16 +650,19 @@ where
         let model = self.agent_model_registry.get_model(&self.agent)?;
 
         // Step 3: Generate cache key based on agent instructions + input
-        let cache_key = self.generate_cache_key(&agent_template);
+        let canonical = agent_template.canonical_for_cache();
+        let cache_key = self.generate_cache_key(&canonical);
 
         // Step 4: Get cache instance (folder based on hash(instructions + model))
-        let cache = self.get_cached_artefact(&agent_template, &model.name)?;
+        let cache = self.get_cached_artefact(&canonical, &model.name)?;
 
         // Step 5: Check cache for existing result
         if let Some(cached_value) = cache.get(&cache_key) {
             // Cache hit - return immediately
             return Ok(ExecutionResult {
                 output: cached_value,
+                cached: true,
+                usage: None,
             });
         }
 
@@ -414,49 +671,361 @@ where
         let specification = self.populate()?;
 
         // Step 7: Execute the agent
-        let result = self.execute(&specification, &model)?;
+        let result = self.execute(&specification, &model, execution_control)?;
 
-        // Step 8: Store result in cache (background operation)
-        // Note: In a real implementation, this would be done in a background thread
-        // to ensure it doesn't block returning the result
+        // Step 8: Store result in cache.
+        // This must be synchronous: CLI invocations are often short-lived, and
+        // detached background threads can be terminated before the write runs.
         let cache_value = result.output.clone();
-        std::thread::spawn(move || {
-            cache.set(&cache_key, &cache_value);
-        });
+        cache.set(&cache_key, &cache_value);
 
         Ok(result)
     }
+
+    /// Public function: run
+    ///
+    /// Activates the agent by orchestrating the complete execution lifecycle
+    /// with persistent caching.
+    pub fn run(self) -> Result<ExecutionResult, AgentRunnerError> {
+        self.run_with_control(None)
+    }
 }
 
-impl FileCache {
-    pub fn cache_path(&self, instructions: &AgentInstructions, input_json: &serde_json::Value) -> PathBuf {
-        let instructions_model_hash = format!("{:?}", instructions);
-        let input_hash = serde_json::json(input_json).to_string();
-        let hash = format!("{}/{}", instructions_model_hash, input_hash);
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&hash);
-        let instructions_model_hash = hasher.finalize().to_vec();
-        let instructions_model_hash_str = hex::encode(instructions_model_hash);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+    use std::fs;
+    use std::path::PathBuf;
 
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(&serde_json::json(input_json).to_string());
-        let input_hash = hasher.finalize().to_vec();
-        let input_hash_str = hex::encode(input_hash);
-
-        let folder_path = self.folder.as_ref().unwrap_or(&Path::new(".reen"));
-        let file_path = folder_path.join(format!("{}/{}", instructions_model_hash_str, input_hash_str)).with_extension("cache");
-        file_path
+    #[derive(Serialize)]
+    struct TestInput {
+        name: String,
+        value: u32,
     }
 
-    pub fn cache_key(&self, instructions: &AgentInstructions, input_json: &serde_json::Value) -> String {
-        format!("{}/{}", FileCache::hash(instructions), serde_json::json(input_json).to_string())
+    #[derive(Serialize)]
+    struct NestedData {
+        city: String,
+        country: String,
     }
 
-    pub fn instructions_model_hash(&self, instructions: &AgentInstructions) -> String {
-        FileCache::hash(instructions)
+    #[derive(Serialize)]
+    struct NestedTestInput {
+        name: String,
+        location: NestedData,
     }
 
-    pub fn input_hash(&self, input_json: &serde_json::Value) -> String {
-        serde_json::json(input_json).to_string()
+    #[derive(Serialize)]
+    struct ToolingInput {
+        dependency_tool_context: serde_json::Value,
+    }
+
+    struct TestRegistry;
+
+    impl AgentRegistry for TestRegistry {
+        fn get_specification(
+            &self,
+            agent_name: &str,
+        ) -> Result<AgentSpecificationTemplate, PopulateError> {
+            Ok(AgentSpecificationTemplate::Legacy(format!(
+                "Test specification for {}",
+                agent_name
+            )))
+        }
+    }
+
+    struct TestModelRegistry;
+
+    impl AgentModelRegistry for TestModelRegistry {
+        fn get_model(&self, _agent_name: &str) -> Result<Model, ExecutionError> {
+            Ok(Model {
+                name: "test-model".to_string(),
+            })
+        }
+    }
+
+    struct MissingPlaceholderRegistry;
+
+    impl AgentRegistry for MissingPlaceholderRegistry {
+        fn get_specification(
+            &self,
+            _agent_name: &str,
+        ) -> Result<AgentSpecificationTemplate, PopulateError> {
+            // This would fail during populate() on a cache miss.
+            Ok(AgentSpecificationTemplate::Legacy(
+                "This will fail: {{input.required_field}}".to_string(),
+            ))
+        }
+    }
+
+    #[test]
+    fn test_agent_runner_creation() {
+        let input = TestInput {
+            name: "test".to_string(),
+            value: 42,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        assert_eq!(runner.agent, "test_agent");
+    }
+
+    #[test]
+    fn test_cache_key_generation() {
+        let input = TestInput {
+            name: "test".to_string(),
+            value: 42,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let key1 = runner.generate_cache_key("model1");
+        let key2 = runner.generate_cache_key("model1");
+        let key3 = runner.generate_cache_key("model2");
+
+        // Same inputs should produce same key
+        assert_eq!(key1, key2);
+        // Different model should produce different key
+        assert_ne!(key1, key3);
+    }
+
+    #[test]
+    fn test_agent_runner_populate() {
+        let input = TestInput {
+            name: "test".to_string(),
+            value: 42,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let result = runner.populate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_returns_cached_output_before_populate() {
+        let input = TestInput {
+            name: "test".to_string(),
+            value: 42,
+        };
+        let agent_name = "cache_hit_agent".to_string();
+        let registry = MissingPlaceholderRegistry;
+        let model_registry = TestModelRegistry;
+        let template = registry
+            .get_specification(&agent_name)
+            .expect("template should load");
+        let canonical = template.canonical_for_cache();
+
+        let runner = AgentRunner::new(agent_name, input, registry, model_registry);
+        let cache_key = runner.generate_cache_key(&canonical);
+        let instructions_model_hash =
+            runner.generate_instructions_model_hash(&canonical, "test-model");
+        let cache = runner
+            .get_cached_artefact(&canonical, "test-model")
+            .expect("cache should initialize");
+        let cache_dir = PathBuf::from(".reen").join(&instructions_model_hash);
+        let cache_path = cache_dir.join(format!("{}.cache", cache_key));
+
+        cache.set(&cache_key, "cached-output");
+
+        let result = runner.run().expect("cache hit should return successfully");
+        assert_eq!(result.output, "cached-output");
+        assert!(result.cached);
+        assert!(result.usage.is_none());
+
+        let _ = fs::remove_file(cache_path);
+        let _ = fs::remove_dir(cache_dir);
+    }
+
+    #[test]
+    fn test_placeholder_replacement_mandatory() {
+        let input = TestInput {
+            name: "Alice".to_string(),
+            value: 100,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let template = "Hello {{input.name}}, your value is {{input.value}}!";
+        let result = runner.replace_placeholders(template);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Hello Alice, your value is 100!");
+    }
+
+    #[test]
+    fn test_placeholder_replacement_optional_present() {
+        let input = TestInput {
+            name: "Bob".to_string(),
+            value: 200,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let template = "Name: {{input.name?}}";
+        let result = runner.replace_placeholders(template);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Name: Bob");
+    }
+
+    #[test]
+    fn test_placeholder_replacement_optional_missing() {
+        let input = TestInput {
+            name: "Charlie".to_string(),
+            value: 300,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let template = "Age: {{input.age?}}";
+        let result = runner.replace_placeholders(template);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Age: ");
+    }
+
+    #[test]
+    fn test_placeholder_replacement_mandatory_missing() {
+        let input = TestInput {
+            name: "Dave".to_string(),
+            value: 400,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let template = "Missing: {{input.missing_field}}";
+        let result = runner.replace_placeholders(template);
+
+        assert!(result.is_err());
+        match result {
+            Err(PopulateError::MissingMandatoryPlaceholder(field)) => {
+                assert_eq!(field, "input.missing_field");
+            }
+            _ => panic!("Expected MissingMandatoryPlaceholder error"),
+        }
+    }
+
+    #[test]
+    fn test_placeholder_replacement_invalid_path() {
+        let input = TestInput {
+            name: "Eve".to_string(),
+            value: 500,
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let template = "Invalid: {{output.field}}";
+        let result = runner.replace_placeholders(template);
+
+        assert!(result.is_err());
+        match result {
+            Err(PopulateError::InvalidPlaceholderPath(path)) => {
+                assert_eq!(path, "output.field");
+            }
+            _ => panic!("Expected InvalidPlaceholderPath error"),
+        }
+    }
+
+    #[test]
+    fn test_placeholder_replacement_nested() {
+        let input = NestedTestInput {
+            name: "Frank".to_string(),
+            location: NestedData {
+                city: "Paris".to_string(),
+                country: "France".to_string(),
+            },
+        };
+        let runner = AgentRunner::new(
+            "test_agent".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let template =
+            "{{input.name}} lives in {{input.location.city}}, {{input.location.country}}";
+        let result = runner.replace_placeholders(template);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Frank lives in Paris, France");
+    }
+
+    #[test]
+    fn build_tooling_json_includes_dependency_lookup_tool_when_present() {
+        let input = ToolingInput {
+            dependency_tool_context: serde_json::json!({
+                "dependency_artifacts": [
+                    {
+                        "name": "amount",
+                        "path": "drafts/data/amount.md",
+                        "content": "Amount content"
+                    }
+                ]
+            }),
+        };
+        let runner = AgentRunner::new(
+            "create_implementation".to_string(),
+            input,
+            TestRegistry,
+            TestModelRegistry,
+        );
+
+        let (tools, tool_context) = runner.build_tooling_json().expect("tooling");
+        let tools = tools.expect("dependency lookup tool should be present");
+        let tool_names = tools
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(tool_names.contains(&"fetch_dependency_artifacts"));
+        assert_eq!(
+            tool_context
+                .and_then(|value| value.get("dependency_tool_context").cloned())
+                .expect("dependency tool context"),
+            serde_json::json!({
+                "dependency_artifacts": [
+                    {
+                        "name": "amount",
+                        "path": "drafts/data/amount.md",
+                        "content": "Amount content"
+                    }
+                ]
+            })
+        );
     }
 }

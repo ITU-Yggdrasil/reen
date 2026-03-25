@@ -115,11 +115,11 @@ impl BuildTracker {
 
         // Compute current input hash
         let current_input_hash = Self::hash_file(input_path)?;
+        let input_hash_matches = current_input_hash == track.input_hash;
+        let dependency_matches = dependency_fingerprint == track.dependency_fingerprint;
+        let needs_update = !(input_hash_matches && dependency_matches);
 
-        // If input hasn't changed, no need to regenerate
-        if current_input_hash == track.input_hash
-            && dependency_fingerprint == track.dependency_fingerprint
-        {
+        if !needs_update {
             return Ok(false);
         }
 

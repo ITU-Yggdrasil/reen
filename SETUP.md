@@ -5,29 +5,8 @@
 ### 1. Rust
 Ensure you have Rust installed. If not, install from [rustup.rs](https://rustup.rs/)
 
-### 2. Python 3
-You need Python 3.7 or later installed.
-
-### 3. Python Dependencies
-Set up a Python virtual environment and install dependencies:
-
-```bash
-./setup_venv.sh
-```
-
-This script will:
-- Create a virtual environment in `.venv/` (if it doesn't exist)
-- Install all required packages from `requirements.txt`
-- Make them available for `runner.py`
-
-Alternatively, you can install manually:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate         # source is not required on windows.
-pip install -r requirements.txt
-```
-
-**Note** The `runner.py` script will automatically detect and use the `.venv` virtual environment if it exists, so you don't need to manually activate it.
+### 2. Environment Variables
+Reen loads provider credentials from your shell environment or a `.env` file in the project tree.
 
 ## LLM Provider Setup
 
@@ -122,19 +101,36 @@ When no `provider/` prefix is given, the provider is inferred from the model nam
 
 **Note** Unknown model names default to Ollama (local, no API key required).
 
+**Note** Bare model names containing "mistral" (e.g. `mistral:7b`) are routed to Ollama for local execution. To use the Mistral API instead, use the explicit prefix: `mistral/codestral-latest`, `mistral/mistral-large-latest`, etc.
+
+### Rate limiting
+
+To avoid API rate limit errors (e.g. 429 from Mistral), you can cap requests per second and tokens per minute:
+
+**Requests per second:**
+- **CLI**: `reen create --rate-limit 2 specification`
+- **Env**: `export REEN_RATE_LIMIT=2`
+- **Registry**: Add `rate_limit: 2` at the top level of `agent_model_registry.yml`
+
+**Tokens per minute:**
+- **CLI**: `reen create --token-limit 60000 specification`
+- **Env**: `export REEN_TOKEN_LIMIT=60000`
+- **Registry**: Add `token_limit: 60000` at the top level of `agent_model_registry.yml`
+
+Precedence: CLI > env > registry. Both limits apply to all create commands (specification, implementation, tests).
+
+The token limiter uses a token bucket with continuous refill to keep throughput stable. Token count is approximated from the request content (word count and character-based heuristics) plus a fixed overhead for system prompts.
+
+When a 429 rate limit error occurs and a rate limit is configured, reen will wait for double the minimum interval, retry the request once, and use half the previous rate for the rest of the run.
+
 ## Verification
 
 Test that everything is set up correctly:
 
 ```bash
-# Build the project
 cargo build
-
-# Check that the Python runner works with Ollama
-echo '{"model": "qwen2.5:7b", "system_prompt": "Say hello"}' | python3 runner.py
+cargo test
 ```
-
-You should see a JSON response with success=true and output containing a greeting.
 
 ## Usage
 

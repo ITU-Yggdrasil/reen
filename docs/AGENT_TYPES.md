@@ -1,6 +1,6 @@
 # Agent Types for Specification Creation
 
-The reen system uses three different specification agents based on the type of draft being processed. This ensures that specifications are tailored to the specific nature of each component type.
+The reen system uses multiple specialized specification agents based on the type of draft being processed. This ensures that specifications are tailored to the specific nature of each component type.
 
 ## Agent Selection
 
@@ -95,6 +95,39 @@ The system automatically selects the appropriate agent based on the file's locat
 - Low-level data structures (those go in data specs)
 - Role player interactions (those go in context specs)
 
+### 4. Brand Identity Agent (`create_specifications_brand`)
+
+**Used for**: `drafts/brands/*.md`
+
+**Purpose**: Creates canonical markdown brand identity specifications from designer drafts.
+
+**Characteristics**:
+- Outputs a structured markdown specification with a fixed section order
+- Defines reusable visual primitives
+- Covers colors, typography, spacing, iconography, motion, and layout
+- Is implementation-independent and component-independent
+- Serves as the authoritative token source for downstream specs
+- Surfaces missing required primitive families as explicit blocking ambiguities
+
+**Output includes**:
+- `# Brand Identity Specification`
+- `## Description`
+- `## Brand Metadata`
+- `## Color Tokens`
+- `## Typography`
+- `## Spacing System`
+- `## Iconography`
+- `## Motion`
+- `## Layout Principles`
+- `## Token Reference Rules`
+- `## Blocking Ambiguities` when applicable
+- `## Implementation Choices Left Open` when applicable
+
+**Does NOT include**:
+- Component styling
+- Framework-specific code
+- Arbitrary section structure outside the canonical contract
+
 ## Processing Order
 
 Files are processed in this order to ensure dependencies are available:
@@ -105,36 +138,41 @@ Files are processed in this order to ensure dependencies are available:
 2. **Contexts second** (`contexts/` folder)
    - May depend on data types
 
-3. **Main files last** (root folder)
+3. **Brands as foundational design artifacts** (`brands/` folder)
+   - May be referenced by downstream visual work
+
+4. **Main files last** (root folder)
    - May depend on both data types and contexts
 
 ## File Structure Mapping
 
 ```
 drafts/
-├── data/
-│   └── X.md → create_specifications_data → specifications/data/X.md
-├── contexts/
-│   └── Y.md → create_specifications_context → specifications/contexts/Y.md
-└── app.md → create_specifications_main → specifications/app.md
+|- data/
+|  `- X.md -> create_specifications_data -> specifications/data/X.md
+|- contexts/
+|  `- Y.md -> create_specifications_context -> specifications/contexts/Y.md
+|- brands/
+|  `- Z.md -> create_specifications_brand -> specifications/brands/Z.md
+`- app.md -> create_specifications_main -> specifications/app.md
 ```
 
 ## Implementation Impact
 
 When implementing specifications, the same folder-based selection applies:
 
-- **Data specs** → Simple type implementations (structs/enums)
+- **Data specs** -> Simple type implementations (structs/enums)
   - **All fields are private**
   - **Public getters only** (no setters by default)
   - **Immutable** unless specification explicitly documents mutability
   - Derives: `Debug`, `Clone`, `PartialEq`, `Eq` (as appropriate)
 
-- **Context specs** → Context implementations with role methods
+- **Context specs** -> Context implementations with role methods
   - Struct with role players and props as fields
   - Public methods from "Functionality"
   - Private role methods from "Role Methods"
 
-- **Main specs** → Application entry points (main.rs or lib.rs)
+- **Main specs** -> Application entry points (main.rs or lib.rs)
   - CLI argument parsing
   - Module organization
   - Application flow

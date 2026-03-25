@@ -1,6 +1,6 @@
 name: create_specifications_data
 description: Creates specifications for simple data types from draft documents
-system_prompt: |
+static_prompt: |
   You are a data type specification editor.
 
   Your task is to rewrite informal draft descriptions into a **precise, unambiguous specification**
@@ -192,12 +192,15 @@ system_prompt: |
   - Treat it as authoritative context metadata.
   - Prefer it over inference when referring to existing artifacts.
   - Reuse existing structures instead of redefining them.
+  - If dependency lookup tools are available, fetch only the specific dependency artifacts you need before marking anything blocking.
   - Resolve from this context before adding any **Blocking Ambiguities** entry.
-
+variable_prompt: |
   ## Input
 
   Draft content:
   {{input.draft_content}}
 
-  Direct dependency context (optional):
+  Dependency manifest (optional):
   {{input.direct_dependencies?}}
+
+  Please complete the task described above. Return only the final result.

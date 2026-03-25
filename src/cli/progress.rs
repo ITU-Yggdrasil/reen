@@ -1,5 +1,7 @@
 use std::time::Instant;
 
+use chrono::Local;
+
 pub struct ProgressIndicator {
     total: usize,
     completed: usize,
@@ -17,12 +19,28 @@ impl ProgressIndicator {
         }
     }
 
-    pub fn start_item(&self, name: &str) {
+    /// Start processing an item. Include estimated token count and timestamp when provided.
+    pub fn start_item(&self, name: &str, estimated_tokens: Option<usize>) {
+        self.start_item_with_label("Processing", name, estimated_tokens);
+    }
+
+    pub fn start_item_cached(&self, name: &str) {
+        self.start_item_with_label("Cached", name, None);
+    }
+
+    pub fn start_item_up_to_date(&self, name: &str) {
+        self.start_item_with_label("Up-to-date", name, None);
+    }
+
+    fn start_item_with_label(&self, label: &str, name: &str, estimated_tokens: Option<usize>) {
+        let current = self.completed + self.failed + 1;
+        let timestamp = Local::now().format("%H:%M:%S");
+        let token_info = estimated_tokens
+            .map(|n| format!(" [~{} tokens]", n))
+            .unwrap_or_default();
         println!(
-            "Processing: {} ({}/{})",
-            name,
-            self.completed + self.failed + 1,
-            self.total
+            "{}: {} ({}/{}){} [{}]",
+            label, name, current, self.total, token_info, timestamp
         );
     }
 

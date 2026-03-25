@@ -1,7 +1,7 @@
 target/
 .reen/
-.venv/
 .env
+.venv/
 .DS_Store
 *.lock
 tests/**/specifications/
@@ -9,3 +9,4 @@ tests/**/src/
 tests/**/Cargo.*
 errors.txt
 .cursor/
+.claude/

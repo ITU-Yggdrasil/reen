@@ -10,6 +10,13 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
+    #[arg(
+        long,
+        global = true,
+        help = "Use agents/agent_model_registry.<profile>.yml for model selection"
+    )]
+    profile: Option<String>,
+
     #[arg(long, global = true, help = "Enable verbose debug output")]
     verbose: bool,
 
@@ -27,9 +34,6 @@ enum Commands {
 
     #[command(subcommand)]
     Check(CheckCommands),
-
-    #[command(subcommand)]
-    Review(ReviewCommands),
 
     #[command(
         about = "Attempt to automatically fix compilation errors (compile → patch → recompile loop)"
@@ -128,14 +132,33 @@ enum CreateCommands {
 
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
+
+        #[arg(
+            long,
+            help = "When blocking ambiguities are detected, invoke agent to fix drafts and retry"
+        )]
+        fix: bool,
+
+        #[arg(
+            long,
+            default_value_t = 3,
+            help = "Max fix attempts per draft when --fix is used"
+        )]
+        max_fix_attempts: u32,
     },
 
     #[command(about = "Create implementation from context files")]
     Implementation {
         #[arg(
             long,
+            help = "When compilation fails after code generation, invoke the automatic compilation-fix loop"
+        )]
+        fix: bool,
+
+        #[arg(
+            long,
             default_value_t = 3,
-            help = "Maximum automatic compilation-fix attempts after code generation"
+            help = "Maximum automatic compilation-fix attempts when --fix is used"
         )]
         max_compile_fix_attempts: u32,
 
@@ -164,6 +187,21 @@ struct CreateArgs {
     #[arg(long, help = "Only process drafts from the data/ folder")]
     data: bool,
 
+    #[arg(long, help = "Only process drafts from the brands/ folder")]
+    brands: bool,
+
+    #[arg(
+        long,
+        help = "Maximum API requests per second (overrides REEN_RATE_LIMIT and registry)"
+    )]
+    rate_limit: Option<f64>,
+
+    #[arg(
+        long,
+        help = "Maximum tokens per minute (overrides REEN_TOKEN_LIMIT and registry)"
+    )]
+    token_limit: Option<f64>,
+
     #[command(subcommand)]
     command: CreateCommands,
 }
@@ -180,116 +218,14 @@ enum CheckCommands {
     },
 }
 
-#[derive(Subcommand)]
-enum ReviewCommands {
-    #[command(
-        about = "Review draft quality against specification errors",
-        alias = "specifications"
-    )]
-    Specification {
-        #[arg(long, help = "Apply suggested corrections directly to draft files")]
-        fix: bool,
-
-        #[arg(
-            long,
-            help = "Select suggestions interactively before applying",
-            requires = "fix",
-            conflicts_with = "all"
-        )]
-        interactive: bool,
-
-        #[arg(
-            long,
-            help = "Apply all suggestions without prompts",
-            requires = "fix",
-            conflicts_with = "interactive"
-        )]
-        all: bool,
-
-        #[arg(
-            long,
-            help = "Prompt after each suggestion (step mode)",
-            requires = "fix",
-            conflicts_with = "all"
-        )]
-        step: bool,
-
-        #[arg(
-            long,
-            help = "Maximum number of suggestions to apply",
-            requires = "fix"
-        )]
-        max: Option<usize>,
-
-        #[arg(
-            long = "file",
-            help = "Only apply suggestions for matching draft file path/name (repeatable)",
-            requires = "fix",
-            value_name = "PATH_OR_NAME",
-            action = clap::ArgAction::Append
-        )]
-        files: Vec<String>,
-
-        #[arg(help = "Optional list of draft names (without .md extension)")]
-        names: Vec<String>,
-    },
-
-    #[command(
-        about = "Review draft quality against implementation errors",
-        alias = "implementations"
-    )]
-    Implementation {
-        #[arg(long, help = "Apply suggested corrections directly to draft files")]
-        fix: bool,
-
-        #[arg(
-            long,
-            help = "Select suggestions interactively before applying",
-            requires = "fix",
-            conflicts_with = "all"
-        )]
-        interactive: bool,
-
-        #[arg(
-            long,
-            help = "Apply all suggestions without prompts",
-            requires = "fix",
-            conflicts_with = "interactive"
-        )]
-        all: bool,
-
-        #[arg(
-            long,
-            help = "Prompt after each suggestion (step mode)",
-            requires = "fix",
-            conflicts_with = "all"
-        )]
-        step: bool,
-
-        #[arg(
-            long,
-            help = "Maximum number of suggestions to apply",
-            requires = "fix"
-        )]
-        max: Option<usize>,
-
-        #[arg(
-            long = "file",
-            help = "Only apply suggestions for matching draft file path/name (repeatable)",
-            requires = "fix",
-            value_name = "PATH_OR_NAME",
-            action = clap::ArgAction::Append
-        )]
-        files: Vec<String>,
-
-        #[arg(help = "Optional list of context names (without .md extension)")]
-        names: Vec<String>,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(profile) = cli.profile.as_deref() {
+        std::env::set_var("REEN_PROFILE", profile);
+    }
+    reen::registries::validate_registry_profile(cli.profile.as_deref())
+        .map_err(anyhow::Error::msg)?;
 
     let config = cli::Config {
         verbose: cli.verbose,
@@ -298,35 +234,52 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Create(create_args) => {
+            let rate_limit = cli::resolve_rate_limit(create_args.rate_limit);
+            let token_limit = cli::resolve_token_limit(create_args.token_limit);
             match create_args.command {
-                CreateCommands::Specification { visuals, names } => {
+                CreateCommands::Specification {
+                    visuals,
+                    names,
+                    fix,
+                    max_fix_attempts,
+                } => {
                     let category_filter = cli::CategoryFilter {
-                        contexts: if visuals { false } else { create_args.contexts },
-                        data: if visuals { false } else { create_args.data },
+                        contexts: create_args.contexts,
+                        data: create_args.data,
+                        brands: create_args.brands,
                         visuals,
                     };
                     cli::create_specification(
                         names,
                         create_args.clear_cache,
                         &category_filter,
+                        rate_limit,
+                        token_limit,
+                        fix,
+                        max_fix_attempts as usize,
                         &config,
                     )
                     .await?;
                 }
                 CreateCommands::Implementation {
+                    fix,
                     max_compile_fix_attempts,
                     names,
                 } => {
                     let category_filter = cli::CategoryFilter {
                         contexts: create_args.contexts,
                         data: create_args.data,
+                        brands: create_args.brands,
                         visuals: false,
                     };
                     cli::create_implementation(
                         names,
+                        fix,
                         max_compile_fix_attempts as usize,
                         create_args.clear_cache,
                         &category_filter,
+                        rate_limit,
+                        token_limit,
                         &config,
                     )
                     .await?;
@@ -335,64 +288,24 @@ async fn main() -> Result<()> {
                     let category_filter = cli::CategoryFilter {
                         contexts: create_args.contexts,
                         data: create_args.data,
+                        brands: create_args.brands,
                         visuals: false,
                     };
-                    cli::create_tests(names, create_args.clear_cache, &category_filter, &config)
-                        .await?;
+                    cli::create_tests(
+                        names,
+                        create_args.clear_cache,
+                        &category_filter,
+                        rate_limit,
+                        token_limit,
+                        &config,
+                    )
+                    .await?;
                 }
             }
         }
         Commands::Check(check_cmd) => match check_cmd {
             CheckCommands::Specification { names } => {
                 cli::check_specification(names, &config).await?;
-            }
-        },
-        Commands::Review(review_cmd) => match review_cmd {
-            ReviewCommands::Specification {
-                fix,
-                interactive,
-                all,
-                step,
-                max,
-                files,
-                names,
-            } => {
-                cli::review_specification(
-                    names,
-                    cli::ReviewFixOptions {
-                        fix,
-                        interactive,
-                        all,
-                        step,
-                        max,
-                        file_filters: files,
-                    },
-                    &config,
-                )
-                .await?;
-            }
-            ReviewCommands::Implementation {
-                fix,
-                interactive,
-                all,
-                step,
-                max,
-                files,
-                names,
-            } => {
-                cli::review_implementation(
-                    names,
-                    cli::ReviewFixOptions {
-                        fix,
-                        interactive,
-                        all,
-                        step,
-                        max,
-                        file_filters: files,
-                    },
-                    &config,
-                )
-                .await?;
             }
         },
         Commands::Fix {
@@ -436,114 +349,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clap::Parser;
-
-    #[test]
-    fn parses_review_specification_with_fix_flag() {
-        let cli = Cli::try_parse_from(["reen", "review", "specification", "--fix", "app"])
-            .expect("cli parse");
-        match cli.command {
-            Commands::Review(ReviewCommands::Specification {
-                fix,
-                interactive,
-                all,
-                step,
-                max,
-                files,
-                names,
-            }) => {
-                assert!(fix);
-                assert!(!interactive);
-                assert!(!all);
-                assert!(!step);
-                assert!(max.is_none());
-                assert!(files.is_empty());
-                assert_eq!(names, vec!["app"]);
-            }
-            _ => panic!("unexpected command variant"),
-        }
-    }
-
-    #[test]
-    fn parses_review_implementation_without_fix() {
-        let cli = Cli::try_parse_from(["reen", "review", "implementation", "game_loop"])
-            .expect("cli parse");
-        match cli.command {
-            Commands::Review(ReviewCommands::Implementation {
-                fix,
-                interactive,
-                all,
-                step,
-                max,
-                files,
-                names,
-            }) => {
-                assert!(!fix);
-                assert!(!interactive);
-                assert!(!all);
-                assert!(!step);
-                assert!(max.is_none());
-                assert!(files.is_empty());
-                assert_eq!(names, vec!["game_loop"]);
-            }
-            _ => panic!("unexpected command variant"),
-        }
-    }
-
-    #[test]
-    fn parses_review_fix_all_with_max() {
-        let cli = Cli::try_parse_from([
-            "reen",
-            "review",
-            "specification",
-            "--fix",
-            "--all",
-            "--max",
-            "2",
-            "app",
-        ])
-        .expect("cli parse");
-        match cli.command {
-            Commands::Review(ReviewCommands::Specification { all, max, .. }) => {
-                assert!(all);
-                assert_eq!(max, Some(2));
-            }
-            _ => panic!("unexpected command variant"),
-        }
-    }
-
-    #[test]
-    fn parses_review_fix_file_filters() {
-        let cli = Cli::try_parse_from([
-            "reen",
-            "review",
-            "implementation",
-            "--fix",
-            "--all",
-            "--file",
-            "drafts/contexts/game_loop.md",
-            "--file",
-            "app",
-            "game_loop",
-        ])
-        .expect("cli parse");
-        match cli.command {
-            Commands::Review(ReviewCommands::Implementation { files, names, .. }) => {
-                assert_eq!(
-                    files,
-                    vec![
-                        "drafts/contexts/game_loop.md".to_string(),
-                        "app".to_string()
-                    ]
-                );
-                assert_eq!(names, vec!["game_loop"]);
-            }
-            _ => panic!("unexpected command variant"),
-        }
-    }
 }

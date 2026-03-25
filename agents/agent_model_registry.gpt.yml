@@ -1,3 +1,5 @@
+# Preset profile: OpenAI-first defaults.
+# Activate by copying this file over `agent_model_registry.yml` before building.
 create_specifications_data:
   model: gpt-5 # qwen2.5:7b
   parallel: true
@@ -7,6 +9,14 @@ create_specifications_context:
 create_specifications_main:
   model: gpt-5 # qwen2.5:7b
   parallel: true
+create_specifications_external_api:
+  model: gpt-5 # qwen2.5:7b
+  parallel: false
+  batch: false
+create_specifications_brand:
+  model: gpt-5 # qwen2.5:7b
+  parallel: false
+  batch: false
 create_implementation:
   model: gpt-5
   parallel: true
@@ -16,6 +26,6 @@ create_test:
 resolve_compilation_errors:
   model: gpt-5
   parallel: false
-review_draft_errors:
+fix_draft_blockers:
   model: gpt-5
   parallel: false

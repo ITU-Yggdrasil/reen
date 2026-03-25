@@ -355,6 +355,16 @@ The specification is the source of truth. If it's wrong, fix the specification f
 4. **Clarity**: Clear separation between public API and internal logic
 5. **Consistency**: All contexts follow the same patterns
 
+## Allowed Cross-Cutting Convention: Environment Configuration
+
+One cross-cutting convention is allowed when environment variables are part of the implementation:
+
+- Create a project-root `.env` file with sensible defaults and non-secret placeholders
+- Load `.env` with standard precedence semantics where process environment variables override `.env`
+- Keep externally observable behavior and public API unchanged
+
+This convention is considered implementation infrastructure, not a public API expansion.
+
 ## Summary
 
 **Golden Rule**: If it's not in the specification, it doesn't exist in the implementation.

@@ -31,18 +31,14 @@ reen/
 
 ### Quick Start
 
-1. Install Python dependencies:
+1. Set your API key(s) for your chosen provider:
 ```bash
-pip install -r requirements.txt
-```
-
-2. Set your API keys:
-```bash
-export ANTHROPIC_API_KEY='your-api-key-here'
 export OPENAI_API_KEY='your-api-key-here'
+export ANTHROPIC_API_KEY='your-api-key-here'
+export MISTRAL_API_KEY='your-api-key-here'
 ```
 
-3. Build the project:
+2. Build the project:
 ```bash
 cargo build --release
 ```
@@ -63,11 +59,15 @@ reen create specification
 
 # Process specific drafts
 reen create specification app agent_runner
-```
-# The reen command has been found to sometimes not work, if it doesn't, use this instead:
-.\target\release\reen.exe      #This is only a replacement for the 'reen' part, still follow the instructions otherwise given.
-# NOTE: It has been found that some don't have a .exe file, and as such it should instead just say reen, instead of reen.exe
 
+# Auto-fix drafts when blocking ambiguities are detected
+reen create specification --fix
+
+# Limit fix attempts (default: 3)
+reen create specification --fix --max-fix-attempts 5
+```
+
+When `--fix` is used and the specification agent reports blocking ambiguities, a new agent (`fix_draft_blockers`) is invoked to propose patches to draft files. Blockers in one draft may require fixes in a dependency draft (e.g. an underspecified data draft can cause blockers in a context spec that depends on it). Patches are applied and specification creation retries until blockers are resolved or the max attempt limit is reached.
 
 ### Create Implementation
 
@@ -165,13 +165,26 @@ See [docs/TRACING_STANDARDS.md](docs/TRACING_STANDARDS.md) for details.
 
 ### Agent-Model Registry
 
-The `agents/agent_model_registry.yml` file maps agents to specific models:
+The `agents/agent_model_registry.yml` file maps agents to specific models.
+Use the `provider/model` format to choose a provider explicitly:
 
 ```yaml
-create_specifications: gpt-4
-create_implementation: claude-3-opus
-create_test: gpt-4
+create_specifications_data:
+  model: mistral/codestral-latest
+create_implementation:
+  model: openai/gpt-5
+create_test:
+  model: ollama/qwen2.5:7b
+fix_draft_blockers:
+  model: mistral/mistral-large-latest
 ```
+
+Supported providers: **OpenAI**, **Anthropic**, **Mistral**, and **Ollama** (local).
+Preset registry files are available for quick switching:
+
+- `agents/agent_model_registry.gpt.yml` — OpenAI (GPT-5)
+- `agents/agent_model_registry.mistral.yml` — Mistral API (Codestral / Mistral Large)
+- `agents/agent_model_registry.qwen.yml` — Ollama (Qwen 2.5)
 
 ## Specification Format
 
@@ -207,7 +220,7 @@ Generated specifications use markdown with a specific structure:
 
 ## Language Choice
 
-While Rust is the default, agents can choose other languages for specific tasks. For example, Python might be used for model interaction. This is specified in the draft or determined by the agent.
+Rust is the default implementation target for this project. Agents can still generate other languages for downstream projects when a draft explicitly calls for them.
 
 ## Error Handling
 
@@ -266,3 +279,31 @@ See [docs/INCREMENTAL_BUILDS.md](docs/INCREMENTAL_BUILDS.md) for details.
 - Incremental agent execution
 - Build cache across git branches
 - Parallel processing of independent tasks
+
+## Docker CLI Image
+
+You can run `reen` as a containerized CLI so local setup only needs Docker.
+
+**Quick start:** Build once, then use the wrapper script:
+
+```bash
+docker build -t reen:latest .
+source scripts/reen.sh   # macOS / Linux / WSL
+# or on Windows PowerShell: . .\scripts\reen.ps1
+
+reen create specification
+```
+
+For full instructions (first build, sourcing, and platform-specific setup for macOS, Windows, and WSL), see [docs/DOCKER_WRAPPER.md](docs/DOCKER_WRAPPER.md).
+
+**Manual run** (without the wrapper):
+
+```bash
+docker run --rm -it \
+  -e MISTRAL_API_KEY="your-key" \
+  -v "$(pwd):/work" \
+  -w /work \
+  reen:latest create specification
+```
+
+If you use OpenAI/Anthropic/Ollama instead, pass the corresponding env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_BASE_URL`, etc.).
