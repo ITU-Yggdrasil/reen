@@ -3227,9 +3227,7 @@ fn determine_specification_output_path(
         .and_then(|component| component.as_os_str().to_str())
         == Some("brands")
     {
-        return Ok(PathBuf::from(specifications_dir)
-            .join(relative_path)
-            .with_extension("json"));
+        return Ok(PathBuf::from(specifications_dir).join(relative_path));
     }
 
     // Build output path in specifications directory
@@ -3790,7 +3788,7 @@ Problem:
             "specifications",
         )
         .expect("path mapping");
-        assert_eq!(path, Path::new("specifications/brands/acme.json"));
+        assert_eq!(path, Path::new("specifications/brands/acme.md"));
     }
 
     #[test]
@@ -3807,7 +3805,7 @@ Problem:
     #[test]
     fn maps_brand_specification_back_to_draft_path() {
         let path = determine_draft_input_path(
-            Path::new("specifications/brands/acme.json"),
+            Path::new("specifications/brands/acme.md"),
             "specifications",
             "drafts",
         )
