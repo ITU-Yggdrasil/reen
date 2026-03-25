@@ -78,6 +78,7 @@ pub fn resolve_token_limit(cli_arg: Option<f64>) -> Option<f64> {
 pub struct CategoryFilter {
     pub contexts: bool,
     pub data: bool,
+    pub visuals: bool,
 }
 
 impl CategoryFilter {
@@ -85,19 +86,20 @@ impl CategoryFilter {
         Self {
             contexts: false,
             data: false,
+            visuals: false,
         }
     }
 
     fn is_active(&self) -> bool {
-        self.contexts || self.data
+        self.contexts || self.data || self.visuals
     }
 
     fn include_data(&self) -> bool {
-        !self.is_active() || self.data
+        !self.is_active() || self.data || self.visuals
     }
 
     fn include_contexts(&self) -> bool {
-        !self.is_active() || self.contexts
+        !self.is_active() || self.contexts || self.visuals
     }
 
     fn include_root(&self) -> bool {
@@ -117,6 +119,7 @@ impl CategoryFilter {
                 return match component.as_ref() {
                     "data" => self.include_data(),
                     "contexts" | "external_apis" => self.include_contexts(),
+                    "visuals" => self.include_data(),
                     _ => self.include_root(),
                 };
             }

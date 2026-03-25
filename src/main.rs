@@ -181,6 +181,9 @@ struct CreateArgs {
     #[arg(long, help = "Only process drafts from the data/ folder")]
     data: bool,
 
+    #[arg(long, help = "Only process drafts from the visuals/ folder")]
+    visuals: bool,
+
     #[arg(
         long,
         help = "Maximum API requests per second (overrides REEN_RATE_LIMIT and registry)"
@@ -226,8 +229,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Create(create_args) => {
             let category_filter = cli::CategoryFilter {
-                contexts: create_args.contexts,
-                data: create_args.data,
+                contexts: if create_args.visuals { false } else { create_args.contexts },
+                data: if create_args.visuals { false } else { create_args.data },
+                visuals: create_args.visuals,
             };
             let rate_limit = cli::resolve_rate_limit(create_args.rate_limit);
             let token_limit = cli::resolve_token_limit(create_args.token_limit);
