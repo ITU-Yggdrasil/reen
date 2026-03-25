@@ -124,6 +124,12 @@ enum CreateCommands {
         alias = "specifications"
     )]
     Specification {
+        #[arg(
+            long,
+            help = "Only process drafts from the visuals/ folder"
+        )]
+        visuals: bool,
+
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
 
@@ -258,6 +264,11 @@ async fn main() -> Result<()> {
                     max_compile_fix_attempts,
                     names,
                 } => {
+                    let category_filter = cli::CategoryFilter {
+                        contexts: create_args.contexts,
+                        data: create_args.data,
+                        visuals: false,
+                    };
                     cli::create_implementation(
                         names,
                         fix,

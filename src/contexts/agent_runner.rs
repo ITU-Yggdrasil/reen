@@ -130,7 +130,6 @@ pub struct AgentSpecification {
     pub variable_prompt: Option<String>,
 }
 
-/// The result of executing an agent
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
     pub output: String,
@@ -699,22 +698,22 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    #[derive(Serialize)]
-    struct TestInput {
-        name: String,
-        value: i32,
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(&serde_json::json(input_json).to_string());
+        let input_hash = hasher.finalize().to_vec();
+        let input_hash_str = hex::encode(input_hash);
+
+        let folder_path = self.folder.as_ref().unwrap_or(&Path::new(".reen"));
+        let file_path = folder_path.join(format!("{}/{}", instructions_model_hash_str, input_hash_str)).with_extension("cache");
+        file_path
     }
 
-    #[derive(Serialize)]
-    struct NestedData {
-        city: String,
-        country: String,
+    pub fn cache_key(&self, instructions: &AgentInstructions, input_json: &serde_json::Value) -> String {
+        format!("{}/{}", FileCache::hash(instructions), serde_json::json(input_json).to_string())
     }
 
-    #[derive(Serialize)]
-    struct NestedTestInput {
-        name: String,
-        location: NestedData,
+    pub fn instructions_model_hash(&self, instructions: &AgentInstructions) -> String {
+        FileCache::hash(instructions)
     }
 
     #[derive(Serialize)]

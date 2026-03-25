@@ -3009,7 +3009,8 @@ fn resolve_named_input_in_category(
 /// Resolves input files in a structured order:
 /// 1. data/ folder (simple data types)
 /// 2. contexts/ folder (use cases with role players)
-/// 3. Root files (like app.md)
+/// 3. visuals/ folder (UI component drafts)
+/// 4. Root files (like app.md)
 ///
 /// The `filter` controls which categories are included. When no filter is
 /// active (both flags false), all three categories are scanned.
@@ -3043,6 +3044,12 @@ fn resolve_input_files(
         if filter.include_brands() {
             let brands_dir = dir_path.join("brands");
             files.extend(collect_md_files_recursive(&brands_dir, extension)?);
+        }
+
+        if filter.include_visuals() {
+            let visuals_dir = dir_path.join("visuals");
+            collect_files_recursive(&visuals_dir, extension, &mut files)
+                .context(format!("Failed to scan {}/visuals directory", dir))?;
         }
 
         if filter.include_root() {
@@ -3099,6 +3106,23 @@ fn resolve_input_files(
                 if !brand_matches.is_empty() {
                     files.extend(brand_matches);
                     found = true;
+                }
+            }
+
+            if !found && filter.include_visuals() {
+                let visuals_dir = dir_path.join("visuals");
+                let mut candidates = Vec::new();
+                collect_files_recursive(&visuals_dir, extension, &mut candidates)
+                    .context(format!("Failed to scan {}/visuals directory", dir))?;
+                for candidate in candidates {
+                    if candidate
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|stem| stem == name)
+                    {
+                        files.push(candidate);
+                        found = true;
+                    }
                 }
             }
 
