@@ -3055,8 +3055,7 @@ fn resolve_input_files(
 
         if filter.include_visuals() {
             let visuals_dir = dir_path.join("visuals");
-            collect_files_recursive(&visuals_dir, extension, &mut files)
-                .context(format!("Failed to scan {}/visuals directory", dir))?;
+            files.extend(collect_md_files_recursive(&visuals_dir, extension)?);
         }
 
         if filter.include_root() {
@@ -3142,22 +3141,42 @@ fn resolve_input_files(
             }
 
             if !found {
-                let searched = match (
-                    filter.include_data(),
-                    filter.include_contexts(),
-                    filter.include_brands(),
-                    filter.include_root(),
-                ) {
-                    (true, true, true, true) => "data/, contexts/, brands/, and root",
-                    (true, true, true, false) => "data/, contexts/, and brands/",
-                    (true, true, false, false) => "data/ and contexts/",
-                    (true, false, true, false) => "data/ and brands/",
-                    (false, true, true, false) => "contexts/ and brands/",
-                    (true, false, false, false) => "data/",
-                    (false, true, false, false) => "contexts/",
-                    (false, false, true, false) => "brands/",
-                    (false, false, false, true) => "root",
-                    _ => "data/, contexts/, brands/, and root",
+                let searched = {
+                    let mut parts: Vec<&str> = Vec::new();
+                    if filter.include_data() {
+                        parts.push("data/");
+                    }
+                    if filter.include_contexts() {
+                        parts.push("contexts/");
+                    }
+                    if filter.include_brands() {
+                        parts.push("brands/");
+                    }
+                    if filter.include_visuals() {
+                        parts.push("visuals/");
+                    }
+                    if filter.include_root() {
+                        parts.push("root");
+                    }
+                    match parts.len() {
+                        0 => "no categories".to_string(),
+                        1 => parts[0].to_string(),
+                        2 => format!("{} and {}", parts[0], parts[1]),
+                        _ => {
+                            let mut s = String::new();
+                            for (i, p) in parts.iter().enumerate() {
+                                if i > 0 {
+                                    if i == parts.len() - 1 {
+                                        s.push_str(" and ");
+                                    } else {
+                                        s.push_str(", ");
+                                    }
+                                }
+                                s.push_str(p);
+                            }
+                            s
+                        }
+                    }
                 };
                 eprintln!(
                     "Warning: File not found: {}.{} (searched in {})",
@@ -3909,6 +3928,7 @@ Problem:
                 contexts: true,
                 data: false,
                 brands: false,
+                visuals: false,
             },
         )
         .expect("external lookup");
@@ -3923,6 +3943,7 @@ Problem:
                 contexts: false,
                 data: true,
                 brands: false,
+                visuals: false,
             },
         )
         .expect("nested lookup");
@@ -3937,6 +3958,7 @@ Problem:
                 contexts: false,
                 data: false,
                 brands: true,
+                visuals: false,
             },
         )
         .expect("brand lookup");
