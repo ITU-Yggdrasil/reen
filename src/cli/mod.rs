@@ -84,6 +84,7 @@ pub struct CategoryFilter {
     pub contexts: bool,
     pub data: bool,
     pub brands: bool,
+    pub visuals: bool,
 }
 
 impl CategoryFilter {
@@ -92,11 +93,12 @@ impl CategoryFilter {
             contexts: false,
             data: false,
             brands: false,
+            visuals: false,
         }
     }
 
     fn is_active(&self) -> bool {
-        self.contexts || self.data || self.brands
+        self.contexts || self.data || self.brands || self.visuals
     }
 
     fn include_data(&self) -> bool {
@@ -109,6 +111,10 @@ impl CategoryFilter {
 
     fn include_brands(&self) -> bool {
         !self.is_active() || self.brands
+    }
+
+    fn include_visuals(&self) -> bool {
+        !self.is_active() || self.visuals
     }
 
     fn include_root(&self) -> bool {
@@ -129,6 +135,7 @@ impl CategoryFilter {
                     "data" => self.include_data(),
                     "contexts" | "external_apis" => self.include_contexts(),
                     "brands" => self.include_brands(),
+                    "visuals" => self.include_visuals(),
                     _ => self.include_root(),
                 };
             }

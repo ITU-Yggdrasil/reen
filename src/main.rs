@@ -234,19 +234,21 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Create(create_args) => {
-            let category_filter = cli::CategoryFilter {
-                contexts: create_args.contexts,
-                data: create_args.data,
-                brands: create_args.brands,
-            };
             let rate_limit = cli::resolve_rate_limit(create_args.rate_limit);
             let token_limit = cli::resolve_token_limit(create_args.token_limit);
             match create_args.command {
                 CreateCommands::Specification {
+                    visuals,
                     names,
                     fix,
                     max_fix_attempts,
                 } => {
+                    let category_filter = cli::CategoryFilter {
+                        contexts: create_args.contexts,
+                        data: create_args.data,
+                        brands: create_args.brands,
+                        visuals,
+                    };
                     cli::create_specification(
                         names,
                         create_args.clear_cache,
@@ -267,6 +269,7 @@ async fn main() -> Result<()> {
                     let category_filter = cli::CategoryFilter {
                         contexts: create_args.contexts,
                         data: create_args.data,
+                        brands: create_args.brands,
                         visuals: false,
                     };
                     cli::create_implementation(
@@ -282,6 +285,12 @@ async fn main() -> Result<()> {
                     .await?;
                 }
                 CreateCommands::Tests { names } => {
+                    let category_filter = cli::CategoryFilter {
+                        contexts: create_args.contexts,
+                        data: create_args.data,
+                        brands: create_args.brands,
+                        visuals: false,
+                    };
                     cli::create_tests(
                         names,
                         create_args.clear_cache,
