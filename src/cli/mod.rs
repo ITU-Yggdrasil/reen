@@ -2076,6 +2076,9 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
             "create_specifications_data",
             "create_specifications_context",
             "create_specifications_main",
+            "create_specifications_visual_components",
+            "create_specifications_brand",
+            "create_specifications_extern_api"
         ],
         Stage::Implementation => &["create_implementation"],
         Stage::Tests => &["create_test"],
@@ -2091,8 +2094,8 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
         return Ok(0);
     }
 
-    let agent_registry = FileAgentRegistry::new(None);
-    let model_registry = FileAgentModelRegistry::new(None, None, None);
+    let agent_registry = FileAgentRegistry::new(Some(PathBuf::from("agents")));
+    let model_registry = FileAgentModelRegistry::new(Some(PathBuf::from("agents")), None, None);
     let mut removed = 0usize;
 
     for agent_name in agents {
@@ -2229,8 +2232,8 @@ fn clear_stage_agent_cache_entries_by_name(
         return Ok(0);
     }
 
-    let agent_registry = FileAgentRegistry::new(None);
-    let model_registry = FileAgentModelRegistry::new(None, None, None);
+    let agent_registry = FileAgentRegistry::new(Some(PathBuf::from("agents")));
+    let model_registry = FileAgentModelRegistry::new(Some(PathBuf::from("agents")), None, None);
     for (agent_name, input) in candidates {
         if clear_single_agent_cache_entry(
             &agent_registry,
@@ -3055,6 +3058,8 @@ fn resolve_input_files(
 
         if filter.include_visuals() {
             let visuals_dir = dir_path.join("visuals");
+            let visuals_files = collect_md_files_recursive(&visuals_dir, extension)?;
+            println!("Visuals files: {:?}", visuals_files);
             files.extend(collect_md_files_recursive(&visuals_dir, extension)?);
         }
 
@@ -3270,6 +3275,15 @@ fn determine_specification_output_path(
             .join("external")
             .join(remainder));
     }
+    if relative_path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("visuals")
+    {
+        let remainder = PathBuf::from_iter(relative_path.components().skip(1));
+        return Ok(PathBuf::from(specifications_dir).join("visuals").join(remainder));
+    }
 
     if relative_path
         .components()
@@ -3369,6 +3383,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
             "contexts" => "create_specifications_context",
             "external_apis" => "create_specifications_external_api",
             "brands" => "create_specifications_brand",
+            "visuals" => "create_specifications_visual_components",
             _ => "create_specifications_main",
         }
     } else {

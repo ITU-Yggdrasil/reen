@@ -124,26 +124,16 @@ enum CreateCommands {
         alias = "specifications"
     )]
     Specification {
-        #[arg(
-            long,
-            help = "Only process drafts from the visuals/ folder"
-        )]
+        #[arg(long, help = "Only process drafts from the visuals/ folder")]
         visuals: bool,
 
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
 
-        #[arg(
-            long,
-            help = "When blocking ambiguities are detected, invoke agent to fix drafts and retry"
-        )]
+        #[arg(long, help = "When blocking ambiguities are detected, invoke agent to fix drafts and retry")]
         fix: bool,
 
-        #[arg(
-            long,
-            default_value_t = 3,
-            help = "Max fix attempts per draft when --fix is used"
-        )]
+        #[arg(long, default_value_t = 3, help = "Max fix attempts per draft when --fix is used")]
         max_fix_attempts: u32,
     },
 
@@ -213,8 +203,17 @@ enum CheckCommands {
         alias = "specifications"
     )]
     Specification {
-        #[arg(help = "Optional list of draft names (without .md extension)")]
-        names: Vec<String>,
+    #[arg(help = "Optional list of draft names (without .md extension)")]
+    names: Vec<String>,
+    
+    #[arg(long, help = "Only process drafts from the visuals/ folder")]
+    visuals: bool,
+
+    #[arg(long, help = "when blocking ambiguities are detected, invoke agent to fix drafts and retry")]
+    fix: bool,
+
+    #[arg(long, default_value_t = 3, help = "Max fix attempts per draft when --fix is used")]
+    max_fix_attempts: u32,
     },
 }
 
@@ -247,7 +246,7 @@ async fn main() -> Result<()> {
                         contexts: create_args.contexts,
                         data: create_args.data,
                         brands: create_args.brands,
-                        visuals,
+                        visuals: visuals,
                     };
                     cli::create_specification(
                         names,
@@ -304,7 +303,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Check(check_cmd) => match check_cmd {
-            CheckCommands::Specification { names } => {
+            CheckCommands::Specification { names, visuals: _, fix: _, max_fix_attempts: _ } => {
                 cli::check_specification(names, &config).await?;
             }
         },
