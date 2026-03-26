@@ -102,6 +102,10 @@ impl CategoryFilter {
         !self.is_active() || self.contexts || self.visuals
     }
 
+    pub fn include_visuals(&self) -> bool {
+        !self.is_active() || self.visuals
+    }
+
     fn include_root(&self) -> bool {
         !self.is_active()
     }
@@ -171,17 +175,29 @@ const BDD_TEST_TARGETS_END: &str = "# reen:bdd-tests:end";
 pub async fn create_specification(
     names: Vec<String>,
     clear_cache: bool,
-    filter: &CategoryFilter,
+    visuals: bool,
+    &category_filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
     fix: bool,
     max_fix_attempts: usize,
     config: &Config,
-) -> Result<()> {
+) -> Result<()> { 
+    // Construct the CategoryFilter based on the CLI flags if visuals is true
+    let filter = if visuals {
+        CategoryFilter {
+            contexts: false,
+            data: false,
+            visuals: true,
+        }
+    } else {
+        CategoryFilter::all()
+    };
+
     create_specification_inner(
         names,
         clear_cache,
-        filter,
+        &filter,
         rate_limit,
         token_limit,
         fix,
@@ -2920,6 +2936,12 @@ fn resolve_input_files(
             files.extend(collect_md_files_recursive(&contexts_dir, extension)?);
             let external_dir = dir_path.join("external_apis");
             files.extend(collect_md_files_recursive(&external_dir, extension)?);
+        }
+
+        // Ensure the visuals category is included
+        if filter.include_visuals() {
+            let visuals_dir = dir_path.join("visuals");
+            files.extend(collect_md_files_recursive(&visuals_dir, extension)?);
         }
 
         if filter.include_root() {

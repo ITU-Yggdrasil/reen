@@ -244,6 +244,7 @@ async fn main() -> Result<()> {
                     cli::create_specification(
                         names,
                         create_args.clear_cache,
+                        create_args.visuals,
                         &category_filter,
                         rate_limit,
                         token_limit,
