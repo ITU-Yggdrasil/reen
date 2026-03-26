@@ -136,7 +136,10 @@ fn parse_brand_spec(spec_content: &str) -> Result<ParsedBrandSpec> {
                     ensure_title_seen(first_heading_seen)?;
                     validate_section_name(&heading)?;
                     if sections.contains_key(&heading) {
-                        bail!("brand specification section '{}' must appear only once", heading);
+                        bail!(
+                            "brand specification section '{}' must appear only once",
+                            heading
+                        );
                     }
                     section_order.push(heading.clone());
                     sections.insert(heading.clone(), Section::default());
@@ -145,9 +148,9 @@ fn parse_brand_spec(spec_content: &str) -> Result<ParsedBrandSpec> {
                 }
                 3 => {
                     ensure_title_seen(first_heading_seen)?;
-                    let section_name = current_section
-                        .clone()
-                        .ok_or_else(|| anyhow!("brand subsection '{}' must appear under a section", heading))?;
+                    let section_name = current_section.clone().ok_or_else(|| {
+                        anyhow!("brand subsection '{}' must appear under a section", heading)
+                    })?;
                     let expected = required_subsections_for(&section_name);
                     if expected.is_empty() {
                         bail!(
@@ -253,9 +256,9 @@ fn validate_required_section_order(section_order: &[String]) -> Result<()> {
     }
 
     if let Some(blocking) = positions.get("Blocking Ambiguities") {
-        let token_rules = positions
-            .get("Token Reference Rules")
-            .ok_or_else(|| anyhow!("brand specification section 'Token Reference Rules' is required"))?;
+        let token_rules = positions.get("Token Reference Rules").ok_or_else(|| {
+            anyhow!("brand specification section 'Token Reference Rules' is required")
+        })?;
         if blocking <= token_rules {
             bail!(
                 "brand specification section 'Blocking Ambiguities' must come after 'Token Reference Rules'"
@@ -264,9 +267,9 @@ fn validate_required_section_order(section_order: &[String]) -> Result<()> {
     }
 
     if let Some(impl_open) = positions.get("Implementation Choices Left Open") {
-        let token_rules = positions
-            .get("Token Reference Rules")
-            .ok_or_else(|| anyhow!("brand specification section 'Token Reference Rules' is required"))?;
+        let token_rules = positions.get("Token Reference Rules").ok_or_else(|| {
+            anyhow!("brand specification section 'Token Reference Rules' is required")
+        })?;
         if impl_open <= token_rules {
             bail!(
                 "brand specification section 'Implementation Choices Left Open' must come after 'Token Reference Rules'"
@@ -368,8 +371,8 @@ fn extract_bullets(section: &str) -> Vec<String> {
         }
 
         let mut chars = trimmed.chars();
-        let is_numbered = chars.next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-            && trimmed.contains(". ");
+        let is_numbered =
+            chars.next().map(|c| c.is_ascii_digit()).unwrap_or(false) && trimmed.contains(". ");
         if is_numbered {
             if let Some((_, rest)) = trimmed.split_once(". ") {
                 let value = rest.trim();

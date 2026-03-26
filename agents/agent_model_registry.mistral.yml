@@ -23,6 +23,10 @@ create_specifications_brand:
 create_implementation:
   model: mistral/codestral-latest
   parallel: true
+create_implementation_brand:
+  model: mistral/codestral-latest
+  parallel: false
+  batch: false
 create_test:
   model: mistral/codestral-latest
   parallel: false

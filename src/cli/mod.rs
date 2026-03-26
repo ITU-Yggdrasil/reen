@@ -25,8 +25,8 @@ mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
 use brand_specs::{
-    is_brand_draft_path, is_brand_spec_path, unresolved_brand_token_references,
-    validate_brand_spec_content,
+    collect_brand_token_references, is_brand_draft_path, is_brand_spec_path,
+    unresolved_brand_token_references, validate_brand_spec_content,
 };
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
@@ -189,6 +189,25 @@ struct PreparedImplementationBatchItem {
     dependency_context: HashMap<String, serde_json::Value>,
     context_content: String,
     prepared: reen::execution::PreparedExecution,
+}
+
+#[derive(Clone)]
+struct ImplementationRunnable {
+    agent_name: &'static str,
+    context_file: PathBuf,
+    context_name: String,
+    output_path: PathBuf,
+    dependency_fingerprint: String,
+    dependency_context: HashMap<String, serde_json::Value>,
+    context_content: String,
+    estimated: usize,
+    cache_hit: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GeneratedOutputFile {
+    path: PathBuf,
+    content: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -914,8 +933,12 @@ pub async fn create_implementation(
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    let dependency_roots =
-        select_dependency_roots(context_files, SPECIFICATIONS_DIR, names_provided, filter)?;
+    let dependency_roots = select_dependency_roots(
+        context_files.clone(),
+        SPECIFICATIONS_DIR,
+        names_provided,
+        filter,
+    )?;
     let execution_levels = build_implementation_execution_plan(dependency_roots, filter)?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!(
@@ -930,38 +953,58 @@ pub async fn create_implementation(
 
     let spec_dir = PathBuf::from(SPECIFICATIONS_DIR);
     let drafts_dir = PathBuf::from(DRAFTS_DIR);
-    let project_info = analyze_specifications(&spec_dir, Some(&drafts_dir))
+    let mut project_info = analyze_specifications(&spec_dir, Some(&drafts_dir))
         .context("Failed to analyze specifications")?;
+    project_info
+        .modules
+        .retain(|folder, _| folder != "brands" && !folder.starts_with("brands/"));
+    project_info
+        .type_names
+        .retain(|key, _| key != "brands" && !key.starts_with("brands/"));
+    let has_non_brand_targets = context_files
+        .iter()
+        .any(|path| !is_brand_spec_path(path, SPECIFICATIONS_DIR));
 
-    let output_dir = PathBuf::from(".");
+    if has_non_brand_targets {
+        let output_dir = PathBuf::from(".");
 
-    generate_cargo_toml(&project_info, &output_dir).context("Failed to generate Cargo.toml")?;
+        generate_cargo_toml(&project_info, &output_dir).context("Failed to generate Cargo.toml")?;
 
-    generate_lib_rs(&project_info, &output_dir).context("Failed to generate lib.rs")?;
+        generate_lib_rs(&project_info, &output_dir).context("Failed to generate lib.rs")?;
 
-    generate_mod_files(&project_info, &output_dir).context("Failed to generate mod.rs files")?;
+        generate_mod_files(&project_info, &output_dir)
+            .context("Failed to generate mod.rs files")?;
 
-    if config.verbose {
-        println!("✓ Project structure generated");
+        if config.verbose {
+            println!("✓ Project structure generated");
+        }
+    } else if config.verbose {
+        println!("Skipping generic project structure generation for brand-only implementation run");
     }
 
     let mut recent_generated_files: Vec<PathBuf> = Vec::new();
-    for p in generated_project_structure_paths(&project_info) {
-        if p.exists() {
-            recent_generated_files.push(p);
+    if has_non_brand_targets {
+        for p in generated_project_structure_paths(&project_info) {
+            if p.exists() {
+                recent_generated_files.push(p);
+            }
         }
     }
 
     // Step 2: Generate individual implementation files
-    let executor = Arc::new(AgentExecutor::new("create_implementation", config)?);
-    let can_parallel = executor.can_run_parallel().unwrap_or(false);
+    let implementation_executor = Arc::new(AgentExecutor::new("create_implementation", config)?);
+    let brand_executor = Arc::new(AgentExecutor::new("create_implementation_brand", config)?);
 
     if config.verbose {
-        let path = executor.model_registry().registry_path();
+        let path = implementation_executor.model_registry().registry_path();
+        println!("Agent model registry: {}", path.display());
         println!(
-            "Agent model registry: {}, create_implementation parallel: {}",
-            path.display(),
-            can_parallel
+            "create_implementation parallel: {}",
+            implementation_executor.can_run_parallel().unwrap_or(false)
+        );
+        println!(
+            "create_implementation_brand parallel: {}",
+            brand_executor.can_run_parallel().unwrap_or(false)
         );
     }
 
@@ -980,9 +1023,10 @@ pub async fn create_implementation(
             );
         }
 
-        let mut runnable = Vec::new();
+        let mut runnable: Vec<ImplementationRunnable> = Vec::new();
         for node in level_nodes {
             let context_file = resolve_implementation_context_file(&node.input_path)?;
+            let agent_name = implementation_agent_name(&context_file);
             let context_name = node.name.clone();
             let dependency_invalidated = node
                 .direct_dependency_names()
@@ -1025,8 +1069,13 @@ pub async fn create_implementation(
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+            let executor = if agent_name == "create_implementation_brand" {
+                &brand_executor
+            } else {
+                &implementation_executor
+            };
             let (dependency_context, estimated) = fit_context_to_token_limit(
-                &executor,
+                executor,
                 &context_content,
                 dependency_context,
                 token_limit,
@@ -1034,7 +1083,8 @@ pub async fn create_implementation(
             let cache_hit = executor
                 .is_cache_hit(&context_content, dependency_context.clone())
                 .unwrap_or(false);
-            runnable.push((
+            runnable.push(ImplementationRunnable {
+                agent_name,
                 context_file,
                 context_name,
                 output_path,
@@ -1043,80 +1093,92 @@ pub async fn create_implementation(
                 context_content,
                 estimated,
                 cache_hit,
-            ));
+            });
         }
+
+        let level_agent_name = runnable.first().map(|item| item.agent_name);
+        let single_agent_level = level_agent_name.is_some()
+            && runnable
+                .iter()
+                .all(|item| Some(item.agent_name) == level_agent_name);
+        let level_executor = level_agent_name.map(|agent_name| {
+            if agent_name == "create_implementation_brand" {
+                brand_executor.clone()
+            } else {
+                implementation_executor.clone()
+            }
+        });
+        let can_parallel = single_agent_level
+            && level_executor
+                .as_ref()
+                .and_then(|executor| executor.can_run_parallel().ok())
+                .unwrap_or(false);
 
         if can_parallel {
             if config.verbose {
-                println!("Parallel execution enabled for create_implementation");
+                println!(
+                    "Parallel execution enabled for {}",
+                    level_agent_name.unwrap_or("create_implementation")
+                );
             }
             let cfg = *config;
+            let executor = level_executor.expect("parallel execution requires a level executor");
             let use_batch = executor.can_use_batch().unwrap_or(false);
             if use_batch {
                 let mut batch_items: Vec<PreparedImplementationBatchItem> = Vec::new();
                 let mut batch_results: Vec<(String, PathBuf, PathBuf, String, Result<()>)> =
                     Vec::new();
 
-                for (
-                    context_file,
-                    context_name,
-                    output_path,
-                    dependency_fingerprint,
-                    dependency_context,
-                    context_content,
-                    estimated,
-                    cache_hit,
-                ) in runnable
-                {
-                    if cache_hit {
-                        progress.start_item_cached(&context_name);
+                for item in runnable {
+                    if item.cache_hit {
+                        progress.start_item_cached(&item.context_name);
                         let result = process_implementation(
                             &executor,
-                            &context_content,
-                            &context_file,
-                            &context_name,
+                            &item.context_content,
+                            &item.context_file,
+                            &item.context_name,
                             &cfg,
-                            dependency_context,
+                            item.dependency_context,
                             resources.execution_control.clone(),
                         )
                         .await;
                         batch_results.push((
-                            context_name,
-                            context_file,
-                            output_path,
-                            dependency_fingerprint,
+                            item.context_name,
+                            item.context_file,
+                            item.output_path,
+                            item.dependency_fingerprint,
                             result,
                         ));
                         continue;
                     }
 
-                    progress.start_item(&context_name, Some(estimated));
+                    progress.start_item(&item.context_name, Some(item.estimated));
                     match executor
-                        .prepare_execution(&context_content, dependency_context.clone())?
+                        .prepare_execution(&item.context_content, item.dependency_context.clone())?
                     {
                         reen::execution::PreparedExecutionState::Cached(output) => {
                             let result = finalize_implementation_output(
-                                &context_file,
-                                &context_name,
+                                &item.context_file,
+                                &item.context_name,
                                 &cfg,
                                 output,
                             );
                             batch_results.push((
-                                context_name,
-                                context_file,
-                                output_path,
-                                dependency_fingerprint,
+                                item.context_name,
+                                item.context_file,
+                                item.output_path,
+                                item.dependency_fingerprint,
                                 result,
                             ));
                         }
                         reen::execution::PreparedExecutionState::Ready(prepared) => {
                             batch_items.push(PreparedImplementationBatchItem {
-                                context_name,
-                                context_file,
-                                output_path,
-                                dependency_fingerprint,
-                                dependency_context,
-                                context_content,
+                                context_name: item.context_name,
+                                context_file: item.context_file,
+                                output_path: item.output_path,
+                                dependency_fingerprint: item.dependency_fingerprint,
+                                dependency_context: item.dependency_context,
+                                context_content: item.context_content,
                                 prepared,
                             });
                         }
@@ -1173,7 +1235,8 @@ pub async fn create_implementation(
                         }
                         Err(batch_error) => {
                             eprintln!(
-                                "Batch execution failed for create_implementation; falling back to sequential execution: {}",
+                                "Batch execution failed for {}; falling back to sequential execution: {}",
+                                level_agent_name.unwrap_or("create_implementation"),
                                 batch_error
                             );
                             for item in batch_items {
@@ -1238,61 +1301,46 @@ pub async fn create_implementation(
             } else {
                 let stage_items = runnable
                     .into_iter()
-                    .map(
-                        |(
-                            context_file,
-                            context_name,
-                            output_path,
-                            dependency_fingerprint,
-                            dependency_context,
-                            context_content,
-                            estimated,
-                            cache_hit,
-                        )| StageItem {
-                            name: context_name.clone(),
-                            estimated,
-                            cache_hit,
-                            payload: (
-                                context_file,
-                                context_name,
-                                output_path,
-                                dependency_fingerprint,
-                                dependency_context,
-                                context_content,
-                            ),
-                        },
-                    )
+                    .map(|item| StageItem {
+                        name: item.context_name.clone(),
+                        estimated: item.estimated,
+                        cache_hit: item.cache_hit,
+                        payload: item,
+                    })
                     .collect::<Vec<_>>();
 
-                let executor_clone = executor.clone();
+                let implementation_executor_clone = implementation_executor.clone();
+                let brand_executor_clone = brand_executor.clone();
                 let results = run_stage_items(
                     stage_items,
                     true,
                     &mut progress,
                     &resources,
                     config,
-                    move |(
-                        context_file,
-                        context_name,
-                        output_path,
-                        dependency_fingerprint,
-                        dependency_context,
-                        context_content,
-                    ),
-                          execution_control| {
-                        let executor = executor_clone.clone();
+                    move |item, execution_control| {
+                        let implementation_executor = implementation_executor_clone.clone();
+                        let brand_executor = brand_executor_clone.clone();
                         async move {
+                            let executor = if item.agent_name == "create_implementation_brand" {
+                                brand_executor
+                            } else {
+                                implementation_executor
+                            };
                             process_implementation(
                                 &executor,
-                                &context_content,
-                                &context_file,
-                                &context_name,
+                                &item.context_content,
+                                &item.context_file,
+                                &item.context_name,
                                 &cfg,
-                                dependency_context,
+                                item.dependency_context,
                                 execution_control,
                             )
                             .await?;
-                            Ok((context_file, output_path, dependency_fingerprint))
+                            Ok((
+                                item.context_file,
+                                item.output_path,
+                                item.dependency_fingerprint,
+                            ))
                         }
                     },
                 )
@@ -1336,33 +1384,16 @@ pub async fn create_implementation(
         } else {
             let stage_items = runnable
                 .into_iter()
-                .map(
-                    |(
-                        context_file,
-                        context_name,
-                        output_path,
-                        dependency_fingerprint,
-                        dependency_context,
-                        context_content,
-                        estimated,
-                        cache_hit,
-                    )| StageItem {
-                        name: context_name.clone(),
-                        estimated,
-                        cache_hit,
-                        payload: (
-                            context_file,
-                            context_name,
-                            output_path,
-                            dependency_fingerprint,
-                            dependency_context,
-                            context_content,
-                        ),
-                    },
-                )
+                .map(|item| StageItem {
+                    name: item.context_name.clone(),
+                    estimated: item.estimated,
+                    cache_hit: item.cache_hit,
+                    payload: item,
+                })
                 .collect::<Vec<_>>();
 
-            let executor_clone = executor.clone();
+            let implementation_executor_clone = implementation_executor.clone();
+            let brand_executor_clone = brand_executor.clone();
             let cfg = *config;
             let results = run_stage_items(
                 stage_items,
@@ -1370,28 +1401,30 @@ pub async fn create_implementation(
                 &mut progress,
                 &resources,
                 config,
-                move |(
-                    context_file,
-                    context_name,
-                    output_path,
-                    dependency_fingerprint,
-                    dependency_context,
-                    context_content,
-                ),
-                      execution_control| {
-                    let executor = executor_clone.clone();
+                move |item, execution_control| {
+                    let implementation_executor = implementation_executor_clone.clone();
+                    let brand_executor = brand_executor_clone.clone();
                     async move {
+                        let executor = if item.agent_name == "create_implementation_brand" {
+                            brand_executor
+                        } else {
+                            implementation_executor
+                        };
                         process_implementation(
                             &executor,
-                            &context_content,
-                            &context_file,
-                            &context_name,
+                            &item.context_content,
+                            &item.context_file,
+                            &item.context_name,
                             &cfg,
-                            dependency_context,
+                            item.dependency_context,
                             execution_control,
                         )
                         .await?;
-                        Ok((context_file, output_path, dependency_fingerprint))
+                        Ok((
+                            item.context_file,
+                            item.output_path,
+                            item.dependency_fingerprint,
+                        ))
                     }
                 },
             )
@@ -1498,12 +1531,29 @@ async fn process_implementation(
     finalize_implementation_output(context_file, context_name, config, impl_result)
 }
 
+fn implementation_agent_name(context_file: &Path) -> &'static str {
+    if is_brand_spec_path(context_file, SPECIFICATIONS_DIR) {
+        "create_implementation_brand"
+    } else {
+        "create_implementation"
+    }
+}
+
 fn finalize_implementation_output(
     context_file: &Path,
     context_name: &str,
     config: &Config,
     impl_result: String,
 ) -> Result<()> {
+    if is_brand_spec_path(context_file, SPECIFICATIONS_DIR) {
+        return finalize_brand_implementation_output(
+            context_file,
+            context_name,
+            config,
+            impl_result,
+        );
+    }
+
     // Extract code from the agent output and write to file
     // The agent output may contain markdown code blocks or raw code
     let code = extract_code_from_output(&impl_result, context_name);
@@ -1547,6 +1597,234 @@ fn finalize_implementation_output(
     }
 
     Ok(())
+}
+
+fn finalize_brand_implementation_output(
+    context_file: &Path,
+    context_name: &str,
+    config: &Config,
+    impl_result: String,
+) -> Result<()> {
+    let generated_files = parse_generated_output_files(&impl_result)?;
+    validate_brand_generated_output(context_file, context_name, &generated_files)?;
+
+    for file in &generated_files {
+        if let Some(parent) = file.path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create brand implementation directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(&file.path, &file.content).with_context(|| {
+            format!(
+                "Failed to write brand implementation file {}",
+                file.path.display()
+            )
+        })?;
+        if config.verbose {
+            println!("Written brand implementation file: {}", file.path.display());
+        }
+    }
+
+    if let Some((failed_file, message)) = generated_files
+        .iter()
+        .filter(|file| file.path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .find_map(|file| {
+            extract_implementation_failure_message(&file.content)
+                .map(|message| (file.path.clone(), message))
+        })
+    {
+        eprintln!("error[impl:compile_error]:");
+        eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
+        eprintln!(
+            "  Generated brand implementation for '{}' contains an explicit failure marker in {}:",
+            context_name,
+            failed_file.display()
+        );
+        eprintln!();
+        for line in message.lines() {
+            eprintln!("  {}", line);
+        }
+        eprintln!();
+        anyhow::bail!(
+            "Generated brand implementation for '{}' contains explicit failure marker",
+            context_name
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_generated_output_files(output: &str) -> Result<Vec<GeneratedOutputFile>> {
+    const FILE_PREFIX: &str = "===FILE:";
+    const FILE_SUFFIX: &str = "===";
+    const END_MARKER: &str = "===END_FILE===";
+
+    let mut files = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_lines: Vec<String> = Vec::new();
+    let mut seen_paths = HashSet::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(FILE_PREFIX) && trimmed.ends_with(FILE_SUFFIX) {
+            if current_path.is_some() {
+                anyhow::bail!(
+                    "generated output started a new file block before closing the previous one"
+                );
+            }
+            let raw_path = trimmed
+                .trim_start_matches(FILE_PREFIX)
+                .trim_end_matches(FILE_SUFFIX)
+                .trim();
+            if raw_path.is_empty() {
+                anyhow::bail!("generated output declared an empty file path");
+            }
+            current_path = Some(raw_path.to_string());
+            current_lines.clear();
+            continue;
+        }
+
+        if trimmed == END_MARKER {
+            let raw_path = current_path.take().ok_or_else(|| {
+                anyhow::anyhow!("generated output ended a file block before starting one")
+            })?;
+            let path = validate_generated_output_path(&raw_path)?;
+            let key = path.to_string_lossy().to_string();
+            if !seen_paths.insert(key.clone()) {
+                anyhow::bail!("generated output contains duplicate file entry '{}'", key);
+            }
+            files.push(GeneratedOutputFile {
+                path,
+                content: current_lines.join("\n"),
+            });
+            current_lines.clear();
+            continue;
+        }
+
+        if current_path.is_some() {
+            current_lines.push(line.to_string());
+        } else if !trimmed.is_empty() {
+            anyhow::bail!("generated output contains non-file content outside file blocks");
+        }
+    }
+
+    if current_path.is_some() {
+        anyhow::bail!("generated output ended before closing the last file block");
+    }
+    if files.is_empty() {
+        anyhow::bail!("generated output did not contain any file blocks");
+    }
+
+    Ok(files)
+}
+
+fn validate_generated_output_path(raw_path: &str) -> Result<PathBuf> {
+    let path = Path::new(raw_path);
+    if path.is_absolute() {
+        anyhow::bail!("generated output path '{}' must be relative", raw_path);
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            _ => anyhow::bail!(
+                "generated output path '{}' contains disallowed path traversal or prefix components",
+                raw_path
+            ),
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        anyhow::bail!(
+            "generated output path '{}' is empty after normalization",
+            raw_path
+        );
+    }
+
+    Ok(normalized)
+}
+
+fn validate_brand_generated_output(
+    context_file: &Path,
+    context_name: &str,
+    generated_files: &[GeneratedOutputFile],
+) -> Result<()> {
+    let required_paths = [
+        Path::new("Cargo.toml"),
+        Path::new("Leptos.toml"),
+        Path::new("src/main.rs"),
+        Path::new("src/lib.rs"),
+    ];
+    for required in required_paths {
+        if !generated_files.iter().any(|file| file.path == required) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' is missing required scaffold file '{}'",
+                context_name,
+                required.display()
+            );
+        }
+    }
+
+    if !generated_files
+        .iter()
+        .any(|file| file.path.starts_with("style") && file.path.file_name().is_some())
+    {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' must include at least one file under style/",
+            context_name
+        );
+    }
+
+    let lib_rs = generated_files
+        .iter()
+        .find(|file| file.path == Path::new("src/lib.rs"))
+        .ok_or_else(|| anyhow::anyhow!("Generated brand implementation is missing src/lib.rs"))?;
+    if !contains_root_route(&lib_rs.content) {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' does not define a detectable root route in src/lib.rs",
+            context_name
+        );
+    }
+
+    let combined = generated_files
+        .iter()
+        .map(|file| file.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let referenced_tokens = collect_brand_token_references(&combined);
+    if !referenced_tokens.is_empty() {
+        let unresolved = unresolved_brand_token_references(&combined, SPECIFICATIONS_DIR)
+            .with_context(|| {
+                format!(
+                    "failed to validate generated brand token references for {}",
+                    context_file.display()
+                )
+            })?;
+        if !unresolved.is_empty() {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' references undefined brand token(s): {}",
+                context_name,
+                unresolved.join(", ")
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn contains_root_route(content: &str) -> bool {
+    let markers = [
+        "path=\"/\"",
+        "path = \"/\"",
+        "path=path!(\"/\")",
+        "path = path!(\"/\")",
+        "StaticSegment(\"\")",
+    ];
+    content.contains("Route") && markers.iter().any(|marker| content.contains(marker))
 }
 
 /// Extract Rust code from agent output
@@ -2077,7 +2355,7 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
             "create_specifications_context",
             "create_specifications_main",
         ],
-        Stage::Implementation => &["create_implementation"],
+        Stage::Implementation => &["create_implementation", "create_implementation_brand"],
         Stage::Tests => &["create_test"],
         Stage::Compile => &[],
     };
@@ -2184,7 +2462,7 @@ fn clear_stage_agent_cache_entries_by_name(
                     additional.insert("target_type_name".to_string(), json!(target_type_name));
                 }
                 candidates.push((
-                    "create_implementation".to_string(),
+                    implementation_agent_name(&context_file).to_string(),
                     CacheAgentInput {
                         draft_content: None,
                         context_content: Some(context_content),
@@ -2637,6 +2915,9 @@ fn build_implemented_dependency_context(
             }
         }
         if !spec_path.starts_with(SPECIFICATIONS_DIR) {
+            continue;
+        }
+        if is_brand_spec_path(&spec_path, SPECIFICATIONS_DIR) {
             continue;
         }
 
@@ -3700,6 +3981,15 @@ fn determine_implementation_output_path(
 ) -> Result<PathBuf> {
     let relative_path = relative_specification_path(context_file, specifications_dir)?;
 
+    if relative_path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("brands")
+    {
+        return Ok(PathBuf::from("Cargo.toml"));
+    }
+
     let file_stem = relative_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -3754,8 +4044,10 @@ mod tests {
         determine_draft_input_path, determine_implementation_output_path,
         determine_specification_output_path, ensure_dev_dependency_entry,
         extract_actionable_blocking_bullets, extract_compile_error_message,
-        generated_project_structure_paths, parse_generated_files, resolve_input_files,
-        sync_managed_block, CategoryFilter, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
+        generated_project_structure_paths, implementation_agent_name, parse_generated_files,
+        parse_generated_output_files, resolve_input_files, sync_managed_block,
+        validate_brand_generated_output, CategoryFilter, BDD_TEST_TARGETS_END,
+        BDD_TEST_TARGETS_START,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -3871,6 +4163,28 @@ Problem:
         )
         .expect("implementation path");
         assert_eq!(path, Path::new("src/contexts/ui/terminal_renderer.rs"));
+    }
+
+    #[test]
+    fn determine_implementation_output_path_maps_brand_specs_to_scaffold_tracking_file() {
+        let path = determine_implementation_output_path(
+            Path::new("specifications/brands/acme.md"),
+            "specifications",
+        )
+        .expect("implementation path");
+        assert_eq!(path, Path::new("Cargo.toml"));
+    }
+
+    #[test]
+    fn implementation_agent_name_routes_brand_specs_to_brand_agent() {
+        assert_eq!(
+            implementation_agent_name(Path::new("specifications/brands/acme.md")),
+            "create_implementation_brand"
+        );
+        assert_eq!(
+            implementation_agent_name(Path::new("specifications/contexts/account.md")),
+            "create_implementation"
+        );
     }
 
     #[test]
@@ -4034,6 +4348,103 @@ fn main() {}
         assert!(files[0].1.contains("Feature: Account"));
         assert_eq!(files[1].0, PathBuf::from("tests/steps/account_steps.rs"));
         assert_eq!(files[2].0, PathBuf::from("tests/bdd_account.rs"));
+    }
+
+    #[test]
+    fn parse_generated_output_files_reads_brand_scaffold_envelope() {
+        let output = r#"===FILE: Cargo.toml===
+[package]
+name = "acme"
+===END_FILE===
+===FILE: src/lib.rs===
+use leptos_router::components::Route;
+===END_FILE==="#;
+
+        let files = parse_generated_output_files(output).expect("parse generated output files");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, PathBuf::from("Cargo.toml"));
+        assert!(files[0].content.contains("[package]"));
+        assert_eq!(files[1].path, PathBuf::from("src/lib.rs"));
+    }
+
+    #[test]
+    fn parse_generated_output_files_rejects_path_traversal() {
+        let output = r#"===FILE: ../Cargo.toml===
+oops
+===END_FILE==="#;
+
+        let err =
+            parse_generated_output_files(output).expect_err("expected path traversal failure");
+        assert!(err.to_string().contains("disallowed path traversal"));
+    }
+
+    #[test]
+    fn validate_brand_generated_output_requires_scaffold_files_and_root_route() {
+        let files = parse_generated_output_files(
+            r#"===FILE: Cargo.toml===
+[package]
+name = "acme"
+===END_FILE===
+===FILE: Leptos.toml===
+output-name = "acme"
+===END_FILE===
+===FILE: src/main.rs===
+fn main() {}
+===END_FILE===
+===FILE: src/lib.rs===
+use leptos::*;
+use leptos_router::components::{Route, Router, Routes};
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <Router>
+            <Routes fallback=|| view! { <main></main> }>
+                <Route path="/" view=|| view! { <main class="shell"></main> }/>
+            </Routes>
+        </Router>
+    }
+}
+===END_FILE===
+===FILE: style/app.css===
+:root { --brand-colors-primary-default: #112233; }
+===END_FILE==="#,
+        )
+        .expect("parse");
+
+        validate_brand_generated_output(Path::new("specifications/brands/acme.md"), "acme", &files)
+            .expect("valid brand generated output");
+    }
+
+    #[test]
+    fn validate_brand_generated_output_rejects_missing_root_route() {
+        let files = parse_generated_output_files(
+            r#"===FILE: Cargo.toml===
+[package]
+name = "acme"
+===END_FILE===
+===FILE: Leptos.toml===
+output-name = "acme"
+===END_FILE===
+===FILE: src/main.rs===
+fn main() {}
+===END_FILE===
+===FILE: src/lib.rs===
+pub fn app() {}
+===END_FILE===
+===FILE: style/app.css===
+:root {}
+===END_FILE==="#,
+        )
+        .expect("parse");
+
+        let err = validate_brand_generated_output(
+            Path::new("specifications/brands/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect_err("expected missing root route failure");
+        assert!(err.to_string().contains("root route"));
     }
 
     #[test]

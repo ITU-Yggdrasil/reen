@@ -124,10 +124,7 @@ enum CreateCommands {
         alias = "specifications"
     )]
     Specification {
-        #[arg(
-            long,
-            help = "Only process drafts from the visuals/ folder"
-        )]
+        #[arg(long, help = "Only process drafts from the visuals/ folder")]
         visuals: bool,
 
         #[arg(help = "Optional list of draft names (without .md extension)")]

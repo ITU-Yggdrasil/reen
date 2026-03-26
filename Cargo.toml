@@ -1,27 +1,21 @@
 [package]
-name = "reen"
+name = "specifications"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "reen"
-path = "src/main.rs"
+[lib]
+name = "specifications"
+path = "src/lib.rs"
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-hex = "0.4"
-clap = { version = "4.5", features = ["derive"] }
-anyhow = "1.0"
-tokio = { version = "1.40", features = ["full"] }
-yaml-rust = "0.4"
-chrono = { version = "0.4", features = ["serde"] }
-regex = "1.10"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-serde_yaml = "0.9"
-dotenvy = "0.15.7"
-html2text = "0.16.7"
+tracing = "0.1"
 
-[lib]
-path = "src/lib.rs"
+[dev-dependencies]
+cucumber = "0.22.1"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread"] }
+
+[features]
+default = ["agent_runner", "filecache", "tick_tack_toe"]
+agent_runner = []
+filecache = []
+tick_tack_toe = []

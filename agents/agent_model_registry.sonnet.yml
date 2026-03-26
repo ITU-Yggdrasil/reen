@@ -24,6 +24,10 @@ create_implementation:
   model: claude-sonnet-4-6
   parallel: true
   batch: false
+create_implementation_brand:
+  model: claude-sonnet-4-6
+  parallel: false
+  batch: false
 create_test:
   model: claude-sonnet-4-6
   parallel: false
