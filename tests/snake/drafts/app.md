@@ -67,7 +67,9 @@ The application runs an outer loop with the following behavior:
    - If terminal width < 20 or terminal height < 20, print an error to stderr and exit with code `20`.
 
 1. If there is no active GameLoopContext (including when the application first starts):
-   - Render a start screen (including score from the previous game if one has been completed in this session).
+   - Render or update a start screen (including score from the previous game if one has been completed in this session).
+   - In terminal mode, the start screen should appear as one stable screen while waiting for input; repeated idle iterations must not cause visible flicker.
+   - In terminal mode, each start-screen line must begin at column 0. Multi-line output must not drift horizontally from one line to the next.
    - Call CommandInputContext.capture and then poll keys via CommandInputContext.next_key.
    - If the user presses the start key "S" or "s":
      - Recreate the initial state.
@@ -77,7 +79,7 @@ The application runs an outer loop with the following behavior:
 
 2. If a GameLoopContext exists:
    - Render current frame using `gameLoopContext.current_board` and `gameLoopContext.get_score`.
-   - In terminal mode, TerminalRenderer must render by calling StringRenderer first and then printing the returned frame after clearing the terminal.
+   - In terminal mode, TerminalRenderer must render by calling StringRenderer first and then updating the terminal in place so the latest frame is shown as one stable screen with no visible flicker or accumulated old frames.
    - In string mode, print the StringRenderer frame directly with no terminal-clearing behavior.
    - Call `gameLoopContext.tick()`
    - If the result is:
@@ -87,6 +89,7 @@ The application runs an outer loop with the following behavior:
 3. When the game ends:
    - Render final board state.
    - Render a "Game Over" message and final score.
+   - In terminal mode, the game-over screen must also restart each rendered line at column 0.
    - Allow the user to start a new game.
    - If `SNAKE_RENDERER=string`, also print `REEN_SNAKE_TEST_RESULT game_over score=<score>` to standard error and then exit with code `0`.
 

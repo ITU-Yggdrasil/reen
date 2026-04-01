@@ -255,7 +255,9 @@ impl AgentExecutor {
 
     /// Writes questions to a file in the questions/ directory
     fn write_questions_file(&self, context_name: &str, questions: &str) -> Result<PathBuf> {
-        let questions_dir = PathBuf::from("questions");
+        let questions_dir = std::env::current_dir()
+            .context("Failed to get current directory")?
+            .join("questions");
 
         // Create questions directory if it doesn't exist
         if !questions_dir.exists() {

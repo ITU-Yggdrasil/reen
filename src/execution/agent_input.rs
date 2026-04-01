@@ -91,11 +91,55 @@ pub fn build_agent_input(
 }
 
 pub fn output_contains_questions(output: &str) -> bool {
-    let question_markers = ["?", "## Questions", "# Questions", "**Questions**"];
-    question_markers
-        .iter()
-        .any(|marker| output.contains(marker))
-        && (output.contains("clarification")
-            || output.contains("answer")
-            || output.contains("question"))
+    let normalized = output.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let lowercase = normalized.to_ascii_lowercase();
+
+    let explicit_question_section = lowercase.contains("## questions")
+        || lowercase.contains("# questions")
+        || lowercase.contains("**questions**");
+    let asks_for_clarification = lowercase.contains("need clarification")
+        || lowercase.contains("needs clarification")
+        || lowercase.contains("please answer")
+        || lowercase.contains("please provide")
+        || lowercase.contains("questions that need answers");
+    let has_enumerated_questions = lowercase.contains("1.") && normalized.contains('?');
+
+    explicit_question_section || asks_for_clarification || has_enumerated_questions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_contains_questions;
+
+    #[test]
+    fn detects_explicit_questions_heading() {
+        assert!(output_contains_questions(
+            "## Questions\n1. Which endpoint should be used?"
+        ));
+    }
+
+    #[test]
+    fn detects_direct_request_for_answers() {
+        assert!(output_contains_questions(
+            "Please answer these before I continue.\n1. Should this support retries?"
+        ));
+    }
+
+    #[test]
+    fn ignores_no_questions_summary_text() {
+        assert!(!output_contains_questions(
+            "Implementation plan complete. There are no questions."
+        ));
+    }
+
+    #[test]
+    fn ignores_regular_output_with_question_word() {
+        assert!(!output_contains_questions(
+            "This section answers the original question and includes the final implementation."
+        ));
+    }
 }

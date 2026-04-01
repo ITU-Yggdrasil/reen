@@ -57,6 +57,7 @@ These flags work with every command:
 
 ```text
 reen create <subcommand>
+reen build [OPTIONS] [NAMES]...
 reen check <subcommand>
 reen fix
 reen compile
@@ -177,6 +178,46 @@ Generated test output goes under:
 - `tests/steps/`
 - `tests/bdd_*.rs`
 
+### `build`
+
+Run specification generation and then implementation generation in one command.
+
+Under the hood this behaves like:
+
+```bash
+reen create specification --fix ...
+reen create implementation --fix ...
+```
+
+If specification creation fails, implementation generation does not run.
+
+Usage:
+
+```text
+reen build [OPTIONS] [NAMES]...
+```
+
+Arguments and options:
+
+- `[NAMES]...`: Optional draft/specification names without the `.md` extension.
+- `--clear-cache`: Ignore build-tracker state for both stages and refresh the stage cache first.
+- `--contexts`: Only include `drafts/contexts/`, `drafts/apis/`, and `drafts/external_apis/`.
+- `--data`: Only include `drafts/data/`.
+- `--fix`: Accepted for parity with `create`; build always enables draft and compilation repair.
+- `--max-fix-attempts <n>`: Limit automatic draft-fix retries during specification creation. Default: `3`.
+- `--max-compile-fix-attempts <n>`: Limit automatic compilation-fix retries during implementation creation. Default: `3`.
+- `--rate-limit <n>`: Maximum API requests per second. Overrides `REEN_RATE_LIMIT` and registry config.
+- `--token-limit <n>`: Maximum tokens per minute. Overrides `REEN_TOKEN_LIMIT` and registry config.
+
+Examples:
+
+```bash
+reen build
+reen build app game_loop
+reen build --contexts
+reen build --clear-cache --max-fix-attempts 5 --max-compile-fix-attempts 5 app
+```
+
 ### `check`
 
 `check` currently has one subcommand:
@@ -205,18 +246,23 @@ Attempt to restore compilation by running a compile -> patch -> recompile loop.
 Usage:
 
 ```text
-reen fix [--max-compile-fix-attempts <n>]
+reen fix [OPTIONS]
 ```
 
 Options:
 
+- `--clear-cache`: Ignore cached planning and compilation-fix agent responses for this run.
 - `--max-compile-fix-attempts <n>`: Maximum automatic fix attempts. Default: `3`.
+- `--rate-limit <n>`: Maximum API requests per second. Overrides `REEN_RATE_LIMIT` and registry config.
+- `--token-limit <n>`: Maximum tokens per minute. Overrides `REEN_TOKEN_LIMIT` and registry config.
 
 Examples:
 
 ```bash
 reen fix
+reen fix --clear-cache
 reen fix --max-compile-fix-attempts 5
+reen fix --rate-limit 1 --token-limit 60000
 ```
 
 ### `compile`
@@ -253,6 +299,8 @@ reen test
 #### `clear cache`
 
 Clear build-tracker entries and agent response cache entries for a stage.
+
+Specification clears also remove cached `fix_draft_blockers` responses. Implementation clears also remove cached `create_plan` and `resolve_compilation_errors` responses.
 
 Targets:
 
@@ -311,7 +359,7 @@ reen --profile sonnet create specification
 
 That command uses `agents/agent_model_registry.sonnet.yml`.
 
-Rate and token limits for `create` commands resolve in this order:
+Rate and token limits for `create` and `fix` commands resolve in this order:
 
 1. CLI flags
 2. `REEN_RATE_LIMIT` / `REEN_TOKEN_LIMIT`
@@ -325,6 +373,7 @@ export REEN_TOKEN_LIMIT=60000
 
 reen create specification
 reen create --rate-limit 1 implementation
+reen fix --rate-limit 1
 ```
 
 ## Provider Notes

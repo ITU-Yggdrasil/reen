@@ -23,6 +23,9 @@ static_prompt: |
   - Terms such as "shared", "same instance", "one stream", "process lifetime", or "must not replace"
     are semantic identity constraints. They are not direct instructions to use a specific Rust type.
   - Prefer idiomatic Rust guidance when unconstrained.
+  - When describing Rust guidance for an inherent method that returns the declaring type, prefer `Self`
+    and wrappers around `Self` (`Option<Self>`, `Result<Self, _>`, `(Self, T)`) instead of repeating
+    concrete generic type names.
 
   ## Required output
 
@@ -62,6 +65,7 @@ static_prompt: |
   - Include explicit verification targets.
   - If the contract mentions shared identity, do not allow plans that casually clone/replace state.
   - If `plan_kind=semantic_repair`, keep the task list tightly scoped to the diagnostics and forbid semantic hollowing.
+  - When a task involves a non-destructive mutation or owned state transition, prefer `Self`-based return notation in the Rust guidance.
   - If the supplied default plan is already sufficient, refine it only minimally.
 
   ## Output format

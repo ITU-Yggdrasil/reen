@@ -73,7 +73,12 @@ pub(crate) fn build_interface_capsule(
     let call_edge_exports = contract
         .required_call_edges
         .iter()
-        .map(|edge| format!("{} -> {}.{}", edge.caller_surface, edge.callee_role, edge.callee_method))
+        .map(|edge| {
+            format!(
+                "{} -> {}.{}",
+                edge.caller_surface, edge.callee_role, edge.callee_method
+            )
+        })
         .collect::<Vec<_>>();
     let verification_notes = contract.verification_targets.clone();
     let selected_snippets = source_content
@@ -165,7 +170,12 @@ fn select_snippets(contract: &ContractArtifact, content: &str) -> Vec<CapsuleSni
         .iter()
         .map(|item| item.name.clone())
         .collect::<Vec<_>>();
-    names.extend(contract.role_methods.iter().map(|method| method.method_name.clone()));
+    names.extend(
+        contract
+            .role_methods
+            .iter()
+            .map(|method| method.method_name.clone()),
+    );
     names.extend(contract.props.iter().map(|prop| prop.name.clone()));
     dedupe_preserve(&mut names);
 
@@ -292,11 +302,17 @@ impl CommandInputContext {
             Some(Path::new("src/contexts/command_input.rs")),
             Some(source),
         );
-        assert!(capsule.public_types.contains(&"CommandInputContext".to_string()));
+        assert!(
+            capsule
+                .public_types
+                .contains(&"CommandInputContext".to_string())
+        );
         assert!(capsule.public_methods.contains(&"capture".to_string()));
-        assert!(capsule
-            .relevant_role_methods
-            .contains(&"stdin_source.read_available".to_string()));
+        assert!(
+            capsule
+                .relevant_role_methods
+                .contains(&"stdin_source.read_available".to_string())
+        );
         assert!(!capsule.selected_snippets.is_empty());
     }
 }

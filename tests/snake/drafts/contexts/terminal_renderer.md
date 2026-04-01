@@ -21,5 +21,9 @@ It must use StringRenderer as the canonical formatter for each frame.
 
   - Output rules:
     - Call `string_renderer.render(board, score)` to obtain the full frame string.
-    - Rendering is in-place: clear terminal and move cursor to top-left before printing each frame.
-    - Print the returned frame string exactly as produced by StringRenderer.
+    - Rendering is in-place: each call must replace the previously shown frame with the new one so the terminal shows one stable current view.
+    - Normal rendering must not rely on visible blank-screen flashes or other noticeable flicker.
+    - Display the returned frame string exactly as produced by StringRenderer.
+    - In terminal mode, rendering must restart at column 0 before the frame is written.
+    - If the terminal update mechanism moves the cursor upward between frames, it must also return the cursor to column 0 before rewriting the next frame.
+    - Multi-line terminal output must preserve left alignment line-by-line; no line may inherit the previous line's horizontal cursor position.

@@ -78,8 +78,12 @@ pub(crate) fn build_default_plan(
     } else {
         output_paths.to_vec()
     };
-    let base_report =
-        build_implementation_plan(spec_path, spec_content, &normalized_output_paths[0], Path::new("."));
+    let base_report = build_implementation_plan(
+        spec_path,
+        spec_content,
+        &normalized_output_paths[0],
+        Path::new("."),
+    );
     let contract = &base_report.contract;
 
     let mut required_behaviors = Vec::new();
@@ -133,8 +137,9 @@ pub(crate) fn build_default_plan(
         ordered_tasks.push(PlanTask {
             order: 1,
             title: "Implement contract".to_string(),
-            detail: "Satisfy the specification contract using the provided collaborators and outputs."
-                .to_string(),
+            detail:
+                "Satisfy the specification contract using the provided collaborators and outputs."
+                    .to_string(),
             target_paths: output_paths
                 .iter()
                 .map(|path| path.display().to_string())
@@ -143,7 +148,12 @@ pub(crate) fn build_default_plan(
         });
     }
 
-    let mut risks = build_risks(contract, &base_report.required_artifacts, plan_kind, diagnostic_text);
+    let mut risks = build_risks(
+        contract,
+        &base_report.required_artifacts,
+        plan_kind,
+        diagnostic_text,
+    );
     dedupe_preserve(&mut risks);
     let mut forbidden_regressions = build_forbidden_regressions(contract, plan_kind);
     dedupe_preserve(&mut forbidden_regressions);
@@ -303,8 +313,15 @@ fn collaborator_is_dependency(
     collaborator: &str,
     dependency_context: &HashMap<String, serde_json::Value>,
 ) -> bool {
-    for key in ["direct_dependencies", "dependency_closure", "implemented_dependencies"] {
-        if let Some(values) = dependency_context.get(key).and_then(|value| value.as_array()) {
+    for key in [
+        "direct_dependencies",
+        "dependency_closure",
+        "implemented_dependencies",
+    ] {
+        if let Some(values) = dependency_context
+            .get(key)
+            .and_then(|value| value.as_array())
+        {
             for item in values {
                 if item
                     .get("name")
@@ -372,8 +389,15 @@ fn build_tasks(
                 order: 1,
                 title: "Diagnose minimal fix scope".to_string(),
                 detail: diagnostic_text
-                    .map(|text| format!("Use the reported diagnostics as the minimal repair scope. {}", summarize_diagnostics(text)))
-                    .unwrap_or_else(|| "Use the reported diagnostics as the minimal repair scope.".to_string()),
+                    .map(|text| {
+                        format!(
+                            "Use the reported diagnostics as the minimal repair scope. {}",
+                            summarize_diagnostics(text)
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "Use the reported diagnostics as the minimal repair scope.".to_string()
+                    }),
                 target_paths: rendered_targets.clone(),
                 verification_targets: verification_targets.to_vec(),
             });
@@ -421,15 +445,23 @@ fn build_risks(
         }
     }
     if !contract.shared_state_requirements.is_empty() {
-        risks.push("Shared identity semantics are required; careless cloning may change behavior.".to_string());
+        risks.push(
+            "Shared identity semantics are required; careless cloning may change behavior."
+                .to_string(),
+        );
     }
     if !contract.env_vars.is_empty() {
         risks.push("Environment/config behavior is specified and must not be omitted during implementation or repair.".to_string());
     }
     if matches!(plan_kind, PlanKind::SemanticRepair)
-        && diagnostic_text.map(|text| !text.trim().is_empty()).unwrap_or(false)
+        && diagnostic_text
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
     {
-        risks.push("Semantic repair must stay within the minimal diagnostic scope and preserve behavior.".to_string());
+        risks.push(
+            "Semantic repair must stay within the minimal diagnostic scope and preserve behavior."
+                .to_string(),
+        );
     }
     risks
 }
@@ -454,10 +486,14 @@ fn build_forbidden_regressions(contract: &BehaviorContract, plan_kind: PlanKind)
         ));
     }
     if !contract.shared_state_requirements.is_empty() {
-        regressions.push("Do not break required shared-state or stable-identity behavior.".to_string());
+        regressions
+            .push("Do not break required shared-state or stable-identity behavior.".to_string());
     }
     if matches!(plan_kind, PlanKind::SemanticRepair) {
-        regressions.push("Do not replace required behavior with stubs, placeholders, or compile-only shells.".to_string());
+        regressions.push(
+            "Do not replace required behavior with stubs, placeholders, or compile-only shells."
+                .to_string(),
+        );
     }
     regressions
 }
@@ -526,10 +562,11 @@ mod tests {
             None,
         );
         assert!(!plan.identity_and_sharing_constraints.is_empty());
-        assert!(plan
-            .identity_and_sharing_constraints
-            .iter()
-            .any(|item| item.identity_semantics == "shared_identity"));
+        assert!(
+            plan.identity_and_sharing_constraints
+                .iter()
+                .any(|item| item.identity_semantics == "shared_identity")
+        );
     }
 
     #[test]

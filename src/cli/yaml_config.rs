@@ -19,6 +19,10 @@ pub struct ReenConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub github: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_limit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub create: Option<CreateConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<FixCommandConfig>,
@@ -37,6 +41,8 @@ pub struct CreateConfig {
     pub rate_limit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_limit: Option<f64>,
+    #[serde(default, skip_serializing_if = "OptionalYamlValue::is_missing")]
+    pub fix: OptionalYamlValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub specification: Option<CreateSpecificationConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,6 +127,12 @@ impl Serialize for OptionalYamlValue {
 pub struct FixCommandConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_compile_fix_attempts: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clear_cache: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_limit: Option<f64>,
 }
 
 pub fn resolve_config_path() -> PathBuf {
@@ -306,6 +318,56 @@ fix:
             parsed.fix.and_then(|fix| fix.max_compile_fix_attempts),
             Some(4)
         );
+    }
+
+    #[test]
+    fn parses_fix_command_cache_and_rate_limit_settings() {
+        let parsed: ReenConfig = serde_yaml::from_str(
+            r#"
+fix:
+  max-compile-fix-attempts: 4
+  clear-cache: true
+  rate-limit: 2.5
+  token-limit: 12000
+"#,
+        )
+        .expect("parse config");
+
+        let fix = parsed.fix.expect("fix config");
+        assert_eq!(fix.max_compile_fix_attempts, Some(4));
+        assert_eq!(fix.clear_cache, Some(true));
+        assert_eq!(fix.rate_limit, Some(2.5));
+        assert_eq!(fix.token_limit, Some(12000.0));
+    }
+
+    #[test]
+    fn parses_root_shared_rate_and_token_limits() {
+        let parsed: ReenConfig = serde_yaml::from_str(
+            r#"
+rate-limit: 1.75
+token-limit: 45000
+"#,
+        )
+        .expect("parse config");
+
+        assert_eq!(parsed.rate_limit, Some(1.75));
+        assert_eq!(parsed.token_limit, Some(45000.0));
+    }
+
+    #[test]
+    fn parses_create_parent_fix_as_enabled() {
+        let parsed: ReenConfig = serde_yaml::from_str(
+            r#"
+create:
+  fix:
+    max-fix-attempts: 6
+"#,
+        )
+        .expect("parse config");
+
+        let create = parsed.create.expect("create config");
+        assert!(fix_value_enabled(&create.fix));
+        assert_eq!(fix_mapping_u32(&create.fix, "max-fix-attempts"), Some(6));
     }
 
     #[test]

@@ -1,0 +1,1 @@
+Only update files in the drafts folder unless explicitly told otherwise

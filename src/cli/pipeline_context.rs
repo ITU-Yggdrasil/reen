@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::agent_executor::AgentExecutor;
-use super::contracts::{ContractArtifact, compact_contract_artifacts, compact_contract_artifact_value};
-use super::interface_capsules::{
-    InterfaceCapsule, compact_interface_capsules,
+use super::contracts::{
+    ContractArtifact, compact_contract_artifact_value, compact_contract_artifacts,
 };
+use super::interface_capsules::{InterfaceCapsule, compact_interface_capsules};
 use super::openapi_fetcher::{
     extract_external_api_symbol_inventory, is_external_api_draft_path, load_openapi_content,
     parse_external_api_draft,
@@ -242,6 +242,12 @@ pub(super) fn build_specification_context(
     mut context: HashMap<String, serde_json::Value>,
     drafts_dir: &str,
 ) -> Result<HashMap<String, serde_json::Value>> {
+    let drafts_root = Path::new(drafts_dir);
+    let relative_path = draft_file.strip_prefix(drafts_root).unwrap_or(draft_file);
+    if relative_path == Path::new("app.md") {
+        context.insert("specification_kind".to_string(), json!("app"));
+    }
+
     if !is_external_api_draft_path(draft_file, drafts_dir) {
         return Ok(context);
     }
@@ -296,9 +302,10 @@ pub(super) fn fit_context_to_token_limit(
 
 #[cfg(test)]
 mod tests {
-    use super::build_context_variants;
+    use super::{build_context_variants, build_specification_context};
     use serde_json::json;
     use std::collections::HashMap;
+    use std::path::Path;
 
     #[test]
     fn context_variants_prefer_full_closure_manifest_before_direct_only() {
@@ -537,7 +544,9 @@ mod tests {
                     .and_then(|items| items.first())
                     .and_then(|item| item.get("content"))
                     .and_then(|value| value.as_str())
-                    .map(|content| content.contains("truncated by reen") || content.contains("pub fn render"))
+                    .map(|content| {
+                        content.contains("truncated by reen") || content.contains("pub fn render")
+                    })
                     .unwrap_or(false)
                     && variant
                         .get("contract_artifact")
@@ -549,5 +558,29 @@ mod tests {
         assert!(compacted.get("contract_artifact").is_some());
         assert!(compacted.get("direct_dependency_contracts").is_some());
         assert!(compacted.get("implemented_direct_role_capsules").is_some());
+    }
+
+    #[test]
+    fn build_specification_context_marks_root_app_drafts() {
+        let context = HashMap::new();
+        let built =
+            build_specification_context(Path::new("drafts/app.md"), "# App", context, "drafts")
+                .expect("build spec context");
+
+        assert_eq!(built.get("specification_kind"), Some(&json!("app")));
+    }
+
+    #[test]
+    fn build_specification_context_leaves_non_app_drafts_unchanged() {
+        let context = HashMap::new();
+        let built = build_specification_context(
+            Path::new("drafts/contexts/game_loop.md"),
+            "# Game Loop",
+            context,
+            "drafts",
+        )
+        .expect("build spec context");
+
+        assert!(!built.contains_key("specification_kind"));
     }
 }

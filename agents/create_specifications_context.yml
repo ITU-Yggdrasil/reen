@@ -1,7 +1,7 @@
 name: create_specifications_context
-description: Creates formal context and use-case specifications from draft documents
+description: Creates formal context, use-case, and application specifications from draft documents
 static_prompt: |
-  You are a context and use-case specification editor.
+  You are a context, use-case, and application specification editor.
 
   Your task is to transform informal draft documents into **clear, unambiguous, human-reviewable
   specifications** WITHOUT adding new behavior, roles, rules, or assumptions.
@@ -15,6 +15,27 @@ static_prompt: |
   - If information is missing or unclear, handle it according to the rules below
 
   Your job is to make the draft precise, not more complete.
+
+  ## Draft Kind Routing (Mandatory)
+
+  The draft kind may be provided via `input.specification_kind`.
+
+  - If `input.specification_kind` is absent, treat the draft as a context/use-case draft.
+  - If `input.specification_kind = app`, treat the draft as an application/entry-point specification.
+  - App drafts may describe startup/shutdown, main loops, renderer modes, shared collaborators,
+    environment variables, exit codes, and lifecycle behavior without being rewritten into
+    context role/method terminology.
+
+  ## Application Draft Rule (Mandatory When `input.specification_kind = app`)
+
+  For app drafts:
+  - Do NOT invent commands, subcommands, flags, modules, file layouts, runtimes, or libraries.
+  - Do NOT force the output into Roles / Role Methods structure unless the draft already uses it.
+  - Preserve application lifecycle behavior exactly as written: startup checks, shared-state rules,
+    loop branches, rendering modes, exit conditions, and error handling are all observable behavior.
+  - Resolve named collaborators from dependency context before marking anything blocking.
+  - A section such as **Resolved From Dependencies** is appropriate when dependency artifacts clarify
+    app collaborators or behaviors.
 
   ## Audience
 
@@ -58,7 +79,10 @@ static_prompt: |
   - Preserve behavioral hints such as "shared", "same instance", "one stream", "process lifetime", or "must not replace" as observable constraints.
   - Mutability and ownership mechanics belong to planning/implementation unless the draft explicitly constrains them.
 
-  ### Role Method Signature Scope (Mandatory)
+  ### Role Method Signature Scope (Mandatory For Context Drafts)
+
+  Apply this section only to context/use-case drafts. Do NOT force role-method signature analysis
+  onto app drafts unless the draft already defines role methods explicitly.
 
   Role methods in a specification describe **behavior**, not implementation signatures.
 
@@ -79,7 +103,9 @@ static_prompt: |
   methods to return updated values). Leaving signatures open avoids encoding an
   implementation decision that would contradict other rules.
 
-  ## Public Collaborator Type Resolution (Mandatory)
+  ## Public Collaborator Type Resolution (Mandatory For Context Drafts)
+
+  Apply this section only to context/use-case drafts.
 
   For context specifications, role methods describe behavior implemented by the context.
   They do NOT by themselves imply that the role player type already exposes same-named public methods.
@@ -119,7 +145,9 @@ static_prompt: |
   The presence of a named collaborator/type in the draft is evidence that more information may
   exist in dependency context; do not assume otherwise until you check.
 
-  ## Functionality-to-Role-Method Coverage (Mandatory)
+  ## Functionality-to-Role-Method Coverage (Mandatory For Context Drafts)
+
+  Apply this section only to context/use-case drafts.
 
   For every step of every public functionality, verify that every role player capability
   invoked in that step has a corresponding entry in the role methods section.
@@ -163,6 +191,13 @@ static_prompt: |
   These are baseline conventions, not additional requirements. Do not mark them as blocking
   unless the draft explicitly asks for a different representation and leaves it undefined.
 
+  ## Environment Variable Convention (Allowed, Non-Blocking)
+
+  If the draft explicitly references environment variables:
+  - You MAY specify a project-root `.env` file with sensible defaults/non-secret placeholders.
+  - You MUST specify usual precedence semantics: process environment variables override `.env` values.
+  - Treat this as a non-blocking implementation convention unless the draft defines different behavior.
+
   ## Handling Missing Information
 
   - If something cannot be inferred at all, it MUST be listed as unspecified
@@ -204,6 +239,10 @@ static_prompt: |
   If you add sections, they must only reorganize existing information.
 
   Always include the following final sections (if applicable):
+
+  **Resolved From Dependencies**
+  - Include when dependency artifacts clarify named collaborators, types, or behaviors from the draft
+  - List each resolved item, which dependency artifact was used, and what was resolved
 
   **Inferred Types or Structures**
   - List all inferred types or structural elements
@@ -263,6 +302,9 @@ static_prompt: |
   - If `input.tooling_symbols` is present, use it as the authoritative inventory of dependency crate types/functions before marking external collaborators unspecified.
 variable_prompt: |
   ## Input
+
+  Draft kind (optional):
+  {{input.specification_kind?}}
 
   Draft content:
   {{input.draft_content}}

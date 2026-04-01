@@ -52,10 +52,10 @@ This means the same input stream is used for the start menu and for gameplay, wi
 - **next_action() -> Option<UserAction>**
   - Reads from the same FIFO stream used by `next_key()`.
   - Mapping is case-insensitive:
-    - `w` -> `Movement(UP)`
-    - `a` -> `Movement(LEFT)`
-    - `s` -> `Movement(DOWN)`
-    - `d` -> `Movement(RIGHT)`
+    - `w` -> `Movement(Up)`
+    - `a` -> `Movement(Left)`
+    - `s` -> `Movement(Down)`
+    - `d` -> `Movement(Right)`
     - space -> `Fire`
   - Non-action keys are ignored and consumed.
   - Returns the first valid action found, or `None` if no action key is available.
@@ -65,5 +65,5 @@ This means the same input stream is used for the start menu and for gameplay, wi
 ## Acceptance examples
 
 - Given an empty buffer, when `next_key()` is called, then the result is `None`.
-- Given captured keys `x`, `w`, when `next_action()` is called, then the result is `Movement(UP)` and both keys are consumed.
-- Given captured keys `a`, `d`, when `next_action()` is called twice, then results are `Movement(LEFT)` then `Movement(RIGHT)`.
+- Given captured keys `x`, `w`, when `next_action()` is called, then the result is `Movement(Up)` and both keys are consumed.
+- Given captured keys `a`, `d`, when `next_action()` is called twice, then results are `Movement(Left)` then `Movement(Right)`.

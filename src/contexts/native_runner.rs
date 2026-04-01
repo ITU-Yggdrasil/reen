@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
+use std::error::Error as StdError;
 use std::future::Future;
 use std::io::Cursor;
 use std::sync::Once;
@@ -765,7 +766,9 @@ fn build_client(timeout_seconds: u64) -> Result<Client, String> {
     thread::scope(|scope| {
         scope
             .spawn(|| {
+                let timeout_seconds = timeout_seconds.max(1);
                 Client::builder()
+                    .connect_timeout(Duration::from_secs(timeout_seconds.min(20)))
                     .timeout(Duration::from_secs(timeout_seconds))
                     .build()
                     .map_err(|e| format!("Failed to create HTTP client: {e}"))
@@ -783,7 +786,7 @@ fn post_json(timeout_seconds: u64, url: &str, body: &Value) -> Result<Value, Str
             .json(body)
             .send()
             .await
-            .map_err(|e| format!("Failed to send request to {url}: {e}"))?;
+            .map_err(|e| format_reqwest_error("send request", url, &e))?;
         decode_json_response(response, url).await
     })
 }
@@ -802,7 +805,7 @@ fn post_json_bearer(
             .json(body)
             .send()
             .await
-            .map_err(|e| format!("Failed to send request to {url}: {e}"))?;
+            .map_err(|e| format_reqwest_error("send request", url, &e))?;
         decode_json_response(response, url).await
     })
 }
@@ -821,7 +824,7 @@ fn post_json_with_headers(
             .json(body)
             .send()
             .await
-            .map_err(|e| format!("Failed to send request to {url}: {e}"))?;
+            .map_err(|e| format_reqwest_error("send request", url, &e))?;
         decode_json_response(response, url).await
     })
 }
@@ -864,6 +867,42 @@ async fn decode_json_response(response: Response, url: &str) -> Result<Value, St
     }
     serde_json::from_str(&payload)
         .map_err(|e| format!("Failed to parse JSON response from {url}: {e}. Body: {payload}"))
+}
+
+fn format_reqwest_error(action: &str, url: &str, error: &reqwest::Error) -> String {
+    let mut details = Vec::new();
+    if error.is_timeout() {
+        details.push("timeout".to_string());
+    }
+    if error.is_connect() {
+        details.push("connect".to_string());
+    }
+    if error.is_request() {
+        details.push("request".to_string());
+    }
+    if error.is_body() {
+        details.push("body".to_string());
+    }
+    if error.is_decode() {
+        details.push("decode".to_string());
+    }
+
+    let mut message = format!("Failed to {action} to {url}: {error}");
+    if !details.is_empty() {
+        message.push_str(&format!(" [{}]", details.join(", ")));
+    }
+
+    let mut sources = Vec::new();
+    let mut current = error.source();
+    while let Some(source) = current {
+        sources.push(source.to_string());
+        current = source.source();
+    }
+    if !sources.is_empty() {
+        message.push_str(&format!(" [caused by: {}]", sources.join(" -> ")));
+    }
+
+    message
 }
 
 fn format_rate_limit_headers(headers: &HeaderMap) -> String {

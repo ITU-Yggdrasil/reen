@@ -125,7 +125,8 @@ pub(crate) fn analyze_specification(
         }
     }
 
-    let collaborator_set: HashSet<&str> = contract.collaborators.iter().map(String::as_str).collect();
+    let collaborator_set: HashSet<&str> =
+        contract.collaborators.iter().map(String::as_str).collect();
     for requirement in &contract.delegation_requirements {
         if !collaborator_set.contains(requirement.actor.as_str()) {
             warnings.push(format!(
@@ -144,7 +145,10 @@ pub(crate) fn analyze_specification(
     if let Some(ctx) = dependency_context {
         let known = dependency_names_from_context(ctx);
         for collaborator in &contract.collaborators {
-            if is_probably_domain_type(collaborator) && !known.is_empty() && !known.contains(collaborator) {
+            if is_probably_domain_type(collaborator)
+                && !known.is_empty()
+                && !known.contains(collaborator)
+            {
                 warnings.push(format!(
                     "Collaborator '{}' was not found in dependency context; verify dependency planning or spec references",
                     collaborator
@@ -193,23 +197,28 @@ pub(crate) fn build_implementation_plan(
         .collect::<Vec<_>>();
 
     let mut verification_targets = Vec::new();
-    verification_targets.extend(contract.env_vars.iter().cloned().map(|name| VerificationTarget {
-        kind: "env_var".to_string(),
-        detail: name,
-    }));
-    verification_targets.extend(contract.collaborators.iter().cloned().map(|name| VerificationTarget {
-        kind: "collaborator".to_string(),
-        detail: name,
-    }));
     verification_targets.extend(
         contract
-            .delegation_requirements
+            .env_vars
             .iter()
-            .map(|req| VerificationTarget {
-                kind: "delegation".to_string(),
-                detail: format!("{} -> {}", req.actor, req.target),
+            .cloned()
+            .map(|name| VerificationTarget {
+                kind: "env_var".to_string(),
+                detail: name,
             }),
     );
+    verification_targets.extend(contract.collaborators.iter().cloned().map(|name| {
+        VerificationTarget {
+            kind: "collaborator".to_string(),
+            detail: name,
+        }
+    }));
+    verification_targets.extend(contract.delegation_requirements.iter().map(|req| {
+        VerificationTarget {
+            kind: "delegation".to_string(),
+            detail: format!("{} -> {}", req.actor, req.target),
+        }
+    }));
     verification_targets.extend(
         contract
             .shared_state_requirements
@@ -220,15 +229,12 @@ pub(crate) fn build_implementation_plan(
                 detail,
             }),
     );
-    verification_targets.extend(
-        contract
-            .output_requirements
-            .iter()
-            .map(|req| VerificationTarget {
-                kind: "output_literal".to_string(),
-                detail: req.literal.clone(),
-            }),
-    );
+    verification_targets.extend(contract.output_requirements.iter().map(|req| {
+        VerificationTarget {
+            kind: "output_literal".to_string(),
+            detail: req.literal.clone(),
+        }
+    }));
 
     let mut warnings = Vec::new();
     for artifact in &required_artifacts {
@@ -256,8 +262,12 @@ pub(crate) fn verify_generated_implementation(
     output_path: &Path,
 ) -> Result<StaticBehaviorVerifierReport> {
     let plan = build_implementation_plan(spec_path, spec_content, output_path, project_root);
-    let code = fs::read_to_string(output_path)
-        .with_context(|| format!("Failed to read generated implementation: {}", output_path.display()))?;
+    let code = fs::read_to_string(output_path).with_context(|| {
+        format!(
+            "Failed to read generated implementation: {}",
+            output_path.display()
+        )
+    })?;
 
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -265,8 +275,10 @@ pub(crate) fn verify_generated_implementation(
     let mut evidence = Vec::new();
 
     for env_var in &plan.contract.env_vars {
-        let satisfied =
-            code.contains(env_var) && (code.contains("env::var") || code.contains("std::env::var") || code.contains("var_os"));
+        let satisfied = code.contains(env_var)
+            && (code.contains("env::var")
+                || code.contains("std::env::var")
+                || code.contains("var_os"));
         evidence.push(VerificationEvidence {
             obligation: format!("Read environment variable {}", env_var),
             satisfied,
@@ -369,13 +381,22 @@ pub(crate) fn verify_generated_implementation(
     }
 
     let placeholder_patterns = [
-        (Regex::new(r"\btodo!\s*\(").unwrap(), "Contains todo! placeholder"),
+        (
+            Regex::new(r"\btodo!\s*\(").unwrap(),
+            "Contains todo! placeholder",
+        ),
         (
             Regex::new(r"\bunimplemented!\s*\(").unwrap(),
             "Contains unimplemented! placeholder",
         ),
-        (Regex::new(r"//\s*no-op").unwrap(), "Contains explicit no-op comment"),
-        (Regex::new(r"//\s*stub").unwrap(), "Contains explicit stub comment"),
+        (
+            Regex::new(r"//\s*no-op").unwrap(),
+            "Contains explicit no-op comment",
+        ),
+        (
+            Regex::new(r"//\s*stub").unwrap(),
+            "Contains explicit stub comment",
+        ),
     ];
     let behavior_sensitive = !plan.contract.external_behavior_clues.is_empty()
         || !plan.contract.env_vars.is_empty()
@@ -533,7 +554,10 @@ fn normalize_stub_candidate_body(body: &str) -> String {
         .join(" ")
 }
 
-pub(crate) fn determine_spec_path_for_output(output_path: &Path, specifications_root: &Path) -> Option<PathBuf> {
+pub(crate) fn determine_spec_path_for_output(
+    output_path: &Path,
+    specifications_root: &Path,
+) -> Option<PathBuf> {
     let normalized = output_path.to_string_lossy().replace('\\', "/");
     if normalized.ends_with("/src/main.rs") || normalized == "src/main.rs" {
         let app = specifications_root.join("app.md");
@@ -632,8 +656,7 @@ fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> Spe
     {
         return SpecificationKind::Context;
     }
-    if has_section(sections, "Functionalities") || has_section(sections, "Properties")
-    {
+    if has_section(sections, "Functionalities") || has_section(sections, "Properties") {
         return SpecificationKind::Data;
     }
     SpecificationKind::Unknown
@@ -812,7 +835,8 @@ fn extract_delegation_requirements(content: &str) -> Vec<DelegationRequirement> 
     let code_re = Regex::new(r"`([^`]+)`").unwrap();
     for line in content.lines() {
         let lowered = line.to_ascii_lowercase();
-        if !lowered.contains("must") && !lowered.contains("uses ") && !lowered.contains("delegated") {
+        if !lowered.contains("must") && !lowered.contains("uses ") && !lowered.contains("delegated")
+        {
             continue;
         }
         let ids = code_re
@@ -890,7 +914,11 @@ fn extract_role_method_names(sections: &[Section]) -> Vec<String> {
             } else if trimmed.starts_with('|') && !trimmed.contains("---") {
                 let name = table_method_re
                     .captures(trimmed)
-                    .and_then(|captures| captures.get(1).map(|matched| normalize_symbol_name(matched.as_str())))
+                    .and_then(|captures| {
+                        captures
+                            .get(1)
+                            .map(|matched| normalize_symbol_name(matched.as_str()))
+                    })
                     .unwrap_or_default();
                 if !name.is_empty() {
                     names.push(name);
@@ -929,14 +957,19 @@ fn extract_external_behavior_clues(content: &str) -> Vec<String> {
 
 fn dependency_names_from_context(ctx: &HashMap<String, serde_json::Value>) -> HashSet<String> {
     let mut names = HashSet::new();
-    for key in ["direct_dependencies", "dependency_closure", "implemented_dependencies"] {
+    for key in [
+        "direct_dependencies",
+        "dependency_closure",
+        "implemented_dependencies",
+    ] {
         if let Some(entries) = ctx.get(key).and_then(|value| value.as_array()) {
             for entry in entries {
                 if let Some(name) = entry.get("name").and_then(|value| value.as_str()) {
                     names.insert(normalize_symbol_name(name));
                 }
                 if let Some(path) = entry.get("path").and_then(|value| value.as_str()) {
-                    if let Some(stem) = Path::new(path).file_stem().and_then(|value| value.to_str()) {
+                    if let Some(stem) = Path::new(path).file_stem().and_then(|value| value.to_str())
+                    {
                         names.insert(normalize_symbol_name(stem));
                     }
                 }
@@ -1039,8 +1072,14 @@ fn is_probably_domain_type(name: &str) -> bool {
 fn collaborator_candidate_paths(project_root: &Path, name: &str) -> Vec<String> {
     let stem = to_snake_case(name);
     let candidates = [
-        project_root.join("src").join("contexts").join(format!("{stem}.rs")),
-        project_root.join("src").join("data").join(format!("{stem}.rs")),
+        project_root
+            .join("src")
+            .join("contexts")
+            .join(format!("{stem}.rs")),
+        project_root
+            .join("src")
+            .join("data")
+            .join(format!("{stem}.rs")),
         project_root.join("src").join(format!("{stem}.rs")),
     ];
     candidates
@@ -1112,12 +1151,19 @@ Unspecified in draft - no environment variables referenced.
         .expect("write spec");
 
         let output = src.join("main.rs");
-        fs::write(&output, "fn main() { let _x = Vec::<u8>::new(); println!(\"READY\"); }")
-            .expect("write impl");
+        fs::write(
+            &output,
+            "fn main() { let _x = Vec::<u8>::new(); println!(\"READY\"); }",
+        )
+        .expect("write impl");
 
-        let report =
-            verify_generated_implementation(&root, &spec_path, &fs::read_to_string(&spec_path).unwrap(), &output)
-                .expect("verify");
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
         assert!(report.errors.iter().any(|item| item.contains("FOO_MODE")));
         assert!(report.high_risk_findings.is_empty());
 
@@ -1159,13 +1205,19 @@ Unspecified in draft - no environment variables referenced.
         )
         .expect("write impl");
 
-        let report =
-            verify_generated_implementation(&root, &spec_path, &fs::read_to_string(&spec_path).unwrap(), &output)
-                .expect("verify");
-        assert!(report
-            .high_risk_findings
-            .iter()
-            .any(|item| item.contains("stdin_source_read_available")));
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("stdin_source_read_available"))
+        );
 
         fs::remove_dir_all(root).ok();
     }

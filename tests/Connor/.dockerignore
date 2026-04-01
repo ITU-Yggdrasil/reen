@@ -1,0 +1,8 @@
+.git
+.gitignore
+target
+.cursor
+.env
+drafts
+specifications
+README.md

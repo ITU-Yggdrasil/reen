@@ -34,7 +34,13 @@ pub async fn compile(config: &Config) -> Result<()> {
     }
 }
 
-pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()> {
+pub async fn fix(
+    max_compile_fix_attempts: usize,
+    clear_cache: bool,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    config: &Config,
+) -> Result<()> {
     println!(
         "Attempting to restore compilation (max_attempts={})...",
         max_compile_fix_attempts
@@ -69,10 +75,7 @@ pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()>
         }
     }
 
-    let resources = ExecutionResources::new(
-        super::resolve_rate_limit(None),
-        super::resolve_token_limit(None),
-    );
+    let resources = ExecutionResources::new(rate_limit, token_limit, config.verbose);
 
     compilation_fix::ensure_compiles_with_auto_fix(
         config,
@@ -81,6 +84,8 @@ pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()>
         artifact_root.as_path(),
         &project_info,
         &recent_files,
+        token_limit,
+        clear_cache,
         resources
             .execution_control
             .as_ref()

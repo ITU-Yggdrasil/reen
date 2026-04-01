@@ -76,6 +76,27 @@ static_prompt: |
   - Do not rename or normalize symbols
   - If an in-scope behavior cannot be expressed using a provided symbol or explicit source name, surface that as a blocking ambiguity in the relevant draft
 
+  ## Canonical Type Reuse Rules
+
+  Treat externally visible boundary types as shared system-level artifacts when the sources indicate
+  they represent the same conceptual type across multiple schemas or operations.
+
+  In particular:
+  - If multiple request/response/envelope schemas use the same discriminator enum or message-family enum,
+    produce one canonical draft for that enum and make other drafts refer to it rather than inventing
+    separate per-schema enums with duplicated meaning.
+  - If an envelope type and a subscription/filter type both refer to the same message-family domain,
+    they must reuse the same canonical enum draft unless the sources explicitly require different enums.
+  - Prefer shared named boundary types over schema-local duplicates when the fields, semantics, and
+    externally observable role are the same.
+  - If the OpenAPI source is ambiguous about whether two similar enums/types are actually the same
+    conceptual contract, surface that ambiguity explicitly rather than silently generating duplicate types.
+
+  For shared enum drafts:
+  - State clearly where the enum is reused.
+  - List the minimum variants that are required by the in-scope caller-visible behavior.
+  - Call out that downstream generated code should reuse that enum type across the relevant boundary types.
+
   ## Data Draft Guidance
 
   For each significant API boundary type, create one markdown draft suitable for the data specification agent.
@@ -87,6 +108,8 @@ static_prompt: |
   - ambiguity sections when required
 
   Do not create drafts for trivial transport wrappers or undocumented internal helper shapes.
+  Do create drafts for shared enums or shared discriminator types when they are part of the
+  caller-visible API contract and are reused across multiple schemas.
 
   ## Context Draft Guidance
 

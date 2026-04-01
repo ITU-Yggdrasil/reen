@@ -8,23 +8,26 @@ use reen::execution::{NativeExecutionControl, NativeRequestStep, NativeStepUsage
 
 use super::Config;
 use super::agent_executor::AgentExecutor;
-use super::progress::ProgressIndicator;
+use super::progress::{ProgressIndicator, print_timed_status};
 use super::rate_limiter::RateLimiter;
 
 #[derive(Clone)]
 pub(crate) struct CliExecutionControl {
     token_limiter: Option<Arc<TokenLimiter>>,
     rate_limiter: Option<Arc<RateLimiter>>,
+    verbose: bool,
 }
 
 impl CliExecutionControl {
     pub(crate) fn new(
         token_limiter: Option<Arc<TokenLimiter>>,
         rate_limiter: Option<Arc<RateLimiter>>,
+        verbose: bool,
     ) -> Self {
         Self {
             token_limiter,
             rate_limiter,
+            verbose,
         }
     }
 
@@ -35,10 +38,23 @@ impl CliExecutionControl {
     pub(crate) fn rate_limiter(&self) -> Option<&Arc<RateLimiter>> {
         self.rate_limiter.as_ref()
     }
+
+    pub(crate) fn verbose(&self) -> bool {
+        self.verbose
+    }
 }
 
 impl NativeExecutionControl for CliExecutionControl {
     fn before_model_request(&self, step: &NativeRequestStep) -> Result<(), String> {
+        if self.verbose {
+            print_timed_status(
+                "Submitting request",
+                &format!(
+                    "{}/{} (~{} input tokens)",
+                    step.provider, step.model, step.estimated_input_tokens
+                ),
+            );
+        }
         if let Some(limiter) = &self.token_limiter {
             let exceeds_limit =
                 block_in_place(|| limiter.exceeds_limit_blocking(step.estimated_input_tokens));
@@ -58,6 +74,20 @@ impl NativeExecutionControl for CliExecutionControl {
     }
 
     fn after_model_response(&self, usage: &NativeStepUsage) {
+        if self.verbose {
+            let mut details = format!("{}/{}", usage.provider, usage.model);
+            if let Some(output_tokens) = usage.output_tokens {
+                details.push_str(&format!(" (output {} tokens", output_tokens));
+                if let Some(total_tokens) = usage.total_tokens {
+                    details.push_str(&format!(", total {}", total_tokens));
+                }
+                details.push(')');
+            } else if let Some(total_tokens) = usage.total_tokens {
+                details.push_str(&format!(" (total {} tokens)", total_tokens));
+            }
+            print_timed_status("Received response", &details);
+        }
+
         let Some(limiter) = &self.token_limiter else {
             return;
         };
@@ -85,12 +115,13 @@ pub(crate) struct ExecutionResources {
 }
 
 impl ExecutionResources {
-    pub(crate) fn new(rate_limit: Option<f64>, token_limit: Option<f64>) -> Self {
+    pub(crate) fn new(rate_limit: Option<f64>, token_limit: Option<f64>, verbose: bool) -> Self {
         let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
         let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
         let execution_control = Some(CliExecutionControl::new(
             token_limiter.clone(),
             rate_limiter.clone(),
+            verbose,
         ));
         Self {
             token_limiter,
@@ -235,7 +266,9 @@ pub(crate) async fn prepare_rate_limit_retry(
     let mut waited = false;
     if let Some(limiter) = token_limiter {
         let limiter_delay = limiter.retry_delay(estimated).await;
-        let delay = server_delay.map(|value| value.max(limiter_delay)).unwrap_or(limiter_delay);
+        let delay = server_delay
+            .map(|value| value.max(limiter_delay))
+            .unwrap_or(limiter_delay);
         eprintln!(
             "Rate limit (429) exceeded for {}, waiting {}s before retrying...",
             item_name,
@@ -274,6 +307,39 @@ pub(crate) async fn prepare_rate_limit_retry(
     waited
 }
 
+async fn await_with_heartbeat<R, Fut>(item_name: &str, verbose: bool, future: Fut) -> Result<R>
+where
+    Fut: Future<Output = Result<R>> + Send + 'static,
+    R: Send + 'static,
+{
+    if !verbose {
+        return future.await;
+    }
+
+    let heartbeat_interval = Duration::from_secs(15);
+    let started_at = std::time::Instant::now();
+    let mut future_handle = tokio::spawn(future);
+
+    loop {
+        let heartbeat = sleep(heartbeat_interval);
+        tokio::pin!(heartbeat);
+        tokio::select! {
+            result = &mut future_handle => {
+                return result.map_err(|error| anyhow::anyhow!("Stage task join error: {}", error))?;
+            }
+            _ = &mut heartbeat => {
+                if future_handle.is_finished() {
+                    continue;
+                }
+                print_timed_status(
+                    "Still processing",
+                    &format!("{} ({}s elapsed)", item_name, started_at.elapsed().as_secs()),
+                );
+            }
+        }
+    }
+}
+
 async fn run_stage_item<T, R, F, Fut>(
     item: StageItem<T>,
     resources: ExecutionResources,
@@ -283,7 +349,7 @@ where
     T: Clone + Send + 'static,
     R: Send + 'static,
     F: Fn(T, Option<CliExecutionControl>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<R>> + Send,
+    Fut: Future<Output = Result<R>> + Send + 'static,
 {
     if !item.cache_hit {
         acquire_request_capacity(
@@ -294,7 +360,17 @@ where
         .await?;
     }
 
-    let mut result = process(item.payload.clone(), resources.execution_control.clone()).await;
+    let verbose = resources
+        .execution_control
+        .as_ref()
+        .map(CliExecutionControl::verbose)
+        .unwrap_or(false);
+    let mut result = await_with_heartbeat(
+        &item.name,
+        verbose,
+        process(item.payload.clone(), resources.execution_control.clone()),
+    )
+    .await;
     if let Err(ref error) = result {
         if is_rate_limit_error(error)
             && prepare_rate_limit_retry(
@@ -312,7 +388,12 @@ where
                 item.estimated,
             )
             .await?;
-            result = process(item.payload, resources.execution_control.clone()).await;
+            result = await_with_heartbeat(
+                &item.name,
+                verbose,
+                process(item.payload, resources.execution_control.clone()),
+            )
+            .await;
         }
     }
 
@@ -328,15 +409,19 @@ mod tests {
     #[test]
     fn parses_retry_after_seconds_header_hint() {
         let error = anyhow!("HTTP 429 ... [rate-limit headers: Retry-After: 12]");
-        assert_eq!(parse_server_retry_delay(&error), Some(Duration::from_secs(12)));
+        assert_eq!(
+            parse_server_retry_delay(&error),
+            Some(Duration::from_secs(12))
+        );
     }
 
     #[test]
     fn parses_millisecond_reset_hint() {
-        let error = anyhow!(
-            "HTTP 429 ... [rate-limit headers: x-ratelimit-reset-requests: 250ms]"
+        let error = anyhow!("HTTP 429 ... [rate-limit headers: x-ratelimit-reset-requests: 250ms]");
+        assert_eq!(
+            parse_server_retry_delay(&error),
+            Some(Duration::from_secs(1))
         );
-        assert_eq!(parse_server_retry_delay(&error), Some(Duration::from_secs(1)));
     }
 
     #[test]

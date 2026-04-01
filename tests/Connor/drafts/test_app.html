@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Geospatial Event Monitor</title>
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 18px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      flex-shrink: 0;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .source-filters {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .source-filters label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      user-select: none;
+    }
+
+    .source-filters input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: #58a6ff;
+      cursor: pointer;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    .dot-lightning { background: #f0a500; }
+    .dot-flight    { background: #58a6ff; }
+
+    .server-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .server-row input[type="text"] {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-size: 12px;
+      padding: 4px 8px;
+      width: 200px;
+      outline: none;
+    }
+
+    .server-row input[type="text"]:focus {
+      border-color: #58a6ff;
+    }
+
+    .interval-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #8b949e;
+    }
+
+    .interval-row select {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      font-size: 12px;
+      padding: 4px 6px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .status-badge {
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 10px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .status-ok      { background: #1a4a2e; color: #3fb950; }
+    .status-error   { background: #4a1a1a; color: #f85149; }
+    .status-idle    { background: #21262d; color: #8b949e; }
+
+    #map {
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* Leaflet dark tile override */
+    .leaflet-tile-pane { filter: brightness(0.85) saturate(0.7); }
+
+    .info-panel {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      background: rgba(22, 27, 34, 0.92);
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 12px;
+      color: #8b949e;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    /* Legend */
+    .legend {
+      position: absolute;
+      bottom: 60px;
+      right: 14px;
+      z-index: 1000;
+      background: rgba(22, 27, 34, 0.9);
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 12px;
+      line-height: 1.8;
+      min-width: 140px;
+    }
+
+    .legend-title {
+      font-weight: 600;
+      color: #e6edf3;
+      margin-bottom: 6px;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .legend-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #8b949e;
+    }
+
+    .legend-swatch {
+      width: 22px;
+      height: 10px;
+      border-radius: 2px;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Geospatial Event Monitor</h1>
+
+  <div class="controls">
+    <!-- Source filter checkboxes -->
+    <div class="source-filters">
+      <label>
+        <input type="checkbox" id="chk-lightning" checked />
+        <span class="dot dot-lightning"></span>
+        Lightning
+      </label>
+      <label>
+        <input type="checkbox" id="chk-flight" checked />
+        <span class="dot dot-flight"></span>
+        Flights
+      </label>
+    </div>
+
+    <!-- Server address -->
+    <div class="server-row">
+      <span style="font-size:12px;color:#8b949e;">Server</span>
+      <input type="text" id="server-url" value="http://localhost:8080" placeholder="http://localhost:8080" />
+    </div>
+
+    <!-- Poll interval -->
+    <div class="interval-row">
+      Poll every
+      <select id="poll-interval">
+        <option value="5000">5 s</option>
+        <option value="10000" selected>10 s</option>
+        <option value="30000">30 s</option>
+        <option value="60000">60 s</option>
+      </select>
+    </div>
+
+    <!-- Status -->
+    <span id="status-badge" class="status-badge status-idle">Idle</span>
+  </div>
+</header>
+
+<div id="map"></div>
+
+<div class="info-panel" id="info-panel">
+  Waiting for first poll…
+</div>
+
+<div class="legend">
+  <div class="legend-title">Events / min</div>
+  <div class="legend-row"><div class="legend-swatch" style="background:#ffffb2;opacity:.8"></div> 0 – 1</div>
+  <div class="legend-row"><div class="legend-swatch" style="background:#fecc5c;opacity:.8"></div> 1 – 5</div>
+  <div class="legend-row"><div class="legend-swatch" style="background:#fd8d3c;opacity:.8"></div> 5 – 20</div>
+  <div class="legend-row"><div class="legend-swatch" style="background:#f03b20;opacity:.8"></div> 20 – 100</div>
+  <div class="legend-row"><div class="legend-swatch" style="background:#bd0026;opacity:.8"></div> 100+</div>
+</div>
+
+<script>
+  // ── Map setup ─────────────────────────────────────────────────────────────
+  const map = L.map('map', {
+    center: [20, 0],
+    zoom: 2,
+    minZoom: 1,
+    maxZoom: 8,
+    zoomControl: true,
+    worldCopyJump: false,
+  });
+
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap contributors © CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(map);
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  let cellLayers = {};   // cellKey → L.Rectangle
+  let pollTimer  = null;
+  let lastPollAt = null;
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function cellKey(c) {
+    return `${c.min_lat},${c.max_lat},${c.min_lon},${c.max_lon}`;
+  }
+
+  function rateToColor(rate) {
+    if (rate <= 0)   return null;          // transparent — no fill at all
+    if (rate < 1)    return '#ffffb2';
+    if (rate < 5)    return '#fecc5c';
+    if (rate < 20)   return '#fd8d3c';
+    if (rate < 100)  return '#f03b20';
+    return '#bd0026';
+  }
+
+  function rateToOpacity(rate) {
+    if (rate <= 0)  return 0;
+    if (rate < 1)   return 0.25;
+    if (rate < 5)   return 0.40;
+    if (rate < 20)  return 0.55;
+    if (rate < 100) return 0.70;
+    return 0.85;
+  }
+
+  function setStatus(state, text) {
+    const el = document.getElementById('status-badge');
+    el.className = 'status-badge status-' + state;
+    el.textContent = text;
+  }
+
+  function setInfo(text) {
+    document.getElementById('info-panel').textContent = text;
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  function renderCells(cells) {
+    const seen = new Set();
+
+    cells.forEach(c => {
+      const key   = cellKey(c);
+      const rate  = c.events_per_minute || 0;
+      const color = rateToColor(rate);
+      const alpha = rateToOpacity(rate);
+
+      seen.add(key);
+
+      const bounds = [
+        [c.min_lat, c.min_lon],
+        [c.max_lat, c.max_lon],
+      ];
+
+      const style = {
+        color:       color || 'transparent',
+        fillColor:   color || 'transparent',
+        fillOpacity: alpha,
+        weight:      rate > 0 ? 0.5 : 0,
+        opacity:     rate > 0 ? 0.6 : 0,
+      };
+
+      if (cellLayers[key]) {
+        cellLayers[key].setStyle(style);
+      } else {
+        const rect = L.rectangle(bounds, style).addTo(map);
+        rect.bindTooltip(() => {
+          const r = rect.options._rate || 0;
+          return `<b>${c.min_lat}°–${c.max_lat}° / ${c.min_lon}°–${c.max_lon}°</b><br>${r.toFixed(2)} events/min`;
+        }, { sticky: true, opacity: 0.9 });
+        cellLayers[key] = rect;
+      }
+
+      // stash rate for tooltip
+      cellLayers[key].options._rate = rate;
+    });
+
+    // hide any cell not in this response (treat as zero)
+    Object.keys(cellLayers).forEach(key => {
+      if (!seen.has(key)) {
+        cellLayers[key].setStyle({ fillOpacity: 0, weight: 0, opacity: 0 });
+        cellLayers[key].options._rate = 0;
+      }
+    });
+  }
+
+  // ── Poll ───────────────────────────────────────────────────────────────────
+  async function poll() {
+    const base     = document.getElementById('server-url').value.replace(/\/$/, '');
+    const lightning = document.getElementById('chk-lightning').checked;
+    const flight    = document.getElementById('chk-flight').checked;
+
+    if (!lightning && !flight) {
+      renderCells([]);
+      setInfo('No sources selected.');
+      return;
+    }
+
+    // Build source filter query param.
+    // The server's /query endpoint accepts ?source=lightning, ?source=flight,
+    // or no param (returns combined). When both are checked we omit the param.
+    let url = base + '/query';
+    if (lightning && !flight)  url += '?source=lightning';
+    if (!lightning && flight)  url += '?source=flight';
+
+    setStatus('idle', 'Polling…');
+
+    try {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const cells = await resp.json();
+
+      lastPollAt = new Date();
+      renderCells(cells);
+
+      const active = cells.filter(c => (c.events_per_minute || 0) > 0).length;
+      setInfo(`${cells.length} cells · ${active} active · last update ${lastPollAt.toLocaleTimeString()}`);
+      setStatus('ok', 'Live');
+    } catch (err) {
+      setStatus('error', 'Error');
+      setInfo(`Poll failed: ${err.message}`);
+    }
+  }
+
+  // ── Scheduler ──────────────────────────────────────────────────────────────
+  function restartPoller() {
+    if (pollTimer) clearInterval(pollTimer);
+    poll(); // immediate first hit
+    pollTimer = setInterval(poll, parseInt(document.getElementById('poll-interval').value, 10));
+  }
+
+  // ── Event bindings ─────────────────────────────────────────────────────────
+  document.getElementById('chk-lightning').addEventListener('change', poll);
+  document.getElementById('chk-flight').addEventListener('change', poll);
+  document.getElementById('server-url').addEventListener('change', restartPoller);
+  document.getElementById('poll-interval').addEventListener('change', restartPoller);
+
+  // ── Boot ───────────────────────────────────────────────────────────────────
+  restartPoller();
+</script>
+
+</body>
+</html>

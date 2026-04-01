@@ -21,9 +21,9 @@ mod external_api_expansion;
 mod interface_capsules;
 mod openapi_fetcher;
 mod patch_service;
-mod planning;
 mod pipeline_context;
 mod pipeline_quality;
+mod planning;
 mod progress;
 mod project_structure;
 mod rate_limiter;
@@ -51,14 +51,14 @@ use external_api_expansion::{
 use interface_capsules::{InterfaceCapsule, build_interface_capsule};
 use openapi_fetcher::is_external_api_draft_path;
 use patch_service::apply_draft_patches;
-use planning::{
-    ExecutionPlan, PlanKind, build_default_plan, parse_plan_output, plan_to_context_value,
-    validate_plan, validation_to_context_value,
-};
 use pipeline_context::{build_specification_context, fit_context_to_token_limit};
 use pipeline_quality::{
     analyze_specification, contract_to_context_value, verify_generated_implementation,
     write_json_report,
+};
+use planning::{
+    ExecutionPlan, PlanKind, build_default_plan, parse_plan_output, plan_to_context_value,
+    validate_plan, validation_to_context_value,
 };
 use progress::{ProgressIndicator, print_timed_status};
 use project_structure::{
@@ -278,6 +278,40 @@ pub async fn create_specification(
     .await
 }
 
+pub async fn build(
+    names: Vec<String>,
+    clear_cache: bool,
+    filter: &CategoryFilter,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    max_fix_attempts: usize,
+    max_compile_fix_attempts: usize,
+    config: &Config,
+) -> Result<()> {
+    create_specification(
+        names.clone(),
+        clear_cache,
+        filter,
+        rate_limit,
+        token_limit,
+        true,
+        max_fix_attempts,
+        config,
+    )
+    .await?;
+    create_implementation(
+        names,
+        true,
+        max_compile_fix_attempts,
+        clear_cache,
+        filter,
+        rate_limit,
+        token_limit,
+        config,
+    )
+    .await
+}
+
 fn create_specification_inner(
     names: Vec<String>,
     clear_cache: bool,
@@ -333,7 +367,7 @@ fn create_specification_inner(
         let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
         println!("Creating specifications for {} draft(s)", total_count);
 
-        let resources = ExecutionResources::new(rate_limit, token_limit);
+        let resources = ExecutionResources::new(rate_limit, token_limit, config.verbose);
 
         let mut progress = ProgressIndicator::new(total_count);
         let mut updated_count = 0;
@@ -974,15 +1008,20 @@ async fn generate_execution_plan_with_agent(
     };
     print_timed_status(status_label, display_name);
 
-    let behavior_contract = analyze_specification(spec_path, spec_content, Some(dependency_context)).contract;
+    let behavior_contract =
+        analyze_specification(spec_path, spec_content, Some(dependency_context)).contract;
     let contract_artifact = build_contract_artifact(
         spec_path,
         spec_content,
         output_paths.first().map(PathBuf::as_path),
         Some(dependency_context),
     );
-    let contract_validation =
-        validate_contract_artifact(&contract_artifact, spec_path, spec_content, Some(dependency_context));
+    let contract_validation = validate_contract_artifact(
+        &contract_artifact,
+        spec_path,
+        spec_content,
+        Some(dependency_context),
+    );
     let fallback_plan = build_default_plan(
         plan_kind,
         spec_path,
@@ -1026,12 +1065,8 @@ async fn generate_execution_plan_with_agent(
         }
     }
 
-    let (planning_context, estimated) = fit_context_to_token_limit(
-        planner,
-        spec_content,
-        planning_context,
-        token_limit,
-    )?;
+    let (planning_context, estimated) =
+        fit_context_to_token_limit(planner, spec_content, planning_context, token_limit)?;
 
     let execution_seed = format!(
         "{}::{}",
@@ -1241,7 +1276,8 @@ fn write_specification_output(
 
     let artifact_root = workspace.artifact_workspace_root();
     let lint_report = analyze_specification(output_path, &spec_content, dependency_context);
-    let contract_output_path = determine_implementation_output_path(output_path, SPECIFICATIONS_DIR).ok();
+    let contract_output_path =
+        determine_implementation_output_path(output_path, SPECIFICATIONS_DIR).ok();
     let contract_artifact = build_contract_artifact(
         output_path,
         &spec_content,
@@ -1557,7 +1593,7 @@ pub async fn create_implementation(
         );
     }
 
-    let resources = ExecutionResources::new(rate_limit, token_limit);
+    let resources = ExecutionResources::new(rate_limit, token_limit, config.verbose);
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
@@ -1704,7 +1740,9 @@ pub async fn create_implementation(
                 eprintln!();
                 continue;
             }
-            let contract = analyze_specification(&context_file, &context_content, Some(&dependency_context)).contract;
+            let contract =
+                analyze_specification(&context_file, &context_content, Some(&dependency_context))
+                    .contract;
             dependency_context.insert(
                 "contract_artifact".to_string(),
                 contract_artifact_to_context_value(&target_contract),
@@ -2182,6 +2220,8 @@ pub async fn create_implementation(
             artifact_root.as_path(),
             &project_info,
             &recent_generated_files,
+            token_limit,
+            clear_cache,
             resources
                 .execution_control
                 .as_ref()
@@ -2750,7 +2790,7 @@ pub async fn create_tests(
     let executor = Arc::new(AgentExecutor::new("create_test", config)?);
     let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
-    let resources = ExecutionResources::new(rate_limit, token_limit);
+    let resources = ExecutionResources::new(rate_limit, token_limit, config.verbose);
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut had_unspecified = false;
@@ -2883,30 +2923,53 @@ fn clear_agent_response_cache_for_stage(
     names: &[String],
     config: &Config,
 ) -> Result<usize> {
-    if names.is_empty() {
-        return clear_stage_agent_cache_dirs(stage, config);
-    }
-    clear_stage_agent_cache_entries_by_name(stage, names, config)
+    let mut removed = clear_stage_auxiliary_agent_cache_dirs(stage, config)?;
+    removed += if names.is_empty() {
+        clear_stage_primary_agent_cache_dirs(stage, config)?
+    } else {
+        clear_stage_primary_agent_cache_entries_by_name(stage, names, config)?
+    };
+    Ok(removed)
 }
 
-fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> {
-    let agents: &[&str] = match stage {
+fn primary_stage_agents(stage: Stage) -> &'static [&'static str] {
+    match stage {
         Stage::Specification => &[
-            "create_specifications",
             "create_specifications_data",
             "create_specifications_context",
             "create_specifications_external_api",
-            "create_specifications_main",
         ],
         Stage::Implementation => &["create_implementation"],
         Stage::Tests => &["create_test"],
         Stage::Compile => &[],
-    };
+    }
+}
+
+fn auxiliary_stage_agents(stage: Stage) -> &'static [&'static str] {
+    match stage {
+        // Keep the legacy main agent here so a full stage clear also removes old root-app caches.
+        Stage::Specification => &["fix_draft_blockers", "create_specifications_main"],
+        Stage::Implementation => &["create_plan", "resolve_compilation_errors"],
+        Stage::Tests | Stage::Compile => &[],
+    }
+}
+
+fn clear_stage_primary_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> {
+    clear_agent_cache_dirs(primary_stage_agents(stage), config)
+}
+
+fn clear_stage_auxiliary_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> {
+    clear_agent_cache_dirs(auxiliary_stage_agents(stage), config)
+}
+
+fn clear_agent_cache_dirs(agents: &[&str], config: &Config) -> Result<usize> {
+    if agents.is_empty() {
+        return Ok(0);
+    }
 
     if config.dry_run {
         println!(
-            "[DRY RUN] Would clear agent response cache directories for {:?}: {}",
-            stage,
+            "[DRY RUN] Would clear agent response cache directories: {}",
             agents.join(", ")
         );
         return Ok(0);
@@ -2958,7 +3021,7 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
     Ok(removed)
 }
 
-fn clear_stage_agent_cache_entries_by_name(
+fn clear_stage_primary_agent_cache_entries_by_name(
     stage: Stage,
     names: &[String],
     config: &Config,
@@ -3142,10 +3205,7 @@ fn clear_single_agent_cache_entry(
     };
 
     let folder_hash = instructions_model_hash(&instructions, &model.name);
-    let input_json = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}", instructions, input_json).as_bytes());
-    let cache_key = hex::encode(hasher.finalize());
+    let cache_key = agent_response_cache_key(&instructions, input);
     let cache_path = PathBuf::from(".reen")
         .join(folder_hash)
         .join(format!("{}.cache", cache_key));
@@ -3175,6 +3235,37 @@ fn instructions_model_hash(agent_instructions: &str, model_name: &str) -> String
     let composite = format!("{}:{}", agent_instructions, model_name);
     let mut hasher = Sha256::new();
     hasher.update(composite.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn canonicalize_cache_json_value(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(canonicalize_cache_json_value)
+                .collect::<Vec<_>>(),
+        ),
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut out = serde_json::Map::new();
+            for (k, val) in entries {
+                out.insert(k, canonicalize_cache_json_value(val));
+            }
+            serde_json::Value::Object(out)
+        }
+        other => other,
+    }
+}
+
+fn agent_response_cache_key(agent_instructions: &str, input: &CacheAgentInput) -> String {
+    let input_json = serde_json::to_value(input)
+        .map(canonicalize_cache_json_value)
+        .and_then(|v| serde_json::to_string(&v))
+        .unwrap_or_else(|_| "{}".to_string());
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}:{}", agent_instructions, input_json).as_bytes());
     hex::encode(hasher.finalize())
 }
 
@@ -3646,7 +3737,8 @@ fn build_implemented_dependency_context(
 fn resolve_dependency_spec_path(raw_path: &str) -> Result<Option<PathBuf>> {
     let mut spec_path = PathBuf::from(raw_path);
     if spec_path.starts_with(DRAFTS_DIR) {
-        let mapped = determine_specification_output_path(&spec_path, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
+        let mapped =
+            determine_specification_output_path(&spec_path, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
         if mapped.exists() {
             spec_path = mapped;
         }
@@ -3667,8 +3759,12 @@ fn build_dependency_contract_artifacts(
         let Some(spec_path) = resolve_dependency_spec_path(&dependency.path)? else {
             continue;
         };
-        let spec_content = fs::read_to_string(&spec_path)
-            .with_context(|| format!("failed reading dependency specification: {}", spec_path.display()))?;
+        let spec_content = fs::read_to_string(&spec_path).with_context(|| {
+            format!(
+                "failed reading dependency specification: {}",
+                spec_path.display()
+            )
+        })?;
         let output_hint = determine_implementation_output_path(&spec_path, SPECIFICATIONS_DIR).ok();
         contracts.push(build_contract_artifact(
             &spec_path,
@@ -3688,7 +3784,11 @@ fn filter_direct_contract_artifacts(
 ) -> Vec<ContractArtifact> {
     let direct_paths = direct_dependencies
         .iter()
-        .filter_map(|dependency| resolve_dependency_spec_path(&dependency.path).ok().flatten())
+        .filter_map(|dependency| {
+            resolve_dependency_spec_path(&dependency.path)
+                .ok()
+                .flatten()
+        })
         .map(|path| path.to_string_lossy().to_string())
         .collect::<HashSet<_>>();
 
@@ -3711,19 +3811,19 @@ fn build_role_capsules_for_implemented_dependencies(
         let Some(spec_path) = resolve_dependency_spec_path(spec_path_raw)? else {
             continue;
         };
-        let spec_content = fs::read_to_string(&spec_path)
-            .with_context(|| format!("failed reading dependency specification: {}", spec_path.display()))?;
+        let spec_content = fs::read_to_string(&spec_path).with_context(|| {
+            format!(
+                "failed reading dependency specification: {}",
+                spec_path.display()
+            )
+        })?;
         let source_path = item
             .get("path")
             .and_then(|value| value.as_str())
             .map(PathBuf::from);
         let source_content = item.get("content").and_then(|value| value.as_str());
-        let contract = build_contract_artifact(
-            &spec_path,
-            &spec_content,
-            source_path.as_deref(),
-            None,
-        );
+        let contract =
+            build_contract_artifact(&spec_path, &spec_content, source_path.as_deref(), None);
         capsules.push(build_interface_capsule(
             &contract,
             source_path.as_deref(),
@@ -3741,7 +3841,11 @@ fn filter_direct_role_capsules(
 ) -> Vec<InterfaceCapsule> {
     let direct_paths = direct_dependencies
         .iter()
-        .filter_map(|dependency| resolve_dependency_spec_path(&dependency.path).ok().flatten())
+        .filter_map(|dependency| {
+            resolve_dependency_spec_path(&dependency.path)
+                .ok()
+                .flatten()
+        })
         .map(|path| path.to_string_lossy().to_string())
         .collect::<HashSet<_>>();
 
@@ -3764,8 +3868,21 @@ pub async fn compile(config: &Config) -> Result<()> {
     cargo_commands::compile(config).await
 }
 
-pub async fn fix(max_compile_fix_attempts: usize, config: &Config) -> Result<()> {
-    cargo_commands::fix(max_compile_fix_attempts, config).await
+pub async fn fix(
+    max_compile_fix_attempts: usize,
+    clear_cache: bool,
+    rate_limit: Option<f64>,
+    token_limit: Option<f64>,
+    config: &Config,
+) -> Result<()> {
+    cargo_commands::fix(
+        max_compile_fix_attempts,
+        clear_cache,
+        rate_limit,
+        token_limit,
+        config,
+    )
+    .await
 }
 
 pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
@@ -3819,7 +3936,7 @@ pub async fn clear_cache(target: &str, names: Vec<String>, config: &Config) -> R
         );
     }
     println!(
-        "✓ Cleared {} agent response cache entrie(s) for {:?}",
+        "✓ Cleared {} agent response cache entries for {:?}",
         removed_agent_cache_entries, stage
     );
     Ok(())
@@ -4398,7 +4515,7 @@ fn determine_draft_input_path(
 /// - "create_specifications_data" for files in data/ folder
 /// - "create_specifications_context" for files in contexts/ folder
 /// - "create_specifications_external_api" for files in external_apis/ or apis/ folder
-/// - "create_specifications_main" for files in root folder
+/// - "create_specifications_context" for root folder drafts
 fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'static str {
     let draft_path = draft_file.to_path_buf();
     let drafts_path = PathBuf::from(drafts_dir);
@@ -4413,11 +4530,11 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
             "data" => "create_specifications_data",
             "contexts" => "create_specifications_context",
             "external_apis" | "apis" => "create_specifications_external_api",
-            _ => "create_specifications_main",
+            _ => "create_specifications_context",
         }
     } else {
-        // Default to main for root files
-        "create_specifications_main"
+        // Default to the shared context spec agent for root files.
+        "create_specifications_context"
     }
 }
 
@@ -4793,15 +4910,17 @@ fn generated_project_structure_paths(project_info: &ProjectInfo) -> Vec<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::{
-        BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, CategoryFilter,
-        build_dependency_drafts_from_context, build_dependency_manifest, build_execution_plan,
-        build_implementation_execution_plan, build_implemented_dependency_manifest,
-        determine_bdd_test_paths, determine_draft_input_path, determine_implementation_output_path,
-        determine_specification_output_path, ensure_dev_dependency_entry,
-        external_generated_context_output_path, external_generated_data_output_path,
-        extract_actionable_blocking_bullets_for_path, extract_compile_error_message,
-        generated_project_structure_paths, parse_generated_files,
-        resolve_implementation_dependency_inputs, resolve_input_files, sync_managed_block,
+        BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, CacheAgentInput, CategoryFilter, Stage,
+        agent_response_cache_key, auxiliary_stage_agents, build_dependency_drafts_from_context,
+        build_dependency_manifest, build_execution_plan, build_implementation_execution_plan,
+        build_implemented_dependency_manifest, determine_bdd_test_paths,
+        determine_draft_input_path, determine_implementation_output_path,
+        determine_specification_agent, determine_specification_output_path,
+        ensure_dev_dependency_entry, external_generated_context_output_path,
+        external_generated_data_output_path, extract_actionable_blocking_bullets_for_path,
+        extract_compile_error_message, generated_project_structure_paths, parse_generated_files,
+        primary_stage_agents, resolve_implementation_dependency_inputs, resolve_input_files,
+        sync_managed_block,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -5139,6 +5258,14 @@ Problem:
     }
 
     #[test]
+    fn routes_root_specification_drafts_to_context_agent() {
+        assert_eq!(
+            determine_specification_agent(Path::new("drafts/app.md"), "drafts"),
+            "create_specifications_context"
+        );
+    }
+
+    #[test]
     fn generated_project_structure_paths_include_nested_mod_files() {
         let mut modules = HashMap::new();
         modules.insert("contexts".to_string(), vec!["account".to_string()]);
@@ -5352,5 +5479,53 @@ fn main() {}
         );
         assert_eq!(actionable.len(), 1);
         assert!(actionable[0].contains("conflicts"));
+    }
+
+    #[test]
+    fn agent_response_cache_key_is_stable_for_reordered_additional_context() {
+        let mut additional_a = HashMap::new();
+        additional_a.insert("zeta".to_string(), serde_json::json!(1));
+        additional_a.insert("alpha".to_string(), serde_json::json!({"b": 2, "a": 1}));
+
+        let mut additional_b = HashMap::new();
+        additional_b.insert("alpha".to_string(), serde_json::json!({"a": 1, "b": 2}));
+        additional_b.insert("zeta".to_string(), serde_json::json!(1));
+
+        let input_a = CacheAgentInput {
+            draft_content: Some("draft".to_string()),
+            context_content: None,
+            additional: additional_a,
+        };
+        let input_b = CacheAgentInput {
+            draft_content: Some("draft".to_string()),
+            context_content: None,
+            additional: additional_b,
+        };
+
+        assert_eq!(
+            agent_response_cache_key("instructions", &input_a),
+            agent_response_cache_key("instructions", &input_b)
+        );
+    }
+
+    #[test]
+    fn stage_cache_cleanup_includes_auxiliary_agents() {
+        assert_eq!(
+            auxiliary_stage_agents(Stage::Specification),
+            &["fix_draft_blockers", "create_specifications_main"]
+        );
+        assert_eq!(
+            auxiliary_stage_agents(Stage::Implementation),
+            &["create_plan", "resolve_compilation_errors"]
+        );
+        assert_eq!(
+            primary_stage_agents(Stage::Specification),
+            &[
+                "create_specifications_data",
+                "create_specifications_context",
+                "create_specifications_external_api",
+            ]
+        );
+        assert!(primary_stage_agents(Stage::Implementation).contains(&"create_implementation"));
     }
 }

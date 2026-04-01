@@ -15,15 +15,18 @@ use super::Config;
 use super::agent_executor::{AgentExecutor, AgentResponse};
 use super::contracts::{
     build_contract_artifact, compact_contract_artifact_value, contract_artifact_to_context_value,
+    contract_validation_to_context_value, validate_contract_artifact,
 };
 use super::patch_service::{
     HunkLineKind, apply_unified_diff, extract_unified_diff_from_agent_output, parse_unified_diff,
+    validate_unified_diff,
+};
+use super::pipeline_quality::{
+    analyze_specification, compare_verifier_reports, contract_to_context_value,
+    determine_spec_path_for_output, verify_generated_implementation,
 };
 use super::planning::{PlanKind, build_default_plan, parse_plan_output, plan_to_context_value};
 use super::progress::print_timed_status;
-use super::pipeline_quality::{
-    compare_verifier_reports, determine_spec_path_for_output, verify_generated_implementation,
-};
 use super::project_structure::ProjectInfo;
 use reen::execution::NativeExecutionControl;
 
@@ -61,6 +64,15 @@ struct CompileFixConfig {
     max_files: usize,
 }
 
+#[derive(Debug, Clone)]
+struct CompileFixRoundContext {
+    truncated_stderr: String,
+    diagnostics: Vec<DiagnosticSpan>,
+    relevant_paths: Vec<PathBuf>,
+    specs_json: BTreeMap<String, String>,
+    additional_context: HashMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DiagnosticSpan {
     pub file: String,
@@ -96,6 +108,8 @@ pub async fn ensure_compiles_with_auto_fix(
     artifact_root: &Path,
     project_info: &ProjectInfo,
     recent_generated_files: &[PathBuf],
+    request_token_limit: Option<f64>,
+    ignore_cache_reads: bool,
     execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<()> {
     if config.dry_run {
@@ -125,11 +139,17 @@ pub async fn ensure_compiles_with_auto_fix(
     );
 
     let cfg = compile_fix_config();
+    let request_budget = effective_request_token_budget(cfg.max_tokens, request_token_limit);
 
     for attempt in 1..=max_attempts {
         let attempt_dir = session_dir.join(format!("attempt_{}", attempt));
         fs::create_dir_all(&attempt_dir)
             .with_context(|| format!("Failed to create {}", attempt_dir.display()))?;
+        fs::write(
+            attempt_dir.join("request_budget.txt"),
+            format!("budget={request_budget}\n"),
+        )
+        .ok();
 
         write_attempt_compile_output(&attempt_dir, &output)?;
 
@@ -139,7 +159,7 @@ pub async fn ensure_compiles_with_auto_fix(
         let mut max_errors_used = cfg.max_errors;
         let mut include_specs = true;
 
-        let mut additional_context = loop {
+        let mut round_context = loop {
             let diagnostics = prioritize_and_cap_diagnostics(&all_diagnostics, max_errors_used);
             let truncated_stderr = truncate_stderr_for_diagnostics(&output.stderr, &diagnostics);
 
@@ -175,8 +195,14 @@ pub async fn ensure_compiles_with_auto_fix(
 
             let estimated =
                 estimate_request_tokens("Compilation failed; propose minimal fix patch.", &ctx);
-            if estimated <= cfg.max_tokens {
-                break ctx;
+            if estimated <= request_budget {
+                break CompileFixRoundContext {
+                    truncated_stderr,
+                    diagnostics,
+                    relevant_paths,
+                    specs_json,
+                    additional_context: ctx,
+                };
             }
             if max_errors_used > 3 {
                 max_errors_used = max_errors_used / 2;
@@ -184,14 +210,14 @@ pub async fn ensure_compiles_with_auto_fix(
                 snippet_lines = snippet_lines / 2;
             } else if include_specs {
                 include_specs = false;
-            } else if max_paths.map(|m| m > 5).unwrap_or(false) {
-                max_paths = max_paths.map(|m| m / 2);
+            } else if max_paths.map(|m| m > 1).unwrap_or(false) {
+                max_paths = max_paths.map(|m| (m / 2).max(1));
             } else {
                 anyhow::bail!(
                     "Compilation fix context exceeds token budget ({} > {}). \
                      Try REEN_COMPILE_FIX_MAX_TOKENS or fix errors manually. Logs: {}",
                     estimated,
-                    cfg.max_tokens,
+                    request_budget,
                     attempt_dir.display()
                 );
             }
@@ -218,18 +244,29 @@ pub async fn ensure_compiles_with_auto_fix(
             &plan_specs_json,
             &plan_truncated_stderr,
             &plan_diagnostics,
+            request_token_limit,
+            ignore_cache_reads,
             execution_control,
         )
         .await?;
-        additional_context.insert("semantic_repair_plan".to_string(), semantic_repair_plan.clone());
+        round_context.additional_context.insert(
+            "semantic_repair_plan".to_string(),
+            semantic_repair_plan.clone(),
+        );
 
-        if let Some(serde_json::Value::String(s)) = additional_context.get("diagnostics_json") {
+        if let Some(serde_json::Value::String(s)) =
+            round_context.additional_context.get("diagnostics_json")
+        {
             fs::write(attempt_dir.join("diagnostics.json"), s).ok();
         }
-        if let Some(serde_json::Value::String(s)) = additional_context.get("files_json") {
+        if let Some(serde_json::Value::String(s)) =
+            round_context.additional_context.get("files_json")
+        {
             fs::write(attempt_dir.join("context_files.json"), s).ok();
         }
-        if let Some(serde_json::Value::String(s)) = additional_context.get("specs_json") {
+        if let Some(serde_json::Value::String(s)) =
+            round_context.additional_context.get("specs_json")
+        {
             if !s.is_empty() && s != "null" {
                 fs::write(attempt_dir.join("context_specs.json"), s).ok();
             }
@@ -245,10 +282,11 @@ pub async fn ensure_compiles_with_auto_fix(
             .context("Failed to create compilation error resolver agent")?;
 
         let agent_response = executor
-            .execute_with_context(
+            .execute_with_context_options(
                 "Compilation failed; propose minimal fix patch.",
-                additional_context,
+                round_context.additional_context.clone(),
                 execution_control,
+                ignore_cache_reads,
             )
             .await
             .context("Failed to execute compilation error resolver agent")?;
@@ -266,10 +304,10 @@ pub async fn ensure_compiles_with_auto_fix(
 
         fs::write(attempt_dir.join("proposed.patch"), &patch_text).ok();
 
-        let extracted = extract_unified_diff_from_agent_output(&patch_text)
+        let mut extracted = extract_unified_diff_from_agent_output(&patch_text)
             .context("Resolver output did not contain a unified diff starting with 'diff --git'")?;
 
-        let guardrail = check_guardrails(project_root, artifact_root, &extracted)?;
+        let mut guardrail = check_guardrails(project_root, artifact_root, &extracted)?;
         fs::write(
             attempt_dir.join("guardrail_report.json"),
             serde_json::to_string_pretty(&guardrail_to_json(&guardrail))
@@ -285,12 +323,74 @@ pub async fn ensure_compiles_with_auto_fix(
             );
         }
 
-        let touched_paths = parse_unified_diff(&extracted)
+        let mut touched_paths = parse_unified_diff(&extracted)
             .context("Invalid unified diff from compilation resolver")?
             .into_iter()
             .filter_map(|fp| fp.new_path.or(fp.old_path))
             .map(PathBuf::from)
             .collect::<Vec<_>>();
+        let validation_result = validate_unified_diff(project_root, &extracted);
+        if let Err(apply_err) = &validation_result {
+            fs::write(
+                attempt_dir.join("patch_validation_error.txt"),
+                format!("{apply_err:#}"),
+            )
+            .ok();
+        }
+        match validation_result {
+            Ok(()) => {}
+            Err(apply_err) if patch_apply_error_requires_regeneration(&apply_err) => {
+                let retry_patch = regenerate_patch_after_apply_failure(
+                    &executor,
+                    project_root,
+                    &output,
+                    &round_context,
+                    recent_generated_files,
+                    project_info,
+                    &touched_paths,
+                    &extracted,
+                    &apply_err,
+                    &attempt_dir,
+                    request_token_limit,
+                    ignore_cache_reads,
+                    execution_control,
+                )
+                .await?;
+                fs::write(attempt_dir.join("proposed_retry.patch"), &retry_patch).ok();
+
+                extracted = extract_unified_diff_from_agent_output(&retry_patch).context(
+                    "Regenerated resolver output did not contain a unified diff starting with 'diff --git'",
+                )?;
+                guardrail = check_guardrails(project_root, artifact_root, &extracted)?;
+                fs::write(
+                    attempt_dir.join("guardrail_retry_report.json"),
+                    serde_json::to_string_pretty(&guardrail_to_json(&guardrail))
+                        .unwrap_or_else(|_| "{}".to_string()),
+                )
+                .ok();
+
+                if !guardrail.ok {
+                    anyhow::bail!(
+                        "Auto-fix blocked by guardrails after patch regeneration:\n{}\nEscalating. Logs: {}",
+                        guardrail.issues.join("\n"),
+                        attempt_dir.display()
+                    );
+                }
+
+                touched_paths = parse_unified_diff(&extracted)
+                    .context("Invalid regenerated unified diff from compilation resolver")?
+                    .into_iter()
+                    .filter_map(|fp| fp.new_path.or(fp.old_path))
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>();
+                validate_unified_diff(project_root, &extracted)
+                    .context("Failed to apply regenerated patch")?;
+            }
+            Err(apply_err) => {
+                return Err(apply_err).context("Failed to apply proposed patch");
+            }
+        }
+
         let semantic_baseline = capture_verifier_reports(
             project_root,
             artifact_root,
@@ -346,6 +446,214 @@ pub async fn ensure_compiles_with_auto_fix(
     );
 }
 
+fn patch_apply_error_requires_regeneration(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let msg = cause.to_string();
+        msg.contains("Could not locate hunk context")
+            || msg.contains("Context mismatch at pos")
+            || msg.contains("Remove mismatch at pos")
+            || msg.contains("Context line beyond EOF")
+            || msg.contains("Remove line beyond EOF")
+    })
+}
+
+fn build_patch_retry_paths(
+    project_root: &Path,
+    round_context: &CompileFixRoundContext,
+    touched_paths: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut paths = Vec::new();
+
+    let source_paths: Vec<PathBuf> = if touched_paths.is_empty() {
+        round_context.relevant_paths.clone()
+    } else {
+        touched_paths.to_vec()
+    };
+
+    for path in source_paths {
+        let full = if path.is_absolute() {
+            path
+        } else {
+            project_root.join(path)
+        };
+        if seen.insert(full.clone()) {
+            paths.push(full);
+        }
+    }
+
+    paths.sort();
+    paths
+}
+
+fn dedupe_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for path in paths {
+        if seen.insert(path.clone()) {
+            deduped.push(path.clone());
+        }
+    }
+    deduped
+}
+
+fn summarize_paths(paths: &[PathBuf]) -> String {
+    let deduped = dedupe_paths(paths);
+    if deduped.is_empty() {
+        return "compilation diagnostics".to_string();
+    }
+    let shown = deduped
+        .iter()
+        .take(5)
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let remaining = deduped.len().saturating_sub(shown.len());
+    if remaining == 0 {
+        shown.join(", ")
+    } else {
+        format!("{}, +{} more", shown.join(", "), remaining)
+    }
+}
+
+fn effective_request_token_budget(
+    compile_fix_budget: usize,
+    request_token_limit: Option<f64>,
+) -> usize {
+    let request_limit = request_token_limit
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.floor() as usize);
+    request_limit
+        .map(|limit| limit.min(compile_fix_budget))
+        .unwrap_or(compile_fix_budget)
+        .max(1)
+}
+
+fn trim_retry_context_to_budget(
+    retry_context: &mut HashMap<String, serde_json::Value>,
+    budget: usize,
+) -> usize {
+    let estimate =
+        |ctx: &HashMap<String, serde_json::Value>| estimate_request_tokens(RETRY_PATCH_PROMPT, ctx);
+
+    let mut estimated = estimate(retry_context);
+    if estimated <= budget {
+        return estimated;
+    }
+
+    if let Some(previous_patch) = retry_context
+        .get("previous_patch")
+        .and_then(|value| value.as_str())
+        .filter(|value| value.chars().count() > 4000)
+        .map(|value| {
+            format!(
+                "{}\n...[truncated previous patch by reen]",
+                value.chars().take(4000).collect::<String>()
+            )
+        })
+    {
+        retry_context.insert("previous_patch".to_string(), json!(previous_patch));
+        estimated = estimate(retry_context);
+        if estimated <= budget {
+            return estimated;
+        }
+    }
+
+    for key in [
+        "previous_patch",
+        "contract_artifacts_json",
+        "specs_json",
+        "recent_changes",
+        "semantic_repair_plan",
+        "compiler_stdout",
+        "diagnostics_json",
+    ] {
+        if retry_context.remove(key).is_some() {
+            estimated = estimate(retry_context);
+            if estimated <= budget {
+                return estimated;
+            }
+        }
+    }
+
+    estimated
+}
+
+async fn regenerate_patch_after_apply_failure(
+    executor: &AgentExecutor,
+    project_root: &Path,
+    output: &CompilationOutput,
+    round_context: &CompileFixRoundContext,
+    recent_generated_files: &[PathBuf],
+    project_info: &ProjectInfo,
+    touched_paths: &[PathBuf],
+    previous_patch: &str,
+    apply_error: &anyhow::Error,
+    attempt_dir: &Path,
+    request_token_limit: Option<f64>,
+    ignore_cache_reads: bool,
+    execution_control: Option<&dyn NativeExecutionControl>,
+) -> Result<String> {
+    let touched_paths = dedupe_paths(touched_paths);
+    let retry_paths = build_patch_retry_paths(project_root, round_context, &touched_paths);
+    let target_summary = summarize_paths(&touched_paths);
+    print_timed_status("Regenerating patch", &target_summary);
+
+    fs::write(
+        attempt_dir.join("patch_apply_error.txt"),
+        format!("{apply_error:#}"),
+    )
+    .ok();
+
+    let files_json = snapshot_files_json(project_root, &retry_paths)?;
+    let mut retry_context = build_agent_context(
+        output,
+        &round_context.truncated_stderr,
+        &round_context.diagnostics,
+        &files_json,
+        &round_context.specs_json,
+        recent_generated_files,
+        project_info,
+    )?;
+    retry_context.insert("previous_patch".to_string(), json!(previous_patch));
+    retry_context.insert(
+        "patch_apply_error".to_string(),
+        json!(format!("{apply_error:#}")),
+    );
+    let retry_budget =
+        effective_request_token_budget(compile_fix_config().max_tokens, request_token_limit);
+    let retry_estimated = trim_retry_context_to_budget(&mut retry_context, retry_budget);
+
+    if let Some(serde_json::Value::String(s)) = retry_context.get("files_json") {
+        fs::write(attempt_dir.join("context_files_retry.json"), s).ok();
+    }
+    fs::write(
+        attempt_dir.join("retry_request_budget.txt"),
+        format!("budget={retry_budget}\nestimated={retry_estimated}\n"),
+    )
+    .ok();
+
+    let agent_response = executor
+        .execute_with_context_options(
+            RETRY_PATCH_PROMPT,
+            retry_context,
+            execution_control,
+            ignore_cache_reads,
+        )
+        .await
+        .context("Failed to regenerate compilation patch after apply failure")?;
+
+    match agent_response {
+        AgentResponse::Final(s) => Ok(s),
+        AgentResponse::Questions(q) => {
+            fs::write(attempt_dir.join("agent_questions_retry.txt"), &q).ok();
+            anyhow::bail!(
+                "Compilation resolver requested clarification while regenerating an unappliable patch; escalating. See: {}",
+                attempt_dir.display()
+            );
+        }
+    }
+}
+
 fn run_cargo_build(project_root: &Path) -> Result<CompilationOutput> {
     let output = Command::new("cargo")
         .arg("build")
@@ -382,39 +690,18 @@ async fn generate_semantic_repair_plan(
     specs_json: &BTreeMap<String, String>,
     truncated_stderr: &str,
     diagnostics: &[DiagnosticSpan],
+    request_token_limit: Option<f64>,
+    ignore_cache_reads: bool,
     execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<serde_json::Value> {
-    let target_summary = if relevant_paths.is_empty() {
-        "compilation diagnostics".to_string()
-    } else {
-        let shown = relevant_paths
-            .iter()
-            .take(3)
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>();
-        let remaining = relevant_paths.len().saturating_sub(shown.len());
-        if remaining == 0 {
-            shown.join(", ")
-        } else {
-            format!("{}, +{} more", shown.join(", "), remaining)
-        }
-    };
+    let target_summary = summarize_paths(relevant_paths);
     print_timed_status("Planning repair", &target_summary);
 
-    let spec_path = specs_json
-        .keys()
+    let (spec_path, spec_content) = specs_json
+        .iter()
         .next()
-        .cloned()
-        .unwrap_or_else(|| "specifications/repair_bundle.md".to_string());
-    let spec_content = if specs_json.is_empty() {
-        String::new()
-    } else {
-        specs_json
-            .iter()
-            .map(|(path, content)| format!("<!-- {} -->\n{}", path, content))
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
+        .map(|(path, content)| (path.clone(), content.clone()))
+        .unwrap_or_else(|| ("specifications/repair_bundle.md".to_string(), String::new()));
     let fallback = build_default_plan(
         PlanKind::SemanticRepair,
         Path::new(&spec_path),
@@ -425,7 +712,10 @@ async fn generate_semantic_repair_plan(
     );
 
     let mut context = HashMap::new();
-    context.insert("plan_kind".to_string(), json!(PlanKind::SemanticRepair.as_str()));
+    context.insert(
+        "plan_kind".to_string(),
+        json!(PlanKind::SemanticRepair.as_str()),
+    );
     context.insert("context_content".to_string(), json!(spec_content));
     let contract_artifact = build_contract_artifact(
         Path::new(&spec_path),
@@ -433,9 +723,25 @@ async fn generate_semantic_repair_plan(
         relevant_paths.first().map(PathBuf::as_path),
         None,
     );
+    let contract_validation = validate_contract_artifact(
+        &contract_artifact,
+        Path::new(&spec_path),
+        &spec_content,
+        None,
+    );
+    let behavior_contract =
+        analyze_specification(Path::new(&spec_path), &spec_content, None).contract;
     context.insert(
         "contract_artifact".to_string(),
         contract_artifact_to_context_value(&contract_artifact),
+    );
+    context.insert(
+        "contract_validation".to_string(),
+        contract_validation_to_context_value(&contract_validation),
+    );
+    context.insert(
+        "behavior_contract".to_string(),
+        contract_to_context_value(&behavior_contract),
     );
     context.insert("default_plan".to_string(), plan_to_context_value(&fallback));
     context.insert(
@@ -450,19 +756,23 @@ async fn generate_semantic_repair_plan(
     context.insert("diagnostics_text".to_string(), json!(truncated_stderr));
     context.insert(
         "diagnostics_json".to_string(),
-        json!(
-            serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())
-        ),
+        json!(serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())),
     );
 
     let planner = AgentExecutor::new("create_plan", config)?;
+    let (context, _) = super::pipeline_context::fit_context_to_token_limit(
+        &planner,
+        "",
+        context,
+        request_token_limit,
+    )?;
     let response = planner
         .execute_with_conversation_with_seed_options(
-            &spec_content,
+            "",
             "semantic_repair_plan",
             context,
             execution_control,
-            false,
+            ignore_cache_reads,
         )
         .await?;
     let plan = parse_plan_output(&response).unwrap_or(fallback);
@@ -493,14 +803,11 @@ fn capture_verifier_reports(
         }
         let spec_content = fs::read_to_string(&spec_path)
             .with_context(|| format!("Failed to read {}", spec_path.display()))?;
-        let report = verify_generated_implementation(project_root, &spec_path, &spec_content, &full)
-            .with_context(|| format!("Failed semantic verification for {}", full.display()))?;
-        let report_path = report_dir.join(
-            rel.to_string_lossy()
-                .replace('\\', "__")
-                .replace('/', "__")
-                + ".json",
-        );
+        let report =
+            verify_generated_implementation(project_root, &spec_path, &spec_content, &full)
+                .with_context(|| format!("Failed semantic verification for {}", full.display()))?;
+        let report_path =
+            report_dir.join(rel.to_string_lossy().replace('\\', "__").replace('/', "__") + ".json");
         fs::write(
             &report_path,
             serde_json::to_string_pretty(&report).unwrap_or_else(|_| "{}".to_string()),
@@ -511,7 +818,10 @@ fn capture_verifier_reports(
     Ok(reports)
 }
 
-fn snapshot_file_backups(project_root: &Path, touched_paths: &[PathBuf]) -> Result<HashMap<PathBuf, Option<String>>> {
+fn snapshot_file_backups(
+    project_root: &Path,
+    touched_paths: &[PathBuf],
+) -> Result<HashMap<PathBuf, Option<String>>> {
     let mut backups = HashMap::new();
     for rel in touched_paths {
         let full = project_root.join(rel);
@@ -528,7 +838,10 @@ fn snapshot_file_backups(project_root: &Path, touched_paths: &[PathBuf]) -> Resu
     Ok(backups)
 }
 
-fn restore_file_backups(project_root: &Path, backups: HashMap<PathBuf, Option<String>>) -> Result<()> {
+fn restore_file_backups(
+    project_root: &Path,
+    backups: HashMap<PathBuf, Option<String>>,
+) -> Result<()> {
     for (rel, content) in backups {
         let full = project_root.join(rel);
         match content {
@@ -622,6 +935,7 @@ fn parse_rustc_diagnostics(stderr: &str) -> Vec<DiagnosticSpan> {
 
 /// Error codes that often cause cascading errors; prioritize these first.
 const ROOT_CAUSE_ERROR_CODES: &[&str] = &["E0412", "E0433", "E0583", "E0407", "E0405"];
+const RETRY_PATCH_PROMPT: &str = "The previous patch did not apply. Re-emit an exact unified diff against the current full file contents. Do not abbreviate or invent omitted code. Every context and removed line must match the provided files verbatim.";
 
 /// File path priority: root/mod files before leaf modules.
 fn file_priority(path: &str) -> u8 {
@@ -1101,8 +1415,12 @@ fn build_agent_context(
         let contract_artifacts = specs_json
             .iter()
             .map(|(spec_path, spec_content)| {
-                let artifact = build_contract_artifact(Path::new(spec_path), spec_content, None, None);
-                (spec_path.clone(), compact_contract_artifact_value(&artifact))
+                let artifact =
+                    build_contract_artifact(Path::new(spec_path), spec_content, None, None);
+                (
+                    spec_path.clone(),
+                    compact_contract_artifact_value(&artifact),
+                )
             })
             .collect::<BTreeMap<_, _>>();
         ctx.insert(
@@ -1676,7 +1994,9 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
     match (&old.return_type, &new.return_type) {
         (None, None) => {}
         (Some(a), Some(b)) => {
-            if !is_ref_value_equivalent(a, b) {
+            if !is_ref_value_equivalent(a, b)
+                && !is_self_receiver_return_shape_equivalent(old, new, a, b)
+            {
                 return Some(format!(
                     "return type changed beyond &T<->T: `{}` -> `{}`",
                     a, b
@@ -1686,6 +2006,32 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
         _ => return Some("return type presence changed".to_string()),
     }
     None
+}
+
+fn is_self_receiver_return_shape_equivalent(
+    old: &FnSig,
+    new: &FnSig,
+    old_return: &str,
+    new_return: &str,
+) -> bool {
+    let old_is_self_receiver = matches!(
+        old.receiver,
+        ReceiverKind::RefSelf
+            | ReceiverKind::ValSelf
+            | ReceiverKind::MutRefSelf
+            | ReceiverKind::MutValSelf
+    );
+    let new_is_self_receiver = matches!(
+        new.receiver,
+        ReceiverKind::RefSelf
+            | ReceiverKind::ValSelf
+            | ReceiverKind::MutRefSelf
+            | ReceiverKind::MutValSelf
+    );
+    old_is_self_receiver
+        && new_is_self_receiver
+        && type_shape_without_generic_args(old_return)
+            == type_shape_without_generic_args(new_return)
 }
 
 fn is_allowed_immutable_receiver_transition(old: &FnSig, new: &FnSig) -> bool {
@@ -1725,6 +2071,21 @@ fn strip_top_level_ref(t: &str) -> String {
         }
     }
     s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn type_shape_without_generic_args(t: &str) -> String {
+    let stripped = strip_top_level_ref(t);
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in stripped.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && !ch.is_whitespace() => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn is_constructor_name(name: &str) -> bool {
@@ -1787,8 +2148,11 @@ fn spec_method_bold_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_guardrails, explicit_implementation_failure_message_from_stderr, map_src_to_spec,
+        check_guardrails, dedupe_paths, explicit_implementation_failure_message_from_stderr,
+        map_src_to_spec, summarize_paths, trim_retry_context_to_budget,
     };
+    use serde_json::json;
+    use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1821,6 +2185,69 @@ mod tests {
             .expect("failure marker should be detected");
 
         assert!(detected.contains(super::super::IMPLEMENTATION_FAILURE_MARKER));
+    }
+
+    #[test]
+    fn summarize_paths_deduplicates_and_caps_output() {
+        let paths = vec![
+            PathBuf::from("Cargo.toml"),
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("src/contexts/mod.rs"),
+            PathBuf::from("src/data/mod.rs"),
+            PathBuf::from("src/data/mod.rs"),
+        ];
+
+        assert_eq!(dedupe_paths(&paths).len(), 5);
+        assert_eq!(
+            summarize_paths(&paths),
+            "Cargo.toml, src/main.rs, src/lib.rs, src/contexts/mod.rs, src/data/mod.rs"
+        );
+    }
+
+    #[test]
+    fn trim_retry_context_drops_optional_fields_to_fit_budget() {
+        let mut context = HashMap::from([
+            (
+                "files_json".to_string(),
+                json!(r#"{"src/main.rs":"fn main() {}"}"#),
+            ),
+            (
+                "compiler_stderr".to_string(),
+                json!("error[E0308]: mismatched types"),
+            ),
+            (
+                "diagnostics_json".to_string(),
+                json!(format!("[{}]", "\"x\"".repeat(4000))),
+            ),
+            (
+                "recent_changes".to_string(),
+                json!("src/main.rs\n".repeat(500)),
+            ),
+            (
+                "specs_json".to_string(),
+                json!(format!("{{{}}}", "\"x\"".repeat(4000))),
+            ),
+            (
+                "contract_artifacts_json".to_string(),
+                json!(format!("{{{}}}", "\"x\"".repeat(4000))),
+            ),
+            (
+                "semantic_repair_plan".to_string(),
+                json!(format!("{{{}}}", "\"x\"".repeat(4000))),
+            ),
+            (
+                "previous_patch".to_string(),
+                json!("diff --git ".repeat(2000)),
+            ),
+        ]);
+
+        let estimated = trim_retry_context_to_budget(&mut context, 4000);
+
+        assert!(estimated <= 4000, "estimated={estimated}");
+        assert!(context.contains_key("files_json"));
+        assert!(!context.contains_key("previous_patch"));
     }
 
     #[test]
@@ -2133,6 +2560,43 @@ mod tests {
  impl GameState {
 -    pub fn increment_score(mut self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(self) }
 +    pub fn increment_score(&self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(Self) }
+ }
+"#;
+
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_self_receiver_return_type_with_added_generic_arity() {
+        let root = make_temp_test_dir("compile_fix_guardrail_self_shape_generics");
+        let src = root.join("src/contexts/game_loop.rs");
+        let spec = root.join("specifications/contexts/game_loop.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameLoopContext<F>(F);\nimpl<F> GameLoopContext<F> {\n    pub fn tick(self) -> Option<GameLoopContext<F>> { None }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "## Functionalities\n- **tick()** returns Some(new GameLoopContext) or None\n",
+        )
+        .expect("write spec");
+
+        let diff = r#"diff --git a/src/contexts/game_loop.rs b/src/contexts/game_loop.rs
+--- a/src/contexts/game_loop.rs
++++ b/src/contexts/game_loop.rs
+@@ -1,4 +1,4 @@
+-pub struct GameLoopContext<F>(F);
+-impl<F> GameLoopContext<F> {
+-    pub fn tick(self) -> Option<GameLoopContext<F>> { None }
++pub struct GameLoopContext<F, S>(F, S);
++impl<F, S> GameLoopContext<F, S> {
++    pub fn tick(self) -> Option<GameLoopContext<F, S>> { None }
  }
 "#;
 

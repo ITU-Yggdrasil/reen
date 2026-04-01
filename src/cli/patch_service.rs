@@ -32,17 +32,189 @@ pub(crate) enum HunkLineKind {
 }
 
 pub(crate) fn extract_unified_diff_from_agent_output(text: &str) -> Option<String> {
-    if let Some(idx) = text.find("diff --git ") {
-        return Some(text[idx..].trim().to_string());
+    let trimmed = text.trim();
+    if trimmed.starts_with("diff --git ") {
+        if let Some((_, candidate)) = salvage_plausible_diff(trimmed) {
+            return Some(candidate);
+        }
     }
 
+    let mut best_diff = text
+        .match_indices("diff --git ")
+        .filter_map(|(idx, _)| {
+            candidate_from_text_slice(&text[idx..])
+                .map(|(patch_count, candidate)| (patch_count, idx, candidate))
+        })
+        .max_by_key(|(patch_count, idx, _)| (*patch_count, *idx))
+        .map(|(_, _, candidate)| candidate);
+
     if let Some(idx) = text.find("\n--- ") {
-        return Some(text[idx + 1..].trim().to_string());
+        if best_diff.is_none() {
+            let candidate = text[idx + 1..].trim();
+            if let Some((_, salvaged)) = salvage_plausible_diff(candidate) {
+                best_diff = Some(salvaged);
+            }
+        }
     }
-    if text.trim_start().starts_with("--- ") {
-        return Some(text.trim().to_string());
+    if best_diff.is_none() && trimmed.starts_with("--- ") {
+        if let Some((_, salvaged)) = salvage_plausible_diff(trimmed) {
+            best_diff = Some(salvaged);
+        }
     }
-    None
+    best_diff
+}
+
+fn is_plausible_unified_diff(candidate: &str) -> Option<usize> {
+    if !contains_only_diff_content(candidate) {
+        return None;
+    }
+
+    parse_unified_diff(candidate).ok().and_then(|patches| {
+        let valid = !patches.is_empty()
+            && patches.iter().all(|patch| {
+                patch
+                    .new_path
+                    .as_deref()
+                    .or(patch.old_path.as_deref())
+                    .is_some_and(|path| !path.is_empty())
+            });
+        valid.then_some(patches.len())
+    })
+}
+
+fn candidate_from_text_slice(text: &str) -> Option<(usize, String)> {
+    let region = trim_to_diff_region(text)?;
+    salvage_plausible_diff(&region)
+}
+
+fn salvage_plausible_diff(candidate: &str) -> Option<(usize, String)> {
+    let mut current = candidate.trim().to_string();
+    loop {
+        if let Some(patch_count) = is_plausible_unified_diff(&current) {
+            return Some((patch_count, current));
+        }
+        let Some(last_idx) = current
+            .match_indices("\ndiff --git ")
+            .map(|(idx, _)| idx + 1)
+            .last()
+        else {
+            return None;
+        };
+        current = current[..last_idx].trim_end().to_string();
+    }
+}
+
+fn trim_to_diff_region(text: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut saw_diff = false;
+    let mut in_hunk = false;
+
+    for line in text.lines() {
+        if line.starts_with("diff --git ") {
+            saw_diff = true;
+            in_hunk = false;
+            lines.push(line.to_string());
+            continue;
+        }
+        if !saw_diff {
+            continue;
+        }
+        if line.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            lines.push(line.to_string());
+            continue;
+        }
+        if in_hunk
+            && (matches!(line.chars().next(), Some(' ' | '+' | '-'))
+                || line.starts_with("\\ No newline at end of file"))
+        {
+            lines.push(line.to_string());
+            continue;
+        }
+        if [
+            "index ",
+            "--- ",
+            "+++ ",
+            "new file mode ",
+            "deleted file mode ",
+            "old mode ",
+            "new mode ",
+            "similarity index ",
+            "rename from ",
+            "rename to ",
+            "Binary files ",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        {
+            in_hunk = false;
+            lines.push(line.to_string());
+            continue;
+        }
+        break;
+    }
+
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn contains_only_diff_content(candidate: &str) -> bool {
+    let mut in_hunk = false;
+    let mut saw_diff = false;
+
+    for line in candidate.lines() {
+        if line.starts_with("diff --git ") {
+            saw_diff = true;
+            in_hunk = false;
+            continue;
+        }
+        if !saw_diff {
+            return false;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("@@ ") {
+            in_hunk = true;
+            continue;
+        }
+        if in_hunk {
+            if matches!(line.chars().next(), Some(' ' | '+' | '-'))
+                || line.starts_with("\\ No newline at end of file")
+            {
+                continue;
+            }
+            if line.starts_with("diff --git ") {
+                in_hunk = false;
+                continue;
+            }
+            return false;
+        }
+        if [
+            "index ",
+            "--- ",
+            "+++ ",
+            "new file mode ",
+            "deleted file mode ",
+            "old mode ",
+            "new mode ",
+            "similarity index ",
+            "rename from ",
+            "rename to ",
+            "Binary files ",
+        ]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+        {
+            continue;
+        }
+        return false;
+    }
+
+    saw_diff
 }
 
 pub(crate) fn parse_unified_diff(diff: &str) -> Result<Vec<FilePatch>> {
@@ -96,16 +268,24 @@ pub(crate) fn parse_unified_diff(diff: &str) -> Result<Vec<FilePatch>> {
                         continue;
                     }
                     if hl.is_empty() {
-                        h_lines.push(HunkLine {
-                            kind: HunkLineKind::Context,
-                            text: String::new(),
-                        });
+                        // Malformed LLM diffs sometimes emit bare blank lines inside hunks
+                        // instead of proper ` ` / `+` / `-` prefixed blank lines.
+                        // Ignore them rather than treating them as phantom context.
                         continue;
                     }
                     let (kind, text) = match hl.chars().next().unwrap() {
-                        ' ' => (HunkLineKind::Context, strip_line_number_annotation(&hl[1..]).to_string()),
-                        '+' => (HunkLineKind::Add, strip_line_number_annotation(&hl[1..]).to_string()),
-                        '-' => (HunkLineKind::Remove, strip_line_number_annotation(&hl[1..]).to_string()),
+                        ' ' => (
+                            HunkLineKind::Context,
+                            strip_line_number_annotation(&hl[1..]).to_string(),
+                        ),
+                        '+' => (
+                            HunkLineKind::Add,
+                            strip_line_number_annotation(&hl[1..]).to_string(),
+                        ),
+                        '-' => (
+                            HunkLineKind::Remove,
+                            strip_line_number_annotation(&hl[1..]).to_string(),
+                        ),
                         _ => continue,
                     };
                     let h = HunkLine { kind, text };
@@ -139,6 +319,23 @@ pub(crate) fn parse_unified_diff(diff: &str) -> Result<Vec<FilePatch>> {
 }
 
 pub(crate) fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<String> {
+    let staged = plan_unified_diff_writes(project_root, diff)?;
+
+    for (target_full, new_content) in staged {
+        if let Some(parent) = target_full.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        fs::write(&target_full, &new_content)
+            .with_context(|| format!("Failed to write {}", target_full.display()))?;
+    }
+    Ok(diff.trim().to_string())
+}
+
+pub(crate) fn validate_unified_diff(project_root: &Path, diff: &str) -> Result<()> {
+    plan_unified_diff_writes(project_root, diff).map(|_| ())
+}
+
+fn plan_unified_diff_writes(project_root: &Path, diff: &str) -> Result<Vec<(PathBuf, String)>> {
     let patches = parse_unified_diff(diff)?;
     let mut staged: Vec<(PathBuf, String)> = Vec::new();
 
@@ -157,16 +354,15 @@ pub(crate) fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<Stri
             fs::create_dir_all(parent).ok();
         }
 
-        let current_content = if let Some((_, content)) =
-            staged.iter().find(|(path, _)| path == &target_full)
-        {
-            content.clone()
-        } else if target_full.exists() {
-            fs::read_to_string(&target_full)
-                .with_context(|| format!("Failed to read {}", target_full.display()))?
-        } else {
-            String::new()
-        };
+        let current_content =
+            if let Some((_, content)) = staged.iter().find(|(path, _)| path == &target_full) {
+                content.clone()
+            } else if target_full.exists() {
+                fs::read_to_string(&target_full)
+                    .with_context(|| format!("Failed to read {}", target_full.display()))?
+            } else {
+                String::new()
+            };
         let orig_lines = split_lines_preserve_empty(&current_content);
         let new_lines = apply_hunks(&orig_lines, &fp.hunks)
             .with_context(|| format!("Failed applying hunks to {}", target_rel))?;
@@ -179,14 +375,7 @@ pub(crate) fn apply_unified_diff(project_root: &Path, diff: &str) -> Result<Stri
         }
     }
 
-    for (target_full, new_content) in staged {
-        if let Some(parent) = target_full.parent() {
-            fs::create_dir_all(parent).ok();
-        }
-        fs::write(&target_full, &new_content)
-            .with_context(|| format!("Failed to write {}", target_full.display()))?;
-    }
-    Ok(diff.trim().to_string())
+    Ok(staged)
 }
 
 pub(crate) fn apply_draft_patches(project_root: &Path, agent_output: &str) -> Result<Vec<PathBuf>> {
@@ -287,68 +476,109 @@ fn apply_hunks(orig: &[String], hunks: &[Hunk]) -> Result<Vec<String>> {
     let mut line_delta: isize = 0;
 
     for h in hunks {
-        let expected_start = expected_hunk_start(h.old_start, line_delta);
-        let (start, trim_leading, trim_trailing) =
-            find_hunk_application(&current, h, expected_start).ok_or_else(|| {
-                let preferred = h.old_start.saturating_sub(1);
-                anyhow::anyhow!(
-                    "Could not locate hunk context (preferred_start={}, expected_start={}, pattern_len={})",
-                    preferred,
-                    expected_start,
-                    hunk_preimage_pattern_len(h)
-                )
-            })?;
-        let effective_end = h.lines.len().saturating_sub(trim_trailing);
-        let effective_lines = &h.lines[trim_leading..effective_end];
+        match apply_single_hunk(&current, h, line_delta) {
+            Ok((next, delta_change)) => {
+                current = next;
+                line_delta += delta_change;
+            }
+            Err(full_err) => {
+                let fragments = split_hunk_into_fragments(h, 3);
+                if fragments.len() <= 1 {
+                    return Err(full_err);
+                }
 
-        let mut pos = start;
-        let mut segment: Vec<String> = Vec::new();
-        for hl in effective_lines {
-            match hl.kind {
-                HunkLineKind::Context => {
-                    let line = current
-                        .get(pos)
-                        .ok_or_else(|| anyhow::anyhow!("Context line beyond EOF at pos {}", pos))?;
-                    if !hunk_line_matches(&hl.text, line) {
-                        anyhow::bail!(
-                            "Context mismatch at pos {}: expected {:?}, found {:?}",
-                            pos,
-                            hl.text,
-                            line
-                        );
+                let mut fragmented_current = current.clone();
+                let mut fragmented_delta = line_delta;
+                let mut fragmented_ok = true;
+                for fragment in &fragments {
+                    match apply_single_hunk(&fragmented_current, fragment, fragmented_delta) {
+                        Ok((next, delta_change)) => {
+                            fragmented_current = next;
+                            fragmented_delta += delta_change;
+                        }
+                        Err(_) => {
+                            fragmented_ok = false;
+                            break;
+                        }
                     }
-                    segment.push(line.clone());
-                    pos += 1;
                 }
-                HunkLineKind::Remove => {
-                    let line = current
-                        .get(pos)
-                        .ok_or_else(|| anyhow::anyhow!("Remove line beyond EOF at pos {}", pos))?;
-                    if !hunk_line_matches(&hl.text, line) {
-                        anyhow::bail!(
-                            "Remove mismatch at pos {}: expected {:?}, found {:?}",
-                            pos,
-                            hl.text,
-                            line
-                        );
-                    }
-                    pos += 1;
-                }
-                HunkLineKind::Add => {
-                    segment.push(hl.text.clone());
+
+                if fragmented_ok {
+                    current = fragmented_current;
+                    line_delta = fragmented_delta;
+                } else {
+                    return Err(full_err);
                 }
             }
         }
-
-        let mut next: Vec<String> = Vec::with_capacity(current.len() + segment.len());
-        next.extend_from_slice(&current[..start]);
-        next.extend(segment);
-        next.extend_from_slice(&current[pos..]);
-        current = next;
-        line_delta += net_hunk_line_delta(h);
     }
 
     Ok(current)
+}
+
+fn apply_single_hunk(
+    current: &[String],
+    hunk: &Hunk,
+    line_delta: isize,
+) -> Result<(Vec<String>, isize)> {
+    let expected_start = expected_hunk_start(hunk.old_start, line_delta);
+    let (start, trim_leading, trim_trailing) =
+        find_hunk_application(current, hunk, expected_start).ok_or_else(|| {
+            let preferred = hunk.old_start.saturating_sub(1);
+            anyhow::anyhow!(
+                "Could not locate hunk context (preferred_start={}, expected_start={}, pattern_len={})",
+                preferred,
+                expected_start,
+                hunk_preimage_pattern_len(hunk)
+            )
+        })?;
+    let effective_end = hunk.lines.len().saturating_sub(trim_trailing);
+    let effective_lines = &hunk.lines[trim_leading..effective_end];
+
+    let mut pos = start;
+    let mut segment: Vec<String> = Vec::new();
+    for hl in effective_lines {
+        match hl.kind {
+            HunkLineKind::Context => {
+                let line = current
+                    .get(pos)
+                    .ok_or_else(|| anyhow::anyhow!("Context line beyond EOF at pos {}", pos))?;
+                if !hunk_line_matches(&hl.text, line) {
+                    anyhow::bail!(
+                        "Context mismatch at pos {}: expected {:?}, found {:?}",
+                        pos,
+                        hl.text,
+                        line
+                    );
+                }
+                segment.push(line.clone());
+                pos += 1;
+            }
+            HunkLineKind::Remove => {
+                let line = current
+                    .get(pos)
+                    .ok_or_else(|| anyhow::anyhow!("Remove line beyond EOF at pos {}", pos))?;
+                if !hunk_line_matches(&hl.text, line) {
+                    anyhow::bail!(
+                        "Remove mismatch at pos {}: expected {:?}, found {:?}",
+                        pos,
+                        hl.text,
+                        line
+                    );
+                }
+                pos += 1;
+            }
+            HunkLineKind::Add => {
+                segment.push(hl.text.clone());
+            }
+        }
+    }
+
+    let mut next: Vec<String> = Vec::with_capacity(current.len() + segment.len());
+    next.extend_from_slice(&current[..start]);
+    next.extend(segment);
+    next.extend_from_slice(&current[pos..]);
+    Ok((next, net_hunk_line_delta(hunk)))
 }
 
 fn expected_hunk_start(old_start: usize, line_delta: isize) -> usize {
@@ -368,6 +598,64 @@ fn net_hunk_line_delta(h: &Hunk) -> isize {
         .filter(|hl| hl.kind == HunkLineKind::Remove)
         .count() as isize;
     adds - removes
+}
+
+fn split_hunk_into_fragments(hunk: &Hunk, context_window: usize) -> Vec<Hunk> {
+    let mut change_blocks: Vec<(usize, usize)> = Vec::new();
+    let mut idx = 0;
+    while idx < hunk.lines.len() {
+        if hunk.lines[idx].kind == HunkLineKind::Context {
+            idx += 1;
+            continue;
+        }
+
+        let start = idx;
+        idx += 1;
+        while idx < hunk.lines.len() && hunk.lines[idx].kind != HunkLineKind::Context {
+            idx += 1;
+        }
+        change_blocks.push((start, idx - 1));
+    }
+
+    if change_blocks.len() <= 1 {
+        return Vec::new();
+    }
+
+    let mut clustered_blocks: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in change_blocks {
+        if let Some((_, previous_end)) = clustered_blocks.last_mut() {
+            let gap = start.saturating_sub(*previous_end + 1);
+            if gap < context_window {
+                *previous_end = end;
+                continue;
+            }
+        }
+        clustered_blocks.push((start, end));
+    }
+
+    if clustered_blocks.len() <= 1 {
+        return Vec::new();
+    }
+
+    clustered_blocks
+        .into_iter()
+        .map(|(change_start, change_end)| {
+            let fragment_start = change_start.saturating_sub(context_window);
+            let fragment_end = (change_end + context_window + 1).min(hunk.lines.len());
+            let old_start_offset = preimage_len(&hunk.lines[..fragment_start]);
+            Hunk {
+                old_start: hunk.old_start + old_start_offset,
+                lines: hunk.lines[fragment_start..fragment_end].to_vec(),
+            }
+        })
+        .collect()
+}
+
+fn preimage_len(lines: &[HunkLine]) -> usize {
+    lines
+        .iter()
+        .filter(|line| matches!(line.kind, HunkLineKind::Context | HunkLineKind::Remove))
+        .count()
 }
 
 fn hunk_preimage_pattern(h: &Hunk) -> Vec<&str> {
@@ -584,7 +872,10 @@ fn find_hunk_start_anywhere_dedented(lines: &[String], pattern: &[&str]) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::{Hunk, HunkLine, HunkLineKind, apply_hunks, apply_unified_diff};
+    use super::{
+        Hunk, HunkLine, HunkLineKind, apply_hunks, apply_unified_diff,
+        extract_unified_diff_from_agent_output, parse_unified_diff, validate_unified_diff,
+    };
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -744,6 +1035,109 @@ mod tests {
                 "middle".to_string(),
                 "target two updated".to_string(),
                 "end".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_hunks_fragments_large_hunk_when_internal_context_is_stale() {
+        let original = vec![
+            "header".to_string(),
+            "keep before".to_string(),
+            "Outcome::Obstacle => {".to_string(),
+            "    first body line".to_string(),
+            "    stale actual line".to_string(),
+            "    more body".to_string(),
+            "Outcome::Food => {".to_string(),
+            "    second body".to_string(),
+            "    another stale actual line".to_string(),
+            "    more second body".to_string(),
+            "Outcome::Empty => {".to_string(),
+            "tail".to_string(),
+        ];
+        let hunks = vec![Hunk {
+            old_start: 1,
+            lines: vec![
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "header".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "keep before".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Remove,
+                    text: "Outcome::Obstacle => {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Add,
+                    text: "CollisionOutcome::Obstacle => {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    first body line".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    stale expected line".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    more body".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Remove,
+                    text: "Outcome::Food => {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Add,
+                    text: "CollisionOutcome::Food => {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    second body".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    another stale expected line".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "    more second body".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Remove,
+                    text: "Outcome::Empty => {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Add,
+                    text: "CollisionOutcome::Empty => {".to_string(),
+                },
+                HunkLine {
+                    kind: HunkLineKind::Context,
+                    text: "tail".to_string(),
+                },
+            ],
+        }];
+
+        let updated = apply_hunks(&original, &hunks).expect("fragmented hunk should apply");
+
+        assert_eq!(
+            updated,
+            vec![
+                "header".to_string(),
+                "keep before".to_string(),
+                "CollisionOutcome::Obstacle => {".to_string(),
+                "    first body line".to_string(),
+                "    stale actual line".to_string(),
+                "    more body".to_string(),
+                "CollisionOutcome::Food => {".to_string(),
+                "    second body".to_string(),
+                "    another stale actual line".to_string(),
+                "    more second body".to_string(),
+                "CollisionOutcome::Empty => {".to_string(),
+                "tail".to_string(),
             ]
         );
     }
@@ -1062,11 +1456,7 @@ fn snake_move(&self, grow: bool) -> Snake {
         let root = make_temp_test_dir("patch_service_same_file_multi_block");
         let file = root.join("src/contexts/command_input.rs");
         fs::create_dir_all(file.parent().expect("parent")).expect("create dir");
-        fs::write(
-            &file,
-            "line 1\nline 2\nline 3\nline 4\nline 5\n",
-        )
-        .expect("write fixture");
+        fs::write(&file, "line 1\nline 2\nline 3\nline 4\nline 5\n").expect("write fixture");
 
         let diff = r#"diff --git a/src/contexts/command_input.rs b/src/contexts/command_input.rs
 --- a/src/contexts/command_input.rs
@@ -1098,6 +1488,93 @@ diff --git a/src/contexts/command_input.rs b/src/contexts/command_input.rs
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_unified_diff_checks_applicability_without_writing_files() {
+        let root = make_temp_test_dir("patch_service_validate_only");
+        let file = root.join("src/main.rs");
+        fs::create_dir_all(file.parent().expect("parent")).expect("create dir");
+        fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").expect("write fixture");
+
+        let diff = r#"diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,3 @@
+ fn main() {
+-    println!("goodbye");
++    println!("updated");
+ }
+"#;
+
+        let err = validate_unified_diff(&root, diff).expect_err("validation should fail");
+        assert!(
+            err.to_string()
+                .contains("Failed applying hunks to src/main.rs")
+        );
+        assert_eq!(
+            fs::read_to_string(&file).expect("read fixture"),
+            "fn main() {\n    println!(\"hello\");\n}\n"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn apply_unified_diff_ignores_bare_blank_lines_inside_hunks() {
+        let root = make_temp_test_dir("patch_service_bare_blank_hunk_line");
+        let file = root.join("src/main.rs");
+        fs::create_dir_all(file.parent().expect("parent")).expect("create dir");
+        fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").expect("write fixture");
+
+        let diff = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n\n-    println!(\"hello\");\n+    println!(\"updated\");\n }\n";
+
+        apply_unified_diff(&root, diff).expect("patch should apply");
+        assert_eq!(
+            fs::read_to_string(&file).expect("read updated file"),
+            "fn main() {\n    println!(\"updated\");\n}"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn extract_unified_diff_prefers_last_plausible_diff_block() {
+        let agent_output = r#"I need to fix several things first.
+
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,1 +1,1 @@
+-old
++new
+
+That attempt is incomplete. Let me write the correct unified diff:
+
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,3 +1,4 @@
+ [dependencies]
+ serde = "1"
++urlencoding = "2"
+ serde_json = "1"
+diff --git a/src/data/mod.rs b/src/data/mod.rs
+--- a/src/data/mod.rs
++++ b/src/data/mod.rs
+@@ -1,2 +1,3 @@
+ pub use foo::Bar;
++pub use foo::Baz;
+ pub use foo::Qux;
+"#;
+
+        let extracted =
+            extract_unified_diff_from_agent_output(agent_output).expect("expected unified diff");
+        let patches = parse_unified_diff(&extracted).expect("diff should parse");
+
+        assert_eq!(patches.len(), 2);
+        assert_eq!(patches[0].new_path.as_deref(), Some("Cargo.toml"));
+        assert_eq!(patches[1].new_path.as_deref(), Some("src/data/mod.rs"));
     }
 
     fn make_temp_test_dir(prefix: &str) -> PathBuf {

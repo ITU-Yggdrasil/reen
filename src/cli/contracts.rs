@@ -111,7 +111,8 @@ pub(crate) fn build_contract_artifact(
             obligation_reason: requirement.source_line.clone(),
         })
         .collect::<Vec<_>>();
-    let lifecycle_obligations = extract_lifecycle_obligations(spec_content, &public_functionalities);
+    let lifecycle_obligations =
+        extract_lifecycle_obligations(spec_content, &public_functionalities);
     let allowed_freedoms = extract_allowed_freedoms(&sections);
     let verification_targets = build_verification_targets(
         &summary,
@@ -158,10 +159,12 @@ pub(crate) fn validate_contract_artifact(
     let mut warnings = spec_report.warnings;
 
     if has_section(&sections, "Roles") && contract.roles.is_empty() {
-        errors.push("Contract stage could not extract any roles from the Roles section".to_string());
+        errors
+            .push("Contract stage could not extract any roles from the Roles section".to_string());
     }
     if has_section(&sections, "Props") && contract.props.is_empty() {
-        warnings.push("Contract stage could not extract any props from the Props section".to_string());
+        warnings
+            .push("Contract stage could not extract any props from the Props section".to_string());
     }
     if (has_section(&sections, "Functionality") || has_section(&sections, "Functionalities"))
         && contract.public_functionalities.is_empty()
@@ -172,7 +175,10 @@ pub(crate) fn validate_contract_artifact(
         );
     }
     if has_section(&sections, "Role Methods") && contract.role_methods.is_empty() {
-        errors.push("Contract stage could not extract any role methods from the Role Methods section".to_string());
+        errors.push(
+            "Contract stage could not extract any role methods from the Role Methods section"
+                .to_string(),
+        );
     }
 
     let role_names = contract
@@ -361,10 +367,10 @@ fn extract_roles(
                 continue;
             }
 
-            if let Some(name) = trimmed
-                .strip_prefix("- **")
-                .and_then(|rest| rest.find("**").map(|end| normalize_symbol_name(&rest[..end])))
-            {
+            if let Some(name) = trimmed.strip_prefix("- **").and_then(|rest| {
+                rest.find("**")
+                    .map(|end| normalize_symbol_name(&rest[..end]))
+            }) {
                 if let Some(previous_name) = pending_role.take() {
                     roles.push(build_role_from_block(
                         &previous_name,
@@ -410,7 +416,10 @@ fn build_role_from_block(
     let related_shared_notes = summary
         .shared_state_requirements
         .iter()
-        .filter(|line| line.to_ascii_lowercase().contains(&normalized_name.to_ascii_lowercase()))
+        .filter(|line| {
+            line.to_ascii_lowercase()
+                .contains(&normalized_name.to_ascii_lowercase())
+        })
         .cloned()
         .collect::<Vec<_>>();
     let identity_semantics = if !related_shared_notes.is_empty() {
@@ -473,10 +482,10 @@ fn extract_props(sections: &[Section]) -> Vec<ContractProp> {
             continue;
         }
 
-        if let Some(name) = trimmed
-            .strip_prefix("- **")
-            .and_then(|rest| rest.find("**").map(|end| normalize_symbol_name(&rest[..end])))
-        {
+        if let Some(name) = trimmed.strip_prefix("- **").and_then(|rest| {
+            rest.find("**")
+                .map(|end| normalize_symbol_name(&rest[..end]))
+        }) {
             if let Some(previous_name) = pending_name.take() {
                 props.push(ContractProp {
                     name: previous_name,
@@ -522,13 +531,16 @@ fn extract_functionalities(sections: &[Section]) -> Vec<ContractFunctionality> {
             .strip_prefix("### ")
             .map(normalize_symbol_name)
             .filter(|value| !value.is_empty());
-        let bullet_name = trimmed
-            .strip_prefix("- **")
-            .and_then(|rest| rest.find("**").map(|end| normalize_symbol_name(&rest[..end])));
+        let bullet_name = trimmed.strip_prefix("- **").and_then(|rest| {
+            rest.find("**")
+                .map(|end| normalize_symbol_name(&rest[..end]))
+        });
         let table_name = if trimmed.starts_with('|') && !trimmed.contains("---") {
-            table_row_re
-                .captures(trimmed)
-                .and_then(|captures| captures.get(1).map(|matched| normalize_symbol_name(matched.as_str())))
+            table_row_re.captures(trimmed).and_then(|captures| {
+                captures
+                    .get(1)
+                    .map(|matched| normalize_symbol_name(matched.as_str()))
+            })
         } else {
             None
         };
@@ -581,7 +593,8 @@ fn extract_role_methods(sections: &[Section]) -> Vec<ContractRoleMethod> {
                         current_role: &Option<String>,
                         current_method_name: &mut Option<String>,
                         current_body: &mut Vec<String>| {
-        if let (Some(role), Some(method_name)) = (current_role.clone(), current_method_name.take()) {
+        if let (Some(role), Some(method_name)) = (current_role.clone(), current_method_name.take())
+        {
             methods.push(ContractRoleMethod {
                 role,
                 method_name: normalize_symbol_name(&method_name),
@@ -601,7 +614,12 @@ fn extract_role_methods(sections: &[Section]) -> Vec<ContractRoleMethod> {
     for line in section.body.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("### ") {
-            flush_method(&mut methods, &current_role, &mut current_method_name, &mut current_body);
+            flush_method(
+                &mut methods,
+                &current_role,
+                &mut current_method_name,
+                &mut current_body,
+            );
             current_role = Some(normalize_symbol_name(rest));
             continue;
         }
@@ -611,23 +629,35 @@ fn extract_role_methods(sections: &[Section]) -> Vec<ContractRoleMethod> {
             .and_then(|rest| rest.find("**").map(|end| rest[..end].trim().to_string()))
             .or_else(|| {
                 if trimmed.starts_with('|') && !trimmed.contains("---") {
-                    table_row_re
-                        .captures(trimmed)
-                        .and_then(|captures| captures.get(1).map(|matched| matched.as_str().trim().to_string()))
+                    table_row_re.captures(trimmed).and_then(|captures| {
+                        captures
+                            .get(1)
+                            .map(|matched| matched.as_str().trim().to_string())
+                    })
                 } else {
                     None
                 }
             });
 
         if let Some(method_name) = next_method {
-            flush_method(&mut methods, &current_role, &mut current_method_name, &mut current_body);
+            flush_method(
+                &mut methods,
+                &current_role,
+                &mut current_method_name,
+                &mut current_body,
+            );
             current_method_name = Some(method_name);
         } else if current_method_name.is_some() && !trimmed.is_empty() {
             current_body.push(strip_markdown(trimmed));
         }
     }
 
-    flush_method(&mut methods, &current_role, &mut current_method_name, &mut current_body);
+    flush_method(
+        &mut methods,
+        &current_role,
+        &mut current_method_name,
+        &mut current_body,
+    );
     methods
 }
 
@@ -638,7 +668,10 @@ fn extract_lifecycle_obligations(
     let mut obligations = Vec::new();
     for functionality in functionalities {
         let name = functionality.name.to_ascii_lowercase();
-        if matches!(name.as_str(), "new" | "run" | "main" | "init" | "initialize") {
+        if matches!(
+            name.as_str(),
+            "new" | "run" | "main" | "init" | "initialize"
+        ) {
             obligations.push(format!("functionality {}", functionality.name));
         }
     }
@@ -691,12 +724,7 @@ fn build_verification_targets(
             .iter()
             .map(|requirement| format!("output: {}", requirement.literal)),
     );
-    targets.extend(
-        summary
-            .env_vars
-            .iter()
-            .map(|name| format!("env: {}", name)),
-    );
+    targets.extend(summary.env_vars.iter().map(|name| format!("env: {}", name)));
     targets.extend(
         summary
             .shared_state_requirements
@@ -740,7 +768,10 @@ fn dependency_hint_for_name(
     ] {
         if let Some(entries) = context.get(key).and_then(|value| value.as_array()) {
             for entry in entries {
-                let entry_name = entry.get("name").and_then(|value| value.as_str()).unwrap_or("");
+                let entry_name = entry
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("");
                 if normalize_symbol_name(entry_name).eq_ignore_ascii_case(name) {
                     return entry
                         .get("path")
@@ -864,7 +895,8 @@ fn normalize_symbol_name(value: &str) -> String {
 }
 
 fn strip_markdown(value: &str) -> String {
-    value.trim()
+    value
+        .trim()
         .trim_matches('-')
         .trim()
         .trim_matches('`')
@@ -874,7 +906,8 @@ fn strip_markdown(value: &str) -> String {
 }
 
 fn non_empty_lines(value: &str) -> Vec<String> {
-    value.lines()
+    value
+        .lines()
         .map(|line| strip_markdown(line.trim()))
         .filter(|line| !line.is_empty())
         .collect()

@@ -1,0 +1,213 @@
+{
+  "plan_kind": "implementation",
+  "target_spec_path": "specifications/contexts/wiki_edit_receiver_context.md",
+  "target_output_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+  "title": "WikiEditReceiverContext — Implementation Plan",
+  "required_behaviors": [
+    "new: Construct WikiEditReceiverContext with shared event_sink (Arc<EventBufferContext>), stream_url, geodata_api_url, reconnect_delay, include_bot_edits; initialise empty coordinate cache; do not open SSE connection.",
+    "start: Open SSE connection to stream_url; loop reading events; call on_event_received for each SSE message; call on_stream_disconnected on any disconnection or server close; run continuously in the background (spawned thread or async task).",
+    "on_event_received: Parse raw SSE data field as JSON WikiEdit; filter by wiki pattern (*wiki but not wikimedia); filter namespace != 0; filter bot edits when include_bot_edits is false; call resolve_coordinates; if Some, construct PositionEvent(lat, lon, edit.timestamp(), 'wiki', Some(title)) and call event_sink.receive_event.",
+    "resolve_coordinates: Check coordinate cache by (wiki, title) key; if hit and not expired return cached value; otherwise call GeoData API ({wiki_base}/w/api.php?action=query&titles={title}&prop=coordinates&format=json); on success cache and return Some(lat, lon); on no-coordinates cache negative sentinel and return None; on HTTP failure return None without caching.",
+    "on_stream_disconnected: Sleep reconnect_delay; then call start; do not discard event_sink, cache, or configuration.",
+    "wiki identifier to base URL: transform 'enwiki' -> 'https://en.wikipedia.org' via string manipulation (strip 'wiki' suffix, prepend 'https://', append '.wikipedia.org').",
+    "Coordinate cache: keyed by (wiki, title); entries hold either Some(lat, lon) or negative sentinel; each entry has an expiry instant (default TTL several hours, e.g., 4 hours); expired entries are treated as missing.",
+    "event_sink abstraction: event_sink is held as Arc<EventBufferContext>; receiver calls event_sink.receive_event(event) directly; downstream code is not changed."
+  ],
+  "required_collaborators": ["event_sink"],
+  "cross_component_integrations": [
+    "WikiEditReceiverContext calls EventBufferContext::receive_event(PositionEvent) via Arc<EventBufferContext>",
+    "WikiEditReceiverContext constructs PositionEvent with source='wiki' using PositionEvent::new",
+    "WikiEditReceiverContext parses WikiEdit from raw SSE JSON payload",
+    "WikiEditReceiverContext issues HTTP GET to GeoData API per unique (wiki, title) pair",
+    "AggregationContext shares the same Arc<EventBufferContext> instance — must not replace or clone the buffer"
+  ],
+  "identity_and_sharing_constraints": [
+    {
+      "subject": "event_sink (EventBufferContext)",
+      "identity_semantics": "Shared identity — the same EventBufferContext instance is held by WikiEditReceiverContext, AggregationContext, and any other active receivers. Must never be replaced, re-created, or independently owned.",
+      "mutation_semantics": "EventBufferContext is internally mutable via its own Mutex-guarded event store. The Arc wrapper must not be cloned into a new allocation; only the Arc reference count increases.",
+      "rust_guidance": "Store as Arc<EventBufferContext>. Accept Arc<EventBufferContext> in new(). Do not clone the inner value; clone only the Arc to increment the reference count. Fulfils shared-reference constraint without transferring sole ownership."
+    },
+    {
+      "subject": "coordinate_cache",
+      "identity_semantics": "Owned by WikiEditReceiverContext; not shared externally.",
+      "mutation_semantics": "Mutable — entries are added and expiry-checked on every resolve_coordinates call. Must be protected for concurrent access if start spawns a thread.",
+      "rust_guidance": "Use a Mutex<HashMap<(String, String), CacheEntry>> where CacheEntry holds an enum (Coordinates { lat: f64, lon: f64 } | Absent) plus an Instant expiry. Wrap the whole struct in Mutex or use an interior-mutable map."
+    },
+    {
+      "subject": "WikiEditReceiverContext (self in start/on_stream_disconnected)",
+      "identity_semantics": "The context itself must persist across reconnections; on_stream_disconnected must not replace state.",
+      "mutation_semantics": "Mutable interior state (cache); immutable config (stream_url, geodata_api_url, reconnect_delay, include_bot_edits).",
+      "rust_guidance": "Wrap Self in Arc so that start can spawn a background thread holding a clone of the Arc, enabling on_stream_disconnected to call start again on the same instance without consuming ownership."
+    }
+  ],
+  "ordered_tasks": [
+    {
+      "order": 1,
+      "title": "Define CacheEntry and CoordinateCache types",
+      "detail": "Define a private enum CacheEntry { Found { lat: f64, lon: f64, expires_at: Instant }, Absent { expires_at: Instant } }. Define a type alias CoordinateCache = HashMap<(String, String), CacheEntry>. Define a constant CACHE_TTL: Duration = Duration::from_secs(4 * 3600). These types are private to the module. The Instant-based expiry allows resolve_coordinates to compare Instant::now() against expires_at.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "CacheEntry enum has Found and Absent variants each with expires_at",
+        "CACHE_TTL constant is defined as several hours"
+      ]
+    },
+    {
+      "order": 2,
+      "title": "Define WikiEditReceiverContext struct",
+      "detail": "Define the public struct WikiEditReceiverContext with fields: event_sink: Arc<EventBufferContext>, stream_url: String, geodata_api_url: String, reconnect_delay: Duration, include_bot_edits: bool, coordinate_cache: Mutex<CoordinateCache>. Derive Debug where possible. The struct is designed to be wrapped in Arc<Self> by the caller so that start can spawn a background task referencing the same instance.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "struct fields match all props from specification",
+        "event_sink field is Arc<EventBufferContext>",
+        "coordinate_cache field is Mutex-guarded"
+      ]
+    },
+    {
+      "order": 3,
+      "title": "Implement new()",
+      "detail": "Implement WikiEditReceiverContext::new(event_sink: Arc<EventBufferContext>, stream_url: String, geodata_api_url: String, reconnect_delay: Duration, include_bot_edits: bool) -> Self. Store all arguments into the corresponding struct fields. Initialise coordinate_cache as Mutex::new(HashMap::new()). Do not open any connection. Log construction with tracing::info.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "new() does not open SSE connection",
+        "new() initialises empty coordinate cache",
+        "new() accepts Arc<EventBufferContext> without cloning the inner value"
+      ]
+    },
+    {
+      "order": 4,
+      "title": "Implement wiki-to-base-URL helper",
+      "detail": "Implement a private fn wiki_to_base_url(wiki: &str) -> String. Strategy: strip trailing 'wiki' from the identifier (e.g., 'enwiki' -> 'en'), prepend 'https://', append '.wikipedia.org'. Example: 'enwiki' -> 'https://en.wikipedia.org'. Edge cases: 'commonswiki' -> strip 'wiki' -> 'commons' -> 'https://commons.wikipedia.org' (acceptable). This is a pure string transformation. Log the mapping at debug level.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "enwiki maps to https://en.wikipedia.org",
+        "dewiki maps to https://de.wikipedia.org"
+      ]
+    },
+    {
+      "order": 5,
+      "title": "Implement resolve_coordinates()",
+      "detail": "Implement fn resolve_coordinates(&self, wiki: &str, title: &str) -> Option<(f64, f64)>. Steps: (1) Lock coordinate_cache; check for key (wiki, title); if entry exists and expires_at > Instant::now(), return Some((lat, lon)) for Found or None for Absent; release lock. (2) If no valid cache entry, drop lock and issue HTTP GET to {wiki_base}/w/api.php?action=query&titles={title}&prop=coordinates&format=json using a blocking HTTP client (e.g., ureq) or async client (e.g., reqwest) consistent with the execution model chosen in start. (3) Parse JSON response: if coordinates array is non-empty, extract lat/lon, re-acquire lock, insert CacheEntry::Found { lat, lon, expires_at: Instant::now() + CACHE_TTL }, release lock, return Some((lat, lon)). (4) If coordinates array is empty or missing, re-acquire lock, insert CacheEntry::Absent { expires_at: Instant::now() + CACHE_TTL }, return None. (5) If HTTP call fails (network error, parse error), return None without writing to cache. Log each branch at debug level.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "Cache hit for Found returns coordinates without HTTP call",
+        "Cache hit for Absent returns None without HTTP call",
+        "Expired cache entry triggers new HTTP call",
+        "HTTP failure returns None and does not write to cache",
+        "Successful HTTP response with no coordinates stores Absent sentinel"
+      ]
+    },
+    {
+      "order": 6,
+      "title": "Implement on_event_received()",
+      "detail": "Implement fn on_event_received(&self, raw_event: &str). Steps: (1) Parse raw_event as serde_json::Value; extract 'data' field if present (SSE wraps payload in 'data'), or parse raw_event directly as JSON. (2) Check 'type' field — accept only 'edit' or 'new'; otherwise return early. (3) Extract wiki, namespace (i32), title, timestamp (Unix epoch i64 -> DateTime<Utc> via DateTime::from_timestamp), bot (bool), user fields. Construct WikiEdit via WikiEdit::new(...). (4) Filter wiki: the wiki field must end with 'wiki' but must not equal 'wikimedia'; if it fails this check, return early. Concretely: wiki.ends_with(\"wiki\") && wiki != \"wikimedia\". (5) If namespace != 0, return early. (6) If !include_bot_edits && wiki_edit.bot(), return early. (7) Call self.resolve_coordinates(wiki_edit.wiki(), wiki_edit.title()). (8) If Some((lat, lon)), construct PositionEvent::new(lat, lon, wiki_edit.timestamp(), EventSource::Wiki (or the string 'wiki' per PositionEvent's source type), Some(wiki_edit.title().to_string())) and call self.event_sink.receive_event(event). Log each discard path at debug level.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "Edit to enwiki article namespace=0 with coordinates produces PositionEvent delivered to event_sink",
+        "Edit with namespace != 0 is discarded",
+        "Bot edit with include_bot_edits=false is discarded",
+        "Edit to wikimedia project is discarded",
+        "Edit with no GeoData coordinates produces no PositionEvent",
+        "PositionEvent has source='wiki', label=title, occurred_at from edit timestamp"
+      ]
+    },
+    {
+      "order": 7,
+      "title": "Implement on_stream_disconnected()",
+      "detail": "Implement fn on_stream_disconnected(self: Arc<Self>). Steps: (1) Log the disconnection at info level. (2) Sleep for self.reconnect_delay (use std::thread::sleep or async equivalent consistent with start's execution model). (3) Call self.start() to reconnect. Does not discard event_sink, coordinate_cache, or any configuration field. The Arc<Self> parameter ensures the instance remains alive through the sleep and the subsequent start call.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "on_stream_disconnected sleeps for reconnect_delay before calling start",
+        "event_sink, cache, and config remain intact after reconnection",
+        "start is called on the same Arc<Self> instance"
+      ]
+    },
+    {
+      "order": 8,
+      "title": "Implement start()",
+      "detail": "Implement pub fn start(self: Arc<Self>). Steps: (1) Spawn a background thread (std::thread::spawn) holding a clone of Arc<Self>. Inside the thread: (2) Open an SSE connection to self.stream_url using an SSE/HTTP client (e.g., eventsource-client crate or manual HTTP chunked-read). (3) Loop: for each SSE event received, call self.on_event_received(raw_data). (4) On any connection error or stream end, break the inner loop and call self.on_stream_disconnected() (which will sleep and restart). This provides automatic reconnect. Log stream open and errors at info level. The outer start method returns immediately after spawning; all blocking work happens inside the thread.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "start returns immediately (non-blocking to caller)",
+        "background thread reads SSE events continuously",
+        "on_stream_disconnected is called when the stream drops",
+        "reconnect loop re-calls start on the same Arc<Self>"
+      ]
+    },
+    {
+      "order": 9,
+      "title": "Wire imports, Cargo dependencies, and module registration",
+      "detail": "Add required Cargo.toml dependencies: serde and serde_json for JSON parsing; chrono for DateTime<Utc>; a blocking HTTP client (ureq) or async (reqwest) for GeoData API calls; an SSE client crate (e.g., eventsource-client or es-client) for the stream connection; tracing for logging. Register the new module in src/contexts/mod.rs (pub mod wiki_edit_receiver_context). Add use statements at the top of the file: Arc, Mutex, Duration, Instant from std; DateTime<Utc> from chrono; EventBufferContext, PositionEvent, WikiEdit from their respective modules.",
+      "target_paths": [
+        "src/contexts/wiki_edit_receiver_context.rs",
+        "src/contexts/mod.rs",
+        "Cargo.toml"
+      ],
+      "verification_targets": [
+        "Module compiles without missing imports",
+        "EventBufferContext is imported from src/contexts/event_buffer_context.rs",
+        "PositionEvent is imported from src/data/position_event.rs",
+        "WikiEdit is imported from src/data/wiki_edit.rs"
+      ]
+    },
+    {
+      "order": 10,
+      "title": "Verify all acceptance scenarios",
+      "detail": "Trace through each acceptance example from the specification against the implementation: (1) Edit to Eiffel Tower on enwiki with GeoData coordinates -> PositionEvent at Paris coords delivered to event_sink. (2) Edit to namespace!=0 page -> silently discarded. (3) Bot edit with include_bot_edits=false -> silently discarded. (4) Edit with no GeoData coordinates -> no event, negative cache entry stored. (5) Same article edited twice quickly -> second edit uses cache, no HTTP call. (6) SSE stream disconnects -> reconnect after reconnect_delay. Confirm that EventBufferContext.receive_event is called with correct PositionEvent fields in scenario 1. Confirm cache expiry logic works for scenario 5.",
+      "target_paths": ["src/contexts/wiki_edit_receiver_context.rs"],
+      "verification_targets": [
+        "Acceptance scenario 1: PositionEvent delivered with correct lat/lon/source/label",
+        "Acceptance scenario 2: namespace filter discards event",
+        "Acceptance scenario 3: bot filter discards event",
+        "Acceptance scenario 4: negative cache entry prevents re-query",
+        "Acceptance scenario 5: cache hit prevents second HTTP call",
+        "Acceptance scenario 6: reconnect after stream drop"
+      ]
+    }
+  ],
+  "verification_targets": [
+    "functionality: new(event_sink, stream_url, geodata_api_url, reconnect_delay, include_bot_edits)",
+    "functionality: start",
+    "functionality: on_event_received(raw_event)",
+    "functionality: resolve_coordinates(wiki, title)",
+    "functionality: on_stream_disconnected",
+    "role_method: event_sink.receive_event(event)",
+    "call_edge: WikiEditReceiverContext (EventSource) -> EventBufferContext",
+    "call_edge: event_sink -> EventBufferContext (shared Arc identity preserved)",
+    "call_edge: resolve_coordinates -> Option<(f64, f64)> (Some/None)",
+    "constraint: event_sink is Arc<EventBufferContext> — same instance shared with AggregationContext",
+    "constraint: coordinate cache survives reconnection",
+    "constraint: wiki filter rejects non-Wikipedia projects and wikimedia",
+    "constraint: namespace filter rejects non-article pages",
+    "constraint: bot filter rejects bot edits when include_bot_edits=false",
+    "constraint: cache negative sentinel prevents re-querying absent coordinates",
+    "constraint: HTTP failure does not populate cache (allows retry)"
+  ],
+  "risks": [
+    {
+      "risk": "SSE client library availability: the Rust SSE ecosystem is fragmented. If eventsource-client is unavailable or incompatible, a manual HTTP chunked-read implementation may be needed.",
+      "mitigation": "Prefer eventsource-client or reqwest with manual SSE line parsing as a fallback. Keep SSE reading isolated behind a private helper so the library can be swapped."
+    },
+    {
+      "risk": "Concurrency between the background SSE thread and coordinate_cache access: the Mutex must not be held across an HTTP call or it will block all other threads.",
+      "mitigation": "Always release the Mutex lock before issuing the HTTP request; re-acquire it only to write the result. Use a local variable to hold the result between the unlock and the re-lock."
+    },
+    {
+      "risk": "wiki filter regex: the pattern '*wiki' (ends with 'wiki') must exclude 'wikimedia'. A naive ends_with('wiki') check passes 'wikimedia' because 'wikimedia' ends in 'ia' not 'wiki'. However, 'wikimedia' does NOT end with 'wiki', so ends_with('wiki') is sufficient. Verify: 'enwiki'.ends_with('wiki') == true, 'wikimedia'.ends_with('wiki') == false. The spec note 'or matches wikimedia' is a clarification of corner cases in the glob pattern, not an additional exclusion needed.",
+      "mitigation": "Implement as: wiki.ends_with('wiki') && wiki != 'wikimedia'. Add a unit test for 'wikimedia' and 'enwiki' inputs."
+    },
+    {
+      "risk": "Timestamp parsing: the SSE stream carries Unix epoch integers (seconds), but WikiEdit.timestamp is DateTime<Utc>. The on_event_received implementation must convert correctly using DateTime::from_timestamp(seconds, 0).",
+      "mitigation": "Use chrono::DateTime::from_timestamp or DateTime::from_utc(NaiveDateTime::from_timestamp(seconds, 0), Utc). Add a unit test covering epoch conversion."
+    }
+  ],
+  "forbidden_regressions": [
+    "Do not remove or replace Arc<EventBufferContext> shared identity — the same buffer instance must remain accessible to AggregationContext and any other receivers.",
+    "Do not call EventBufferContext::new inside WikiEditReceiverContext — it must accept and hold the existing Arc<EventBufferContext>.",
+    "Do not discard the coordinate_cache on reconnection — on_stream_disconnected must preserve the cache across reconnects.",
+    "Do not allow receive_event to be called for events that fail any of the three filters (wiki project, namespace, bot).",
+    "Do not store a cache entry on HTTP failure — only failed API calls must be retryable.",
+    "Do not expose WikiEdit outside of WikiEditReceiverContext — it is a boundary type confined to this module.",
+    "Do not set PositionEvent.source to any value other than 'wiki' in on_event_received."
+  ]
+}

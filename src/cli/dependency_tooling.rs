@@ -198,11 +198,13 @@ where
     let metadata_json = cargo_metadata_runner(&paths.cargo_toml_path)?;
     let inventory = build_symbols_inventory(&paths, &manifest, &metadata_json)?;
     if let Some(parent) = paths.symbols_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
     fs::write(
         &paths.symbols_path,
-        serde_json::to_string_pretty(&inventory).context("Failed to serialize symbols inventory")?,
+        serde_json::to_string_pretty(&inventory)
+            .context("Failed to serialize symbols inventory")?,
     )
     .with_context(|| format!("Failed to write {}", paths.symbols_path.display()))?;
 
@@ -218,13 +220,28 @@ pub(crate) fn tooling_needs_refresh(paths: &ToolingPaths) -> Result<bool> {
     }
 
     let dependency_modified = fs::metadata(&paths.dependency_manifest_path)
-        .with_context(|| format!("Failed to inspect {}", paths.dependency_manifest_path.display()))?
+        .with_context(|| {
+            format!(
+                "Failed to inspect {}",
+                paths.dependency_manifest_path.display()
+            )
+        })?
         .modified()
-        .with_context(|| format!("Failed to read mtime for {}", paths.dependency_manifest_path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to read mtime for {}",
+                paths.dependency_manifest_path.display()
+            )
+        })?;
     let cargo_modified = fs::metadata(&paths.cargo_toml_path)
         .with_context(|| format!("Failed to inspect {}", paths.cargo_toml_path.display()))?
         .modified()
-        .with_context(|| format!("Failed to read mtime for {}", paths.cargo_toml_path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to read mtime for {}",
+                paths.cargo_toml_path.display()
+            )
+        })?;
     let symbols_modified = fs::metadata(&paths.symbols_path)
         .with_context(|| format!("Failed to inspect {}", paths.symbols_path.display()))?
         .modified()
@@ -258,7 +275,10 @@ fn validate_dependency_manifest(manifest: &mut DependencyManifest, path: &Path) 
         package.capabilities.dedup();
 
         if package.name.is_empty() {
-            bail!("Dependency package name cannot be empty in {}", path.display());
+            bail!(
+                "Dependency package name cannot be empty in {}",
+                path.display()
+            );
         }
         if package.version.is_empty() {
             bail!(
@@ -285,7 +305,8 @@ fn write_tooling_manifest(paths: &ToolingPaths, manifest: &DependencyManifest) -
     fs::create_dir_all(&paths.tooling_root)
         .with_context(|| format!("Failed to create {}", paths.tooling_root.display()))?;
     if let Some(parent) = paths.stub_lib_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
     let dependency_map = manifest
@@ -328,7 +349,12 @@ fn run_cargo_metadata(manifest_path: &Path) -> Result<String> {
         .arg("--manifest-path")
         .arg(manifest_path)
         .output()
-        .with_context(|| format!("Failed to execute cargo metadata for {}", manifest_path.display()))?;
+        .with_context(|| {
+            format!(
+                "Failed to execute cargo metadata for {}",
+                manifest_path.display()
+            )
+        })?;
 
     if !output.status.success() {
         bail!(
@@ -357,13 +383,16 @@ fn build_symbols_inventory(
     let mut packages = Vec::new();
     for dependency in &manifest.packages {
         let canonical = canonicalize_name(&dependency.name);
-        let metadata_package = packages_by_canonical.get(&canonical).copied().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Dependency '{}' was not resolved by cargo metadata from {}",
-                dependency.name,
-                paths.cargo_toml_path.display()
-            )
-        })?;
+        let metadata_package = packages_by_canonical
+            .get(&canonical)
+            .copied()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Dependency '{}' was not resolved by cargo metadata from {}",
+                    dependency.name,
+                    paths.cargo_toml_path.display()
+                )
+            })?;
         packages.push(RustDependencySymbols {
             name: metadata_package.name.clone(),
             version: metadata_package.version.clone(),
@@ -376,7 +405,10 @@ fn build_symbols_inventory(
     Ok(RustSymbolsInventory {
         generated_at: Utc::now().to_rfc3339(),
         manifest_path: paths.cargo_toml_path.to_string_lossy().into_owned(),
-        source_dependencies_path: paths.dependency_manifest_path.to_string_lossy().into_owned(),
+        source_dependencies_path: paths
+            .dependency_manifest_path
+            .to_string_lossy()
+            .into_owned(),
         packages,
     })
 }
@@ -387,7 +419,11 @@ fn extract_public_symbols(package: &CargoMetadataPackage) -> Result<Vec<RustSymb
     let mut scanned_roots = BTreeSet::new();
 
     for target in &package.targets {
-        if !target.kind.iter().any(|kind| kind == "lib" || kind == "proc-macro") {
+        if !target
+            .kind
+            .iter()
+            .any(|kind| kind == "lib" || kind == "proc-macro")
+        {
             continue;
         }
 
@@ -441,15 +477,43 @@ fn collect_symbols_from_content(
     seen: &mut BTreeSet<String>,
 ) {
     let patterns = [
-        ("struct", Regex::new(r"(?m)^\s*pub\s+struct\s+([A-Za-z_][A-Za-z0-9_]*)").expect("struct regex")),
-        ("enum", Regex::new(r"(?m)^\s*pub\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)").expect("enum regex")),
-        ("trait", Regex::new(r"(?m)^\s*pub\s+trait\s+([A-Za-z_][A-Za-z0-9_]*)").expect("trait regex")),
-        ("type_alias", Regex::new(r"(?m)^\s*pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)").expect("type regex")),
-        ("constant", Regex::new(r"(?m)^\s*pub\s+const\s+([A-Za-z_][A-Za-z0-9_]*)").expect("const regex")),
-        ("static", Regex::new(r"(?m)^\s*pub\s+static\s+([A-Za-z_][A-Za-z0-9_]*)").expect("static regex")),
-        ("module", Regex::new(r"(?m)^\s*pub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)").expect("mod regex")),
-        ("function", Regex::new(r"(?m)^\s*pub\s+(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)").expect("fn regex")),
-        ("re_export", Regex::new(r"(?m)^\s*pub\s+use\s+(.+);").expect("use regex")),
+        (
+            "struct",
+            Regex::new(r"(?m)^\s*pub\s+struct\s+([A-Za-z_][A-Za-z0-9_]*)").expect("struct regex"),
+        ),
+        (
+            "enum",
+            Regex::new(r"(?m)^\s*pub\s+enum\s+([A-Za-z_][A-Za-z0-9_]*)").expect("enum regex"),
+        ),
+        (
+            "trait",
+            Regex::new(r"(?m)^\s*pub\s+trait\s+([A-Za-z_][A-Za-z0-9_]*)").expect("trait regex"),
+        ),
+        (
+            "type_alias",
+            Regex::new(r"(?m)^\s*pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)").expect("type regex"),
+        ),
+        (
+            "constant",
+            Regex::new(r"(?m)^\s*pub\s+const\s+([A-Za-z_][A-Za-z0-9_]*)").expect("const regex"),
+        ),
+        (
+            "static",
+            Regex::new(r"(?m)^\s*pub\s+static\s+([A-Za-z_][A-Za-z0-9_]*)").expect("static regex"),
+        ),
+        (
+            "module",
+            Regex::new(r"(?m)^\s*pub\s+mod\s+([A-Za-z_][A-Za-z0-9_]*)").expect("mod regex"),
+        ),
+        (
+            "function",
+            Regex::new(r"(?m)^\s*pub\s+(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")
+                .expect("fn regex"),
+        ),
+        (
+            "re_export",
+            Regex::new(r"(?m)^\s*pub\s+use\s+(.+);").expect("use regex"),
+        ),
     ];
 
     for (kind, regex) in patterns {
@@ -506,7 +570,12 @@ fn canonicalize_name(value: &str) -> String {
     value
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(|ch| ch.to_ascii_lowercase().to_string().chars().collect::<Vec<_>>())
+        .flat_map(|ch| {
+            ch.to_ascii_lowercase()
+                .to_string()
+                .chars()
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -562,7 +631,8 @@ mod tests {
         )
         .expect("write manifest");
 
-        let error = load_dependency_manifest(&manifest_path).expect_err("expected validation error");
+        let error =
+            load_dependency_manifest(&manifest_path).expect_err("expected validation error");
         assert!(error.to_string().contains("missing a version"));
 
         let _ = fs::remove_dir_all(root);
@@ -596,11 +666,18 @@ mod tests {
         assert!(tooling_needs_refresh(&paths).expect("refresh missing outputs"));
 
         fs::create_dir_all(paths.tooling_root.join("src")).expect("mkdir tooling src");
-        fs::write(&paths.cargo_toml_path, "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").expect("write cargo");
+        fs::write(
+            &paths.cargo_toml_path,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write cargo");
         fs::write(&paths.symbols_path, "{}").expect("write symbols");
         std::thread::sleep(Duration::from_millis(20));
-        fs::write(&paths.dependency_manifest_path, "packages:\n  - name: serde_json\n    version: \"1.0\"\n")
-            .expect("rewrite manifest");
+        fs::write(
+            &paths.dependency_manifest_path,
+            "packages:\n  - name: serde_json\n    version: \"1.0\"\n",
+        )
+        .expect("rewrite manifest");
 
         assert!(tooling_needs_refresh(&paths).expect("refresh stale outputs"));
 
@@ -652,20 +729,23 @@ mod tests {
         assert!(paths.cargo_toml_path.exists());
         assert!(paths.symbols_path.exists());
 
-        let symbols: RustSymbolsInventory = serde_json::from_str(
-            &fs::read_to_string(&paths.symbols_path).expect("read symbols"),
-        )
-        .expect("parse symbols");
+        let symbols: RustSymbolsInventory =
+            serde_json::from_str(&fs::read_to_string(&paths.symbols_path).expect("read symbols"))
+                .expect("parse symbols");
         assert_eq!(symbols.packages.len(), 1);
         assert_eq!(symbols.packages[0].name, "serde_json");
-        assert!(symbols.packages[0]
-            .symbols
-            .iter()
-            .any(|symbol| symbol.kind == "struct" && symbol.name == "Value"));
-        assert!(symbols.packages[0]
-            .symbols
-            .iter()
-            .any(|symbol| symbol.kind == "function" && symbol.name == "from_str"));
+        assert!(
+            symbols.packages[0]
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == "struct" && symbol.name == "Value")
+        );
+        assert!(
+            symbols.packages[0]
+                .symbols
+                .iter()
+                .any(|symbol| symbol.kind == "function" && symbol.name == "from_str")
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -686,8 +766,11 @@ mod tests {
         )
         .expect("write manifest");
         std::thread::sleep(Duration::from_millis(20));
-        fs::write(&paths.cargo_toml_path, "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n")
-            .expect("write cargo");
+        fs::write(
+            &paths.cargo_toml_path,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write cargo");
         fs::write(&paths.symbols_path, "{}").expect("write symbols");
 
         let mut called = false;
