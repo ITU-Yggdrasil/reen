@@ -96,19 +96,30 @@ pub fn output_contains_questions(output: &str) -> bool {
         return false;
     }
 
-    let lowercase = normalized.to_ascii_lowercase();
+    let mut lines = normalized.lines().map(str::trim);
+    let Some(first_non_empty) = lines.find(|line| !line.is_empty()) else {
+        return false;
+    };
 
-    let explicit_question_section = lowercase.contains("## questions")
-        || lowercase.contains("# questions")
-        || lowercase.contains("**questions**");
-    let asks_for_clarification = lowercase.contains("need clarification")
-        || lowercase.contains("needs clarification")
-        || lowercase.contains("please answer")
-        || lowercase.contains("please provide")
-        || lowercase.contains("questions that need answers");
-    let has_enumerated_questions = lowercase.contains("1.") && normalized.contains('?');
+    let heading = first_non_empty.to_ascii_lowercase();
+    let is_questions_heading =
+        heading == "## questions" || heading == "# questions" || heading == "**questions**";
+    if !is_questions_heading {
+        return false;
+    }
 
-    explicit_question_section || asks_for_clarification || has_enumerated_questions
+    lines.any(|line| {
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars().peekable();
+        let mut saw_digit = false;
+
+        while matches!(chars.peek(), Some(c) if c.is_ascii_digit()) {
+            saw_digit = true;
+            chars.next();
+        }
+
+        saw_digit && matches!(chars.next(), Some('.')) && matches!(chars.next(), Some(' '))
+    })
 }
 
 #[cfg(test)]
@@ -123,8 +134,8 @@ mod tests {
     }
 
     #[test]
-    fn detects_direct_request_for_answers() {
-        assert!(output_contains_questions(
+    fn requires_questions_heading_at_top_level() {
+        assert!(!output_contains_questions(
             "Please answer these before I continue.\n1. Should this support retries?"
         ));
     }
@@ -141,5 +152,35 @@ mod tests {
         assert!(!output_contains_questions(
             "This section answers the original question and includes the final implementation."
         ));
+    }
+
+    #[test]
+    fn ignores_rust_code_with_debug_formatting_and_try_operator() {
+        assert!(!output_contains_questions(
+            r#"```rust
+fn render(value: Result<Option<String>, std::io::Error>) -> Result<(), std::io::Error> {
+    tracing::debug!("value={:?}", value);
+    let scale = 1.0_f32;
+    let inner = value?;
+    println!("{:?} {}", inner, scale);
+    Ok(())
+}
+```"#
+        ));
+    }
+
+    #[test]
+    fn ignores_heading_inside_code_block() {
+        assert!(!output_contains_questions(
+            r#"```md
+## Questions
+1. This is an example inside fenced code.
+```"#
+        ));
+    }
+
+    #[test]
+    fn requires_numbered_question_after_heading() {
+        assert!(!output_contains_questions("## Questions\nNo questions."));
     }
 }

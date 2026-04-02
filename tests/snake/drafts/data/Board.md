@@ -4,11 +4,18 @@
 
 A rectangular playfield that defines valid positions and acts as the primary obstacle boundary (walls/bounds) for Snake.
 
-the coordinate system is 0 based starting in the lower left corner (0,0) extending to the upper right (width - 1, height -1). cells where either x or y is zero or where x is width - 1 or y is height - 1 are considered to be the boundary and not part of the playing field. i.e. the are walls/obstacles
+The coordinate system is zero-based, starts in the lower-left corner `(0,0)`, and extends
+to the upper-right corner `(width - 1, height - 1)`.
 
 ## Fields
-- **width_** 
-- **height_**
 
-## Invariants
-- `width > 0` and `height > 0`
+| Field | Meaning | Accessible | Notes |
+|---|---|---|---|
+| width | Width of the rectangular board | X | Positive whole number |
+| height | Height of the rectangular board | X | Positive whole number |
+
+## Rules
+
+- `width` must be greater than `0`.
+- `height` must be greater than `0`.
+- Cells where `x == 0`, `y == 0`, `x == width - 1`, or `y == height - 1` are boundary walls.

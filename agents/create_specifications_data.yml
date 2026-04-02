@@ -21,6 +21,20 @@ static_prompt: |
   You are writing for human reviewers (developers and architects).
   The result must be readable, reviewable, and faithful to the draft.
 
+  ## Structured Draft Summary (Authoritative When Present)
+
+  If `input.draft_summary` is present, it is the parser-approved summary of the draft.
+
+  For strict data drafts:
+  - treat `Description`, `Fields` or `Variants`, `Rules`, `Construction Rules`,
+    `Access Rules`, `Functionalities`, and `Notes` from `input.draft_summary` as the
+    authoritative structure
+  - use the raw draft text only to preserve exact wording and supporting detail
+  - do not invent core sections that are absent from `input.draft_summary`
+  - use `## Fields` instead of legacy `Properties`
+  - use `## Variants` for enum-like data artifacts
+  - use `## Rules` instead of legacy `Constraints & Rules`
+
   ## Names Are Sacred
 
   - Property, type, and method names MUST be preserved exactly
@@ -116,25 +130,38 @@ static_prompt: |
   - If `new` is explicitly defined in the draft:
     - Preserve and specify that explicit definition (do not replace it with an inferred one).
 
-  ## Auto-Implemented Getter Rule (Mandatory)
+  ## Accessible Getter Rule (Mandatory)
 
-  - For any property/field whose name ends with a trailing underscore (`_`), you MUST include an auto-implemented getter in Functionalities.
-  - Getter naming rule:
-    - If the field is named `field_`, the getter MUST be named `field`.
-    - In general, remove exactly one trailing underscore from the field name to form the getter name.
-  - This auto-generated getter does not imply any additional behavior beyond returning the field value.
-  - Do not apply this rule to enum variants.
+  - If `input.draft_summary.fields` is present, treat it as the authoritative parsed field list.
+  - A field whose `getter_accessible` value is `true` MUST receive a generated getter in Functionalities.
+  - A field whose `getter_accessible` value is `false` MUST NOT receive a generated getter unless the draft explicitly names that getter as a functionality.
+  - If the draft uses `Variants` instead of `Fields`, do not generate getters from variants.
 
   ## Output Structure
 
-  Use the following structure exactly:
+  For strict data drafts, use the following core structure:
 
-  1. Description  
-  2. Type Kind (Struct / Enum / NewType / **Unspecified**)  
-  3. Mutability (Immutable / Mutable)  
-  4. Properties (only those explicitly mentioned)  
-  5. Functionalities (only those explicitly named)  
-  6. Constraints & Rules (only those explicitly stated or directly implied)  
+  1. `# <Data Type Name>`
+  2. `## Description`
+  3. `## Type Kind`
+  4. `## Mutability`
+  5. exactly one of:
+     - `## Fields`
+     - `## Variants`
+  6. optional `## Functionalities`
+  7. optional `## Rules`
+  8. optional `## Construction Rules`
+  9. optional `## Access Rules`
+  10. optional `## Notes`
+
+  Core structure rules:
+  - Never emit a top-level `Properties` section for strict data drafts.
+  - Never emit a top-level `Constraints & Rules` section for strict data drafts.
+  - If emitting `## Fields`, use a markdown table that represents the field surface of the type.
+  - A specification `## Fields` table may enrich the draft with resolved type information, but it must still remain a `Fields` section.
+  - If emitting `## Variants`, use a markdown table that represents the variant surface of the type.
+  - Represent getter obligations in `## Functionalities`, not by copying the draft's `Accessible` control column verbatim unless traceability requires it.
+  - Do NOT include first-person or tool/process narration such as "I checked", "I'll fetch", or "Here is the final specification."
 
   Include the following final sections (if applicable):
 
@@ -172,13 +199,14 @@ static_prompt: |
   If included, they must:
   - Use only draft-defined fields and functions
   - Avoid invented values, rules, or formats
+  - Appear under the relevant core section rather than as narration before the specification
 
   ## Validation Checklist
 
   Before submitting, verify:
-  - [ ] All properties and functions originate in the draft
+  - [ ] All fields, variants, and functionalities originate in the draft
   - [ ] Constructor policy applied correctly (Struct/NewType gets `new` when missing; Enum does not unless explicit)
-  - [ ] Trailing-underscore fields include auto-implemented getters with one underscore removed (for example `field_` -> `field`)
+  - [ ] Accessible fields from `input.draft_summary` receive generated getters; inaccessible fields do not
   - [ ] No new fields, variants, or rules were added
   - [ ] Names exactly match the draft
   - [ ] Referenced items in dependency context were resolved before marking unspecified/blocking
@@ -201,6 +229,12 @@ variable_prompt: |
 
   Draft content:
   {{input.draft_content}}
+
+  Draft parser kind (optional):
+  {{input.draft_kind?}}
+
+  Draft summary (authoritative when present):
+  {{input.draft_summary?}}
 
   Dependency manifest (optional):
   {{input.direct_dependencies?}}

@@ -4,15 +4,17 @@
 
 A data type representing an amount of a currency.
 
-## Fields:
+## Fields
 
-- **amount** an integer value that denominates the amount in the minor unit of the currency. Negative values are allowed
-- **currency** : uses the currency enum to specify the currency of the amount
+| Field | Meaning | Notes |
+|---|---|---|
+| amount | Integer value in the currency's minor unit | Negative values are allowed |
+| currency | Currency enum for the amount | Uses the Currency type |
 
-## Functionality
+## Functionalities
 
-- **get_amount** amount / 100 (floating point division)
-- **get_currency** returns the currency
-- **zero** takes a currency and returns an amount object with the amount set to zero
-**addition** two amount objects can be added provided that the currency is the same for both. The result is a new amount object where the amount is set to the sum of the amounts of the operands. The currency is unchanged. If the currencies don't match we panic
-**subtraction** two amount objects can be subtracted provided that the currency is the same for both. the result is a new amount object where the amount is set to the difference of the amounts of the operands. The currency remains unchanged. If the currencies don't match we panic
+- **get_amount** Returns `amount / 100` using floating-point division.
+- **get_currency** Returns the currency.
+- **zero** Takes a currency and returns an amount object with amount set to zero.
+- **addition** Two amount objects can be added when their currencies match. The result is a new amount object with the summed amount and the same currency. If the currencies do not match, the operation panics.
+- **subtraction** Two amount objects can be subtracted when their currencies match. The result is a new amount object with the difference and the same currency. If the currencies do not match, the operation panics.

@@ -5,10 +5,13 @@
 Represents the main charater of the snake game.
 
 ## Fields
-- **body_** A list of position objects. The head being the first element in the list
-- **direction_** The direction the snake is travelling
 
+| Field | Meaning | Notes |
+|---|---|---|
+| body | Ordered list of snake positions | The head is the first element |
+| direction | Current direction of travel | Uses the Direction type |
 
-## business rules
+## Rules
+
 - body length > 0
 - All positions in `body` are unique (no self-overlap).

@@ -17,6 +17,7 @@ mod compilation_fix;
 mod contracts;
 mod dependency_graph;
 mod dependency_tooling;
+mod draft_schema;
 mod external_api_expansion;
 mod interface_capsules;
 mod openapi_fetcher;
@@ -45,6 +46,7 @@ use dependency_tooling::{
     ensure_tooling_artifacts_fresh, load_dependency_manifest, load_symbols_context,
     merge_manifest_dependencies,
 };
+use draft_schema::parse_repo_draft;
 use external_api_expansion::{
     GeneratedDraftArtifact, parse_external_api_expansion, sanitize_generated_artifact_name,
 };
@@ -456,11 +458,14 @@ fn create_specification_inner(
                         };
 
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
+                    let parsed_draft =
+                        parse_repo_draft(&draft_file, &workspace.drafts_dir, &draft_content)?;
                     let dependency_context = build_specification_context(
                         &draft_file,
                         &draft_content,
                         dependency_context,
                         &workspace.drafts_dir,
+                        parsed_draft.as_ref(),
                     )?;
                     let (dependency_context, estimated) = fit_context_to_token_limit(
                         &executor,

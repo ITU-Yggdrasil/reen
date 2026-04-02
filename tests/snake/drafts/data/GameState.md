@@ -6,18 +6,22 @@ Holds the current score, where the food is (if any), and how long the game has b
 
 ## Fields
 
-- **score_** a whole number that is never negative, representing the current score.
-  - Score starts at 0.
-  - Score only increases.
-  - Score will not exceed 2,000,000,000 during normal play.
-- **food_placement** None if no food is available; Some(food) if there is food on the board.
-- **game_started** start time of the game as a whole number representing `utc.now_ms` when the game was started.
+| Field | Meaning | Notes |
+|---|---|---|
+| score | Current score as a whole number | Starts at `0` |
+| food_placement | Current food on the board, if any | `None` means no food is available |
+| game_started | Game start time expressed as `utc.now_ms` | Used to calculate elapsed game time |
 
+## Rules
 
-## Functionality
+- `score` is never negative.
+- `score` only increases.
+- During normal play, `score` does not exceed `2,000,000,000`.
 
-- **new** initializes the game state by setting score to 0 and `game_started = utc.now_ms`; `food_placement` is set to None.
-- **place_food** takes Some(food) or None and returns a new GameState with `food_placement` updated.
-- **game time** returns `utc.now_ms - game_started` in milliseconds.
-- **increment_score** takes a positive whole number and returns a new GameState with the score increased by that amount.
-- **food** returns `food_placement`.
+## Functionalities
+
+- **new** Initializes the game state by setting `score = 0`, `food_placement = None`, and `game_started = utc.now_ms`.
+- **place_food** Takes `Some(food)` or `None` and returns a new GameState with `food_placement` updated.
+- **game_time** Returns `utc.now_ms - game_started` in milliseconds.
+- **increment_score** Takes a positive whole number and returns a new GameState with the score increased by that amount.
+- **food** Returns `food_placement`.

@@ -1,6 +1,6 @@
 # MetricsContext
 
-## Description
+## Purpose
 
 MetricsContext owns the HTTP server and is responsible for serving two kinds of responses:
 
@@ -15,100 +15,76 @@ reads the current buffered events and serialises them as dashboard event objects
 MetricsContext has no knowledge of events, geography, or feeds — it only knows how to
 ask its collaborators for a result and serialise it into the appropriate wire format.
 
----
+## Role Players
 
-## Roles
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| aggregator | Supplies on-demand aggregation results | Returns EventRate values for every cell |
+| buffer | Supplies current live PositionEvents | Returns current events, optionally filtered by source |
 
-- **aggregator**
-  Provides on-demand aggregation results.
-  Fulfilled by AggregationContext.
-
-- **buffer**
-  Provides the current live PositionEvents, optionally filtered by source.
-  Fulfilled by EventBufferContext.
-
----
-
-## Role methods
+## Role Methods
 
 ### aggregator
 
-- **produce_rates**
-  Returns one EventRate per cell, covering all cells in the grid.
+- **produce_rates** Returns one EventRate per cell, covering all cells in the grid.
 
 ### buffer
 
-- **current_events_for_source(source)**
-  Returns the current live PositionEvents, optionally filtered by source.
+- **current_events_for_source(source)** Returns the current live PositionEvents, optionally filtered by source.
 
----
+## Props
 
 ## Functionalities
 
-- **new(aggregator, buffer)**
-  Constructs a MetricsContext with the given role players.
-  Stores the aggregator and buffer. Does not itself bind a socket or start an HTTP server.
+### new
 
-- **handle_metrics_request**
-  Called when an HTTP GET arrives at the configured metrics_path.
-  Calls aggregator.produce_rates.
-  Encodes each EventRate as a Prometheus gauge metric named `geospatial_event_rate`.
-  Each metric line carries the following labels:
-  - `min_lat` — the cell's southern latitude boundary,
-  - `max_lat` — the cell's northern latitude boundary,
-  - `min_lon` — the cell's western longitude boundary,
-  - `max_lon` — the cell's eastern longitude boundary.
-  The gauge value is the events_per_minute from the EventRate.
-  Cells with a rate of zero are included in the output so that Prometheus can observe
-  the disappearance of activity.
-  Returns the full metric text with a 200 status and the Prometheus content-type header.
+| Started by | Uses | Result |
+|---|---|---|
+| application startup | aggregator, buffer | metrics context is constructed |
 
-- **handle_query_request**
-  Called when an HTTP GET arrives at the configured query_path.
-  Calls buffer.current_events_for_source(source), where source is either:
-  - absent, meaning all sources,
-  - `flight`,
-  - `lightning`,
-  - `earthquake`,
-  - `aisstream`,
-  - `adsb`,
-  - `wiki`.
-  Any other source query value is treated the same as absent: no source filter is applied
-  and events from all sources are returned.
-  Returns a JSON array.
-  Each array element is a JSON object, not a positional array.
-  The exact object fields are:
-  - `latitude`
-  - `longitude`
-  - `occurred_at`
-  - `source`
-  - `label`
-  Field meanings:
-  - `latitude`: numeric latitude in decimal degrees.
-  - `longitude`: numeric longitude in decimal degrees.
-  - `occurred_at`: timestamp string in RFC 3339 format.
-  - `source`: string event source name.
-  - `label`: string label when present, or `null` when absent.
-  Returns the JSON payload with a 200 status and an appropriate content-type header.
+Rules:
+- Stores the provided aggregator and buffer.
+- Does not bind a socket or start an HTTP server at construction time.
 
----
+| Given | When | Then |
+|---|---|---|
+| an aggregator and buffer are available | new is called | a MetricsContext is returned |
 
-## Acceptance examples
+### handle_metrics_request
 
-- Given the aggregator returns a non-zero rate for one cell, when a Prometheus scrape
-  arrives, then the response body contains exactly one non-zero `geospatial_event_rate`
-  line carrying the correct cell labels and value.
-- Given the aggregator returns rates for 648 cells, when a Prometheus scrape arrives,
-  then the response contains 648 metric lines (including any zero-valued cells).
-- Given a GET request arrives at query_path, when handle_query_request runs, then the
-  response is valid JSON and each entry is an object with fields `latitude`,
-  `longitude`, `occurred_at`, `source`, and `label`.
-- Given a GET request arrives at query_path with `source=lightning`, when
-  handle_query_request runs, then only lightning events are included in the returned
-  JSON array.
-- Given a GET request arrives at query_path with `source=wiki`, when
-  handle_query_request runs, then only wiki events are included in the returned JSON
-  array.
-- Given a GET request arrives at query_path with `source=unknown`, when
-  handle_query_request runs, then the source value is treated as absent and the returned
-  JSON array includes events from all sources.
+| Started by | Uses | Result |
+|---|---|---|
+| HTTP GET to metrics_path | aggregator | Prometheus response is returned |
+
+Rules:
+- Calls `aggregator.produce_rates`.
+- Encodes each EventRate as a Prometheus gauge metric named `geospatial_event_rate`.
+- Each metric line carries labels `min_lat`, `max_lat`, `min_lon`, and `max_lon`.
+- Uses `events_per_minute` as the gauge value.
+- Includes zero-valued cells in the output.
+- Returns the full metric text with a 200 status and the Prometheus content type.
+
+| Given | When | Then |
+|---|---|---|
+| the aggregator returns a non-zero rate for one cell | handle_metrics_request runs | the response body contains a `geospatial_event_rate` line with the correct labels and value |
+
+### handle_query_request
+
+| Started by | Uses | Result |
+|---|---|---|
+| HTTP GET to query_path | buffer, optional source filter | JSON event array is returned |
+
+Rules:
+- Calls `buffer.current_events_for_source(source)`.
+- Treats absent source as all sources.
+- Accepts `flight`, `lightning`, `earthquake`, `aisstream`, `adsb`, and `wiki` as explicit filters.
+- Treats any other source query value the same as absent.
+- Returns a JSON array of objects.
+- Each object contains `latitude`, `longitude`, `occurred_at`, `source`, and `label`.
+- Encodes `occurred_at` as RFC 3339 text.
+- Encodes `label` as `null` when absent.
+- Returns the JSON payload with a 200 status and an appropriate content type.
+
+| Given | When | Then |
+|---|---|---|
+| a GET request arrives at query_path with `source=lightning` | handle_query_request runs | only lightning events are included in the returned JSON array |

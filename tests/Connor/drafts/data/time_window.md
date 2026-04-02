@@ -11,36 +11,18 @@ old events; the AggregationContext uses it to bound the population it counts ove
 
 The default duration is five minutes. It is configurable at startup.
 
----
-
 ## Fields
 
-- **duration**
-  The length of the window expressed as a human-readable label — for example
-  "5 minutes" or "10 minutes". Intended for display and logging purposes only.
-  This field is not readable by collaborators; it exists solely for human consumption.
-
-- **minutes**
-  The same duration expressed as a plain number of minutes. This is the machine-usable
-  form: the EventBufferContext uses it to compute the staleness boundary, and the
-  AggregationContext uses it as the divisor when deriving event rates. The default value
-  is five. Both fields must always agree — they represent the same duration in different
-  forms. This field is private; collaborators read it only through the `minutes()`
-  getter listed in `Functionalities`.
-
----
+| Field | Meaning | Accessible | Notes |
+|---|---|---|---|
+| duration | Human-readable label such as `5 minutes` |  | Display and logging only |
+| minutes | Numeric duration in whole minutes | X | Machine-usable value used by buffer and aggregator |
 
 ## Functionalities
 
-- **new(duration, minutes)**
-  Constructs a TimeWindow from the human-readable label and machine-usable minute value.
+- **new(duration, minutes)** Constructs a TimeWindow from the human-readable label and machine-usable minute value.
 
-- **minutes()**
-  Returns the numeric window length in minutes.
-
----
-
-## Numeric rules
+## Rules
 
 - `minutes` is a signed 32-bit integer (`i32`).
 - `minutes` must be a whole number of minutes greater than or equal to `1`.

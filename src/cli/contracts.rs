@@ -158,9 +158,11 @@ pub(crate) fn validate_contract_artifact(
     let mut errors = spec_report.errors;
     let mut warnings = spec_report.warnings;
 
-    if has_section(&sections, "Roles") && contract.roles.is_empty() {
+    if has_any_section(&sections, &["Roles", "Role Players", "Helpers the App Uses"])
+        && contract.roles.is_empty()
+    {
         errors
-            .push("Contract stage could not extract any roles from the Roles section".to_string());
+            .push("Contract stage could not extract any roles from the role/helper section".to_string());
     }
     if has_section(&sections, "Props") && contract.props.is_empty() {
         warnings
@@ -304,7 +306,9 @@ fn extract_roles(
     dependency_context: Option<&HashMap<String, serde_json::Value>>,
 ) -> Vec<ContractRole> {
     let mut roles = Vec::new();
-    let Some(section) = find_section(sections, "Roles") else {
+    let Some(section) =
+        find_first_section(sections, &["Roles", "Role Players", "Helpers the App Uses"])
+    else {
         for name in &summary.collaborators {
             roles.push(build_fallback_role(name, summary, dependency_context));
         }
@@ -342,21 +346,15 @@ fn extract_roles(
             ));
         }
     } else {
-        let table_row_re = Regex::new(r"^\|\s*\*\*([^*|`]+)\*\*\s*\|\s*(.+?)\s*\|$").unwrap();
         let mut pending_role: Option<String> = None;
         let mut pending_notes = Vec::new();
         for line in lines {
             let trimmed = line.trim();
             if trimmed.starts_with('|') && !trimmed.contains("---") {
-                if let Some(captures) = table_row_re.captures(trimmed) {
-                    let name = captures
-                        .get(1)
-                        .map(|matched| normalize_symbol_name(matched.as_str()))
-                        .unwrap_or_default();
-                    let description = captures
-                        .get(2)
-                        .map(|matched| strip_markdown(matched.as_str()))
-                        .unwrap_or_default();
+                if let Some((name, description)) = extract_named_table_row(
+                    trimmed,
+                    &["role", "role player", "helper", "collaborator"],
+                ) {
                     roles.push(build_role_from_block(
                         &name,
                         &description,
@@ -456,22 +454,13 @@ fn extract_props(sections: &[Section]) -> Vec<ContractProp> {
         return Vec::new();
     };
     let mut props = Vec::new();
-    let table_row_re = Regex::new(r"^\|\s*\*\*([^*|`]+)\*\*\s*\|\s*(.+?)\s*\|$").unwrap();
     let mut pending_name: Option<String> = None;
     let mut pending_notes = Vec::new();
 
     for line in section.body.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('|') && !trimmed.contains("---") {
-            if let Some(captures) = table_row_re.captures(trimmed) {
-                let name = captures
-                    .get(1)
-                    .map(|matched| normalize_symbol_name(matched.as_str()))
-                    .unwrap_or_default();
-                let description = captures
-                    .get(2)
-                    .map(|matched| strip_markdown(matched.as_str()))
-                    .unwrap_or_default();
+            if let Some((name, description)) = extract_named_table_row(trimmed, &["prop"]) {
                 props.push(ContractProp {
                     name,
                     description,
@@ -860,6 +849,14 @@ fn has_section(sections: &[Section], title: &str) -> bool {
     find_section(sections, title).is_some()
 }
 
+fn find_first_section<'a>(sections: &'a [Section], titles: &[&str]) -> Option<&'a Section> {
+    titles.iter().find_map(|title| find_section(sections, title))
+}
+
+fn has_any_section(sections: &[Section], titles: &[&str]) -> bool {
+    titles.iter().any(|title| has_section(sections, title))
+}
+
 fn normalize_section_title(title: &str) -> String {
     let trimmed = title.trim().trim_end_matches(':').trim();
     let normalized = if trimmed
@@ -878,11 +875,7 @@ fn normalize_section_title(title: &str) -> String {
 }
 
 fn normalize_symbol_name(value: &str) -> String {
-    let trimmed = value
-        .trim()
-        .trim_matches('`')
-        .trim_matches('*')
-        .trim_matches('|');
+    let trimmed = strip_markdown_markup(value);
     if trimmed.is_empty() {
         return String::new();
     }
@@ -892,6 +885,47 @@ fn normalize_symbol_name(value: &str) -> String {
         .unwrap_or(trimmed)
         .trim_matches(|c: char| matches!(c, '(' | ')' | ',' | '.' | ':'))
         .to_string()
+}
+
+fn strip_markdown_markup(value: &str) -> &str {
+    value
+        .trim()
+        .trim_matches('`')
+        .trim_matches('*')
+        .trim_matches('|')
+}
+
+fn extract_named_table_row(line: &str, header_labels: &[&str]) -> Option<(String, String)> {
+    if !line.starts_with('|') || line.contains("---") {
+        return None;
+    }
+
+    let cells = line
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| strip_markdown_markup(cell.trim()).to_string())
+        .collect::<Vec<_>>();
+    if cells.len() < 2 {
+        return None;
+    }
+
+    let name_cell = cells[0].trim();
+    if name_cell.is_empty() {
+        return None;
+    }
+
+    let lowered = name_cell.to_ascii_lowercase();
+    if header_labels.iter().any(|label| *label == lowered) {
+        return None;
+    }
+
+    let name = normalize_symbol_name(name_cell);
+    if name.is_empty() {
+        return None;
+    }
+
+    let description = cells[1].trim().to_string();
+    Some((name, description))
 }
 
 fn strip_markdown(value: &str) -> String {
@@ -1005,5 +1039,65 @@ mod tests {
         assert_eq!(contract.roles[0].name, "command");
         assert_eq!(contract.role_methods[0].method_name, "next");
         assert_eq!(contract.public_functionalities[0].name, "tick");
+    }
+
+    #[test]
+    fn builds_context_contract_from_role_players_and_plain_tables() {
+        let content = r#"# CommandInputContext
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| stdin_source | Supplies keyboard input to the context | Provides non-blocking reads from standard input |
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| buffer | FIFO queue of captured keystrokes | Shared for the whole application session |
+
+## Role Methods
+### stdin_source
+- **read_available**
+  Returns all currently available keystrokes in arrival order without blocking.
+
+## Functionalities
+### capture
+- Reads available keys without blocking.
+"#;
+
+        let contract = build_contract_artifact(
+            Path::new("specifications/contexts/command_input.md"),
+            content,
+            Some(Path::new("src/contexts/command_input.rs")),
+            None,
+        );
+
+        assert_eq!(contract.roles.len(), 1);
+        assert_eq!(contract.roles[0].name, "stdin_source");
+        assert_eq!(contract.props.len(), 1);
+        assert_eq!(contract.props[0].name, "buffer");
+    }
+
+    #[test]
+    fn app_helpers_table_is_exposed_as_roles() {
+        let content = r#"# App
+
+## Helpers the App Uses
+| Helper | Role in the Application |
+|---|---|
+| `CommandInputContext` | Captures key presses into one shared FIFO stream |
+| `GameLoopContext` | Advances the game one tick at a time |
+"#;
+
+        let contract = build_contract_artifact(
+            Path::new("specifications/app.md"),
+            content,
+            Some(Path::new("src/main.rs")),
+            None,
+        );
+
+        assert_eq!(contract.roles.len(), 2);
+        assert_eq!(contract.roles[0].name, "CommandInputContext");
+        assert_eq!(contract.roles[1].name, "GameLoopContext");
     }
 }

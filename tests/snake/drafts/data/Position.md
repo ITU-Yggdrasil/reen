@@ -1,13 +1,15 @@
 # Position
 
-## Summary
+## Description
 A value object representing a cell coordinate on the Board.
 
 ## Fields
-- **x_** an integer >= 0 representing the x-coordinate on the cell grid
-- **y_** an integer >= 0 representing the y-coordinate on the cell grid
 
+| Field | Meaning | Accessible | Notes |
+|---|---|---|---|
+| x | X-coordinate on the cell grid | X | Integer greater than or equal to `0` |
+| y | Y-coordinate on the cell grid | X | Integer greater than or equal to `0` |
 
-## Functionality
+## Rules
 
-position supports equality. Two positions are considred equal if x1 equals x2 and y1 equals y2 
+- Two positions are equal when both their `x` and `y` coordinates are equal.

@@ -1,12 +1,12 @@
 # AdsbReceiverContext
 
-## Description
+## Purpose
 
 AdsbReceiverContext is the boundary adapter for the ADS-B Exchange REST API. It polls the
 API at a regular interval, translates each returned AircraftState into a PositionEvent, and
 forwards those events into the wider system.
 
-This context fulfils the EventSource role in exactly the same way as every other receiver.
+This context fulfills the EventSource role in exactly the same way as every other receiver.
 The downstream EventBufferContext must not be able to distinguish which receiver is active.
 Running this context alongside any other receiver must be a matter of configuration, not of
 changing any downstream code.
@@ -17,104 +17,104 @@ tracked aircraft, not a stream of individual updates. The receiver polls on a fi
 and emits one PositionEvent per aircraft per poll cycle, provided the aircraft has a valid
 position fix.
 
----
+## Role Players
 
-## Roles
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| event_sink | Receives produced PositionEvents | Accepts each successfully mapped aircraft event |
 
-- **event_sink**
-  The recipient of produced PositionEvents.
-  Fulfilled by EventBufferContext.
-  The receiver must not know the concrete type of the sink; it only calls the
-  receive_event behaviour on whatever is playing this role.
-
----
-
-## Props
-
-- **api_url**
-  The base URL of the ADS-B Exchange aircraft endpoint. When a bounding_box is provided,
-  the receiver constructs a region-scoped URL (e.g., the lat/lon/dist form); otherwise
-  it requests the global snapshot.
-
-- **api_key**
-  The API key required to authenticate with ADS-B Exchange. Sent as a request header.
-
-- **poll_interval**
-  How frequently the API should be queried. ADS-B Exchange data updates approximately
-  every second server-side, but rate limits apply at the API tier; a sensible default
-  aligns with the permitted request rate for the configured API key tier.
-
-- **bounding_box**
-  An optional geographic region used to restrict the query. Defined inline as four
-  decimal-degree values: min_latitude, max_latitude, min_longitude, max_longitude.
-  When absent, the global aircraft snapshot is requested.
-
----
-
-## Role methods
+## Role Methods
 
 ### event_sink
 
-- **receive_event(event)**
-  Accepts a single PositionEvent and stores it for later querying.
-  The receiver calls this once per successfully mapped aircraft state.
+- **receive_event(event)** Accepts a single PositionEvent and stores it for later querying.
 
----
+## Props
+
+| Prop | Meaning | Notes |
+|---|---|---|
+| api_url | Base URL of the ADS-B Exchange aircraft endpoint | When `bounding_box` is absent, the global snapshot is requested |
+| api_key | API key used to authenticate with ADS-B Exchange | Sent as a request header |
+| poll_interval | How frequently the API is queried | Default should respect the configured rate-limit tier |
+| bounding_box | Optional geographic restriction for the query | Inline `min_latitude`, `max_latitude`, `min_longitude`, `max_longitude` values |
 
 ## Functionalities
 
-- **new(event_sink, api_url, api_key, poll_interval, bounding_box)**
-  Constructs an AdsbReceiverContext with the given role player and props.
-  The event_sink is passed as a shared reference — the same EventBufferContext instance
-  is also held by AggregationContext (and by any other active receiver). The application
-  must not give up sole ownership of the buffer when passing it here.
-  Stores all provided values. Does not start polling.
-  Call start to begin the polling loop.
+### new
 
-- **start**
-  Begins the polling loop. Runs continuously in the background.
-  On each iteration, waits for poll_interval to elapse, then calls fetch_aircraft.
+| Started by | Uses | Result |
+|---|---|---|
+| application startup | event_sink, props | receiver is constructed |
 
-- **fetch_aircraft**
-  Issues a GET request to the configured api_url, passing the bounding_box if set and
-  the api_key in the request header.
-  On a successful response, iterates over the returned aircraft records and calls
-  on_aircraft_received for each one.
-  On a failed or rate-limited response, records an error count for diagnostic purposes
-  and waits until the next scheduled interval before retrying.
+Rules:
+- Stores `event_sink`, `api_url`, `api_key`, `poll_interval`, and optional `bounding_box`.
+- The `event_sink` is passed by shared reference because the same EventBufferContext may be shared with other contexts.
+- Does not start polling during construction.
+- Call `start` to begin the polling loop.
 
-- **on_aircraft_received(raw_state)**
-  Attempts to parse the raw record as an AircraftState.
-  If the latitude or longitude is absent, discards the record silently.
-  Otherwise, maps the aircraft state to a PositionEvent:
-  - latitude and longitude are taken directly from the aircraft state,
-  - occurred_at is taken from the state's timestamp,
-  - source is set to "adsb",
-  - label is set to the callsign if present and non-blank, otherwise to the ICAO hex code.
-  Passes the resulting PositionEvent to event_sink.receive_event.
+| Given | When | Then |
+|---|---|---|
+| an event sink and valid configuration are available | new is called | an AdsbReceiverContext is returned without polling yet |
 
----
+### start
 
-## Parsing details
+| Started by | Uses | Result |
+|---|---|---|
+| application runtime | poll_interval | background polling loop begins |
 
-- The ADS-B Exchange API returns aircraft records in an `ac` array within a JSON object.
+Rules:
+- Begins a continuous background loop.
+- Waits for `poll_interval` to elapse before each fetch cycle.
+- Calls `fetch_aircraft` on each scheduled iteration.
+- Retains the same configuration and event sink across iterations.
+
+| Given | When | Then |
+|---|---|---|
+| a configured receiver | start is called | the receiver begins polling on the configured interval |
+
+### fetch_aircraft
+
+| Started by | Uses | Result |
+|---|---|---|
+| polling loop | api_url, api_key, optional bounding_box | one API snapshot is fetched and each record is handed to `on_aircraft_received` |
+
+Rules:
+- Issues a GET request to the configured `api_url`.
+- Includes `api_key` as a request header.
+- Applies `bounding_box` to the request when configured.
+- On a successful response, iterates the returned aircraft records from the `ac` array.
+- Calls `on_aircraft_received` for each returned record.
+- On failed or rate-limited responses, records a diagnostic error count.
+- Waits until the next scheduled interval before retrying after a failure.
+
+| Given | When | Then |
+|---|---|---|
+| a successful response containing four aircraft with valid coordinates | fetch_aircraft runs | four records are handed to `on_aircraft_received` and four PositionEvents can be delivered |
+
+### on_aircraft_received
+
+| Started by | Uses | Result |
+|---|---|---|
+| `fetch_aircraft` | raw_state, event_sink | a mapped PositionEvent is delivered or the record is discarded |
+
+Rules:
+- Attempts to parse `raw_state` as an AircraftState.
+- If latitude or longitude is absent, discards the record silently.
+- Maps latitude and longitude directly from the aircraft state when present.
+- Uses the state's timestamp as `occurred_at`.
+- Sets `source` to `adsb`.
+- Uses the callsign as `label` when it is present and non-blank.
+- Falls back to the ICAO hex code as `label` when the callsign is absent or blank.
+- Passes the resulting PositionEvent to `event_sink.receive_event`.
+
+| Given | When | Then |
+|---|---|---|
+| an aircraft record with blank callsign and valid coordinates | on_aircraft_received runs | a PositionEvent is emitted with the ICAO hex code as its label |
+
+## Notes
+
+- The ADS-B Exchange API returns aircraft records in an `ac` array inside a JSON object.
 - Altitude may be numeric or the string `"ground"`.
-- Latitude and longitude are floating-point numbers; absent means no field or null.
-- Timestamp is typically a Unix epoch integer in seconds; the `now` field in the response
-  envelope gives the snapshot time and can be used as a fallback when per-aircraft time
-  is absent.
-- Callsign may be an empty string rather than absent; both must be treated as missing.
-
----
-
-## Acceptance examples
-
-- Given a successful response containing four aircraft with valid coordinates, when
-  fetch_aircraft runs, then four PositionEvents are delivered to event_sink.
-- Given an aircraft record with no latitude, when on_aircraft_received runs, then no
-  event is delivered and the record is silently discarded.
-- Given an aircraft with a blank callsign, when on_aircraft_received runs, then the
-  resulting PositionEvent uses the ICAO hex code as the label.
-- Given the API returns a rate-limit response, when fetch_aircraft runs, then no events
-  are delivered, the error count increases by one, and the next attempt is deferred to
-  the next scheduled interval.
+- Latitude and longitude are floating-point numbers; absence means no field or `null`.
+- Timestamp is usually a Unix epoch integer in seconds, and the envelope `now` value can be used when a per-aircraft timestamp is absent.
+- Callsign may be an empty string rather than absent; both cases are treated as missing.

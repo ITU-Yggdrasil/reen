@@ -125,6 +125,13 @@ static_prompt: |
   Follow the structure of the draft.
   You may add headings only to organize existing information.
 
+  For all outputs:
+  - Do NOT include first-person or tool/process narration such as "I checked", "I'll fetch", or "Here is the final specification."
+  - Keep appendix naming consistent with the other specification agents:
+    - `Resolved From Dependencies`
+    - `Blocking Ambiguities`
+    - `Implementation Choices Left Open`
+
   Include this section when applicable:
   **Blocking Ambiguities**
   - List only ambiguities that block implementation because they affect externally observable behavior, business rules, or conflict directly with referenced dependency artifacts
@@ -182,6 +189,12 @@ variable_prompt: |
 
   Draft content:
   {{input.draft_content}}
+
+  Draft parser kind (optional):
+  {{input.draft_kind?}}
+
+  Draft summary (optional):
+  {{input.draft_summary?}}
 
   Dependency manifest (optional):
   {{input.direct_dependencies?}}

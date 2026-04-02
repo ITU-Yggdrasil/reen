@@ -36,6 +36,15 @@ static_prompt: |
   - Only add or clarify information that directly addresses the listed blocking ambiguities
   - Preserve existing content; only add or clarify what is needed
   - Patch the correct draft(s)—blockers may point to dependency drafts
+  - Map blockers back to the aligned specification and draft section names first:
+    - context specs/drafts may refer to `Purpose`, `Role Players`, `Role Methods`, `Props`, `Functionalities`, and `Notes`
+    - data specs/drafts may refer to `Description`, `Fields`, `Variants`, `Rules`, `Construction Rules`, `Access Rules`, `Functionalities`, and `Notes`
+    - app specs may still use flexible core sections, but appendices such as `Blocking Ambiguities` and `Resolved From Dependencies` are not draft sections and should not be patched directly
+  - Preserve the strict draft schemas already in use:
+    - contexts use `Purpose`, `Role Players`, `Role Methods`, `Props`, `Functionalities`
+    - data uses `Description` plus exactly one of `Fields` or `Variants`
+    - apis use `Description`, `Authoritative Sources`, optional `Consumed Surface`, optional `Generated Data Specifications`
+  - Keep required table headers and labeled-bullet shapes intact when editing a structured draft
 
   ## Output format (CRITICAL)
 

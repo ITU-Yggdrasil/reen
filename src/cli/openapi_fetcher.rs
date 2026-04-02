@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
 
+use super::draft_schema::parse_api_draft_content;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExternalApiDraftMetadata {
     pub openapi_url: Option<String>,
@@ -72,19 +74,26 @@ pub fn is_external_api_draft_path(draft_file: &Path, drafts_dir: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn parse_external_api_draft(draft_content: &str) -> ExternalApiDraftMetadata {
-    let openapi_section =
-        extract_markdown_section(draft_content, &["OpenAPI", "API Specification"]);
-    let documentation_section = extract_markdown_section(draft_content, &["Documentation"]);
-    let scope_section = extract_markdown_section(draft_content, &["Scope"]);
+pub fn parse_external_api_draft(draft_content: &str) -> Result<ExternalApiDraftMetadata> {
+    let summary = parse_api_draft_content(draft_content)?;
+    let endpoint_scope = summary
+        .consumed_surface
+        .values()
+        .flat_map(|values| values.iter())
+        .flat_map(|value| extract_endpoint_scope(value))
+        .fold(Vec::new(), |mut acc, endpoint| {
+            if !acc.iter().any(|existing| existing == &endpoint) {
+                acc.push(endpoint);
+            }
+            acc
+        });
 
-    ExternalApiDraftMetadata {
-        openapi_url: extract_labeled_value(&openapi_section, "URL")
-            .or_else(|| extract_first_url(&openapi_section)),
-        openapi_local: extract_labeled_value(&openapi_section, "Local"),
-        documentation_urls: extract_urls(&documentation_section),
-        endpoint_scope: extract_endpoint_scope(&scope_section),
-    }
+    Ok(ExternalApiDraftMetadata {
+        openapi_url: summary.authoritative_sources.openapi_url,
+        openapi_local: summary.authoritative_sources.openapi_local,
+        documentation_urls: summary.authoritative_sources.documentation_urls,
+        endpoint_scope,
+    })
 }
 
 pub fn load_openapi_content(
@@ -122,7 +131,7 @@ pub fn extract_external_api_symbol_inventory(
     draft_file: &Path,
     draft_content: &str,
 ) -> Result<ExternalApiSymbolInventory> {
-    let metadata = parse_external_api_draft(draft_content);
+    let metadata = parse_external_api_draft(draft_content)?;
     let document = load_openapi_document(draft_file, &metadata)?;
     Ok(extract_symbol_inventory_from_openapi(&document))
 }
@@ -472,60 +481,6 @@ fn short_symbol_hash(value: &str) -> String {
     hex::encode(hasher.finalize())[..8].to_string()
 }
 
-fn extract_markdown_section(content: &str, titles: &[&str]) -> String {
-    let headings = titles
-        .into_iter()
-        .map(|title| format!("## {}", title))
-        .collect::<Vec<_>>();
-    let mut lines = Vec::new();
-    let mut in_section = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("## ") {
-            if headings.iter().any(|heading| trimmed == heading) {
-                in_section = true;
-                continue;
-            }
-            if in_section {
-                break;
-            }
-        }
-        if in_section {
-            lines.push(line);
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn extract_labeled_value(section: &str, label: &str) -> Option<String> {
-    let pattern = format!(
-        r"(?im)^\s*[-*]?\s*(?:\*\*)?{}(?:\*\*)?\s*:\s*(\S.+?)\s*$",
-        regex::escape(label)
-    );
-    let re = Regex::new(&pattern).ok()?;
-    re.captures(section)
-        .and_then(|captures| captures.get(1))
-        .map(|capture| capture.as_str().trim().to_string())
-}
-
-fn extract_urls(section: &str) -> Vec<String> {
-    let url_re = Regex::new(r"https?://\S+").expect("valid URL regex");
-    let mut urls = Vec::new();
-    for capture in url_re.find_iter(section) {
-        let url = capture.as_str().trim_end_matches([',', ')', ']']);
-        if !urls.iter().any(|existing| existing == url) {
-            urls.push(url.to_string());
-        }
-    }
-    urls
-}
-
-fn extract_first_url(section: &str) -> Option<String> {
-    extract_urls(section).into_iter().next()
-}
-
 fn extract_endpoint_scope(section: &str) -> Vec<String> {
     let endpoint_re = Regex::new(r"/[A-Za-z0-9_{}./:-]*").expect("valid endpoint regex");
     let mut endpoints = Vec::new();
@@ -558,22 +513,32 @@ mod tests {
         std::env::temp_dir().join(format!("reen_openapi_{}_{}", prefix, nanos))
     }
 
+    fn strict_local_openapi_draft(title: &str, relative_spec_path: &str) -> String {
+        format!(
+            "# {title}\n\n## Description\n\nTest external API draft.\n\n## Authoritative Sources\n\n- OpenAPI Local: {relative_spec_path}\n"
+        )
+    }
+
     #[test]
     fn parses_external_api_draft_metadata() {
         let draft = r#"# Stripe API Client
 
-## API Specification
-- **URL**: https://example.com/openapi.json
-- **Local**: specs/stripe.yaml
+## Description
 
-## Documentation
-- **URL**: https://docs.example.com/stripe
+Stripe API.
 
-## Scope
-- Endpoints to include: /v1/charges, /v1/customers
+## Authoritative Sources
+
+- OpenAPI URL: https://example.com/openapi.json
+- OpenAPI Local: specs/stripe.yaml
+- Documentation URL: https://docs.example.com/stripe
+
+## Consumed Surface
+
+- Operations: /v1/charges, /v1/customers
 "#;
 
-        let metadata = parse_external_api_draft(draft);
+        let metadata = parse_external_api_draft(draft).expect("parse");
         assert_eq!(
             metadata.openapi_url.as_deref(),
             Some("https://example.com/openapi.json")
@@ -609,14 +574,17 @@ mod tests {
     fn parses_external_api_draft_metadata_from_bare_api_specification_url() {
         let draft = r#"# AISStream
 
-## API Specification
-- https://example.com/openapi.yaml
+## Description
 
-## Documentation
-- https://docs.example.com/aisstream
+AIS stream.
+
+## Authoritative Sources
+
+- OpenAPI URL: https://example.com/openapi.yaml
+- Documentation URL: https://docs.example.com/aisstream
 "#;
 
-        let metadata = parse_external_api_draft(draft);
+        let metadata = parse_external_api_draft(draft).expect("parse");
         assert_eq!(
             metadata.openapi_url.as_deref(),
             Some("https://example.com/openapi.yaml")
@@ -713,7 +681,7 @@ mod tests {
         let draft_file = draft_dir.join("stripe.md");
         fs::write(
             &draft_file,
-            "# Stripe\n\n## OpenAPI\n- Local: specs/stripe.yaml\n",
+            strict_local_openapi_draft("Stripe", "specs/stripe.yaml"),
         )
         .expect("write draft");
         fs::write(
@@ -796,7 +764,7 @@ components:
         let draft_file = draft_dir.join("demo.md");
         fs::write(
             &draft_file,
-            "# Demo\n\n## OpenAPI\n- Local: specs/demo.yaml\n",
+            strict_local_openapi_draft("Demo", "specs/demo.yaml"),
         )
         .expect("write draft");
         fs::write(

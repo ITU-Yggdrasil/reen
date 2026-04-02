@@ -1,6 +1,6 @@
 # AggregationContext
 
-## Description
+## Purpose
 
 AggregationContext is the analytical layer that translates a population of recent
 PositionEvents into per-cell EventCounts and EventRates.
@@ -10,82 +10,80 @@ belong to collaborators it works with via roles. On each request, it asks the bu
 for the current event population, asks the grid to assign each event to a cell, and
 then tallies the results.
 
-AggregationContext is stateless between calls: every invocation of produce_counts or
-produce_rates recomputes from scratch against the current state of the buffer.
+AggregationContext is stateless between calls: every invocation of `produce_counts` or
+`produce_rates` recomputes from scratch against the current state of the buffer.
 
----
+## Role Players
 
-## Roles
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| buffer | Supplies the current population of recent PositionEvents | Provides current events and the active TimeWindow |
+| grid | Supplies the geographic cell layout | Maps coordinates to cells and enumerates all cells |
 
-- **buffer**
-  Provides the current population of recent PositionEvents.
-  Fulfilled by EventBufferContext.
-
-- **grid**
-  Provides the spatial organisation of the world into GeographicCells.
-  Fulfilled by GridContext.
-
----
-
-## Role methods
+## Role Methods
 
 ### buffer
 
-- **current_events**
-  Returns all PositionEvents currently within the configured time window.
-
-- **window**
-  Returns the TimeWindow currently configured on the buffer.
-  Used by produce_counts to stamp each EventCount with the active window, and by
-  produce_rates to obtain the window's minutes value as the divisor for rate calculation.
+- **current_events** Returns all PositionEvents currently within the configured time window.
+- **window** Returns the active TimeWindow used to stamp counts and derive rates.
 
 ### grid
 
-- **cell_for(latitude, longitude)**
-  Returns the GeographicCell that contains the given coordinate.
+- **cell_for(latitude, longitude)** Returns the GeographicCell that contains the given coordinate.
+- **all_cells** Returns the complete list of GeographicCells in the grid.
 
-- **all_cells**
-  Returns the complete list of GeographicCells in the grid.
-
----
+## Props
 
 ## Functionalities
 
-- **new(buffer, grid)**
-  Constructs the context with the provided buffer and grid role players.
-  The buffer is passed as a shared reference (the same instance is also held by the
-  receiver contexts), so the application must not hand over sole ownership of the buffer
-  here. Performs no computation at construction time.
+### new
 
-- **produce_counts**
-  Returns an EventCount for every cell in the grid.
-  Steps:
-  1. Calls buffer.window to obtain the active TimeWindow.
-  2. Calls buffer.current_events to get the live event population.
-  3. For each event, calls grid.cell_for with the event's latitude and longitude to
-     determine which cell it belongs to.
-  4. Tallies the number of events per cell.
-  5. Calls grid.all_cells to obtain the full cell list.
-  6. Returns one EventCount per cell. Cells with no matching events receive a count
-     of zero — no cell is omitted from the result.
-  The window field of each EventCount is set to the TimeWindow obtained in step 1.
+| Started by | Uses | Result |
+|---|---|---|
+| application startup | buffer, grid | aggregation context is constructed |
 
-- **produce_rates**
-  Returns an EventRate for every cell in the grid.
-  Calls produce_counts internally. For each EventCount, divides the count by the
-  window's minutes value to derive the rate.
-  Because TimeWindow.minutes is defined as a positive whole-number `i32` with minimum
-  value `1`, this division is always well-defined for valid inputs and cannot divide by zero.
-  Returns one EventRate per cell in the same exhaustive fashion as produce_counts.
-  The window field of each EventRate is the same TimeWindow carried by its EventCount.
+Rules:
+- Stores the provided buffer and grid role players.
+- The buffer is passed as a shared reference.
+- Performs no computation at construction time.
 
----
+| Given | When | Then |
+|---|---|---|
+| a buffer and grid are available | new is called | an AggregationContext is returned |
 
-## Acceptance examples
+### produce_counts
 
-- Given the buffer holds three events all in the same cell, when produce_counts runs,
-  then that cell has a count of three and all other cells have a count of zero.
-- Given a window of five minutes and a cell count of ten, when produce_rates runs,
-  then that cell has an events_per_minute of two.
-- Given the buffer is empty, when produce_counts runs, then all cells have a count of
-  zero and the total number of EventCounts equals the number of cells in the grid.
+| Started by | Uses | Result |
+|---|---|---|
+| caller requesting counts | buffer, grid | one EventCount per grid cell is returned |
+
+Rules:
+- Calls `buffer.window` to obtain the active TimeWindow.
+- Calls `buffer.current_events` to obtain the live event population.
+- Calls `grid.cell_for` for each event to determine its cell.
+- Tallies the number of events per cell.
+- Calls `grid.all_cells` to obtain the full cell list.
+- Returns one EventCount per cell.
+- Cells with no matching events receive a count of zero.
+- The `window` field of each EventCount is set to the TimeWindow obtained from the buffer.
+
+| Given | When | Then |
+|---|---|---|
+| the buffer holds three events in one cell | produce_counts runs | that cell has a count of three and all other cells have zero |
+
+### produce_rates
+
+| Started by | Uses | Result |
+|---|---|---|
+| caller requesting rates | produce_counts | one EventRate per grid cell is returned |
+
+Rules:
+- Calls `produce_counts` internally.
+- Divides each EventCount by the window's minutes value to derive the rate.
+- Because TimeWindow minutes are always at least `1`, valid inputs do not divide by zero.
+- Returns one EventRate per cell in the same exhaustive fashion as `produce_counts`.
+- Carries the same TimeWindow from each EventCount into the resulting EventRate.
+
+| Given | When | Then |
+|---|---|---|
+| a window of five minutes and a cell count of ten | produce_rates runs | that cell has an events_per_minute value of two |

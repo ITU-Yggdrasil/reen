@@ -2,34 +2,27 @@
 
 ## Description
 
-The ledger is the cvore of the banking system. Any transaction is written to the ledger in form of LedgerEntries. When they are comitted to the ledger, the ledger records the LedgerEntry. 
+The ledger is the core of the banking system.
+Any transaction is written to the ledger in the form of a LedgerEntry.
+The ledger is immutable, so adding a new entry produces a new ledger object while preserving
+the previous chain of entries.
 
-The ledger is immutable so adding a new ledger entry produces a new ledger object. The entries of the ledger are kept.
+## Fields
 
+| Field | Meaning | Notes |
+|---|---|---|
+| head | Most recent ledger entry | Required when a ledger exists |
+| tail | Previous immutable ledger or `None` | `None` for the first-ever entry |
 
-## Properties
+## Rules
 
-- **head** a ledger entry
-- **tail** an immutable reference to a ledger object representing all previous ledger entries or None if head is the first ever entry
+- Adding an entry produces a new immutable ledger value.
+- The historical chain of entries is preserved through `tail`.
 
-## Functionality  
+## Functionalities
 
-- **get_entries_for** Provided an account number (i32) the ledger returns all ledger entries where that account is either sink or source. It should be sorted ascending based on the timestamps of the entries. Duplicate timestampts for ledger entries for the same account can't happen.
-
-- **add_entry** Commits an entry to the ledger. The result of the operation is a _new_ ledger, with the old one as it's (internal) tail. Every ledger entry represents a transaction. Adding the entry, is comparable to comitting an atomic transaction in a database. 
-  **business rules**:
-  - At least one of sink and source must be not None.
-  - The hash of the current head entry must match the prev_hash of the entry being added.
-
-**new** Accepts an entry and creates a new ledger with None as the tail and the provided entry as the head
-**settle** Only valid for an unsettled entry i.e. one where the sink is None. Since the entries are immutable, the method creates a new entry based on the input/argument setting the sink to the provided account id.
-The timestamp is the timestamp of the original ledger entry.
-Returns anyhow::Result<LedgerEntry>
-
-**create_entry** provided with a source (including None), an amount, the method constructs a new ledger entry and returns this.
-- if source is not null at least on entry for that account must exist on the ledger.
-- sink is always None at this point for the ledger entry
-- timestamp is utc.now
-- prev_hash must be set to the hash of the current head entry on the ledger.
-- the hash is not provided, it's calculated by the entry itself
-Returns anyhow::Result<LedgerEntry>
+- **get_entries_for** Given an account number, returns all ledger entries where that account is either sink or source. The result is sorted ascending by timestamp.
+- **add_entry** Commits an entry and returns a new ledger whose old state becomes the internal tail. At least one of sink and source must be present, and the current head hash must match the entry's `prev_hash`.
+- **new** Accepts an entry and creates a new ledger with `None` as the tail and the provided entry as the head.
+- **settle** Takes an unsettled entry whose sink is `None`, returns a new entry with sink set to the provided account id, and preserves the original timestamp.
+- **create_entry** Given a source account (including `None`) and an amount, constructs a new unsettled ledger entry. If source is not `None`, at least one entry for that account must already exist on the ledger. The created entry always has `sink = None`, `timestamp = utc.now`, `prev_hash` equal to the current head hash, and a hash calculated by the entry itself.

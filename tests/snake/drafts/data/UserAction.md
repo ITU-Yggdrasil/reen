@@ -2,4 +2,11 @@
 
 ## Description
 
-An enum that coomunicates user actions. An action can either be Movement(Direction) or Fire
+An enum that communicates user actions.
+
+## Variants
+
+| Variant | Meaning | Notes |
+|---|---|---|
+| Movement(Direction) | A movement command carrying a Direction value | Used for `w`, `a`, `s`, `d` input |
+| Fire | A fire action | Used for the space key |

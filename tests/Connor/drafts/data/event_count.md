@@ -8,45 +8,19 @@ over a specific TimeWindow.
 It is a snapshot value — it reflects the state of the event buffer at the moment it was
 computed. Two EventCounts for the same cell computed at different moments may differ.
 
----
-
 ## Fields
 
-All fields are private. Collaborators read them only through the getter methods listed in
-`Functionalities`.
-
-- **cell**
-  The geographic region this count applies to.
-  Read by AggregationContext when constructing the corresponding EventRate.
-
-- **count**
-  The total number of PositionEvents whose coordinates fell within the cell and whose
-  occurred_at timestamp fell within the relevant time window.
-  Read by AggregationContext when computing the rate by dividing by the window's minutes value.
-
-- **window**
-  The time window over which the count was computed.
-  Read by AggregationContext to carry the window forward into each EventRate.
-
----
+| Field | Meaning | Accessible | Notes |
+|---|---|---|---|
+| cell | Geographic region the count applies to | X | Used to build EventRate |
+| count | Number of matching PositionEvents in the cell | X | Whole-event cardinality |
+| window | Time window the count was computed over | X | Carried into EventRate |
 
 ## Functionalities
 
-- **new(cell, count, window)**
-  Constructs an EventCount from the supplied field values.
+- **new(cell, count, window)** Constructs an EventCount from the supplied field values.
 
-- **cell()**
-  Returns the geographic cell this count applies to.
-
-- **count()**
-  Returns the number of matching events.
-
-- **window()**
-  Returns the time window over which the count was computed.
-
----
-
-## Numeric rules
+## Rules
 
 - `count` is a signed 32-bit integer (`i32`) in storage and on the wire.
 - `count` represents a cardinality and therefore must be greater than or equal to `0`.

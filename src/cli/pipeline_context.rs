@@ -7,6 +7,7 @@ use super::agent_executor::AgentExecutor;
 use super::contracts::{
     ContractArtifact, compact_contract_artifact_value, compact_contract_artifacts,
 };
+use super::draft_schema::DraftDocument;
 use super::interface_capsules::{InterfaceCapsule, compact_interface_capsules};
 use super::openapi_fetcher::{
     extract_external_api_symbol_inventory, is_external_api_draft_path, load_openapi_content,
@@ -241,18 +242,23 @@ pub(super) fn build_specification_context(
     draft_content: &str,
     mut context: HashMap<String, serde_json::Value>,
     drafts_dir: &str,
+    parsed_draft: Option<&DraftDocument>,
 ) -> Result<HashMap<String, serde_json::Value>> {
     let drafts_root = Path::new(drafts_dir);
     let relative_path = draft_file.strip_prefix(drafts_root).unwrap_or(draft_file);
     if relative_path == Path::new("app.md") {
         context.insert("specification_kind".to_string(), json!("app"));
     }
+    if let Some(parsed) = parsed_draft {
+        context.insert("draft_summary".to_string(), json!(parsed.summary));
+        context.insert("draft_kind".to_string(), json!(parsed.kind));
+    }
 
     if !is_external_api_draft_path(draft_file, drafts_dir) {
         return Ok(context);
     }
 
-    let metadata = parse_external_api_draft(draft_content);
+    let metadata = parse_external_api_draft(draft_content)?;
     let openapi_content = load_openapi_content(draft_file, &metadata)?;
     let symbol_inventory = extract_external_api_symbol_inventory(draft_file, draft_content)?;
     context.insert("openapi_content".to_string(), json!(openapi_content));
@@ -563,9 +569,14 @@ mod tests {
     #[test]
     fn build_specification_context_marks_root_app_drafts() {
         let context = HashMap::new();
-        let built =
-            build_specification_context(Path::new("drafts/app.md"), "# App", context, "drafts")
-                .expect("build spec context");
+        let built = build_specification_context(
+            Path::new("drafts/app.md"),
+            "# App",
+            context,
+            "drafts",
+            None,
+        )
+        .expect("build spec context");
 
         assert_eq!(built.get("specification_kind"), Some(&json!("app")));
     }
@@ -578,6 +589,7 @@ mod tests {
             "# Game Loop",
             context,
             "drafts",
+            None,
         )
         .expect("build spec context");
 

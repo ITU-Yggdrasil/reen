@@ -425,6 +425,13 @@ pub(crate) fn verify_generated_implementation(
             warnings.push(finding);
         }
     }
+    for finding in detect_ignored_immutable_return_values(spec_content, &code) {
+        high_risk_findings.push(format!(
+            "{} in {}",
+            finding,
+            output_path.display()
+        ));
+    }
 
     Ok(StaticBehaviorVerifierReport {
         contract: plan.contract,
@@ -541,6 +548,109 @@ fn detect_trivial_obligation_stubs(code: &str, role_method_names: &[String]) -> 
     findings
 }
 
+fn detect_ignored_immutable_return_values(spec_content: &str, code: &str) -> Vec<String> {
+    if !spec_declares_immutable_value_updates(spec_content) {
+        return Vec::new();
+    }
+
+    let methods = extract_immutable_transform_method_names(spec_content);
+    if methods.is_empty() {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with("let ")
+            || trimmed.starts_with("return ")
+            || trimmed.starts_with("if ")
+            || trimmed.starts_with("match ")
+        {
+            continue;
+        }
+
+        for method in &methods {
+            let pattern = format!(".{}(", method);
+            if trimmed.contains(&pattern) && trimmed.ends_with(';') {
+                findings.push(format!(
+                    "Immutable transform method '{}' appears to have its return value ignored",
+                    method
+                ));
+            }
+        }
+    }
+
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+fn spec_declares_immutable_value_updates(spec_content: &str) -> bool {
+    let sections = parse_markdown_sections(spec_content);
+    if let Some(section) = find_section(&sections, "Mutability") {
+        if section.body.to_ascii_lowercase().contains("immutable") {
+            return true;
+        }
+    }
+    spec_content
+        .to_ascii_lowercase()
+        .contains("returns a new")
+}
+
+fn extract_immutable_transform_method_names(spec_content: &str) -> Vec<String> {
+    let sections = parse_markdown_sections(spec_content);
+    let Some(section) = find_section(&sections, "Functionalities")
+        .or_else(|| find_section(&sections, "Functionality"))
+    else {
+        return Vec::new();
+    };
+
+    let mut methods = Vec::new();
+    let mut current_method: Option<String> = None;
+    let mut current_body = Vec::new();
+
+    let flush =
+        |methods: &mut Vec<String>, current_method: &mut Option<String>, current_body: &mut Vec<String>| {
+            let Some(name) = current_method.take() else {
+                current_body.clear();
+                return;
+            };
+            let body = current_body.join("\n").to_ascii_lowercase();
+            if body.contains("returns a new") {
+                methods.push(normalize_symbol_name(&name));
+            }
+            current_body.clear();
+        };
+
+    for line in section.body.lines() {
+        let trimmed = line.trim();
+        let next_name = trimmed
+            .strip_prefix("### ")
+            .map(normalize_symbol_name)
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                trimmed.strip_prefix("- **").and_then(|rest| {
+                    rest.find("**")
+                        .map(|end| normalize_symbol_name(&rest[..end]))
+                })
+            });
+
+        if let Some(name) = next_name {
+            flush(&mut methods, &mut current_method, &mut current_body);
+            current_method = Some(name);
+        } else if current_method.is_some() && !trimmed.is_empty() {
+            current_body.push(trimmed.to_string());
+        }
+    }
+
+    flush(&mut methods, &mut current_method, &mut current_body);
+    methods.sort();
+    methods.dedup();
+    methods
+}
+
 fn normalize_stub_candidate_body(body: &str) -> String {
     body.lines()
         .map(str::trim)
@@ -643,22 +753,43 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
 
 fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> SpecificationKind {
     let path = spec_path.to_string_lossy().to_ascii_lowercase();
-    if path.ends_with("/app.md")
-        || spec_content.to_ascii_lowercase().contains("application")
-        || has_section(sections, "Behavior")
+    if path.ends_with("/app.md") {
+        return SpecificationKind::App;
+    }
+
+    if has_any_section(
+        sections,
+        &["Roles", "Role Players", "Role Methods", "Functionality", "Props"],
+    ) {
+        return SpecificationKind::Context;
+    }
+    if has_any_section(sections, &["Functionalities", "Properties"]) {
+        return SpecificationKind::Data;
+    }
+
+    let title = spec_content
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# ").map(str::trim))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if title == "app"
+        || title == "application"
+        || title.contains("primary application")
+        || has_any_section(
+            sections,
+            &[
+                "Behavior",
+                "Startup",
+                "Main Loop Behavior",
+                "Exit Codes",
+                "Error Handling",
+                "Helpers the App Uses",
+            ],
+        )
     {
         return SpecificationKind::App;
     }
-    if has_section(sections, "Roles")
-        || has_section(sections, "Role Methods")
-        || has_section(sections, "Functionality")
-        || has_section(sections, "Props")
-    {
-        return SpecificationKind::Context;
-    }
-    if has_section(sections, "Functionalities") || has_section(sections, "Properties") {
-        return SpecificationKind::Data;
-    }
+
     SpecificationKind::Unknown
 }
 
@@ -703,6 +834,14 @@ fn has_section(sections: &[Section], title: &str) -> bool {
     find_section(sections, title).is_some()
 }
 
+fn find_first_section<'a>(sections: &'a [Section], titles: &[&str]) -> Option<&'a Section> {
+    titles.iter().find_map(|title| find_section(sections, title))
+}
+
+fn has_any_section(sections: &[Section], titles: &[&str]) -> bool {
+    titles.iter().any(|title| has_section(sections, title))
+}
+
 fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
     let mut names = BTreeSet::new();
 
@@ -721,7 +860,7 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
         }
     }
 
-    if let Some(section) = find_section(sections, "Roles") {
+    if let Some(section) = find_first_section(sections, &["Roles", "Role Players"]) {
         let role_lines = section.body.lines().collect::<Vec<_>>();
         let uses_subheadings = role_lines
             .iter()
@@ -734,6 +873,10 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
                     .strip_prefix("### ")
                     .map(normalize_symbol_name)
                     .unwrap_or_default()
+            } else if let Some(cell) =
+                extract_table_cell_name(trimmed, &["role", "role player", "helper"])
+            {
+                cell
             } else if trimmed.starts_with('-') {
                 extract_bullet_name(trimmed)
             } else {
@@ -749,10 +892,15 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
         if let Some(section) = find_section(sections, title) {
             for line in section.body.lines() {
                 let trimmed = line.trim();
-                if !trimmed.starts_with('-') {
-                    continue;
-                }
-                let candidate = extract_bullet_name(trimmed);
+                let candidate = if let Some(cell) =
+                    extract_table_cell_name(trimmed, &["helper", "collaborator"])
+                {
+                    cell
+                } else if trimmed.starts_with('-') {
+                    extract_bullet_name(trimmed)
+                } else {
+                    String::new()
+                };
                 if collaborator_name_is_actionable(&candidate) {
                     names.insert(candidate);
                 }
@@ -993,8 +1141,36 @@ fn extract_bullet_name(line: &str) -> String {
     normalize_symbol_name(candidate)
 }
 
+fn extract_table_cell_name(line: &str, header_labels: &[&str]) -> Option<String> {
+    if !line.starts_with('|') || line.contains("---") {
+        return None;
+    }
+
+    let cells = line
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| strip_markdown_markup(cell.trim()))
+        .collect::<Vec<_>>();
+    if cells.is_empty() {
+        return None;
+    }
+
+    let first = cells[0].trim();
+    if first.is_empty() {
+        return None;
+    }
+
+    let first_lower = first.to_ascii_lowercase();
+    if header_labels.iter().any(|label| *label == first_lower) {
+        return None;
+    }
+
+    let name = normalize_symbol_name(first);
+    if name.is_empty() { None } else { Some(name) }
+}
+
 fn normalize_symbol_name(value: &str) -> String {
-    let trimmed = value.trim().trim_matches('`').trim_matches('*');
+    let trimmed = strip_markdown_markup(value);
     if trimmed.is_empty() {
         return String::new();
     }
@@ -1004,6 +1180,14 @@ fn normalize_symbol_name(value: &str) -> String {
         .unwrap_or(trimmed)
         .trim_matches(|c: char| matches!(c, '(' | ')' | ',' | '.'))
         .to_string()
+}
+
+fn strip_markdown_markup(value: &str) -> &str {
+    value
+        .trim()
+        .trim_matches('`')
+        .trim_matches('*')
+        .trim_matches('|')
 }
 
 fn normalize_section_title(title: &str) -> String {
@@ -1223,6 +1407,114 @@ Unspecified in draft - no environment variables referenced.
     }
 
     #[test]
+    fn verifier_flags_ignored_immutable_transform_results() {
+        let root = make_temp_dir("pipeline_quality_immutable_ignore");
+        let specs = root.join("specifications").join("data");
+        let src = root.join("src").join("data");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("gamestate.md");
+        fs::write(
+            &spec_path,
+            r#"# GameState
+
+## Mutability
+Immutable. All mutation-like operations return a new GameState rather than modifying the existing instance.
+
+## Functionalities
+- **place_food**
+  Takes Some(food) or None and returns a new GameState with food updated.
+- **increment_score**
+  Takes a positive whole number and returns a new GameState with score increased.
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("gamestate_usage.rs");
+        fs::write(
+            &output,
+            r#"fn build(mut game_state: GameState, food: Option<Food>) {
+    game_state.place_food(food);
+    game_state.increment_score(10);
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("place_food"))
+        );
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("increment_score"))
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_allows_used_immutable_transform_results() {
+        let root = make_temp_dir("pipeline_quality_immutable_used");
+        let specs = root.join("specifications").join("data");
+        let src = root.join("src").join("data");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("gamestate.md");
+        fs::write(
+            &spec_path,
+            r#"# GameState
+
+## Mutability
+Immutable. All mutation-like operations return a new GameState rather than modifying the existing instance.
+
+## Functionalities
+- **place_food**
+  Takes Some(food) or None and returns a new GameState with food updated.
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("gamestate_usage.rs");
+        fs::write(
+            &output,
+            r#"fn build(game_state: GameState, food: Option<Food>) -> GameState {
+    let game_state = game_state.place_food(food);
+    game_state
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            !report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("place_food"))
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn env_var_extraction_ignores_casing_examples_without_env_context() {
         let content = r#"# CollisionType
 
@@ -1274,6 +1566,66 @@ Unspecified in draft - no environment variables referenced.
         assert_eq!(
             report.contract.collaborators,
             vec!["string_renderer".to_string()]
+        );
+    }
+
+    #[test]
+    fn context_specs_with_role_players_tables_stay_contexts() {
+        let content = r#"# CommandInputContext
+
+## Purpose
+Used for one shared input stream across the whole application session.
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| stdin_source | Supplies keyboard input to the context | Provides non-blocking reads from standard input |
+
+## Role Methods
+### stdin_source
+- **read_available**
+  Returns all currently available keystrokes in arrival order without blocking.
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| buffer | FIFO queue of captured keystrokes | Shared for the whole application session |
+
+## Functionalities
+### capture
+- Reads available keys without blocking.
+"#;
+        let report = analyze_specification(
+            Path::new("specifications/contexts/command_input.md"),
+            content,
+            None,
+        );
+        assert_eq!(report.contract.kind, SpecificationKind::Context);
+        assert_eq!(
+            report.contract.collaborators,
+            vec!["stdin_source".to_string()]
+        );
+    }
+
+    #[test]
+    fn collaborator_extraction_reads_helpers_table_rows() {
+        let content = r#"# App
+
+## Helpers the App Uses
+| Helper | Role in the Application |
+|---|---|
+| `CommandInputContext` | Captures key presses into one shared FIFO stream |
+| `GameLoopContext` | Holds the game rules and advances the game one tick at a time |
+| `StringRenderer` | Formats the board and score into a plain-text frame string |
+"#;
+        let report = analyze_specification(Path::new("specifications/app.md"), content, None);
+        assert_eq!(
+            report.contract.collaborators,
+            vec![
+                "CommandInputContext".to_string(),
+                "GameLoopContext".to_string(),
+                "StringRenderer".to_string()
+            ]
         );
     }
 

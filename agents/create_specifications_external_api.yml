@@ -28,6 +28,12 @@ static_prompt: |
 
   If documentation conflicts with OpenAPI content on externally observable behavior, report that conflict under **Blocking Ambiguities**.
 
+  ## Structured Draft Summary (Authoritative When Present)
+
+  If `input.draft_summary` is present, it is the parser-approved summary of the API draft.
+  Treat `Description`, `Authoritative Sources`, `Consumed Surface`, and
+  `Generated Data Specifications` from that summary as the authoritative scope.
+
   ## Tool Usage
 
   You may call the `fetch_documentation` tool when you need relevant details from linked documentation.
@@ -63,7 +69,7 @@ static_prompt: |
   - Do not wrap the JSON in markdown fences
   - `context_drafts` must contain at least one draft
   - `data_drafts` should contain one draft per significant API boundary type in scope
-  - Every `draft_markdown` must be plain markdown suitable as input to the existing data/context specification agents
+  - Every `draft_markdown` must be plain markdown suitable as input to the strict data/context specification agents
 
   The markdown drafts are still drafts, not final specifications.
   They should be concrete, source-grounded, and implementation-free.
@@ -72,6 +78,7 @@ static_prompt: |
 
   - Preserve names from the draft when they are explicit
   - Use the provided external symbol inventory as the authoritative source for operation names and boundary type names
+  - If `input.draft_summary.generated_data_specifications` is present, prefer those exact artifact names when they match the symbol inventory or explicit sources
   - If a symbol inventory entry exists, reuse it exactly
   - Do not rename or normalize symbols
   - If an in-scope behavior cannot be expressed using a provided symbol or explicit source name, surface that as a blocking ambiguity in the relevant draft
@@ -101,6 +108,13 @@ static_prompt: |
 
   For each significant API boundary type, create one markdown draft suitable for the data specification agent.
 
+  Strict draft rules:
+  - Each generated data draft must use the strict data draft schema.
+  - Required sections: `# <Data Type Name>`, `## Description`, and exactly one of `## Fields` or `## Variants`.
+  - Optional sections: `## Rules`, `## Construction Rules`, `## Access Rules`, `## Functionalities`, `## Notes`.
+  - Use `## Variants` for shared enums or finite discriminator/message-family sets.
+  - Use `## Fields` for record-like boundary types.
+
   Include only source-grounded material such as:
   - what the boundary object represents
   - fields or parts that are explicitly visible in the OpenAPI/docs
@@ -115,6 +129,15 @@ static_prompt: |
 
   Create one or more markdown drafts suitable for the context specification agent.
 
+  Strict draft rules:
+  - Each generated context draft must use the strict context draft schema.
+  - Required sections: `# <Context Name>`, `## Purpose`, `## Role Players`, `## Role Methods`, `## Props`, `## Functionalities`.
+  - Optional section: `## Notes`.
+  - Each functionality under `## Functionalities` must be a `###` subsection containing:
+    - one `Started by | Uses | Result` table
+    - one `Rules:` bullet list
+    - one `Given | When | Then` table
+
   Cover:
   - how the integration is configured or connected
   - how authentication is handled when documented
@@ -125,6 +148,9 @@ static_prompt: |
   Prefer a single main integration context unless the sources clearly require multiple distinct contexts.
 
   Each context draft should stay implementation-free and written in plain English.
+  Do not emit bespoke integration-draft heading styles such as `Overview`, `Connection`, or
+  `Authentication` as top-level sections; translate those concerns into the strict context
+  schema using `Purpose`, `Props`, `Functionalities`, and `Notes`.
 
   ## Blocking Ambiguities
 
@@ -145,6 +171,7 @@ static_prompt: |
   - stay traceable to the draft/OpenAPI/docs
   - be concise but specific enough for the downstream specification agents
   - mention source method/path or operationId in prose when that improves traceability
+  - use the exact strict draft section names required above
 
   ## Validation Checklist
 
@@ -159,6 +186,9 @@ variable_prompt: |
 
   Draft content:
   {{input.draft_content}}
+
+  Draft summary (authoritative when present):
+  {{input.draft_summary?}}
 
   OpenAPI content:
   {{input.openapi_content}}

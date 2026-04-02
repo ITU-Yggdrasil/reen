@@ -2,12 +2,196 @@
 
 ## Description
 
-The currency type is an enum representing the Active ISO 4217 currency codes. The complete list of codes is (in sorted order)
+The currency type is an enum representing the active ISO 4217 currency codes.
 
 AED, AFN, ALL, AMD, ANG, AOA, ARS, AUD, AWG, AZN, BAM, BBD, BDT, BGN, BHD, BIF, BMD, BND, BOB, BOV, BRL, BSD, BTN, BWP, BYN, BZD, CAD, CDF, CHE, CHF, CHW, CLF, CLP, CNY, COP, COU, CRC, CUP, CVE, CZK, DJF, DKK, DOP, DZD, EGP, ERN, ETB, EUR, FJD, FKP, GBP, GEL, GHS, GIP, GMD, GNF, GTQ, GYD, HKD, HNL, HTG, HUF, IDR, ILS, INR, IQD, IRR, ISK, JMD, JOD, JPY, KES, KGS, KHR, KMF, KPW, KRW, KWD, KYD, KZT, LAK, LBP, LKR, LRD, LSL, LYD, MAD, MDL, MGA, MKD, MMK, MNT, MOP, MRU, MUR, MVR, MWK, MXN, MXV, MYR, MZN, NAD, NGN, NIO, NOK, NPR, NZD, OMR, PAB, PEN, PGK, PHP, PKR, PLN, PYG, QAR, RON, RSD, RUB, RWF, SAR, SBD, SCR, SDG, SEK, SGD, SHP, SLE, SLL, SOS, SRD, SSP, STN, SVC, SYP, SZL, THB, TJS, TMT, TND, TOP, TRY, TTD, TWD, TZS, UAH, UGX, USD, USN, UYI, UYU, UYW, UZS, VED, VES, VND, VUV, WST, XAF, XAG, XAU, XBA, XBB, XBC, XBD, XCD, XDR, XOF, XPD, XPF, XPT, XSU, XTS, XUA, XXX, YER, ZAR, ZMW, ZWL
 
-Serialisation and deserialization should use serde aut-implementation
+Serialization and deserialization should use serde auto-implementation.
 
-## Functionality
+## Variants
 
-- **to_str** returns the three-letter code from the list above
+| Variant | Meaning | Notes |
+|---|---|---|
+| AED | ISO 4217 code AED | |
+| AFN | ISO 4217 code AFN | |
+| ALL | ISO 4217 code ALL | |
+| AMD | ISO 4217 code AMD | |
+| ANG | ISO 4217 code ANG | |
+| AOA | ISO 4217 code AOA | |
+| ARS | ISO 4217 code ARS | |
+| AUD | ISO 4217 code AUD | |
+| AWG | ISO 4217 code AWG | |
+| AZN | ISO 4217 code AZN | |
+| BAM | ISO 4217 code BAM | |
+| BBD | ISO 4217 code BBD | |
+| BDT | ISO 4217 code BDT | |
+| BGN | ISO 4217 code BGN | |
+| BHD | ISO 4217 code BHD | |
+| BIF | ISO 4217 code BIF | |
+| BMD | ISO 4217 code BMD | |
+| BND | ISO 4217 code BND | |
+| BOB | ISO 4217 code BOB | |
+| BOV | ISO 4217 code BOV | |
+| BRL | ISO 4217 code BRL | |
+| BSD | ISO 4217 code BSD | |
+| BTN | ISO 4217 code BTN | |
+| BWP | ISO 4217 code BWP | |
+| BYN | ISO 4217 code BYN | |
+| BZD | ISO 4217 code BZD | |
+| CAD | ISO 4217 code CAD | |
+| CDF | ISO 4217 code CDF | |
+| CHE | ISO 4217 code CHE | |
+| CHF | ISO 4217 code CHF | |
+| CHW | ISO 4217 code CHW | |
+| CLF | ISO 4217 code CLF | |
+| CLP | ISO 4217 code CLP | |
+| CNY | ISO 4217 code CNY | |
+| COP | ISO 4217 code COP | |
+| COU | ISO 4217 code COU | |
+| CRC | ISO 4217 code CRC | |
+| CUP | ISO 4217 code CUP | |
+| CVE | ISO 4217 code CVE | |
+| CZK | ISO 4217 code CZK | |
+| DJF | ISO 4217 code DJF | |
+| DKK | ISO 4217 code DKK | |
+| DOP | ISO 4217 code DOP | |
+| DZD | ISO 4217 code DZD | |
+| EGP | ISO 4217 code EGP | |
+| ERN | ISO 4217 code ERN | |
+| ETB | ISO 4217 code ETB | |
+| EUR | ISO 4217 code EUR | |
+| FJD | ISO 4217 code FJD | |
+| FKP | ISO 4217 code FKP | |
+| GBP | ISO 4217 code GBP | |
+| GEL | ISO 4217 code GEL | |
+| GHS | ISO 4217 code GHS | |
+| GIP | ISO 4217 code GIP | |
+| GMD | ISO 4217 code GMD | |
+| GNF | ISO 4217 code GNF | |
+| GTQ | ISO 4217 code GTQ | |
+| GYD | ISO 4217 code GYD | |
+| HKD | ISO 4217 code HKD | |
+| HNL | ISO 4217 code HNL | |
+| HTG | ISO 4217 code HTG | |
+| HUF | ISO 4217 code HUF | |
+| IDR | ISO 4217 code IDR | |
+| ILS | ISO 4217 code ILS | |
+| INR | ISO 4217 code INR | |
+| IQD | ISO 4217 code IQD | |
+| IRR | ISO 4217 code IRR | |
+| ISK | ISO 4217 code ISK | |
+| JMD | ISO 4217 code JMD | |
+| JOD | ISO 4217 code JOD | |
+| JPY | ISO 4217 code JPY | |
+| KES | ISO 4217 code KES | |
+| KGS | ISO 4217 code KGS | |
+| KHR | ISO 4217 code KHR | |
+| KMF | ISO 4217 code KMF | |
+| KPW | ISO 4217 code KPW | |
+| KRW | ISO 4217 code KRW | |
+| KWD | ISO 4217 code KWD | |
+| KYD | ISO 4217 code KYD | |
+| KZT | ISO 4217 code KZT | |
+| LAK | ISO 4217 code LAK | |
+| LBP | ISO 4217 code LBP | |
+| LKR | ISO 4217 code LKR | |
+| LRD | ISO 4217 code LRD | |
+| LSL | ISO 4217 code LSL | |
+| LYD | ISO 4217 code LYD | |
+| MAD | ISO 4217 code MAD | |
+| MDL | ISO 4217 code MDL | |
+| MGA | ISO 4217 code MGA | |
+| MKD | ISO 4217 code MKD | |
+| MMK | ISO 4217 code MMK | |
+| MNT | ISO 4217 code MNT | |
+| MOP | ISO 4217 code MOP | |
+| MRU | ISO 4217 code MRU | |
+| MUR | ISO 4217 code MUR | |
+| MVR | ISO 4217 code MVR | |
+| MWK | ISO 4217 code MWK | |
+| MXN | ISO 4217 code MXN | |
+| MXV | ISO 4217 code MXV | |
+| MYR | ISO 4217 code MYR | |
+| MZN | ISO 4217 code MZN | |
+| NAD | ISO 4217 code NAD | |
+| NGN | ISO 4217 code NGN | |
+| NIO | ISO 4217 code NIO | |
+| NOK | ISO 4217 code NOK | |
+| NPR | ISO 4217 code NPR | |
+| NZD | ISO 4217 code NZD | |
+| OMR | ISO 4217 code OMR | |
+| PAB | ISO 4217 code PAB | |
+| PEN | ISO 4217 code PEN | |
+| PGK | ISO 4217 code PGK | |
+| PHP | ISO 4217 code PHP | |
+| PKR | ISO 4217 code PKR | |
+| PLN | ISO 4217 code PLN | |
+| PYG | ISO 4217 code PYG | |
+| QAR | ISO 4217 code QAR | |
+| RON | ISO 4217 code RON | |
+| RSD | ISO 4217 code RSD | |
+| RUB | ISO 4217 code RUB | |
+| RWF | ISO 4217 code RWF | |
+| SAR | ISO 4217 code SAR | |
+| SBD | ISO 4217 code SBD | |
+| SCR | ISO 4217 code SCR | |
+| SDG | ISO 4217 code SDG | |
+| SEK | ISO 4217 code SEK | |
+| SGD | ISO 4217 code SGD | |
+| SHP | ISO 4217 code SHP | |
+| SLE | ISO 4217 code SLE | |
+| SLL | ISO 4217 code SLL | |
+| SOS | ISO 4217 code SOS | |
+| SRD | ISO 4217 code SRD | |
+| SSP | ISO 4217 code SSP | |
+| STN | ISO 4217 code STN | |
+| SVC | ISO 4217 code SVC | |
+| SYP | ISO 4217 code SYP | |
+| SZL | ISO 4217 code SZL | |
+| THB | ISO 4217 code THB | |
+| TJS | ISO 4217 code TJS | |
+| TMT | ISO 4217 code TMT | |
+| TND | ISO 4217 code TND | |
+| TOP | ISO 4217 code TOP | |
+| TRY | ISO 4217 code TRY | |
+| TTD | ISO 4217 code TTD | |
+| TWD | ISO 4217 code TWD | |
+| TZS | ISO 4217 code TZS | |
+| UAH | ISO 4217 code UAH | |
+| UGX | ISO 4217 code UGX | |
+| USD | ISO 4217 code USD | |
+| USN | ISO 4217 code USN | |
+| UYI | ISO 4217 code UYI | |
+| UYU | ISO 4217 code UYU | |
+| UYW | ISO 4217 code UYW | |
+| UZS | ISO 4217 code UZS | |
+| VED | ISO 4217 code VED | |
+| VES | ISO 4217 code VES | |
+| VND | ISO 4217 code VND | |
+| VUV | ISO 4217 code VUV | |
+| WST | ISO 4217 code WST | |
+| XAF | ISO 4217 code XAF | |
+| XAG | ISO 4217 code XAG | |
+| XAU | ISO 4217 code XAU | |
+| XBA | ISO 4217 code XBA | |
+| XBB | ISO 4217 code XBB | |
+| XBC | ISO 4217 code XBC | |
+| XBD | ISO 4217 code XBD | |
+| XCD | ISO 4217 code XCD | |
+| XDR | ISO 4217 code XDR | |
+| XOF | ISO 4217 code XOF | |
+| XPD | ISO 4217 code XPD | |
+| XPF | ISO 4217 code XPF | |
+| XPT | ISO 4217 code XPT | |
+| XSU | ISO 4217 code XSU | |
+| XTS | ISO 4217 code XTS | |
+| XUA | ISO 4217 code XUA | |
+| XXX | ISO 4217 code XXX | |
+| YER | ISO 4217 code YER | |
+| ZAR | ISO 4217 code ZAR | |
+| ZMW | ISO 4217 code ZMW | |
+| ZWL | ISO 4217 code ZWL | |
+
+## Functionalities
+
+- **to_str** Returns the three-letter code from the list above.

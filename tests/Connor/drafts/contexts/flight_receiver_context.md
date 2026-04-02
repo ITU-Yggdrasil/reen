@@ -1,99 +1,111 @@
 # FlightReceiverContext
 
-## Description
+## Purpose
 
-FlightReceiverContext is the boundary adapter for the OpenSky Network REST API.
-It polls the API at a regular interval, translates each returned FlightPosition into a
+FlightReceiverContext is the boundary adapter for the OpenSky Network REST API. It polls
+the API at a regular interval, translates each returned FlightPosition into a
 PositionEvent, and forwards those events into the wider system.
 
-This context fulfils the EventSource role in exactly the same way as LightningReceiverContext.
+This context fulfills the EventSource role in exactly the same way as other receivers.
 The downstream EventBufferContext must not be able to distinguish which receiver is active.
-Running both receivers simultaneously — so that the buffer receives both lightning and flight
-events — must be a matter of configuration, not of changing any downstream code.
+Running this context alongside any other receiver must be a matter of configuration, not of
+changing any downstream code.
 
----
+## Role Players
 
-## Roles
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| event_sink | Receives produced PositionEvents | Accepts each successfully mapped flight event |
 
-- **event_sink**
-  The recipient of produced PositionEvents.
-  Fulfilled by EventBufferContext.
-  The receiver must not know the concrete type of the sink; it only calls the
-  receive_event behaviour on whatever is playing this role.
-
----
-
-## Props
-
-- **api_url**
-  The base URL of the OpenSky Network states endpoint.
-
-- **api_token**
-  An optional bearer token for authenticated OpenSky access.
-  When present, each outbound HTTP request includes `Authorization: Bearer <token>`.
-  When absent, requests are sent without an Authorization header.
-
-- **poll_interval**
-  How frequently the API should be queried. The default is a value that stays within
-  OpenSky's anonymous rate limits.
-
-- **bounding_box**
-  An optional geographic region used to restrict the query. Defined inline as four
-  decimal-degree values: min_latitude, max_latitude, min_longitude, max_longitude.
-  When absent, the global feed is requested.
-
----
-
-## Role methods
+## Role Methods
 
 ### event_sink
 
-- **receive_event(event)**
-  Accepts a single PositionEvent and stores it for later querying.
-  The receiver calls this once per successfully mapped flight position.
+- **receive_event(event)** Accepts a single PositionEvent and stores it for later querying.
 
----
+## Props
+
+| Prop | Meaning | Notes |
+|---|---|---|
+| api_url | Base URL of the OpenSky Network states endpoint | Queried on each poll cycle |
+| api_token | Optional bearer token for authenticated OpenSky access | When absent, requests are sent without an Authorization header |
+| poll_interval | How frequently the API is queried | Default should respect anonymous rate limits |
+| bounding_box | Optional geographic restriction for the query | Inline `min_latitude`, `max_latitude`, `min_longitude`, `max_longitude` values |
 
 ## Functionalities
 
-- **new(event_sink, api_url, api_token, poll_interval, bounding_box)**
-  Constructs a FlightReceiverContext with the given role player and props.
-  The event_sink is passed as a shared reference — the same EventBufferContext instance
-  is also held by AggregationContext (and by any other active receiver). The application
-  must not give up sole ownership of the buffer when passing it here.
-  Stores the event_sink, api_url, api_token, poll_interval, and bounding_box. Does not start polling.
-  Call start to begin the polling loop.
+### new
 
-- **start**
-  Begins the polling loop. Runs continuously in the background.
-  On each iteration, waits for poll_interval to elapse, then calls fetch_positions.
+| Started by | Uses | Result |
+|---|---|---|
+| application startup | event_sink, props | receiver is constructed |
 
-- **fetch_positions**
-  Issues a GET request to the configured api_url, passing the bounding_box if set.
-  If api_token is present, includes it as an HTTP bearer token on that request.
-  On a successful response, iterates over the returned flight state records and calls
-  on_position_received for each one.
-  On a failed or rate-limited response, records an error count for diagnostic purposes
-  and waits until the next scheduled interval before retrying.
+Rules:
+- Stores `event_sink`, `api_url`, optional `api_token`, `poll_interval`, and optional `bounding_box`.
+- The `event_sink` is passed by shared reference because the same EventBufferContext may be shared with other contexts.
+- Does not start polling during construction.
+- Call `start` to begin the polling loop.
 
-- **on_position_received(raw_position)**
-  Attempts to parse the raw record as a FlightPosition.
-  If the latitude or longitude is absent, discards the record silently.
-  Otherwise, maps the flight position to a PositionEvent:
-  - latitude and longitude are taken directly from the flight position,
-  - occurred_at is taken from the flight position's timestamp,
-  - PositionEvent.source is set to the canonical source value `flight`,
-  - label is set to the callsign if present, otherwise to "flight".
-  Passes the resulting PositionEvent to event_sink.receive_event.
+| Given | When | Then |
+|---|---|---|
+| an event sink and valid OpenSky configuration are available | new is called | a FlightReceiverContext is returned without polling yet |
 
----
+### start
 
-## Acceptance examples
+| Started by | Uses | Result |
+|---|---|---|
+| application runtime | poll_interval | background polling loop begins |
 
-- Given a successful API response containing three positions with valid coordinates,
-  when fetch_positions runs, then three PositionEvents are delivered to event_sink.
-- Given a position record with no latitude, when on_position_received runs, then no
-  event is delivered and the record is silently discarded.
-- Given the API returns a rate-limit response, when fetch_positions runs, then no events
-  are delivered and the error count increases by one, and the next attempt is deferred
-  to the next scheduled interval.
+Rules:
+- Begins a continuous background loop.
+- Waits for `poll_interval` to elapse before each fetch cycle.
+- Calls `fetch_positions` on each scheduled iteration.
+- Retains the same configuration and event sink across iterations.
+
+| Given | When | Then |
+|---|---|---|
+| a configured receiver | start is called | the receiver begins polling the flight feed on the configured interval |
+
+### fetch_positions
+
+| Started by | Uses | Result |
+|---|---|---|
+| polling loop | api_url, optional api_token, optional bounding_box | one API snapshot is fetched and each record is handed to `on_position_received` |
+
+Rules:
+- Issues a GET request to the configured `api_url`.
+- Applies `bounding_box` to the request when configured.
+- Includes `Authorization: Bearer <token>` when `api_token` is present.
+- On a successful response, iterates over the returned flight state records.
+- Calls `on_position_received` for each returned record.
+- On failed or rate-limited responses, records a diagnostic error count.
+- Waits until the next scheduled interval before retrying after a failure.
+
+| Given | When | Then |
+|---|---|---|
+| a successful API response containing three valid positions | fetch_positions runs | three records are handed to `on_position_received` and three PositionEvents can be delivered |
+
+### on_position_received
+
+| Started by | Uses | Result |
+|---|---|---|
+| `fetch_positions` | raw_position, event_sink | a mapped PositionEvent is delivered or the record is discarded |
+
+Rules:
+- Attempts to parse `raw_position` as a FlightPosition.
+- If latitude or longitude is absent, discards the record silently.
+- Maps latitude and longitude directly from the flight position when present.
+- Uses the flight position timestamp as `occurred_at`.
+- Sets `source` to `flight`.
+- Uses the callsign as `label` when it is present.
+- Falls back to the literal label `flight` when the callsign is absent.
+- Passes the resulting PositionEvent to `event_sink.receive_event`.
+
+| Given | When | Then |
+|---|---|---|
+| a position record with no latitude | on_position_received runs | no PositionEvent is emitted and the record is silently discarded |
+
+## Notes
+
+- OpenSky state responses are snapshots rather than event streams.
+- The receiver emits one PositionEvent per successfully mapped aircraft state in each poll cycle.

@@ -30,7 +30,7 @@ static_prompt: |
 
   For app drafts:
   - Do NOT invent commands, subcommands, flags, modules, file layouts, runtimes, or libraries.
-  - Do NOT force the output into Roles / Role Methods structure unless the draft already uses it.
+  - Do NOT force the output into the strict context schema unless the app draft already uses it.
   - Preserve application lifecycle behavior exactly as written: startup checks, shared-state rules,
     loop branches, rendering modes, exit conditions, and error handling are all observable behavior.
   - Resolve named collaborators from dependency context before marking anything blocking.
@@ -41,6 +41,23 @@ static_prompt: |
 
   You are writing for humans (stakeholders, architects, developers).
   The result must be understandable without technical implementation knowledge.
+
+  ## Structured Draft Summary (Authoritative When Present)
+
+  If `input.draft_summary` is present, it is the parser-approved summary of the draft.
+
+  For strict context drafts:
+  - treat `Purpose`, `Role Players`, `Role Methods`, `Props`, and per-functionality interaction/rules/examples from `input.draft_summary` as authoritative structure
+  - use the raw draft text only to preserve exact wording and supporting detail
+  - do not infer missing sections that are absent from `input.draft_summary`
+  - the final specification core sections must be `Purpose`, `Role Players`, `Role Methods`, `Props`, `Functionalities`, and optional `Notes`
+  - `Role Players` must remain a markdown table
+  - `Props` must remain a markdown table
+  - each functionality must remain a `###` subsection containing:
+    - one `Started by | Uses | Result` table
+    - one `Rules:` bullet list
+    - one `Given | When | Then` table
+  - do NOT rename core sections to legacy alternatives such as `Roles`, `Acceptance Examples`, `Scenarios`, or `Interactions`
 
   ## Names Are Sacred
 
@@ -235,8 +252,25 @@ static_prompt: |
 
   ## Output Structure
 
-  Follow the structure of the draft.
-  If you add sections, they must only reorganize existing information.
+  For strict context drafts when `input.draft_summary` is present:
+  - Output the core specification using this section order:
+    1. `# <Context Name>`
+    2. `## Purpose`
+    3. `## Role Players`
+    4. `## Role Methods`
+    5. `## Props`
+    6. `## Functionalities`
+    7. optional `## Notes`
+  - Keep section names exactly as written above.
+  - Keep `Role Players` and `Props` as tables rather than converting them into prose subsections.
+  - Keep each functionality in the parsed three-part layout rather than replacing it with a prose-only description or a separate top-level examples section.
+
+  For app drafts:
+  - Follow the structure of the draft.
+  - If you add sections, they must only reorganize existing information.
+
+  For all outputs:
+  - Do NOT include first-person or tool/process narration such as "I checked", "I'll fetch", or "Here is the final specification."
 
   Always include the following final sections (if applicable):
 
@@ -306,8 +340,14 @@ variable_prompt: |
   Draft kind (optional):
   {{input.specification_kind?}}
 
+  Draft parser kind (optional):
+  {{input.draft_kind?}}
+
   Draft content:
   {{input.draft_content}}
+
+  Draft summary (authoritative when present):
+  {{input.draft_summary?}}
 
   Dependency manifest (optional):
   {{input.direct_dependencies?}}

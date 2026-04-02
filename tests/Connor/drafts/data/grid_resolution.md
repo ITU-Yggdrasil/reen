@@ -13,32 +13,13 @@ aggregation; coarser resolutions produce fewer, larger cells.
 GridResolution is a configuration value, set once at startup and held constant for the
 lifetime of the process.
 
----
-
 ## Fields
 
-Both fields are private. Collaborators read them only through the getter methods listed
-in `Functionalities`.
-
-- **degrees_latitude**
-  The height of each cell in decimal degrees of latitude.
-  The default value is ten degrees.
-  Read by GridContext when computing cell boundaries and enumerating the grid.
-
-- **degrees_longitude**
-  The width of each cell in decimal degrees of longitude.
-  The default value is ten degrees.
-  Read by GridContext when computing cell boundaries and enumerating the grid.
-
----
+| Field | Meaning | Accessible | Notes |
+|---|---|---|---|
+| degrees_latitude | Height of each cell in decimal degrees of latitude | X | Default is ten degrees |
+| degrees_longitude | Width of each cell in decimal degrees of longitude | X | Default is ten degrees |
 
 ## Functionalities
 
-- **new(degrees_latitude, degrees_longitude)**
-  Constructs a GridResolution from the provided axis sizes.
-
-- **degrees_latitude()**
-  Returns the configured latitude step in decimal degrees.
-
-- **degrees_longitude()**
-  Returns the configured longitude step in decimal degrees.
+- **new(degrees_latitude, degrees_longitude)** Constructs a GridResolution from the provided axis sizes.

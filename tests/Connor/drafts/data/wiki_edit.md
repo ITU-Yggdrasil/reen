@@ -19,39 +19,13 @@ The coordinates of an article represent the subject of the article, not the loca
 editor. An edit to the article for the Eiffel Tower produces a PositionEvent at Paris;
 an edit to the article for the Amazon River produces an event in South America.
 
----
-
 ## Fields
 
-wiki, title, user, timestamp, and namespace are readable by WikiEditReceiverContext when
-deciding whether to process a record. coordinates is resolved externally and not present
-in the raw event.
-
-- **wiki**
-  Which Wikimedia project this edit was made on (e.g., "enwiki", "dewiki", "frwikivoyage").
-  Read by WikiEditReceiverContext when filtering: only edits to article namespaces of
-  Wikipedia projects (those ending in "wiki", excluding "wikimedia") are processed.
-
-- **namespace**
-  The MediaWiki namespace of the edited page. Namespace 0 is the article namespace.
-  Read by WikiEditReceiverContext when filtering: only namespace 0 edits are processed.
-
-- **title**
-  The title of the edited article as it appears in the wiki (spaces represented as
-  underscores or spaces depending on the event format).
-  Read by WikiEditReceiverContext when looking up the article's geographic coordinates
-  via the GeoData API, and when setting the label of the resulting PositionEvent.
-
-- **user**
-  The username of the editor, or an IP address for anonymous edits. May be used for
-  diagnostic purposes. Not used in the PositionEvent.
-
-- **timestamp**
-  The moment the edit was recorded by the Wikimedia servers, stored as a UTC timestamp.
-  The receiver is responsible for converting from the ISO 8601 string in the wire format
-  into a UTC timestamp before constructing the struct.
-  Read by WikiEditReceiverContext when setting the occurred_at of the resulting PositionEvent.
-
-- **bot**
-  Whether the edit was flagged as a bot edit. May be used by the receiver to optionally
-  filter out automated edits. Not included in the PositionEvent.
+| Field | Meaning | Accessible | Notes |
+|---|---|---|---|
+| wiki | Wikimedia project identifier such as `enwiki` | X | Used for project filtering and GeoData URL construction |
+| namespace | MediaWiki namespace of the edited page | X | Namespace `0` is the article namespace |
+| title | Title of the edited page | X | Used for GeoData lookup and PositionEvent label |
+| user | Username or IP address of the editor |  | Diagnostic only |
+| timestamp | UTC timestamp for when the edit was recorded | X | Receiver converts from the wire format |
+| bot | Whether the edit was flagged as a bot edit | X | Used for optional bot filtering |
