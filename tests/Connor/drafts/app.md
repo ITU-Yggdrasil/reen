@@ -1,11 +1,28 @@
 # Application
 
+## Application Kind
+
+`service_app`
+
 ## Description
 
 The application is the entry point that wires the system together and starts it running.
 It reads configuration, constructs every context, connects them through their roles, and
 hands off control. Once started, it has no further active role - the contexts it has
 assembled run autonomously.
+
+## Runtime Topology
+
+The application runs as one long-lived backend process.
+It starts one HTTP listener for the request/response surface and may also start up to six
+live feed workers for lightning, flight, earthquake, AISStream, ADS-B, and wiki edits.
+
+## Command Interface
+
+No CLI subcommands are specified in this draft.
+Startup behavior is controlled through configuration and environment variables.
+
+## Transport Surface
 
 The application exposes two HTTP endpoints, both served by MetricsContext on a single
 HTTP listener:
@@ -42,6 +59,26 @@ for serialisation and performs no domain computation on either result.
 The application can start up to six live external feeds: lightning, flight, earthquake,
 AISStream, ADS-B, and wiki edits. Each one is enabled or disabled independently through
 configuration.
+
+## Static Surface
+
+Not applicable. This draft specifies a backend service surface only.
+
+## Collaborators and Wiring
+
+| Collaborator | Responsibility |
+|---|---|
+| `GridContext` | Maps geographic positions into configured grid cells. |
+| `EventBufferContext` | Stores the shared live-event buffer used by downstream readers and receivers. |
+| `AggregationContext` | Produces rate snapshots from buffered events and grid assignment. |
+| `MetricsContext` | Serves the HTTP endpoints and serialises the response bodies. |
+| `LightningReceiverContext` | Connects the lightning feed and forwards accepted events into the shared buffer. |
+| `FlightReceiverContext` | Polls the flight feed and forwards accepted events into the shared buffer. |
+| `EarthquakeReceiverContext` | Polls the earthquake feed and forwards accepted events into the shared buffer. |
+| `AISStreamContext` | Maintains the AISStream transport/session details used by the AIS receiver. |
+| `AISStreamReceiverContext` | Consumes AISStream messages and forwards accepted events into the shared buffer. |
+| `AdsbReceiverContext` | Polls the ADS-B feed and forwards accepted events into the shared buffer. |
+| `WikiEditReceiverContext` | Consumes the wiki edit stream and forwards accepted events into the shared buffer. |
 
 ---
 

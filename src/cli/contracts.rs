@@ -158,7 +158,10 @@ pub(crate) fn validate_contract_artifact(
     let mut errors = spec_report.errors;
     let mut warnings = spec_report.warnings;
 
-    if has_any_section(&sections, &["Roles", "Role Players", "Helpers the App Uses"])
+    if has_any_section(
+        &sections,
+        &["Role Players", "Collaborators", "Collaborators and Wiring"],
+    )
         && contract.roles.is_empty()
     {
         errors
@@ -168,11 +171,10 @@ pub(crate) fn validate_contract_artifact(
         warnings
             .push("Contract stage could not extract any props from the Props section".to_string());
     }
-    if (has_section(&sections, "Functionality") || has_section(&sections, "Functionalities"))
-        && contract.public_functionalities.is_empty()
+    if has_section(&sections, "Functionalities") && contract.public_functionalities.is_empty()
     {
         errors.push(
-            "Contract stage could not extract any public functionalities from the Functionality/Functionalities section"
+            "Contract stage could not extract any public functionalities from the Functionalities section"
                 .to_string(),
         );
     }
@@ -306,8 +308,10 @@ fn extract_roles(
     dependency_context: Option<&HashMap<String, serde_json::Value>>,
 ) -> Vec<ContractRole> {
     let mut roles = Vec::new();
-    let Some(section) =
-        find_first_section(sections, &["Roles", "Role Players", "Helpers the App Uses"])
+    let Some(section) = find_first_section(
+        sections,
+        &["Role Players", "Collaborators", "Collaborators and Wiring"],
+    )
     else {
         for name in &summary.collaborators {
             roles.push(build_fallback_role(name, summary, dependency_context));
@@ -503,9 +507,7 @@ fn extract_props(sections: &[Section]) -> Vec<ContractProp> {
 }
 
 fn extract_functionalities(sections: &[Section]) -> Vec<ContractFunctionality> {
-    let Some(section) = find_section(sections, "Functionality")
-        .or_else(|| find_section(sections, "Functionalities"))
-    else {
+    let Some(section) = find_section(sections, "Functionalities") else {
         return Vec::new();
     };
 
@@ -839,10 +841,7 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
 }
 
 fn find_section<'a>(sections: &'a [Section], title: &str) -> Option<&'a Section> {
-    let expected = normalize_section_title(title);
-    sections
-        .iter()
-        .find(|section| normalize_section_title(&section.title) == expected)
+    sections.iter().find(|section| section.title == title)
 }
 
 fn has_section(sections: &[Section], title: &str) -> bool {
@@ -855,23 +854,6 @@ fn find_first_section<'a>(sections: &'a [Section], titles: &[&str]) -> Option<&'
 
 fn has_any_section(sections: &[Section], titles: &[&str]) -> bool {
     titles.iter().any(|title| has_section(sections, title))
-}
-
-fn normalize_section_title(title: &str) -> String {
-    let trimmed = title.trim().trim_end_matches(':').trim();
-    let normalized = if trimmed
-        .chars()
-        .next()
-        .map(|ch| ch.is_ascii_digit())
-        .unwrap_or(false)
-    {
-        trimmed.trim_start_matches(|ch: char| {
-            ch.is_ascii_digit() || matches!(ch, '.' | ')' | ':' | '-' | ' ')
-        })
-    } else {
-        trimmed
-    };
-    normalized.to_ascii_lowercase()
 }
 
 fn normalize_symbol_name(value: &str) -> String {
@@ -954,21 +936,25 @@ fn dedupe_preserve(values: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_contract_artifact, validate_contract_artifact};
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use super::build_contract_artifact;
+    use std::path::Path;
 
     #[test]
-    fn builds_context_contract_with_roles_props_and_methods() {
+    fn builds_context_contract_with_role_players_props_and_methods() {
         let content = r#"# CommandInputContext
 
-## Roles
-- **stdin_source**
-  Provides non-blocking reads from standard input.
+## Purpose
+Used for one shared input stream across the whole application session.
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| stdin_source | Supplies keyboard input to the context | Provides non-blocking reads from standard input. |
 
 ## Props
-- **buffer**
-  FIFO queue of captured keystrokes.
+| Prop | Meaning | Notes |
+|---|---|---|
+| buffer | FIFO queue of captured keystrokes. | Shared for the whole application session. |
 
 ## Role Methods
 ### stdin_source
@@ -996,49 +982,6 @@ mod tests {
         assert_eq!(contract.role_methods.len(), 1);
         assert_eq!(contract.role_methods[0].method_name, "read_available");
         assert_eq!(contract.public_functionalities.len(), 2);
-    }
-
-    #[test]
-    fn contract_validation_respects_numbered_sections() {
-        let content = r#"# GameLoopContext
-
-## 2. Roles
-| Role | Description |
-|------|-------------|
-| **command** | Provides player input. |
-
-## 3. Props:
-| Prop | Description |
-|------|-------------|
-| **board** | Board dimensions. |
-
-## 4. Role methods:
-### command
-| Method | Description |
-|--------|-------------|
-| **next** | Returns the next direction. |
-
-## 5. Functionalities
-### `tick()`
-- Reads the next movement direction.
-"#;
-
-        let contract = build_contract_artifact(
-            Path::new("specifications/contexts/game_loop.md"),
-            content,
-            Some(PathBuf::from("src/contexts/game_loop.rs").as_path()),
-            Some(&HashMap::new()),
-        );
-        let report = validate_contract_artifact(
-            &contract,
-            Path::new("specifications/contexts/game_loop.md"),
-            content,
-            Some(&HashMap::new()),
-        );
-        assert!(report.ok);
-        assert_eq!(contract.roles[0].name, "command");
-        assert_eq!(contract.role_methods[0].method_name, "next");
-        assert_eq!(contract.public_functionalities[0].name, "tick");
     }
 
     #[test]
@@ -1079,11 +1022,11 @@ mod tests {
     }
 
     #[test]
-    fn app_helpers_table_is_exposed_as_roles() {
+    fn app_collaborators_and_wiring_table_is_exposed_as_roles() {
         let content = r#"# App
 
-## Helpers the App Uses
-| Helper | Role in the Application |
+## Collaborators and Wiring
+| Collaborator | Responsibility |
 |---|---|
 | `CommandInputContext` | Captures key presses into one shared FIFO stream |
 | `GameLoopContext` | Advances the game one tick at a time |

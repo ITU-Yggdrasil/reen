@@ -601,9 +601,7 @@ fn spec_declares_immutable_value_updates(spec_content: &str) -> bool {
 
 fn extract_immutable_transform_method_names(spec_content: &str) -> Vec<String> {
     let sections = parse_markdown_sections(spec_content);
-    let Some(section) = find_section(&sections, "Functionalities")
-        .or_else(|| find_section(&sections, "Functionality"))
-    else {
+    let Some(section) = find_section(&sections, "Functionalities") else {
         return Vec::new();
     };
 
@@ -757,13 +755,10 @@ fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> Spe
         return SpecificationKind::App;
     }
 
-    if has_any_section(
-        sections,
-        &["Roles", "Role Players", "Role Methods", "Functionality", "Props"],
-    ) {
+    if has_any_section(sections, &["Purpose", "Role Players", "Role Methods", "Props"]) {
         return SpecificationKind::Context;
     }
-    if has_any_section(sections, &["Functionalities", "Properties"]) {
+    if has_any_section(sections, &["Description", "Fields", "Variants"]) {
         return SpecificationKind::Data;
     }
 
@@ -778,12 +773,20 @@ fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> Spe
         || has_any_section(
             sections,
             &[
+                "Application Kind",
                 "Behavior",
+                "Runtime Topology",
+                "Configuration Surface",
+                "Command Interface",
+                "Transport Surface",
+                "Static Surface",
                 "Startup",
+                "Startup Sequence",
                 "Main Loop Behavior",
+                "Collaborators and Wiring",
                 "Exit Codes",
                 "Error Handling",
-                "Helpers the App Uses",
+                "Shutdown",
             ],
         )
     {
@@ -824,18 +827,11 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
 }
 
 fn find_section<'a>(sections: &'a [Section], title: &str) -> Option<&'a Section> {
-    let expected = normalize_section_title(title);
-    sections
-        .iter()
-        .find(|section| normalize_section_title(&section.title) == expected)
+    sections.iter().find(|section| section.title == title)
 }
 
 fn has_section(sections: &[Section], title: &str) -> bool {
     find_section(sections, title).is_some()
-}
-
-fn find_first_section<'a>(sections: &'a [Section], titles: &[&str]) -> Option<&'a Section> {
-    titles.iter().find_map(|title| find_section(sections, title))
 }
 
 fn has_any_section(sections: &[Section], titles: &[&str]) -> bool {
@@ -860,7 +856,7 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
         }
     }
 
-    if let Some(section) = find_first_section(sections, &["Roles", "Role Players"]) {
+    if let Some(section) = find_section(sections, "Role Players") {
         let role_lines = section.body.lines().collect::<Vec<_>>();
         let uses_subheadings = role_lines
             .iter()
@@ -873,9 +869,7 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
                     .strip_prefix("### ")
                     .map(normalize_symbol_name)
                     .unwrap_or_default()
-            } else if let Some(cell) =
-                extract_table_cell_name(trimmed, &["role", "role player", "helper"])
-            {
+            } else if let Some(cell) = extract_table_cell_name(trimmed, &["role player"]) {
                 cell
             } else if trimmed.starts_with('-') {
                 extract_bullet_name(trimmed)
@@ -888,7 +882,7 @@ fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
         }
     }
 
-    for title in ["Collaborators", "Helpers the App Uses"] {
+    for title in ["Collaborators", "Collaborators and Wiring"] {
         if let Some(section) = find_section(sections, title) {
             for line in section.body.lines() {
                 let trimmed = line.trim();
@@ -1190,23 +1184,6 @@ fn strip_markdown_markup(value: &str) -> &str {
         .trim_matches('|')
 }
 
-fn normalize_section_title(title: &str) -> String {
-    let trimmed = title.trim().trim_end_matches(':').trim();
-    let normalized = if trimmed
-        .chars()
-        .next()
-        .map(|ch| ch.is_ascii_digit())
-        .unwrap_or(false)
-    {
-        trimmed.trim_start_matches(|ch: char| {
-            ch.is_ascii_digit() || matches!(ch, '.' | ')' | ':' | '-' | ' ')
-        })
-    } else {
-        trimmed
-    };
-    normalized.to_ascii_lowercase()
-}
-
 fn collaborator_name_is_actionable(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -1224,7 +1201,6 @@ fn is_documentation_label(name: &str) -> bool {
             | "Example"
             | "Examples"
             | "Functionalities"
-            | "Functionality"
             | "Inference"
             | "Input"
             | "Inputs"
@@ -1235,11 +1211,9 @@ fn is_documentation_label(name: &str) -> bool {
             | "Output"
             | "Outputs"
             | "Produces"
-            | "Properties"
             | "Purpose"
             | "Returns"
             | "Role"
-            | "Roles"
             | "Rules"
     )
 }
@@ -1367,12 +1341,13 @@ Unspecified in draft - no environment variables referenced.
             &spec_path,
             r#"# CommandInputContext
 
-## Description
-- Reads stdin without blocking.
+## Purpose
+Used for one shared input stream across the whole application session.
 
-## Roles
-- **stdin_source**
-  Provides non-blocking reads from standard input.
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| stdin_source | Supplies keyboard input to the context | Provides non-blocking reads from standard input. |
 
 ## Role Methods
 ### stdin_source
@@ -1546,7 +1521,7 @@ Immutable. All mutation-like operations return a new GameState rather than modif
     fn collaborator_extraction_ignores_role_metadata_labels() {
         let content = r#"# Terminal Renderer
 
-## Roles
+## Role Players
 
 ### `string_renderer`
 - **Purpose**: Formats the current game frame as plain text.
@@ -1608,11 +1583,11 @@ Used for one shared input stream across the whole application session.
     }
 
     #[test]
-    fn collaborator_extraction_reads_helpers_table_rows() {
+    fn collaborator_extraction_reads_collaborators_and_wiring_table_rows() {
         let content = r#"# App
 
-## Helpers the App Uses
-| Helper | Role in the Application |
+## Collaborators and Wiring
+| Collaborator | Responsibility |
 |---|---|
 | `CommandInputContext` | Captures key presses into one shared FIFO stream |
 | `GameLoopContext` | Holds the game rules and advances the game one tick at a time |
@@ -1627,37 +1602,6 @@ Used for one shared input stream across the whole application session.
                 "StringRenderer".to_string()
             ]
         );
-    }
-
-    #[test]
-    fn section_matching_handles_numbering_case_and_colons() {
-        let content = r#"# GameLoopContext
-
-## 2. Roles
-
-- **command**
-  Provides input.
-
-## 3. Props:
-
-- **board**
-  Holds board state.
-
-## 4. Role methods:
-
-### command
-
-- **next**
-  Returns the next command.
-"#;
-        let report = analyze_specification(
-            Path::new("specifications/contexts/game_loop.md"),
-            content,
-            None,
-        );
-        assert_eq!(report.contract.kind, SpecificationKind::Context);
-        assert_eq!(report.contract.collaborators, vec!["command".to_string()]);
-        assert_eq!(report.contract.role_method_names, vec!["next".to_string()]);
     }
 
     #[test]

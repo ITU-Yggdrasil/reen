@@ -6,9 +6,6 @@ create_specifications_data:
 create_specifications_context:
   model: gpt-5 # qwen2.5:7b
   parallel: true
-create_specifications_main:
-  model: gpt-5 # qwen2.5:7b
-  parallel: true
 create_specifications_external_api:
   model: gpt-5 # qwen2.5:7b
   parallel: false

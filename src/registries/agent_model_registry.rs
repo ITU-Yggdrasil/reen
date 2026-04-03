@@ -210,8 +210,8 @@ fn parse_token_limit(yaml_content: &str) -> Option<f64> {
     }
 }
 
-/// Parses the YAML registry file into a HashMap
-/// Supports both old format (string) and new format (object with model/parallel/batch)
+/// Parses the YAML registry file into a HashMap.
+/// Agent entries must use object form with model/parallel/batch fields.
 fn parse_registry(
     yaml_content: &str,
     default_model: &str,
@@ -239,14 +239,7 @@ fn parse_registry(
                 if k == "rate_limit" || k == "token_limit" {
                     continue;
                 }
-                let config = if let Some(v_str) = value.as_str() {
-                    // Old format: simple string value (model name)
-                    AgentConfig {
-                        model: v_str.to_string(),
-                        parallel: default_parallel,
-                        batch: false,
-                    }
-                } else if let Some(v_hash) = value.as_hash() {
+                let config = if let Some(v_hash) = value.as_hash() {
                     // New format: object with model, parallel, and optional batch
                     let model = v_hash
                         .get(&yaml_rust::Yaml::String("model".to_string()))
@@ -270,12 +263,10 @@ fn parse_registry(
                         batch,
                     }
                 } else {
-                    // Fallback to defaults
-                    AgentConfig {
-                        model: default_model.to_string(),
-                        parallel: default_parallel,
-                        batch: false,
-                    }
+                    return Err(ExecutionError::ExecutionFailed(format!(
+                        "Agent model registry entry '{}' must use object form with 'model' and optional 'parallel'/'batch'",
+                        k
+                    )));
                 };
 
                 registry.insert(k.to_string(), config);
@@ -330,11 +321,11 @@ mod tests {
   model: qwen2.5:7b
   parallel: false
   batch: false",
-            "create_specifications_main:
+            "create_specifications_external_api:
   model: qwen2.5:7b
   parallel: false
   batch: false",
-            "create_specifications_external_api:
+            "create_plan:
   model: qwen2.5:7b
   parallel: false
   batch: false",
@@ -362,34 +353,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_registry_old_format() {
+    fn test_parse_registry_rejects_old_format() {
         let yaml = r#"
 create_specifications_data: gpt-4
 create_implementation: claude-3-opus
 create_test: gpt-4
 create_specifications_context: gpt-4
-create_specifications_main: gpt-4
 create_specifications_external_api: gpt-4
+create_plan: gpt-4
 resolve_compilation_errors: gpt-4
 fix_draft_blockers: gpt-4
 "#;
 
         let result = parse_registry(yaml, "default", false);
-        assert!(result.is_ok());
-
-        let registry = result.unwrap();
-        assert_eq!(
-            registry.get("create_specifications_data").map(|c| &c.model),
-            Some(&"gpt-4".to_string())
-        );
-        assert_eq!(
-            registry.get("create_implementation").map(|c| &c.model),
-            Some(&"claude-3-opus".to_string())
-        );
-        assert_eq!(
-            registry.get("create_specifications_data").map(|c| c.batch),
-            Some(false)
-        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -408,12 +385,12 @@ create_test:
 create_specifications_context:
   model: gpt-4
   parallel: true
-create_specifications_main:
-  model: gpt-4
-  parallel: true
 create_specifications_external_api:
   model: gpt-4
   parallel: true
+create_plan:
+  model: gpt-4
+  parallel: false
 resolve_compilation_errors:
   model: gpt-4
   parallel: false

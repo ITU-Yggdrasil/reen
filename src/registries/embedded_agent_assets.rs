@@ -14,9 +14,6 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
         "create_specifications_context.yml" => Some(include_str!(
             "../../agents/create_specifications_context.yml"
         )),
-        "create_specifications_main.yml" => {
-            Some(include_str!("../../agents/create_specifications_main.yml"))
-        }
         "create_specifications_external_api.yml" => Some(include_str!(
             "../../agents/create_specifications_external_api.yml"
         )),
@@ -36,7 +33,6 @@ pub fn embedded_expected_agent_names() -> &'static [&'static str] {
     &[
         "create_specifications_data",
         "create_specifications_context",
-        "create_specifications_main",
         "create_specifications_external_api",
         "create_plan",
         "create_implementation",
@@ -62,8 +58,8 @@ mod tests {
     fn embedded_agent_specs_are_available() {
         let content = embedded_agent_spec("create_implementation.yml").expect("embedded spec");
         assert!(
-            content.contains("static_prompt") || content.contains("system_prompt"),
-            "agent spec must have static_prompt or system_prompt"
+            content.contains("static_prompt:") && content.contains("variable_prompt:"),
+            "agent spec must define both static_prompt and variable_prompt"
         );
     }
 
@@ -78,7 +74,7 @@ mod tests {
             );
             assert!(
                 !content.contains("\nsystem_prompt:"),
-                "{filename} should not fall back to legacy system_prompt"
+                "{filename} should not define system_prompt"
             );
         }
     }

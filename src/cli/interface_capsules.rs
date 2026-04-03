@@ -261,13 +261,18 @@ mod tests {
     fn builds_capsule_from_contract_and_source() {
         let spec = r#"# CommandInputContext
 
-## Roles
-- **stdin_source**
-  Provides input.
+## Purpose
+Used for one shared input stream across the whole application session.
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| stdin_source | Supplies keyboard input to the context | Provides input. |
 
 ## Props
-- **buffer**
-  Queue of chars.
+| Prop | Meaning | Notes |
+|---|---|---|
+| buffer | Queue of chars. | Shared for the whole application session. |
 
 ## Role Methods
 ### stdin_source

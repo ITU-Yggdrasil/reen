@@ -15,7 +15,7 @@ All generated code MUST include tracing instrumentation for observability and de
    "[ContextName] [role_name] [role_method], message"
    ```
 
-2. **Functionality Methods (public methods)**:
+2. **Functionalities Methods (public methods)**:
    ```
    "[ContextName] [method_name], message"
    ```
@@ -40,7 +40,7 @@ pub struct MoneyTransfer {
 }
 
 impl MoneyTransfer {
-    // Public method (from Functionality section)
+    // Public method (from Functionalities section)
     pub fn transfer(self) -> Result<Ledger> {
         tracing::info!(
             "[MoneyTransfer] transfer, source={}, sink={}, amount={}",
@@ -103,7 +103,7 @@ pub struct Account {
 }
 
 impl Account {
-    // Public method (from Functionality)
+    // Public method (from Functionalities)
     pub fn balance(&self) -> f64 {
         tracing::info!(
             "[Account] balance, account_id={}",
@@ -158,7 +158,7 @@ impl Account {
 ### When to Use Each Level
 
 - **`tracing::info!()`**:
-  - Entry to all public methods (Functionality)
+  - Entry to all public methods (Functionalities)
   - Major state changes
   - Successful completion of operations
 

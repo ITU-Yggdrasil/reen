@@ -96,9 +96,6 @@ impl From<ExecutionError> for AgentRunnerError {
 /// Template format for agent specifications (from registry, before population)
 #[derive(Debug, Clone)]
 pub enum AgentSpecificationTemplate {
-    /// Legacy: single template with placeholders (populated as whole)
-    Legacy(String),
-    /// Cache-optimized: static instructions + variable section with placeholders
     Split {
         static_prompt: String,
         variable_prompt: String,
@@ -107,10 +104,8 @@ pub enum AgentSpecificationTemplate {
 
 impl AgentSpecificationTemplate {
     /// Returns a canonical string for cache key/hash purposes.
-    /// For legacy: the full template. For split: static + variable (unpopulated).
     pub fn canonical_for_cache(&self) -> String {
         match self {
-            AgentSpecificationTemplate::Legacy(s) => s.clone(),
             AgentSpecificationTemplate::Split {
                 static_prompt,
                 variable_prompt,
@@ -122,12 +117,8 @@ impl AgentSpecificationTemplate {
 /// A populated agent specification ready for execution
 #[derive(Debug, Clone)]
 pub struct AgentSpecification {
-    /// Legacy: full populated prompt (when split format not used)
-    pub system_prompt: Option<String>,
-    /// Cache-optimized: static instructions (system message)
-    pub static_prompt: Option<String>,
-    /// Cache-optimized: populated variable content (user message)
-    pub variable_prompt: Option<String>,
+    pub static_prompt: String,
+    pub variable_prompt: String,
 }
 
 /// The result of executing an agent
@@ -167,7 +158,6 @@ pub struct Model {
 /// Trait for loading agent specifications by name
 pub trait AgentRegistry {
     /// Load an agent specification template by agent name.
-    /// Returns either a legacy full template or a split (static + variable) template.
     fn get_specification(
         &self,
         agent_name: &str,
@@ -228,23 +218,14 @@ where
         let template = self.agent_registry.get_specification(&self.agent)?;
 
         match &template {
-            AgentSpecificationTemplate::Legacy(t) => {
-                let populated = self.replace_placeholders(t)?;
-                Ok(AgentSpecification {
-                    system_prompt: Some(populated),
-                    static_prompt: None,
-                    variable_prompt: None,
-                })
-            }
             AgentSpecificationTemplate::Split {
                 static_prompt,
                 variable_prompt,
             } => {
                 let populated = self.replace_placeholders(variable_prompt)?;
                 Ok(AgentSpecification {
-                    system_prompt: None,
-                    static_prompt: Some(static_prompt.clone()),
-                    variable_prompt: Some(populated),
+                    static_prompt: static_prompt.clone(),
+                    variable_prompt: populated,
                 })
             }
         }
@@ -371,26 +352,12 @@ where
         model: &Model,
     ) -> Result<serde_json::Value, ExecutionError> {
         let (tools, tool_context) = self.build_tooling_json()?;
-        let mut request = if let (Some(static_p), Some(variable_p)) =
-            (&specification.static_prompt, &specification.variable_prompt)
-        {
-            serde_json::json!({
-                "model": model.name,
-                "static_prompt": static_p,
-                "variable_prompt": variable_p,
-                "agent_name": self.agent,
-            })
-        } else if let Some(system_p) = &specification.system_prompt {
-            serde_json::json!({
-                "model": model.name,
-                "system_prompt": system_p,
-            })
-        } else {
-            return Err(ExecutionError::RunnerError(
-                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
-                    .to_string(),
-            ));
-        };
+        let mut request = serde_json::json!({
+            "model": model.name,
+            "static_prompt": specification.static_prompt,
+            "variable_prompt": specification.variable_prompt,
+            "agent_name": self.agent,
+        });
 
         if let Some(tools) = tools {
             request["tools"] = tools;
@@ -478,22 +445,9 @@ where
 
     /// Estimates the populated input token count for the request that would be sent.
     pub fn estimate_input_tokens(&self) -> Result<usize, AgentRunnerError> {
-        const LEGACY_USER_PROMPT: &str = "Please complete the task described in the system prompt.";
-
         let specification = self.populate()?;
-        let estimate = if let (Some(static_prompt), Some(variable_prompt)) = (
-            specification.static_prompt.as_deref(),
-            specification.variable_prompt.as_deref(),
-        ) {
-            estimate_tokens(static_prompt) + estimate_tokens(variable_prompt)
-        } else if let Some(system_prompt) = specification.system_prompt.as_deref() {
-            estimate_tokens(system_prompt) + estimate_tokens(LEGACY_USER_PROMPT)
-        } else {
-            return Err(AgentRunnerError::Execution(ExecutionError::ExecutionFailed(
-                "AgentSpecification has neither system_prompt nor static_prompt+variable_prompt"
-                    .to_string(),
-            )));
-        };
+        let estimate = estimate_tokens(&specification.static_prompt)
+            + estimate_tokens(&specification.variable_prompt);
 
         Ok(estimate + REQUEST_OVERHEAD_TOKENS)
     }
@@ -751,10 +705,10 @@ mod tests {
             &self,
             agent_name: &str,
         ) -> Result<AgentSpecificationTemplate, PopulateError> {
-            Ok(AgentSpecificationTemplate::Legacy(format!(
-                "Test specification for {}",
-                agent_name
-            )))
+            Ok(AgentSpecificationTemplate::Split {
+                static_prompt: format!("Static specification for {}", agent_name),
+                variable_prompt: "Variable content for {{input.name}}".to_string(),
+            })
         }
     }
 
@@ -776,9 +730,10 @@ mod tests {
             _agent_name: &str,
         ) -> Result<AgentSpecificationTemplate, PopulateError> {
             // This would fail during populate() on a cache miss.
-            Ok(AgentSpecificationTemplate::Legacy(
-                "This will fail: {{input.required_field}}".to_string(),
-            ))
+            Ok(AgentSpecificationTemplate::Split {
+                static_prompt: "Static".to_string(),
+                variable_prompt: "This will fail: {{input.required_field}}".to_string(),
+            })
         }
     }
 

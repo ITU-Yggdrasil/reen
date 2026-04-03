@@ -8,10 +8,6 @@ create_specifications_context:
   model: claude-sonnet-4-6
   parallel: true
   batch: false
-create_specifications_main:
-  model: claude-sonnet-4-6
-  parallel: true
-  batch: false
 create_specifications_external_api:
   model: claude-sonnet-4-6
   parallel: false

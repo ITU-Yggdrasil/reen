@@ -2526,9 +2526,12 @@ fn is_known_section_title(line: &str) -> bool {
         "Type Kind (Struct / Enum / NewType / Unspecified)",
         "Type Kind (Struct / Enum / NewType / **Unspecified**)",
         "Mutability (Immutable / Mutable)",
-        "Properties",
+        "Fields",
+        "Variants",
         "Functionalities",
-        "Constraints & Rules",
+        "Rules",
+        "Construction Rules",
+        "Access Rules",
         "Inferred Types or Structures",
         "Inferred Types or Structures (Non-Blocking)",
         "Blocking Ambiguities",
@@ -2952,8 +2955,7 @@ fn primary_stage_agents(stage: Stage) -> &'static [&'static str] {
 
 fn auxiliary_stage_agents(stage: Stage) -> &'static [&'static str] {
     match stage {
-        // Keep the legacy main agent here so a full stage clear also removes old root-app caches.
-        Stage::Specification => &["fix_draft_blockers", "create_specifications_main"],
+        Stage::Specification => &["fix_draft_blockers"],
         Stage::Implementation => &["create_plan", "resolve_compilation_errors"],
         Stage::Tests | Stage::Compile => &[],
     }
@@ -5517,7 +5519,7 @@ fn main() {}
     fn stage_cache_cleanup_includes_auxiliary_agents() {
         assert_eq!(
             auxiliary_stage_agents(Stage::Specification),
-            &["fix_draft_blockers", "create_specifications_main"]
+            &["fix_draft_blockers"]
         );
         assert_eq!(
             auxiliary_stage_agents(Stage::Implementation),

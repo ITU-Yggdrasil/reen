@@ -1,5 +1,8 @@
 # The primary application
 
+## Application Kind
+`cli_app`
+
 ## Description
 This is a simple Snake game application that runs in a terminal.
 
@@ -15,20 +18,36 @@ The application is responsible for:
 
 Game progression logic itself is delegated to the GameLoopContext.
 
-### Helpers the App Uses
-The Primary Application uses these helpers (they must exist as part of the overall system):
-- **CommandInputContext**: captures key presses into one shared FIFO stream for the whole session.
-- **GameLoopContext**: holds the game rules and advances the game by one tick at a time.
-- **StringRenderer**: formats the board and score into a plain text frame string.
-- **TerminalRenderer**: draws the board and the score to the terminal.
-- **food_dropper**: chooses the next food placement on a free interior (non-wall, non-snake) cell.
+## Runtime Topology
+The application runs as one terminal process with one shared input stream for the whole session.
+At any point in time it has either:
+- no active GameLoopContext and is showing a menu/start screen, or
+- one active GameLoopContext and is running gameplay.
+
+## Command Interface
+No command-line arguments or subcommands are defined.
+
+## Transport Surface
+Not applicable. The application does not expose network routes.
+
+## Static Surface
+Not applicable. The application does not serve static pages or assets.
+
+## Collaborators and Wiring
+| Collaborator | Responsibility |
+|---|---|
+| `CommandInputContext` | Captures key presses into one shared FIFO stream for the whole session. |
+| `GameLoopContext` | Holds the game rules and advances the game one tick at a time. |
+| `StringRenderer` | Formats the board and score into a plain text frame string. |
+| `TerminalRenderer` | Draws the board and the score to the terminal. |
+| `food_dropper` | Chooses the next food placement on a free interior (non-wall, non-snake) cell. |
 
 The Primary Application must not implement the game rules itself (movement, collisions, scoring, food placement).
 It only (1) collects input, (2) asks the GameLoopContext to advance, and (3) shows what the game looks like.
 
 ---
 
-### Initial state
+## Startup Sequence
 On start, show a message such as:
 "Press s to start a new game"
 
@@ -53,7 +72,7 @@ When the game is started:
 
 ---
 
-### Functionalities
+## Main Loop Behavior
 
 The application runs an outer loop with the following behavior:
 
@@ -99,7 +118,7 @@ Normal exit code is `0`.
 
 ---
 
-### Error handling
+## Error Handling
 
 In case of a runtime error:
 

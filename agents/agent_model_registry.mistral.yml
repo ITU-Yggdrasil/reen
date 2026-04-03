@@ -9,9 +9,6 @@ create_specifications_data:
 create_specifications_context:
   model: mistral/mistral-large-latest
   parallel: true
-create_specifications_main:
-  model: mistral/mistral-large-latest
-  parallel: true
 create_specifications_external_api:
   model: mistral/mistral-large-latest
   parallel: false

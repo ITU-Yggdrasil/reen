@@ -17,8 +17,6 @@ use std::time::Duration;
 use crate::execution::estimate_tokens;
 
 static DOTENV_INIT: Once = Once::new();
-
-const LEGACY_USER_PROMPT: &str = "Please complete the task described in the system prompt.";
 const OPENAI_PROMPT_CACHE_MIN_TOKENS: usize = 1024;
 const ANTHROPIC_PROMPT_CACHE_TTL: &str = "1h";
 
@@ -150,17 +148,12 @@ fn normalize_request(request: &Value) -> Result<NormalizedRequest, String> {
 
     let static_prompt = request.get("static_prompt").and_then(Value::as_str);
     let variable_prompt = request.get("variable_prompt").and_then(Value::as_str);
-    let system_prompt = request.get("system_prompt").and_then(Value::as_str);
-
     let (system_content, user_content) =
         if let (Some(static_prompt), Some(variable_prompt)) = (static_prompt, variable_prompt) {
             (static_prompt.to_string(), variable_prompt.to_string())
-        } else if let Some(system_prompt) = system_prompt {
-            (system_prompt.to_string(), LEGACY_USER_PROMPT.to_string())
         } else {
             return Err(
-                "Missing required fields: (system_prompt) or (static_prompt + variable_prompt)"
-                    .to_string(),
+                "Missing required fields: static_prompt and variable_prompt".to_string(),
             );
         };
 
@@ -1341,21 +1334,6 @@ mod tests {
         assert_eq!(
             normalized.agent_name.as_deref(),
             Some("create_implementation")
-        );
-    }
-
-    #[test]
-    fn normalize_request_supports_legacy_system_prompt() {
-        let request = json!({
-            "model": "claude-sonnet",
-            "system_prompt": "do the thing",
-        });
-
-        let normalized = normalize_request(&request).expect("normalize request");
-        assert_eq!(normalized.system_content, "do the thing");
-        assert_eq!(
-            normalized.user_content,
-            "Please complete the task described in the system prompt."
         );
     }
 

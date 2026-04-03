@@ -26,7 +26,7 @@ The system automatically selects the appropriate agent based on the file's locat
 - Description - what the type represents and its purpose
 - Type kind (Struct/Enum/NewType)
 - **Mutability contract** (Immutable by default)
-- **Properties** - the data structure (fields/variants)
+- **Fields** or **Variants** - the data structure
 - **Functionalities** - the public API (or omitted for default: constructor + getters)
 - Validation rules
 - Examples (valid and invalid cases with constructor calls)
@@ -39,7 +39,7 @@ The system automatically selects the appropriate agent based on the file's locat
 - Role players or actors
 
 **Key Structure**:
-- **Properties section** defines the data (becomes private fields)
+- **Fields** / **Variants** define the data
 - **Functionalities section** defines the public API
   - If omitted: default to constructor + getters
   - If present: implement ONLY what's listed (must include constructor if needed)
@@ -61,39 +61,41 @@ The system automatically selects the appropriate agent based on the file's locat
 - Props (context properties)
 - Roles and responsibilities
 - Role players and their capabilities
-- Functionality (public operations)
+- Functionalities (public operations)
 - Use cases
 - Sequence diagrams
 - Business rules
 - Examples
 
-### 3. Main Application Agent (`create_specifications_main`)
+### 3. Root Application Drafts (`drafts/app.md`)
 
-**Used for**: `drafts/*.md` (root folder files like `app.md`)
+**Used for**: `drafts/app.md` (root application draft files)
 
-**Purpose**: Creates specifications for main application entry points (main.rs, mod.rs, or library roots).
+**Handled by**: `create_specifications_context` with `specification_kind = app`
+
+**Purpose**: Creates specifications for root application entry points without forcing them into the context/use-case schema.
 
 **Characteristics**:
-- Application entry points (binary or library root)
-- Command-line interface structure
-- Top-level application flow
-- Module organization
-- Configuration and initialization
+- Application entry points (binary, service, or web app)
+- May declare an explicit application kind such as `cli_app`, `service_app`, or `web_app`
+- Top-level startup/bootstrap and shutdown behavior
+- Configuration, collaborator wiring, and lifecycle rules
+- Optional command interface, transport surface, and static surface sections
 
 **Output includes**:
-- Application overview (type: Binary/Library/Module)
-- Command structure (for CLI apps)
-- Application flow
-- Module organization
-- Configuration requirements
-- Dependencies
-- Error handling strategy
-- Usage examples
+- Application kind when present in the draft
+- Runtime topology and application flow
+- Configuration surface
+- Command interface when the draft defines args/subcommands/flags
+- Transport surface when the draft defines routes/endpoints
+- Static surface when the draft defines pages/assets
+- Collaborators and wiring
+- Error handling, exit, and shutdown behavior
 
 **Does NOT include**:
 - Detailed context implementations (those go in context specs)
 - Low-level data structures (those go in data specs)
-- Role player interactions (those go in context specs)
+- Forced role-player structure for app drafts that are written as lifecycle/configuration documents
 
 ## Processing Order
 
@@ -105,7 +107,7 @@ Files are processed in this order to ensure dependencies are available:
 2. **Contexts second** (`contexts/` folder)
    - May depend on data types
 
-3. **Main files last** (root folder)
+3. **Root app files last** (root folder)
    - May depend on both data types and contexts
 
 ## File Structure Mapping
@@ -116,7 +118,7 @@ drafts/
 │   └── X.md → create_specifications_data → specifications/data/X.md
 ├── contexts/
 │   └── Y.md → create_specifications_context → specifications/contexts/Y.md
-└── app.md → create_specifications_main → specifications/app.md
+└── app.md → create_specifications_context (app mode) → specifications/app.md
 ```
 
 ## Implementation Impact
@@ -131,13 +133,14 @@ When implementing specifications, the same folder-based selection applies:
 
 - **Context specs** → Context implementations with role methods
   - Struct with role players and props as fields
-  - Public methods from "Functionality"
+  - Public methods from "Functionalities"
   - Private role methods from "Role Methods"
 
-- **Main specs** → Application entry points (main.rs or lib.rs)
-  - CLI argument parsing
-  - Module organization
-  - Application flow
+- **Root app specs** → Application entry points (for example `src/main.rs`)
+  - Startup/bootstrap flow
+  - Collaborator wiring
+  - Command interface when documented
+  - Transport/static surfaces when documented
 
 The implementation agent (`create_implementation`) enforces immutability for data types:
 - Validates that mutability is explicitly justified if present

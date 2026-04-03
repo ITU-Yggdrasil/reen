@@ -16,7 +16,6 @@ static_prompt: |
 
   1. **ONLY functions listed in "Functionalities" section can be public**
      - These are the ONLY public methods allowed on the context
-     - If a legacy specification uses singular `Functionality`, treat it as equivalent to `Functionalities`
      - All other methods MUST be private
      - Private helper functions are allowed when needed to keep code clear and maintainable
 
@@ -78,33 +77,6 @@ static_prompt: |
      - Normalize that title into a valid Rust/Cargo package name using lowercase `snake_case`/kebab-safe characters as needed.
      - Do not invent an unrelated package name based on folder names or generic placeholders when the app title is present.
      - If both library and binary targets are created for the same app-driven project, keep naming consistent with the normalized app title unless the specification explicitly requires otherwise.
-
-  ### Specification Schema Compatibility (MANDATORY)
-
-  The repository may contain either legacy specifications or the aligned specification schemas.
-  You MUST recognize both during the migration period.
-
-  Treat these section names as equivalent where noted:
-
-  - public method section:
-    - preferred: `Functionalities`
-    - legacy: `Functionality`
-  - context collaborator section:
-    - preferred: `Role Players`
-    - legacy: `Roles`, `Roles and Responsibilities`
-  - context introduction:
-    - preferred: `Purpose`
-    - legacy: `Description`
-  - data field section:
-    - preferred: `Fields`
-    - legacy: `Properties`
-  - data enum section:
-    - preferred: `Variants`
-  - data rule sections:
-    - preferred: `Rules`, `Construction Rules`, `Access Rules`
-    - legacy: `Constraints & Rules`
-
-  When both legacy and aligned forms appear, prefer the aligned form.
 
   ### Implementation Structure (MANDATORY):
 
@@ -172,7 +144,7 @@ static_prompt: |
 
   1. **Determine project type from specification**:
      - Look at the specification title/name and structure
-     - **If specification is for a simple data type** (has Type Kind and either `Fields`, `Variants`, or legacy `Properties`, plus optional `Functionalities`):
+     - **If specification is for a simple data type** (has Type Kind and either `Fields` or `Variants`, plus optional `Functionalities`):
        - This is a data type in `src/data/`
        - **CRITICAL**: Data types are IMMUTABLE by default
        - All fields should be private with public getters ONLY
@@ -185,7 +157,7 @@ static_prompt: |
        - Derive the Cargo package name from the `app.md` title
        - Create `src/main.rs` with main() function
        - Add `[[bin]]` section to Cargo.toml
-     - **If specification is for a context** (has `Props`, `Role Players` or legacy `Roles`, and `Functionalities` or legacy `Functionality`): This is a library component
+     - **If specification is for a context** (has `Purpose`, `Role Players`, `Props`, and `Functionalities`): This is a library component
        - Create `src/lib.rs` and context modules
        - Add `[lib]` section to Cargo.toml
      - **If unclear**: Default to library structure
@@ -199,11 +171,11 @@ static_prompt: |
 
   3. **Parse the specification structure**:
 
-     **For Data Types (has `Fields` or legacy `Properties`, or has `Variants`)**:
-     - Read `Fields` or legacy `Properties` - these become private struct fields for record-like types
+     **For Data Types (has `Fields` or `Variants`)**:
+     - Read `Fields` - these become private struct fields for record-like types
      - Read `Variants` - these become enum variants for enum-like types
      - Read `Functionalities` - these become public methods
-     - Read `Rules`, `Construction Rules`, `Access Rules`, or legacy `Constraints & Rules` - these constrain construction and behavior
+     - Read `Rules`, `Construction Rules`, and `Access Rules` - these constrain construction and behavior
      - Treat statements that properties are "readable" or "writable" as accessor requirements:
        - "readable" => getter required
        - "writable" on mutable types => setter or equivalent mutating API required
@@ -217,10 +189,10 @@ static_prompt: |
      - Include constructor in `Functionalities` if needed; don't assume it exists
      - For immutable data methods that "return a new X", prefer borrowed receivers (`&self`) and rebuild the new value without mutating the original instance
 
-     **For Contexts (has `Purpose`, `Role Players`, `Props`, and `Functionalities`, or compatible legacy sections)**:
-     - Read `Role Players` or legacy `Roles` / `Roles and Responsibilities` - identify role players and their capabilities
+     **For Contexts (has `Purpose`, `Role Players`, `Props`, and `Functionalities`)**:
+     - Read `Role Players` - identify role players and their capabilities
      - Read `Props` section - extract stable context fields
-     - Read `Functionalities` or legacy `Functionality` section - identify public operations (these become public methods)
+     - Read `Functionalities` section - identify public operations (these become public methods)
      - Extract role capabilities from sequence diagrams and behavior descriptions
      - Map roles to struct fields, behaviors to public methods, capabilities to private role methods
 
@@ -252,7 +224,7 @@ static_prompt: |
   5. **Implement EXACTLY as specified**:
      - Create struct with role players and props as fields
      - Implement constructor if specified
-     - Implement ONLY the public functions from `Functionalities` (or legacy `Functionality`)
+     - Implement ONLY the public functions from `Functionalities`
      - Implement ONLY the role methods from "Role Methods"
      - All role methods MUST be private
      - Name every role method as `<role>_<method_name>` (for example `source_withdraw`, `sink_deposit`)
@@ -650,7 +622,7 @@ static_prompt: |
      - Example: `tracing::debug!("[MoneyTransfer] source withdraw, amount={}", amount);`
      - Example: `tracing::info!("[Account] ledger balance, calculated_balance={}", balance);`
 
-  2. **Functionality Methods (public methods)**:
+  2. **Functionalities Methods (public methods)**:
      - Format: `"[ContextName] [method_name]"`
      - Example: `tracing::info!("[MoneyTransfer] transfer, from={}, to={}, amount={}", source_id, sink_id, amount);`
      - Example: `tracing::debug!("[Account] monthly_limit, remaining={}", limit);`
@@ -676,7 +648,7 @@ static_prompt: |
   }
 
   impl MoneyTransfer {
-      // Public method (Functionality)
+      // Public method (Functionalities)
       pub fn transfer(self) -> Result<Ledger> {
           tracing::info!(
               "[MoneyTransfer] transfer, source={}, sink={}, amount={}",
@@ -805,7 +777,7 @@ static_prompt: |
   compile_error!(
       "ERROR: Cannot implement specification as written.
 
-  Problem: The 'run' method in \"Functionalities\" (or legacy \"Functionality\") is documented to perform
+  Problem: The 'run' method in \"Functionalities\" is documented to perform
   input validation, but no 'validate' role method exists in \"Role Methods\".
 
   Required: Either:
@@ -828,7 +800,7 @@ static_prompt: |
   - ✓ **Tracing instrumented**: All methods have proper tracing calls
   - ✓ **Tracing format correct**: `"[ContextName] [role] [method]"` for role methods, `"[ContextName] [method]"` for public methods
   - ✓ **Tracing dependency**: `tracing` added to `Cargo.toml`
-  - ✓ **ONLY methods from "Functionalities" are public** (or legacy `Functionality` during migration)
+  - ✓ **ONLY methods from "Functionalities" are public**
   - ✓ **All role methods from "Role Methods" are implemented as private methods** (additional private helpers are also allowed)
   - ✓ **Role method naming follows `<role>_<method_name>`**
   - ✓ **ALL role players from spec are struct fields**
@@ -853,7 +825,7 @@ static_prompt: |
 
   2. **Public API Audit**:
      - List all public methods in your implementation
-     - Compare with `Functionalities` section in spec (or legacy `Functionality`)
+     - Compare with `Functionalities` section in spec
      - They MUST match exactly (same names, same signatures)
 
   3. **Private Methods Audit**:
@@ -864,11 +836,11 @@ static_prompt: |
   4. **Fields Audit**:
      - List all struct fields in your implementation
      - For contexts, compare with `Role Players` and `Props` in spec
-     - For data types, compare with `Fields` in spec (or legacy `Properties`)
+     - For data types, compare with `Fields` in spec
      - They MUST match exactly (same names, same types)
 
   5. **No Unauthorized Extras**:
-     - Verify no **public** methods exist beyond those in `Functionalities` (or legacy `Functionality`)
+     - Verify no **public** methods exist beyond those in `Functionalities`
      - Verify no **public** fields exist beyond those in "Role Players" and "Props"
      - Verify no **private** role methods exist beyond those in "Role Methods" (private helpers are allowed)
      - If you added a public method, field, or role method NOT in the spec, remove it
@@ -885,7 +857,7 @@ static_prompt: |
   }
 
   impl MyContext {
-      pub fn run(&self) { }         // ✓ In "Functionalities" (or legacy "Functionality")
+      pub fn run(&self) { }         // ✓ In "Functionalities"
       pub fn quick_run(&self) { }   // ✗ NOT in spec - REMOVE (extra public method)
 
       fn execute(&self) { }         // ✓ In "Role Methods"

@@ -45,13 +45,12 @@ impl AgentRegistry for FileAgentRegistry {
             return Err(PopulateError::AgentNotFound(agent_name.to_string()));
         };
 
-        // Extract the specification from the YAML (split or legacy format)
+        // Extract the specification from the YAML.
         extract_specification(agent_content)
     }
 }
 
 /// Extracts the agent specification from YAML.
-/// Prefers static_prompt + variable_prompt (cache-optimized); falls back to system_prompt (legacy).
 fn extract_specification(yaml_content: &str) -> Result<AgentSpecificationTemplate, PopulateError> {
     use yaml_rust::YamlLoader;
 
@@ -66,7 +65,6 @@ fn extract_specification(yaml_content: &str) -> Result<AgentSpecificationTemplat
 
     let doc = &docs[0];
 
-    // Prefer split format (cache-optimized) when both static_prompt and variable_prompt present
     let static_p = doc["static_prompt"].as_str();
     let variable_p = doc["variable_prompt"].as_str();
     if let (Some(static_prompt), Some(variable_prompt)) = (static_p, variable_p) {
@@ -76,40 +74,15 @@ fn extract_specification(yaml_content: &str) -> Result<AgentSpecificationTemplat
         });
     }
 
-    // Fall back to legacy system_prompt
-    if let Some(system_prompt) = doc["system_prompt"].as_str() {
-        Ok(AgentSpecificationTemplate::Legacy(
-            system_prompt.to_string(),
-        ))
-    } else {
-        Err(PopulateError::InvalidSpecification(
-            "No system_prompt or (static_prompt + variable_prompt) found in agent specification"
-                .to_string(),
-        ))
-    }
+    Err(PopulateError::InvalidSpecification(
+        "Agent specification must define both static_prompt and variable_prompt".to_string(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::AgentSpecificationTemplate;
-
-    #[test]
-    fn test_extract_specification_legacy() {
-        let yaml = r#"
-name: test_agent
-description: Test agent
-system_prompt: |
-  This is a test prompt.
-  It has multiple lines.
-"#;
-
-        let result = extract_specification(yaml);
-        assert!(result.is_ok());
-        let template = result.unwrap();
-        let canonical = template.canonical_for_cache();
-        assert!(canonical.contains("This is a test prompt"));
-    }
 
     #[test]
     fn test_extract_specification_split() {
@@ -124,16 +97,12 @@ variable_prompt: |
 
         let result = extract_specification(yaml);
         assert!(result.is_ok());
-        match result.unwrap() {
-            AgentSpecificationTemplate::Split {
-                static_prompt,
-                variable_prompt,
-            } => {
-                assert!(static_prompt.contains("Static instructions"));
-                assert!(variable_prompt.contains("{{input.foo}}"));
-            }
-            _ => panic!("expected Split format"),
-        }
+        let AgentSpecificationTemplate::Split {
+            static_prompt,
+            variable_prompt,
+        } = result.unwrap();
+        assert!(static_prompt.contains("Static instructions"));
+        assert!(variable_prompt.contains("{{input.foo}}"));
     }
 
     #[test]

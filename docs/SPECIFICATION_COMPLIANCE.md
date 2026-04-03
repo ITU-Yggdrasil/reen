@@ -51,11 +51,11 @@ Private methods that operate on role players using props.
 - These are the only private methods allowed
 - No helper methods, no utilities
 
-### 4. Functionality
+### 4. Functionalities
 Public methods available on the context.
 
 ```markdown
-## Functionality
+## Functionalities
 
 ### method_name
 **Signature**: `fn method_name(self) -> Result<...>`
@@ -77,8 +77,8 @@ Public methods available on the context.
    - Every prop → struct field
    - Nothing else
 
-2. **Public methods = Functionality section**
-   - Every function in Functionality → public method
+2. **Public methods = Functionalities section**
+   - Every function in Functionalities → public method
    - Match signatures exactly
    - Nothing else
 
@@ -104,7 +104,7 @@ Public methods available on the context.
    - No convenience methods
    - No shortcuts
    - No helpers
-   - Only what's in Functionality
+   - Only what's in Functionalities
 
 3. **No extra private methods**
    - No helper functions
@@ -145,8 +145,8 @@ grep "pub fn" src/contexts/your_context.rs
 ```
 
 **Questions to ask**:
-- [ ] Is every function in "Functionality" implemented?
-- [ ] Are all public methods listed in "Functionality"?
+- [ ] Is every function in "Functionalities" implemented?
+- [ ] Are all public methods listed in "Functionalities"?
 - [ ] Are there any extra public methods?
 
 #### 3. Private Methods Audit
@@ -189,7 +189,7 @@ For each method, verify:
 ### agent.execute
 **Signature**: `fn execute(this: String, registry: Registry) -> Result<Output>`
 
-## Functionality
+## Functionalities
 
 ### run
 **Signature**: `fn run(self) -> Result<Output>`
@@ -208,7 +208,7 @@ pub struct AgentContext<T> {
 }
 
 impl<T> AgentContext<T> {
-    // Public method from Functionality
+    // Public method from Functionalities
     pub fn run(self) -> Result<Output> {
         self.execute()
     }
@@ -222,7 +222,7 @@ impl<T> AgentContext<T> {
 
 **Why this is correct**:
 - ✓ Has exactly 3 fields (1 role player + 2 props)
-- ✓ Has exactly 1 public method (from Functionality)
+- ✓ Has exactly 1 public method (from Functionalities)
 - ✓ Has exactly 1 private method (from Role Methods)
 - ✓ Signatures match exactly
 
@@ -241,7 +241,7 @@ impl<T> AgentContext<T> {
         self.execute()
     }
 
-    pub fn quick_run(&self) -> Result<Output> {  // ✗ NOT in Functionality
+    pub fn quick_run(&self) -> Result<Output> {  // ✗ NOT in Functionalities
         self.execute()
     }
 
