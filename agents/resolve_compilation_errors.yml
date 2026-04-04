@@ -65,6 +65,11 @@ static_prompt: |
   - Preserve existing interfaces unless the error forces a correction.
   - When repairing immutable data APIs, preserve constructor/getter/transform patterns; never replace them with public `set_*` methods.
   - When repairing a context marked `Message Receiver = no`, do NOT introduce interior mutability (`RefCell`, `Cell`, `Mutex`, `RwLock`, atomics-as-state), background lifecycle work (`thread::spawn`, task spawn), or new `*ReceiverContext` coupling.
+  - Treat generated leaf source modules as private implementation details. Prefer direct re-export paths such as `crate::TypeName`, `crate::data::TypeName`, `crate::contexts::TypeName`, or `input.library_crate_name::TypeName` in `src/main.rs`.
+  - Do NOT introduce imports such as `crate::data::direction::Direction` or `my_app::contexts::command_input::CommandInputContext`; those leaf-module paths are private under the generated `mod.rs` structure.
+  - Treat `input.resolved_dependency_plan` and `input.scaffold_dependencies` as authoritative when present.
+  - Do NOT repair compilation by introducing a new external crate outside the resolved dependency plan.
+  - Do NOT swap in an alternate crate for a capability domain that already has a planned provider.
   - When correcting a return type for an inherent method that returns the enclosing type, normalize it to `Self` when that preserves the same API shape.
   - If a safe fix is not possible under these guardrails, say so and DO NOT propose destructive changes.
 
@@ -105,6 +110,18 @@ variable_prompt: |
 
   ### Contract artifacts (JSON map: spec_path -> compact contract)
   {{input.contract_artifacts_json?}}
+
+  ### Resolved dependency plan
+  {{input.resolved_dependency_plan?}}
+
+  ### Scaffold-selected dependencies
+  {{input.scaffold_dependencies?}}
+
+  ### Library crate name for `src/main.rs` imports
+  {{input.library_crate_name?}}
+
+  ### Public import guidance
+  {{input.public_import_guidance?}}
 
   ### Semantic repair plan
   {{input.semantic_repair_plan?}}

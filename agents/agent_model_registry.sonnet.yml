@@ -16,6 +16,10 @@ create_plan:
   model: claude-sonnet-4-6
   parallel: false
   batch: false
+bootstrap_capability_registry:
+  model: claude-sonnet-4-6
+  parallel: false
+  batch: false
 create_implementation:
   model: claude-sonnet-4-6
   parallel: true

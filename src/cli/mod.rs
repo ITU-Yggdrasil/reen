@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 mod agent_executor;
 mod artifact_backend;
+mod capability_registry;
 mod cargo_commands;
 mod compilation_fix;
 mod contracts;
@@ -34,6 +35,13 @@ pub mod yaml_config;
 use agent_executor::{AgentExecutor, AgentResponse};
 use artifact_backend::{
     ArtifactCategory, ArtifactKind, ArtifactStore, BackendSelection, build_artifact_store,
+};
+use capability_registry::{
+    CapabilityRegistry, add_capability_mapping_to_registry, bootstrap_registry_from_scan,
+    builtin_provider_catalog_json, capability_registry_path, empty_registry, ensure_scan_coverage,
+    load_capability_registry, merge_registry_proposals, parse_capability_registry_fragment,
+    resolved_dependency_plan_context, scan_draft_capabilities,
+    sync_dependency_manifest_from_capability_registry, write_capability_registry,
 };
 use contracts::{
     ContractArtifact, build_contract_artifact, contract_artifact_to_context_value,
@@ -1518,6 +1526,8 @@ pub async fn create_implementation(
     config: &Config,
 ) -> Result<()> {
     let workspace = WorkspaceContext::resolve(config)?;
+    let _ =
+        sync_dependency_manifest_from_capability_registry(&workspace.drafts_root, config.verbose)?;
     let names_provided = !names.is_empty();
     let context_files = resolve_input_files(&workspace.specifications_dir, names, "md", filter)?;
 
@@ -1671,6 +1681,29 @@ pub async fn create_implementation(
                 &workspace.specifications_dir,
                 Some(&workspace.drafts_dir),
             )?;
+            let library_crate_name = project_info.package_name.clone();
+            dependency_context.insert(
+                "library_crate_name".to_string(),
+                json!(library_crate_name.clone()),
+            );
+            dependency_context.insert(
+                "public_import_guidance".to_string(),
+                json!({
+                    "library_crate_name": library_crate_name.clone(),
+                    "library_import_roots": ["<crate>::TypeName", "<crate>::data::TypeName", "<crate>::contexts::TypeName"],
+                    "main_import_examples": [
+                        format!("use {}::TypeName;", library_crate_name),
+                        format!("use {}::data::TypeName;", library_crate_name),
+                        format!("use {}::contexts::TypeName;", library_crate_name),
+                    ],
+                    "forbidden_leaf_examples": [
+                        format!("use {}::data::direction::Direction;", library_crate_name),
+                        format!("use {}::contexts::command_input::CommandInputContext;", library_crate_name),
+                        "use crate::data::direction::Direction;".to_string(),
+                    ],
+                    "note": "Generated mod.rs files re-export direct public types. Leaf module paths are private and must not be imported."
+                }),
+            );
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
             let target_contract = build_contract_artifact(
                 &context_file,
@@ -3599,7 +3632,32 @@ fn build_dependency_context(
     if let Some(tooling_symbols) = load_symbols_context(Path::new(primary_root))? {
         context.insert("tooling_symbols".to_string(), tooling_symbols);
     }
+    if let Some(drafts_root) = infer_drafts_root(primary_root, fallback_root) {
+        if let Some(resolved_plan) = resolved_dependency_plan_context(&drafts_root)? {
+            context.insert(
+                "resolved_dependency_plan".to_string(),
+                resolved_plan.clone(),
+            );
+            if let Some(packages) = resolved_plan.get("packages") {
+                context.insert("scaffold_dependencies".to_string(), packages.clone());
+            }
+        }
+    }
     Ok(context)
+}
+
+fn infer_drafts_root(primary_root: &str, fallback_root: Option<&str>) -> Option<PathBuf> {
+    let primary = Path::new(primary_root);
+    if primary.file_name().and_then(|value| value.to_str()) == Some("drafts") {
+        return Some(primary.to_path_buf());
+    }
+    if let Some(fallback) = fallback_root {
+        let fallback = Path::new(fallback);
+        if fallback.file_name().and_then(|value| value.to_str()) == Some("drafts") {
+            return Some(fallback.to_path_buf());
+        }
+    }
+    primary.parent().map(|parent| parent.join("drafts"))
 }
 
 fn build_implementation_execution_plan(
@@ -3871,6 +3929,161 @@ fn compact_agent_dependency_context(
     compact
 }
 
+pub async fn capabilities_init(use_agent: bool, force: bool, config: &Config) -> Result<()> {
+    let workspace = WorkspaceContext::resolve(config)?;
+    let registry_path = capability_registry_path(&workspace.drafts_root);
+    let existing = load_capability_registry(&registry_path)?;
+    if existing.is_some() && !force {
+        anyhow::bail!(
+            "Capability registry already exists at {}. Re-run with --force to regenerate it.",
+            registry_path.display()
+        );
+    }
+
+    let scan = scan_draft_capabilities(&workspace.drafts_root)?;
+    let mut registry = bootstrap_registry_from_scan(existing.as_ref(), &scan);
+    if use_agent {
+        enrich_capability_registry_with_agent(&scan, &mut registry, config).await?;
+    }
+    ensure_scan_coverage(&mut registry, &scan);
+
+    if config.dry_run {
+        println!(
+            "[DRY RUN] Would write capability registry to {}",
+            registry_path.display()
+        );
+        return Ok(());
+    }
+
+    write_capability_registry(&registry_path, &registry)?;
+    let plan =
+        sync_dependency_manifest_from_capability_registry(&workspace.drafts_root, config.verbose)?
+            .unwrap_or_else(|| unreachable!("capability registry was just written"));
+
+    println!("✓ Wrote {}", registry_path.display());
+    println!(
+        "✓ Regenerated {}",
+        workspace.drafts_root.join("dependencies.yml").display()
+    );
+
+    if !plan.unresolved_capabilities.is_empty() {
+        let unresolved = plan
+            .unresolved_capabilities
+            .iter()
+            .map(|item| format!("{} ({})", item.capability, item.domain))
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "Capability registry initialized with unresolved capabilities: {}. Resolve them with `reen capabilities add ...`.",
+            unresolved
+        );
+    }
+
+    Ok(())
+}
+
+pub async fn capabilities_add(
+    capability: String,
+    crate_name: String,
+    domain: String,
+    version: String,
+    features: Vec<String>,
+    default_features: bool,
+    config: &Config,
+) -> Result<()> {
+    let workspace = WorkspaceContext::resolve(config)?;
+    let registry_path = capability_registry_path(&workspace.drafts_root);
+    let mut registry = load_capability_registry(&registry_path)?.unwrap_or_else(empty_registry);
+    add_capability_mapping_to_registry(
+        &mut registry,
+        &capability,
+        &crate_name,
+        &domain,
+        &version,
+        &features,
+        default_features,
+    )?;
+
+    if config.dry_run {
+        println!(
+            "[DRY RUN] Would update {} with {} -> {} ({})",
+            registry_path.display(),
+            capability,
+            crate_name,
+            domain
+        );
+        return Ok(());
+    }
+
+    write_capability_registry(&registry_path, &registry)?;
+    let plan =
+        sync_dependency_manifest_from_capability_registry(&workspace.drafts_root, config.verbose)?
+            .unwrap_or_else(|| unreachable!("capability registry was just written"));
+
+    println!("✓ Updated {}", registry_path.display());
+    println!(
+        "✓ Regenerated {}",
+        workspace.drafts_root.join("dependencies.yml").display()
+    );
+    if !plan.unresolved_capabilities.is_empty() {
+        println!(
+            "Unresolved capabilities remain: {}",
+            plan.unresolved_capabilities
+                .iter()
+                .map(|item| format!("{} ({})", item.capability, item.domain))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+async fn enrich_capability_registry_with_agent(
+    scan: &capability_registry::CapabilityScan,
+    registry: &mut CapabilityRegistry,
+    config: &Config,
+) -> Result<()> {
+    let unresolved = scan
+        .detected
+        .iter()
+        .filter(|item| {
+            registry
+                .unmapped_capabilities
+                .iter()
+                .any(|candidate| candidate.capability == item.capability)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if unresolved.is_empty() {
+        return Ok(());
+    }
+
+    let executor = AgentExecutor::new("bootstrap_capability_registry", config)?;
+    let mut context = HashMap::new();
+    context.insert("detected_capabilities".to_string(), json!(scan));
+    context.insert("unresolved_capabilities".to_string(), json!(unresolved));
+    context.insert("existing_registry".to_string(), json!(registry));
+    context.insert(
+        "builtin_provider_catalog".to_string(),
+        builtin_provider_catalog_json(),
+    );
+    let input = "Inspect the unresolved draft capabilities and return only a YAML capability registry fragment. Prefer the built-in provider catalog when it already covers the need. If no safe provider can be chosen, leave the capability unmapped.";
+    let response = executor.execute_with_context(input, context, None).await?;
+    let output = match response {
+        AgentResponse::Final(output) => output,
+        AgentResponse::Questions(questions) => {
+            anyhow::bail!(
+                "Capability bootstrap agent requested follow-up questions unexpectedly: {}",
+                questions
+            );
+        }
+    };
+    let proposal = parse_capability_registry_fragment(&output)?;
+    merge_registry_proposals(registry, &proposal)?;
+    Ok(())
+}
+
 pub async fn compile(config: &Config) -> Result<()> {
     cargo_commands::compile(config).await
 }
@@ -3882,6 +4095,9 @@ pub async fn fix(
     token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
+    let workspace = WorkspaceContext::resolve(config)?;
+    let _ =
+        sync_dependency_manifest_from_capability_registry(&workspace.drafts_root, config.verbose)?;
     cargo_commands::fix(
         max_compile_fix_attempts,
         clear_cache,
@@ -4934,6 +5150,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(prefix: &str) -> PathBuf {
@@ -4942,6 +5159,11 @@ mod tests {
             .expect("time ok")
             .as_nanos();
         std::env::temp_dir().join(format!("reen_cli_{}_{}", prefix, nanos))
+    }
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[test]
@@ -5133,6 +5355,7 @@ Problem:
             vec!["PositionReport".to_string()]
         );
 
+        let _guard = cwd_lock().lock().expect("cwd lock");
         let original_dir = std::env::current_dir().expect("cwd");
         std::env::set_current_dir(&root).expect("set cwd");
         let implementation_levels = build_implementation_execution_plan(

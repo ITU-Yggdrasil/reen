@@ -1,5 +1,11 @@
 # GameLoopContext
 
+## Message Receiver
+
+no
+
+---
+
 ## Purpose
 
 GameLoopContext is the "Game" part of the system.

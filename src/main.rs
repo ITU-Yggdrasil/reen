@@ -90,8 +90,50 @@ enum Commands {
     #[command(about = "Test the project using cargo test")]
     Test,
 
+    #[command(subcommand, about = "Manage capability-to-crate planning")]
+    Capabilities(CapabilityCommands),
+
     #[command(subcommand, about = "Clear cache entries or generated artifacts")]
     Clear(ClearCommands),
+}
+
+#[derive(Subcommand)]
+enum CapabilityCommands {
+    #[command(about = "Scan drafts and create the initial capability registry")]
+    Init {
+        #[arg(
+            long,
+            help = "Use an agent to propose mappings for unresolved or ambiguous capabilities"
+        )]
+        agent: bool,
+
+        #[arg(
+            long,
+            help = "Regenerate the registry even if drafts/capability_registry.yml already exists"
+        )]
+        force: bool,
+    },
+
+    #[command(about = "Add or extend a capability mapping in the registry")]
+    Add {
+        #[arg(help = "Capability identifier in snake_case")]
+        capability: String,
+
+        #[arg(help = "Crate name to provide this capability", value_name = "crate")]
+        krate: String,
+
+        #[arg(long, help = "Capability domain in snake_case")]
+        domain: String,
+
+        #[arg(long, help = "Crate version")]
+        version: String,
+
+        #[arg(long = "feature", help = "Cargo feature to enable", action = clap::ArgAction::Append)]
+        features: Vec<String>,
+
+        #[arg(long, help = "Disable default features for the selected crate")]
+        no_default_features: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -516,6 +558,30 @@ async fn main() -> Result<()> {
         Commands::Test => {
             cli::test(&config).await?;
         }
+        Commands::Capabilities(command) => match command {
+            CapabilityCommands::Init { agent, force } => {
+                cli::capabilities_init(agent, force, &config).await?;
+            }
+            CapabilityCommands::Add {
+                capability,
+                krate,
+                domain,
+                version,
+                features,
+                no_default_features,
+            } => {
+                cli::capabilities_add(
+                    capability,
+                    krate,
+                    domain,
+                    version,
+                    features,
+                    !no_default_features,
+                    &config,
+                )
+                .await?;
+            }
+        },
         Commands::Clear(clear_cmd) => match clear_cmd {
             ClearCommands::Cache(target) => match target {
                 ClearCacheTargets::Specification { names } => {
@@ -547,7 +613,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildArgs, Cli, Commands};
+    use super::{BuildArgs, CapabilityCommands, Cli, Commands};
     use clap::Parser;
 
     #[test]
@@ -607,6 +673,54 @@ mod tests {
                 "expected build command, got {:?}",
                 std::mem::discriminant(&other)
             ),
+        }
+    }
+
+    #[test]
+    fn parses_capabilities_init_with_agent() {
+        let cli = Cli::parse_from(["reen", "capabilities", "init", "--agent"]);
+        match cli.command {
+            Commands::Capabilities(CapabilityCommands::Init { agent, force }) => {
+                assert!(agent);
+                assert!(!force);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parses_capabilities_add() {
+        let cli = Cli::parse_from([
+            "reen",
+            "capabilities",
+            "add",
+            "terminal_raw_input",
+            "crossterm",
+            "--domain",
+            "terminal",
+            "--version",
+            "0.27",
+            "--feature",
+            "events",
+            "--no-default-features",
+        ]);
+        match cli.command {
+            Commands::Capabilities(CapabilityCommands::Add {
+                capability,
+                krate,
+                domain,
+                version,
+                features,
+                no_default_features,
+            }) => {
+                assert_eq!(capability, "terminal_raw_input");
+                assert_eq!(krate, "crossterm");
+                assert_eq!(domain, "terminal");
+                assert_eq!(version, "0.27");
+                assert_eq!(features, vec!["events"]);
+                assert!(no_default_features);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
         }
     }
 }

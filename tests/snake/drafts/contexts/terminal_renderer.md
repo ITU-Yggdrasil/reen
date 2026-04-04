@@ -1,5 +1,11 @@
 # Terminal Renderer
 
+## Message Receiver
+
+no
+
+---
+
 ## Purpose
 
 TerminalRenderer draws the current game frame as text (ASCII) in the terminal.

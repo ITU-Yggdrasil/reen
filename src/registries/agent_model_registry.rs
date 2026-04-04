@@ -301,7 +301,13 @@ fn validate_expected_agents_present(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -516,6 +522,7 @@ create_specifications_data:
 
     #[test]
     fn resolve_registry_path_uses_profiled_filename() {
+        let _guard = cwd_lock().lock().expect("cwd lock");
         let test_dir = unique_test_dir("profile_path");
         let agents_dir = test_dir.join("agents");
         fs::create_dir_all(&agents_dir).expect("create temp agents dir");
@@ -535,6 +542,7 @@ create_specifications_data:
 
     #[test]
     fn validate_registry_profile_errors_when_profiled_file_is_missing() {
+        let _guard = cwd_lock().lock().expect("cwd lock");
         let test_dir = unique_test_dir("profile_missing");
         fs::create_dir_all(test_dir.join("agents")).expect("create temp agents dir");
 

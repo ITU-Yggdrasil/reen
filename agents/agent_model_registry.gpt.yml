@@ -13,6 +13,9 @@ create_specifications_external_api:
 create_plan:
   model: gpt-5
   parallel: false
+bootstrap_capability_registry:
+  model: gpt-5
+  parallel: false
 create_implementation:
   model: gpt-5
   parallel: true

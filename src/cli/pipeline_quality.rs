@@ -6,6 +6,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use super::capability_registry::{
+    allowed_external_crate_roots, registry_provider_domains_by_crate,
+};
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) enum SpecificationKind {
     App,
@@ -441,6 +445,12 @@ pub(crate) fn verify_generated_implementation(
     for finding in detect_ignored_immutable_return_values(spec_content, &code) {
         high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
     }
+    for finding in detect_private_leaf_module_import_findings(&code) {
+        high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+    }
+    for finding in detect_external_crate_policy_findings(project_root, &code)? {
+        high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+    }
     if matches!(plan.contract.kind, SpecificationKind::Context) && !plan.contract.message_receiver {
         for finding in detect_non_receiver_context_findings(&code) {
             high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
@@ -599,6 +609,98 @@ fn detect_ignored_immutable_return_values(spec_content: &str, code: &str) -> Vec
     findings.sort();
     findings.dedup();
     findings
+}
+
+fn detect_private_leaf_module_import_findings(code: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let leaf_import_re = Regex::new(
+        r"(?m)^\s*use\s+(?:crate|[A-Za-z_][A-Za-z0-9_]*)::(?:data|contexts)::[a-z_][A-Za-z0-9_]*::",
+    )
+    .unwrap();
+
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if leaf_import_re.is_match(trimmed) {
+            findings.push(format!(
+                "Import uses a private leaf-module path; rewrite it to a public re-export path (`{}`)",
+                trimmed
+            ));
+        }
+    }
+
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+fn detect_external_crate_policy_findings(project_root: &Path, code: &str) -> Result<Vec<String>> {
+    let drafts_root = project_root.join("drafts");
+    let Some(allowed) = allowed_external_crate_roots(&drafts_root)? else {
+        return Ok(Vec::new());
+    };
+    let provider_domains = registry_provider_domains_by_crate(&drafts_root)?.unwrap_or_default();
+    let planned_by_domain = provider_domains
+        .iter()
+        .filter(|(crate_name, _)| allowed.contains(crate_name.as_str()))
+        .map(|(crate_name, domain)| (domain.clone(), crate_name.clone()))
+        .collect::<HashMap<_, _>>();
+    let external_roots = extract_external_crate_roots(code);
+    let mut findings = Vec::new();
+
+    for root in external_roots {
+        if allowed.contains(&root) || baseline_allowed_crate_roots().contains(root.as_str()) {
+            continue;
+        }
+        let known_domain = provider_domains
+            .get(&root)
+            .cloned()
+            .or_else(|| known_capability_domain_for_crate(&root).map(str::to_string));
+        if let Some(domain) = known_domain.as_deref() {
+            if let Some(planned) = planned_by_domain.get(domain) {
+                findings.push(format!(
+                    "Code imports external crate '{}' but capability domain '{}' is planned to use '{}'",
+                    root, domain, planned
+                ));
+                continue;
+            }
+        }
+        findings.push(format!(
+            "Code imports external crate '{}' which is not declared in the resolved dependency plan",
+            root
+        ));
+    }
+
+    findings.sort();
+    findings.dedup();
+    Ok(findings)
+}
+
+fn extract_external_crate_roots(code: &str) -> BTreeSet<String> {
+    let qualified_path_re = Regex::new(r"\b([a-z_][a-z0-9_]*)::").unwrap();
+    qualified_path_re
+        .captures_iter(code)
+        .filter_map(|captures| captures.get(1))
+        .filter(|capture| {
+            let start = capture.start();
+            !(start >= 2 && &code[start - 2..start] == "::")
+        })
+        .map(|capture| capture.as_str().to_string())
+        .filter(|root| !baseline_allowed_crate_roots().contains(root.as_str()))
+        .collect()
+}
+
+fn baseline_allowed_crate_roots() -> HashSet<&'static str> {
+    HashSet::from([
+        "crate", "self", "super", "std", "core", "alloc", "data", "contexts", "tracing",
+    ])
+}
+
+fn known_capability_domain_for_crate(crate_name: &str) -> Option<&'static str> {
+    match crate_name {
+        "crossterm" | "termion" => Some("terminal"),
+        "serialport" => Some("serial"),
+        _ => None,
+    }
 }
 
 fn detect_non_receiver_context_findings(code: &str) -> Vec<String> {
@@ -863,6 +965,21 @@ fn parse_message_receiver_literal(body: &str) -> Option<bool> {
     None
 }
 
+fn is_markdown_thematic_break(line: &str) -> bool {
+    let compact = line
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if compact.len() < 3 {
+        return false;
+    }
+    let mut chars = compact.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    matches!(first, '-' | '*' | '_') && chars.all(|ch| ch == first)
+}
+
 fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> SpecificationKind {
     let path = spec_path.to_string_lossy().to_ascii_lowercase();
     if path.ends_with("/app.md") {
@@ -918,7 +1035,8 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
     let mut current_title: Option<String> = None;
     let mut current_body = String::new();
     for line in content.lines() {
-        if let Some(title) = line.trim().strip_prefix("## ") {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed.strip_prefix("## ") {
             if let Some(existing) = current_title.take() {
                 sections.push(Section {
                     title: existing,
@@ -927,6 +1045,9 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
                 current_body.clear();
             }
             current_title = Some(title.trim().to_string());
+            continue;
+        }
+        if current_title.is_some() && is_markdown_thematic_break(trimmed) {
             continue;
         }
         if current_title.is_some() {
@@ -1382,6 +1503,9 @@ fn to_snake_case(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::capability_registry::{
+        add_capability_mapping_to_registry, empty_registry, write_capability_registry,
+    };
     use super::{
         SpecificationKind, analyze_specification, compare_verifier_reports,
         determine_spec_path_for_output, verify_generated_implementation,
@@ -1551,6 +1675,176 @@ Immutable. All mutation-like operations return a new GameState rather than modif
                 .high_risk_findings
                 .iter()
                 .any(|item| item.contains("increment_score"))
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_flags_private_leaf_module_import_paths() {
+        let root = make_temp_dir("pipeline_quality_leaf_imports");
+        let specs = root.join("specifications");
+        let src = root.join("src");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("app.md");
+        fs::write(
+            &spec_path,
+            r#"# Snake App
+
+## Behavior
+- Starts the game.
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("main.rs");
+        fs::write(
+            &output,
+            r#"use snake::data::direction::Direction;
+
+fn main() {
+    let _ = Direction::Right;
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("private leaf-module path")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_flags_unplanned_external_crates_when_registry_exists() {
+        let root = make_temp_dir("pipeline_quality_unplanned_crate");
+        let specs = root.join("specifications");
+        let drafts = root.join("drafts");
+        let src = root.join("src");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir drafts");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let mut registry = empty_registry();
+        add_capability_mapping_to_registry(
+            &mut registry,
+            "terminal_raw_input",
+            "crossterm",
+            "terminal",
+            "0.27",
+            &[],
+            true,
+        )
+        .expect("map capability");
+        write_capability_registry(&drafts.join("capability_registry.yml"), &registry)
+            .expect("write registry");
+        fs::write(
+            drafts.join("contexts/terminal_renderer.md"),
+            "# TerminalRenderer\n\nReads key presses in raw mode.\n",
+        )
+        .expect("write draft");
+
+        let spec_path = specs.join("app.md");
+        fs::write(&spec_path, "# App\n\n## Behavior\n- Runs.\n").expect("write spec");
+
+        let output = src.join("main.rs");
+        fs::write(
+            &output,
+            r#"use libc::STDIN_FILENO;
+
+fn main() {
+    let _ = STDIN_FILENO;
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("not declared in the resolved dependency plan")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_flags_conflicting_domain_provider() {
+        let root = make_temp_dir("pipeline_quality_conflicting_provider");
+        let specs = root.join("specifications");
+        let drafts = root.join("drafts");
+        let src = root.join("src");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir drafts");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let mut registry = empty_registry();
+        add_capability_mapping_to_registry(
+            &mut registry,
+            "terminal_raw_input",
+            "crossterm",
+            "terminal",
+            "0.27",
+            &[],
+            true,
+        )
+        .expect("map capability");
+        write_capability_registry(&drafts.join("capability_registry.yml"), &registry)
+            .expect("write registry");
+        fs::write(
+            drafts.join("contexts/terminal_renderer.md"),
+            "# TerminalRenderer\n\nReads key presses in raw mode.\n",
+        )
+        .expect("write draft");
+
+        let spec_path = specs.join("app.md");
+        fs::write(&spec_path, "# App\n\n## Behavior\n- Runs.\n").expect("write spec");
+
+        let output = src.join("main.rs");
+        fs::write(
+            &output,
+            r#"use termion::raw::IntoRawMode;
+
+fn main() {}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report.high_risk_findings.iter().any(|item| {
+                item.contains("capability domain 'terminal' is planned to use 'crossterm'")
+            }),
+            "findings: {:?}",
+            report.high_risk_findings
         );
 
         fs::remove_dir_all(root).ok();
@@ -1739,6 +2033,53 @@ Derived projection.
                 .iter()
                 .any(|item| item.contains("Message Receiver"))
         );
+    }
+
+    #[test]
+    fn context_specs_accept_message_receiver_with_thematic_break_separator() {
+        let content = r#"# ProjectionContext
+
+## Purpose
+Derived projection.
+
+## Message Receiver
+no
+
+---
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| ledger | Source data | Provides entries |
+
+## Role Methods
+### ledger
+- **entries**
+  Returns entries.
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| account_id | Target account | Stable |
+
+## Functionalities
+### balance
+- Returns the current balance.
+"#;
+        let report = analyze_specification(
+            Path::new("specifications/contexts/projection_context.md"),
+            content,
+            None,
+        );
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|item| item.contains("Message Receiver")),
+            "errors: {:?}",
+            report.errors
+        );
+        assert!(!report.contract.message_receiver);
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
+use super::capability_registry::capability_registry_exists;
 use super::dependency_tooling::render_dependency_entries;
 
 /// Information about the project structure extracted from specifications
@@ -16,18 +17,14 @@ pub struct ProjectInfo {
     pub context_dependencies: HashMap<String, Vec<String>>,
     /// Dependencies and their versions
     pub dependencies: HashMap<String, String>,
-    /// Package name
+    /// Cargo package name and library crate name
     pub package_name: String,
 }
 
 /// Analyzes all specifications and extracts project structure information
 pub fn analyze_specifications(spec_dir: &Path, draft_dir: Option<&Path>) -> Result<ProjectInfo> {
     let mut project_info = ProjectInfo {
-        package_name: spec_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("generated_project")
-            .to_string(),
+        package_name: derive_project_package_name(spec_dir),
         ..Default::default()
     };
 
@@ -41,6 +38,56 @@ pub fn analyze_specifications(spec_dir: &Path, draft_dir: Option<&Path>) -> Resu
     compute_context_dependencies(spec_dir, &mut project_info)?;
 
     Ok(project_info)
+}
+
+fn derive_project_package_name(spec_dir: &Path) -> String {
+    let raw_name = if spec_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value == "specifications")
+    {
+        spec_dir
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|value| value.to_str())
+            .unwrap_or("generated_project")
+    } else {
+        spec_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("generated_project")
+    };
+
+    sanitize_crate_name(raw_name)
+}
+
+fn sanitize_crate_name(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_separator = false;
+
+    for ch in value.chars() {
+        let lowered = ch.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            if out.is_empty() && lowered.is_ascii_digit() {
+                out.push('_');
+            }
+            out.push(lowered);
+            last_was_separator = false;
+        } else if !out.is_empty() && !last_was_separator {
+            out.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    while out.ends_with('_') {
+        out.pop();
+    }
+
+    if out.is_empty() {
+        "generated_project".to_string()
+    } else {
+        out
+    }
 }
 
 fn scan_directory(
@@ -115,8 +162,11 @@ fn analyze_spec_file(
         }
     }
 
-    // Detect dependencies from content
-    detect_dependencies(&content, project_info);
+    // Detect dependencies from content only when the project has not opted into
+    // the capability registry yet.
+    if !capability_registry_exists(draft_dir) {
+        detect_dependencies(&content, project_info);
+    }
 
     Ok(())
 }
@@ -681,6 +731,20 @@ mod tests {
         assert!(cargo_toml.contains(
             "tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"
         ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn analyze_specifications_uses_parent_folder_name_for_specifications_dir() {
+        let root = std::env::temp_dir().join("reen_project_structure_parent_name");
+        let specs = root.join("money transfer").join("specifications");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(specs.join("data")).expect("mkdir");
+        fs::write(specs.join("data/amount.md"), "# Amount\n").expect("write spec");
+
+        let project_info = analyze_specifications(&specs, None).expect("analyze specifications");
+        assert_eq!(project_info.package_name, "money_transfer");
 
         let _ = fs::remove_dir_all(root);
     }

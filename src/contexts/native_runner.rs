@@ -152,9 +152,7 @@ fn normalize_request(request: &Value) -> Result<NormalizedRequest, String> {
         if let (Some(static_prompt), Some(variable_prompt)) = (static_prompt, variable_prompt) {
             (static_prompt.to_string(), variable_prompt.to_string())
         } else {
-            return Err(
-                "Missing required fields: static_prompt and variable_prompt".to_string(),
-            );
+            return Err("Missing required fields: static_prompt and variable_prompt".to_string());
         };
 
     Ok(NormalizedRequest {

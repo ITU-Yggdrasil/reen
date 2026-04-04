@@ -56,9 +56,12 @@ static_prompt: |
      - Do not emit mismatched names that would break generated `mod.rs` re-exports.
 
   8. **Import roots must match generated project structure**
-     - Prefer crate-root re-exports (`crate::TypeName`) or `crate::data::...` / `crate::contexts::...` as appropriate.
+     - Generated `mod.rs` files re-export direct public types. Treat leaf source modules as private implementation details.
+     - For library modules under `src/data/` and `src/contexts/`, prefer `crate::TypeName`, `crate::data::TypeName`, or `crate::contexts::TypeName`.
+     - For `src/main.rs`, use the provided `input.library_crate_name` for library imports: `input.library_crate_name::TypeName`, `input.library_crate_name::data::TypeName`, or `input.library_crate_name::contexts::TypeName`.
      - Do NOT import from `crate::types::...` unless such a module is explicitly present in the generated project.
-     - Avoid private submodule paths when public re-exports are available.
+     - Forbidden: private leaf-module paths such as `crate::data::amount::Amount`, `crate::contexts::account::Account`, or `my_app::data::direction::Direction`.
+     - Avoid subgroup namespace imports when a direct re-export exists.
 
   9. **Environment configuration convention (MANDATORY when env vars are used)**
      - If the implementation reads any environment variables, create a project-root `.env` file with sensible defaults.
@@ -73,11 +76,10 @@ static_prompt: |
      - These terms describe API obligations only; they do NOT require public struct fields or any particular internal representation.
      - If the specification explicitly lists accessor method names/signatures, those explicit definitions override this default interpretation.
 
-  11. **Cargo package naming for app-driven projects is normative**
-     - If implementing an `app.md` specification, derive the Cargo package name from the document title (the top-level `# ...` heading in `app.md`).
-     - Normalize that title into a valid Rust/Cargo package name using lowercase `snake_case`/kebab-safe characters as needed.
-     - Do not invent an unrelated package name based on folder names or generic placeholders when the app title is present.
-     - If both library and binary targets are created for the same app-driven project, keep naming consistent with the normalized app title unless the specification explicitly requires otherwise.
+  11. **Cargo and crate naming are scaffold-managed**
+     - `Cargo.toml`, the library crate name, and generated `mod.rs` re-exports are managed by the scaffold.
+     - Do not invent package names or library crate names inside generated Rust files.
+     - When `src/main.rs` needs to import the library target, use the provided `input.library_crate_name`.
 
   ### Implementation Structure (MANDATORY):
 
@@ -154,10 +156,10 @@ static_prompt: |
        - Do NOT consume owned `self` or use `mut self` for immutable public transforms unless the specification explicitly requires ownership transfer
        - Use `#[derive(Clone)]` for copying values
        - If mutability is specified, verify it's justified and implement constraints
-     - **If specification is for "App" or "Application"**: This is a binary application
-       - Derive the Cargo package name from the `app.md` title
-       - Create `src/main.rs` with main() function
-       - Add `[[bin]]` section to Cargo.toml
+    - **If specification is for "App" or "Application"**: This is a binary application
+      - Use the scaffold-managed library crate name from `input.library_crate_name` when importing library code into `src/main.rs`
+      - Create `src/main.rs` with main() function
+      - Add `[[bin]]` section to Cargo.toml
      - **If specification is for a context** (has `Purpose`, `Role Players`, `Props`, and `Functionalities`): This is a library component
        - Create `src/lib.rs` and context modules
        - Add `[lib]` section to Cargo.toml
@@ -305,15 +307,15 @@ static_prompt: |
   Create a **binary** structure:
 
   1. **`Cargo.toml` with `[[bin]]` section**:
-     - Derive `package.name` from the `app.md` title (`# ...`), normalized into a valid Cargo package name
+     - Cargo package and library naming are scaffold-managed; do not emit Cargo content from this agent
      ```toml
      [package]
-     name = "app_title_normalized"
+     name = "scaffold_managed"
      version = "0.1.0"
      edition = "2021"
 
      [[bin]]
-     name = "app_title_normalized"
+     name = "scaffold_managed"
      path = "src/main.rs"
 
      [dependencies]
@@ -339,10 +341,10 @@ static_prompt: |
   Create **both library and binary**:
 
   1. **`Cargo.toml` with both `[lib]` and `[[bin]]`**:
-     - If an `app.md` title is present, derive the package name from that title and keep target naming consistent with it unless the specification explicitly requires otherwise
+     - Cargo package and library naming are scaffold-managed; do not invent names in generated Rust files
      ```toml
      [package]
-     name = "app_title_normalized"
+     name = "scaffold_managed"
      version = "0.1.0"
      edition = "2021"
 
@@ -971,6 +973,8 @@ static_prompt: |
   If `input.direct_dependencies` is present, it is authoritative project context.
 
   You MUST:
+  - Treat `input.resolved_dependency_plan` as the authoritative external-crate plan when present.
+  - Treat `input.scaffold_dependencies` as the authoritative list of scaffold-selected external crates when present.
   - Treat `input.direct_dependencies` as an authoritative dependency manifest.
   - Treat `input.contract_artifact` as the authoritative machine-readable contract for the target module when present.
   - Prefer provided dependency artifacts over inference.
@@ -983,6 +987,8 @@ static_prompt: |
   - When specification wording and implemented dependency API details differ in low-level shape, prefer compatibility with fetched `input.implemented_dependencies` artifacts while preserving specified behavior.
   - If `input.tooling_symbols` is present, treat it as the authoritative crate/type inventory for dependencies declared in `drafts/dependencies.yml`.
   - Prefer the provided symbol inventory over guessing which types, traits, or functions a dependency crate exposes.
+  - Do NOT introduce new external crates outside `input.resolved_dependency_plan` / `input.scaffold_dependencies` when those are present.
+  - Do NOT substitute an alternate crate for the same capability domain when the dependency plan already selected one.
 variable_prompt: |
   ## Input
 
@@ -1009,6 +1015,18 @@ variable_prompt: |
 
   Behavior contract (optional, authoritative):
   {{input.behavior_contract?}}
+
+  Resolved dependency plan (optional, authoritative for external crates):
+  {{input.resolved_dependency_plan?}}
+
+  Scaffold-selected dependencies (optional, authoritative crate list):
+  {{input.scaffold_dependencies?}}
+
+  Library crate name for `src/main.rs` imports (optional, authoritative):
+  {{input.library_crate_name?}}
+
+  Public import guidance (optional, authoritative):
+  {{input.public_import_guidance?}}
 
   Implementation plan (optional, authoritative):
   {{input.implementation_plan?}}

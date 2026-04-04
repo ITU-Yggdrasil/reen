@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 
 use super::Config;
 use super::agent_executor::{AgentExecutor, AgentResponse};
+use super::capability_registry::resolved_dependency_plan_context;
 use super::contracts::{
     build_contract_artifact, compact_contract_artifact_value, contract_artifact_to_context_value,
     contract_validation_to_context_value, validate_contract_artifact,
@@ -1441,7 +1442,45 @@ fn build_agent_context(
                 .join("\n")
         ),
     );
-    ctx.insert("project_info".to_string(), json!(project_info.package_name));
+    let library_crate_name = project_info.package_name.clone();
+    ctx.insert(
+        "project_info".to_string(),
+        json!(library_crate_name.clone()),
+    );
+    ctx.insert(
+        "library_crate_name".to_string(),
+        json!(library_crate_name.clone()),
+    );
+    ctx.insert(
+        "public_import_guidance".to_string(),
+        json!({
+            "library_crate_name": library_crate_name.clone(),
+            "library_import_roots": ["<crate>::TypeName", "<crate>::data::TypeName", "<crate>::contexts::TypeName"],
+            "main_import_examples": [
+                format!("use {}::TypeName;", library_crate_name),
+                format!("use {}::data::TypeName;", library_crate_name),
+                format!("use {}::contexts::TypeName;", library_crate_name),
+            ],
+            "forbidden_leaf_examples": [
+                format!("use {}::data::direction::Direction;", library_crate_name),
+                format!("use {}::contexts::command_input::CommandInputContext;", library_crate_name),
+                "use crate::data::direction::Direction;".to_string(),
+            ],
+            "note": "Generated mod.rs files re-export direct public types. Leaf module paths are private and must not be imported."
+        }),
+    );
+    let drafts_root = std::env::current_dir()
+        .context("Failed to resolve current directory for dependency plan")?
+        .join("drafts");
+    if let Some(resolved_plan) = resolved_dependency_plan_context(&drafts_root)? {
+        ctx.insert(
+            "resolved_dependency_plan".to_string(),
+            resolved_plan.clone(),
+        );
+        if let Some(packages) = resolved_plan.get("packages") {
+            ctx.insert("scaffold_dependencies".to_string(), packages.clone());
+        }
+    }
     Ok(ctx)
 }
 
@@ -1824,7 +1863,7 @@ fn parse_message_receiver_setting(spec_text: &str) -> Option<bool> {
             continue;
         }
         if current_section == Some("Message Receiver") {
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || is_markdown_thematic_break(trimmed) {
                 continue;
             }
             if trimmed.eq_ignore_ascii_case("yes") || trimmed.eq_ignore_ascii_case("true") {
@@ -1837,6 +1876,21 @@ fn parse_message_receiver_setting(spec_text: &str) -> Option<bool> {
         }
     }
     Some(false)
+}
+
+fn is_markdown_thematic_break(line: &str) -> bool {
+    let compact = line
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if compact.len() < 3 {
+        return false;
+    }
+    let mut chars = compact.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    matches!(first, '-' | '*' | '_') && chars.all(|ch| ch == first)
 }
 
 fn evaluate_non_receiver_semantic_drift(target: &str, added_lines: &[String]) -> Vec<String> {
@@ -2237,7 +2291,8 @@ fn spec_method_bold_re() -> &'static Regex {
 mod tests {
     use super::{
         check_guardrails, dedupe_paths, explicit_implementation_failure_message_from_stderr,
-        map_src_to_spec, summarize_paths, trim_retry_context_to_budget,
+        map_src_to_spec, parse_message_receiver_setting, summarize_paths,
+        trim_retry_context_to_budget,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2453,6 +2508,27 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn parse_message_receiver_setting_ignores_thematic_breaks() {
+        let spec = r#"# CommandInputContext
+
+## Purpose
+Collects and reads key presses.
+
+## Message Receiver
+no
+
+---
+
+## Role Players
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| stdin_source | Supplies keyboard input | Provides non-blocking reads |
+"#;
+
+        assert_eq!(parse_message_receiver_setting(spec), Some(false));
     }
 
     #[test]

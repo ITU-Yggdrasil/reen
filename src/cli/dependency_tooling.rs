@@ -8,6 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use super::capability_registry::sync_dependency_manifest_from_capability_registry;
+
 const DEPENDENCY_SCHEMA: &str = "reen.dependencies/v1";
 const DEPENDENCY_MANIFEST_NAME: &str = "dependencies.yml";
 const TOOLING_DIR: &str = ".reen/tooling";
@@ -140,6 +142,7 @@ pub fn ensure_tooling_artifacts_fresh(
     artifact_workspace_root: &Path,
     verbose: bool,
 ) -> Result<()> {
+    let _ = sync_dependency_manifest_from_capability_registry(drafts_root, verbose)?;
     ensure_tooling_artifacts_fresh_with_runner(
         drafts_root,
         artifact_workspace_root,

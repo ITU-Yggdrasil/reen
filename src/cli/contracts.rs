@@ -949,7 +949,8 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
     let mut current_body = String::new();
 
     for line in content.lines() {
-        if let Some(title) = line.trim().strip_prefix("## ") {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed.strip_prefix("## ") {
             if let Some(existing) = current_title.take() {
                 sections.push(Section {
                     title: existing,
@@ -958,6 +959,10 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
                 current_body.clear();
             }
             current_title = Some(title.trim().to_string());
+            continue;
+        }
+
+        if current_title.is_some() && is_markdown_thematic_break(trimmed) {
             continue;
         }
 
@@ -975,6 +980,21 @@ fn parse_markdown_sections(content: &str) -> Vec<Section> {
     }
 
     sections
+}
+
+fn is_markdown_thematic_break(line: &str) -> bool {
+    let compact = line
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if compact.len() < 3 {
+        return false;
+    }
+    let mut chars = compact.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    matches!(first, '-' | '*' | '_') && chars.all(|ch| ch == first)
 }
 
 fn find_section<'a>(sections: &'a [Section], title: &str) -> Option<&'a Section> {

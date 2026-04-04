@@ -1,5 +1,11 @@
 # CommandInputContext
 
+## Message Receiver
+
+no
+
+---
+
 ## Purpose
 
 CommandInputContext defines how key presses are collected and read.
