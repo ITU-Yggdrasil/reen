@@ -19,7 +19,10 @@ static_prompt: |
   ## Semantics
 
   - Data types are immutable by default unless the specification explicitly says otherwise.
-  - Contexts are NOT immutable by default. Infer ownership, identity, and mutability from behavior.
+  - Contexts use `Message Receiver` semantics:
+    - `Message Receiver = no` => no hidden evolving state; prefer immutable/value-style handling or explicit updated-value returns.
+    - `Message Receiver = yes` => private mutable state and lifecycle behavior are allowed.
+  - Only message receivers may directly depend on message receivers.
   - Terms such as "shared", "same instance", "one stream", "process lifetime", or "must not replace"
     are semantic identity constraints. They are not direct instructions to use a specific Rust type.
   - Prefer idiomatic Rust guidance when unconstrained.

@@ -62,10 +62,10 @@ static_prompt: |
   If `input.draft_summary` is present, it is the parser-approved summary of the draft.
 
   For strict context drafts:
-  - treat `Purpose`, `Role Players`, `Role Methods`, `Props`, and per-functionality interaction/rules/examples from `input.draft_summary` as authoritative structure
+  - treat `Purpose`, optional `Message Receiver`, `Role Players`, `Role Methods`, `Props`, and per-functionality interaction/rules/examples from `input.draft_summary` as authoritative structure
   - use the raw draft text only to preserve exact wording and supporting detail
   - do not infer missing sections that are absent from `input.draft_summary`
-  - the final specification core sections must be `Purpose`, `Role Players`, `Role Methods`, `Props`, `Functionalities`, and optional `Notes`
+  - the final specification core sections must be `Purpose`, `Message Receiver`, `Role Players`, `Role Methods`, `Props`, `Functionalities`, and optional `Notes`
   - `Role Players` must remain a markdown table
   - `Props` must remain a markdown table
   - each functionality must remain a `###` subsection containing:
@@ -103,13 +103,18 @@ static_prompt: |
   Turing-complete ecosystem. Language-specific details can be useful notes, but
   they MUST NEVER be treated as blocking ambiguities.
 
-  ## Context State Rule (Mandatory)
+  ## Message Receiver Rule (Mandatory)
 
   For context specifications:
-  - Do NOT assume contexts are immutable by default.
-  - Do NOT assume contexts are mutable by default.
+  - Always emit a `## Message Receiver` section.
+  - If the draft explicitly marks the context as a message receiver, preserve that as `yes`.
+  - If the draft explicitly marks the context as not being a message receiver, preserve that as `no`.
+  - If the draft does not mention message-receiver behavior, emit `no`.
+  - Acceptable normalized output values are exactly `yes` or `no`.
+  - `Message Receiver = yes` means the context is a stateful boundary that may own private evolving state or lifecycle behavior.
+  - `Message Receiver = no` means the context is not a hidden mutable state owner; do not describe it as having private evolving state or background lifecycle.
   - Preserve behavioral hints such as "shared", "same instance", "one stream", "process lifetime", or "must not replace" as observable constraints.
-  - Mutability and ownership mechanics belong to planning/implementation unless the draft explicitly constrains them.
+  - Low-level ownership and mutability mechanics still belong to planning/implementation unless the draft explicitly constrains them.
 
   ### Role Method Signature Scope (Mandatory For Context Drafts)
 
@@ -271,11 +276,12 @@ static_prompt: |
   - Output the core specification using this section order:
     1. `# <Context Name>`
     2. `## Purpose`
-    3. `## Role Players`
-    4. `## Role Methods`
-    5. `## Props`
-    6. `## Functionalities`
-    7. optional `## Notes`
+    3. `## Message Receiver`
+    4. `## Role Players`
+    5. `## Role Methods`
+    6. `## Props`
+    7. `## Functionalities`
+    8. optional `## Notes`
   - Keep section names exactly as written above.
   - Keep `Role Players` and `Props` as tables rather than converting them into prose subsections.
   - Keep each functionality in the parsed three-part layout rather than replacing it with a prose-only description or a separate top-level examples section.

@@ -1570,6 +1570,7 @@ fn check_guardrails(
         // Heuristics: constrain public API changes and block stub/bypass macros.
         let mut removed_pub_fns: Vec<FnSig> = Vec::new();
         let mut added_pub_fns: Vec<FnSig> = Vec::new();
+        let mut added_lines: Vec<String> = Vec::new();
         let mut removes_impl_failure_marker = false;
         let mut adds_placeholder_text = false;
         for hl in &fp.hunk_lines {
@@ -1587,6 +1588,7 @@ fn check_guardrails(
                     }
                 }
                 HunkLineKind::Add => {
+                    added_lines.push(hl.text.clone());
                     if public_fn_re().is_match(&hl.text) {
                         modifies_public_fn_lines = true;
                         if let Some(sig) = parse_pub_fn_signature(&hl.text) {
@@ -1625,6 +1627,11 @@ fn check_guardrails(
             &added_pub_fns,
             &allowed_public_methods,
         ));
+        if target.starts_with("src/contexts/")
+            && spec_message_receiver_setting(artifact_root, &target) == Some(false)
+        {
+            issues.extend(evaluate_non_receiver_semantic_drift(&target, &added_lines));
+        }
 
         // Also ensure target resolves within root when joined.
         let full = project_root.join(&target);
@@ -1799,6 +1806,87 @@ fn spec_declared_public_methods(artifact_root: &Path, target: &str) -> HashSet<S
         }
     }
     methods
+}
+
+fn spec_message_receiver_setting(artifact_root: &Path, target: &str) -> Option<bool> {
+    let spec_rel = map_src_to_spec(target)?;
+    let spec_path = resolve_spec_path(artifact_root, &spec_rel)?;
+    let spec_text = fs::read_to_string(spec_path).ok()?;
+    parse_message_receiver_setting(&spec_text)
+}
+
+fn parse_message_receiver_setting(spec_text: &str) -> Option<bool> {
+    let mut current_section: Option<&str> = None;
+    for line in spec_text.lines() {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed.strip_prefix("## ") {
+            current_section = Some(title.trim());
+            continue;
+        }
+        if current_section == Some("Message Receiver") {
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.eq_ignore_ascii_case("yes") || trimmed.eq_ignore_ascii_case("true") {
+                return Some(true);
+            }
+            if trimmed.eq_ignore_ascii_case("no") || trimmed.eq_ignore_ascii_case("false") {
+                return Some(false);
+            }
+            return None;
+        }
+    }
+    Some(false)
+}
+
+fn evaluate_non_receiver_semantic_drift(target: &str, added_lines: &[String]) -> Vec<String> {
+    let mut issues = Vec::new();
+    let added_text = added_lines.join("\n");
+
+    let mutability_patterns = [
+        (r"\bRefCell\s*<", "RefCell"),
+        (r"\bCell\s*<", "Cell"),
+        (r"\bMutex\s*<", "Mutex"),
+        (r"\bRwLock\s*<", "RwLock"),
+        (r"\bAtomic[A-Za-z0-9_]+\b", "atomic state"),
+    ];
+    for (pattern, label) in mutability_patterns {
+        let re = Regex::new(pattern).expect("valid non-receiver mutability regex");
+        if re.is_match(&added_text) {
+            issues.push(format!(
+                "{}: patch introduces `{}` into a non-message-receiver context; escalation required.",
+                target, label
+            ));
+        }
+    }
+
+    let lifecycle_patterns = [
+        (r"\bthread::spawn\s*\(", "thread::spawn"),
+        (r"\bstd::thread::spawn\s*\(", "std::thread::spawn"),
+        (r"\btokio::spawn\s*\(", "tokio::spawn"),
+        (r"\bspawn_blocking\s*\(", "spawn_blocking"),
+        (r"\basync_std::task::spawn\s*\(", "async_std::task::spawn"),
+    ];
+    for (pattern, label) in lifecycle_patterns {
+        let re = Regex::new(pattern).expect("valid non-receiver lifecycle regex");
+        if re.is_match(&added_text) {
+            issues.push(format!(
+                "{}: patch introduces background lifecycle work via `{}` into a non-message-receiver context; escalation required.",
+                target, label
+            ));
+        }
+    }
+
+    let receiver_context_re =
+        Regex::new(r"ReceiverContext\b").expect("valid receiver-context regex");
+    if receiver_context_re.is_match(&added_text) {
+        issues.push(format!(
+            "{}: patch introduces `*ReceiverContext` coupling into a non-message-receiver context; escalation required.",
+            target
+        ));
+    }
+
+    issues
 }
 
 fn evaluate_public_api_changes(
@@ -2317,6 +2405,52 @@ mod tests {
 
         let report = check_guardrails(&root, &root, diff).expect("guardrail report");
         assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_blocks_non_receiver_context_semantic_drift() {
+        let root = make_temp_test_dir("compile_fix_guardrail_non_receiver");
+        let src = root.join("src/contexts/projection_context.rs");
+        let draft = root.join("drafts/contexts/projection_context.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(draft.parent().expect("draft parent")).expect("create draft dir");
+        fs::write(
+            &src,
+            "pub struct ProjectionContext;\nimpl ProjectionContext {\n    pub fn refresh(&self) {}\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &draft,
+            "## Purpose\nDerived read model.\n\n## Role Players\n| Role player | Why involved | Expected behaviour |\n|---|---|---|\n| ledger | Source data | Provides entries |\n\n## Role Methods\n### ledger\n- **entries** Returns entries.\n\n## Props\n| Prop | Meaning | Notes |\n|---|---|---|\n| account_id | Target account | Stable |\n\n## Functionalities\n### refresh\n| Started by | Uses | Result |\n|---|---|---|\n| caller | ledger | projection is refreshed |\n\nRules:\n- Recomputes derived state.\n\n| Given | When | Then |\n|---|---|---|\n| entries exist | refresh runs | projection is refreshed |\n",
+        )
+        .expect("write draft");
+
+        let diff = r#"diff --git a/src/contexts/projection_context.rs b/src/contexts/projection_context.rs
+--- a/src/contexts/projection_context.rs
++++ b/src/contexts/projection_context.rs
+@@ -1,4 +1,9 @@
++use std::sync::Mutex;
++
+ pub struct ProjectionContext;
+ impl ProjectionContext {
+     pub fn refresh(&self) {}
+ }
++
++fn cache() -> Mutex<Vec<String>> { Mutex::new(Vec::new()) }
+"#;
+
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
+        assert!(!report.ok, "issues: {:?}", report.issues);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.contains("non-message-receiver context")),
+            "issues: {:?}",
+            report.issues
+        );
 
         fs::remove_dir_all(&root).ok();
     }

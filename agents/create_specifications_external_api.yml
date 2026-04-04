@@ -132,7 +132,7 @@ static_prompt: |
   Strict draft rules:
   - Each generated context draft must use the strict context draft schema.
   - Required sections: `# <Context Name>`, `## Purpose`, `## Role Players`, `## Role Methods`, `## Props`, `## Functionalities`.
-  - Optional section: `## Notes`.
+  - Optional sections: `## Message Receiver`, `## Notes`.
   - Each functionality under `## Functionalities` must be a `###` subsection containing:
     - one `Started by | Uses | Result` table
     - one `Rules:` bullet list
@@ -146,6 +146,11 @@ static_prompt: |
   - rate limits, retries, reconnection, or connection lifecycle only when explicitly documented
 
   Prefer a single main integration context unless the sources clearly require multiple distinct contexts.
+
+  `## Message Receiver` guidance:
+  - Emit `## Message Receiver` only when the source material clearly implies a long-lived event/command receiver, background lifecycle, reconnection loop, subscription loop, listener, or private evolving state owner.
+  - When emitted, use only `yes` or `no`.
+  - If the sources do not clearly imply receiver behavior, omit the section and let the downstream specification stage default it to `no`.
 
   Each context draft should stay implementation-free and written in plain English.
   Do not emit bespoke integration-draft heading styles such as `Overview`, `Connection`, or

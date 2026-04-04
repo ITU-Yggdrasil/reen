@@ -1146,7 +1146,7 @@ components:
         .expect("write spec");
         fs::write(
             &stripe,
-            "# Stripe\n\n## OpenAPI\n- Local: specs/stripe.yaml\n",
+            "# Stripe\n\n## Description\n\nStripe API.\n\n## Authoritative Sources\n\n- OpenAPI Local: specs/stripe.yaml\n",
         )
         .expect("write draft");
         fs::write(&payments, "Depends on: CreatePaymentIntent, PaymentIntent")
@@ -1184,7 +1184,7 @@ components:
         .expect("write spec");
         fs::write(
             &stripe,
-            "# Stripe\n\nMentions Money.\n\n## OpenAPI\n- Local: specs/stripe.yaml\n",
+            "# Stripe\n\n## Description\n\nMentions Money.\n\n## Authoritative Sources\n\n- OpenAPI Local: specs/stripe.yaml\n",
         )
         .expect("write draft");
         fs::write(&money, "# Money").expect("write data");

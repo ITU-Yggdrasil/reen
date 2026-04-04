@@ -470,10 +470,11 @@ mod tests {
             (
                 "contract_artifact".to_string(),
                 json!({
-                    "contract_version": "reen.contract/v1",
+                    "contract_version": "reen.contract/v2",
                     "source_spec_path": "specifications/contexts/command_input.md",
                     "title": "CommandInputContext",
                     "specification_kind": "context",
+                    "message_receiver": true,
                     "target_artifact_kind": "context_module",
                     "primary_output_path_hint": "src/contexts/command_input.rs",
                     "public_functionalities": [{"name": "capture", "signature_hint": null, "behavior_summary": ["Reads input"], "required_inputs": [], "required_outputs": []}],
@@ -494,10 +495,11 @@ mod tests {
                 "direct_dependency_contracts".to_string(),
                 json!([
                     {
-                        "contract_version": "reen.contract/v1",
+                        "contract_version": "reen.contract/v2",
                         "source_spec_path": "specifications/contexts/string_renderer.md",
                         "title": "StringRenderer",
                         "specification_kind": "context",
+                        "message_receiver": false,
                         "target_artifact_kind": "context_module",
                         "primary_output_path_hint": "src/contexts/string_renderer.rs",
                         "public_functionalities": [{"name": "render", "signature_hint": null, "behavior_summary": [], "required_inputs": [], "required_outputs": []}],
@@ -523,6 +525,7 @@ mod tests {
                         "spec_path": "specifications/contexts/string_renderer.md",
                         "source_path": "src/contexts/string_renderer.rs",
                         "artifact_kind": "context_module",
+                        "message_receiver": false,
                         "public_types": ["StringRenderer"],
                         "public_methods": ["render"],
                         "relevant_role_methods": ["formatter.render"],

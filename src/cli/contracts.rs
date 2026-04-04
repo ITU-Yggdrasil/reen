@@ -59,6 +59,7 @@ pub(crate) struct ContractArtifact {
     pub(crate) source_spec_path: String,
     pub(crate) title: String,
     pub(crate) specification_kind: String,
+    pub(crate) message_receiver: bool,
     pub(crate) target_artifact_kind: String,
     pub(crate) primary_output_path_hint: Option<String>,
     pub(crate) public_functionalities: Vec<ContractFunctionality>,
@@ -122,10 +123,11 @@ pub(crate) fn build_contract_artifact(
     );
 
     ContractArtifact {
-        contract_version: "reen.contract/v1".to_string(),
+        contract_version: "reen.contract/v2".to_string(),
         source_spec_path: spec_path.display().to_string(),
         title: summary.title.clone(),
         specification_kind: specification_kind_name(summary.kind.clone()).to_string(),
+        message_receiver: summary.message_receiver,
         target_artifact_kind: infer_target_artifact_kind(&summary, output_path_hint),
         primary_output_path_hint: output_path_hint.map(|path| path.display().to_string()),
         public_functionalities,
@@ -161,18 +163,17 @@ pub(crate) fn validate_contract_artifact(
     if has_any_section(
         &sections,
         &["Role Players", "Collaborators", "Collaborators and Wiring"],
-    )
-        && contract.roles.is_empty()
+    ) && contract.roles.is_empty()
     {
-        errors
-            .push("Contract stage could not extract any roles from the role/helper section".to_string());
+        errors.push(
+            "Contract stage could not extract any roles from the role/helper section".to_string(),
+        );
     }
     if has_section(&sections, "Props") && contract.props.is_empty() {
         warnings
             .push("Contract stage could not extract any props from the Props section".to_string());
     }
-    if has_section(&sections, "Functionalities") && contract.public_functionalities.is_empty()
-    {
+    if has_section(&sections, "Functionalities") && contract.public_functionalities.is_empty() {
         errors.push(
             "Contract stage could not extract any public functionalities from the Functionalities section"
                 .to_string(),
@@ -183,6 +184,13 @@ pub(crate) fn validate_contract_artifact(
             "Contract stage could not extract any role methods from the Role Methods section"
                 .to_string(),
         );
+    }
+    if contract.specification_kind == "context" && !contract.message_receiver {
+        errors.extend(find_message_receiver_dependency_violations(
+            contract,
+            &sections,
+            dependency_context,
+        ));
     }
 
     let role_names = contract
@@ -241,6 +249,7 @@ pub(crate) fn compact_contract_artifact_value(contract: &ContractArtifact) -> se
         "source_spec_path": contract.source_spec_path,
         "title": contract.title,
         "specification_kind": contract.specification_kind,
+        "message_receiver": contract.message_receiver,
         "target_artifact_kind": contract.target_artifact_kind,
         "primary_output_path_hint": contract.primary_output_path_hint,
         "roles": contract.roles.iter().map(|role| {
@@ -311,8 +320,7 @@ fn extract_roles(
     let Some(section) = find_first_section(
         sections,
         &["Role Players", "Collaborators", "Collaborators and Wiring"],
-    )
-    else {
+    ) else {
         for name in &summary.collaborators {
             roles.push(build_fallback_role(name, summary, dependency_context));
         }
@@ -732,6 +740,7 @@ fn extract_mutation_constraints(content: &str) -> Vec<String> {
         let lowered = line.to_ascii_lowercase();
         if lowered.contains("mutable")
             || lowered.contains("mutability")
+            || lowered.contains("message receiver")
             || lowered.contains("ownership")
             || lowered.contains("without resetting or replacing")
             || lowered.contains("same shared")
@@ -774,6 +783,134 @@ fn dependency_hint_for_name(
         }
     }
     None
+}
+
+fn find_message_receiver_dependency_violations(
+    contract: &ContractArtifact,
+    sections: &[Section],
+    dependency_context: Option<&HashMap<String, serde_json::Value>>,
+) -> Vec<String> {
+    let Some(context) = dependency_context else {
+        return Vec::new();
+    };
+
+    let receivers = dependency_message_receiver_names(context);
+    if receivers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut violations = Vec::new();
+    for receiver in receivers {
+        let receiver_normalized = normalize_symbol_name(&receiver);
+
+        if contract
+            .roles
+            .iter()
+            .any(|role| role.name.eq_ignore_ascii_case(&receiver_normalized))
+            || section_mentions_name(sections, "Role Players", &receiver)
+            || section_mentions_name(sections, "Role Players", &receiver_normalized)
+        {
+            violations.push(format!(
+                "Non-message-receiver context must not depend on message receiver '{}' via `## Role Players`",
+                receiver
+            ));
+        }
+
+        if contract.props.iter().any(|prop| {
+            prop.name.eq_ignore_ascii_case(&receiver_normalized)
+                || prop
+                    .description
+                    .to_ascii_lowercase()
+                    .contains(&receiver.to_ascii_lowercase())
+        }) || section_mentions_name(sections, "Props", &receiver)
+        {
+            violations.push(format!(
+                "Non-message-receiver context must not depend on message receiver '{}' via `## Props`",
+                receiver
+            ));
+        }
+
+        if contract
+            .public_functionalities
+            .iter()
+            .filter_map(|item| item.signature_hint.as_deref())
+            .any(|signature| signature_contains_name(signature, &receiver))
+            || section_mentions_name(sections, "Functionalities", &receiver)
+        {
+            violations.push(format!(
+                "Non-message-receiver context must not depend on message receiver '{}' via `## Functionalities`",
+                receiver
+            ));
+        }
+
+        if contract.required_call_edges.iter().any(|edge| {
+            edge.callee_role.eq_ignore_ascii_case(&receiver_normalized)
+                || edge
+                    .caller_surface
+                    .eq_ignore_ascii_case(&receiver_normalized)
+        }) {
+            violations.push(format!(
+                "Non-message-receiver context must not delegate directly to message receiver '{}'",
+                receiver
+            ));
+        }
+    }
+
+    violations.sort();
+    violations.dedup();
+    violations
+}
+
+fn dependency_message_receiver_names(
+    dependency_context: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for key in ["direct_dependency_contracts", "dependency_contracts"] {
+        let Some(entries) = dependency_context
+            .get(key)
+            .and_then(|value| value.as_array())
+        else {
+            continue;
+        };
+        for entry in entries {
+            let is_context = entry
+                .get("specification_kind")
+                .and_then(|value| value.as_str())
+                .map(|value| value == "context")
+                .unwrap_or(false);
+            let is_receiver = entry
+                .get("message_receiver")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if !is_context || !is_receiver {
+                continue;
+            }
+            if let Some(title) = entry.get("title").and_then(|value| value.as_str()) {
+                names.push(title.to_string());
+            }
+        }
+        if !names.is_empty() {
+            break;
+        }
+    }
+    dedupe_preserve(&mut names);
+    names
+}
+
+fn section_mentions_name(sections: &[Section], title: &str, name: &str) -> bool {
+    let Some(section) = find_section(sections, title) else {
+        return false;
+    };
+    section
+        .body
+        .to_ascii_lowercase()
+        .contains(&name.to_ascii_lowercase())
+}
+
+fn signature_contains_name(signature: &str, name: &str) -> bool {
+    signature
+        .to_ascii_lowercase()
+        .contains(&name.to_ascii_lowercase())
 }
 
 fn extract_capabilities_from_block(block: &str) -> Vec<String> {
@@ -849,7 +986,9 @@ fn has_section(sections: &[Section], title: &str) -> bool {
 }
 
 fn find_first_section<'a>(sections: &'a [Section], titles: &[&str]) -> Option<&'a Section> {
-    titles.iter().find_map(|title| find_section(sections, title))
+    titles
+        .iter()
+        .find_map(|title| find_section(sections, title))
 }
 
 fn has_any_section(sections: &[Section], titles: &[&str]) -> bool {
@@ -936,7 +1075,9 @@ fn dedupe_preserve(values: &mut Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_contract_artifact;
+    use super::{build_contract_artifact, validate_contract_artifact};
+    use serde_json::json;
+    use std::collections::HashMap;
     use std::path::Path;
 
     #[test]
@@ -945,6 +1086,9 @@ mod tests {
 
 ## Purpose
 Used for one shared input stream across the whole application session.
+
+## Message Receiver
+yes
 
 ## Role Players
 | Role Player | Why Involved | Expected Behaviour |
@@ -976,6 +1120,8 @@ Used for one shared input stream across the whole application session.
         );
 
         assert_eq!(contract.roles.len(), 1);
+        assert_eq!(contract.contract_version, "reen.contract/v2");
+        assert!(contract.message_receiver);
         assert_eq!(contract.roles[0].name, "stdin_source");
         assert_eq!(contract.props.len(), 1);
         assert_eq!(contract.props[0].name, "buffer");
@@ -987,6 +1133,9 @@ Used for one shared input stream across the whole application session.
     #[test]
     fn builds_context_contract_from_role_players_and_plain_tables() {
         let content = r#"# CommandInputContext
+
+## Message Receiver
+no
 
 ## Role Players
 | Role Player | Why Involved | Expected Behaviour |
@@ -1016,6 +1165,7 @@ Used for one shared input stream across the whole application session.
         );
 
         assert_eq!(contract.roles.len(), 1);
+        assert!(!contract.message_receiver);
         assert_eq!(contract.roles[0].name, "stdin_source");
         assert_eq!(contract.props.len(), 1);
         assert_eq!(contract.props[0].name, "buffer");
@@ -1042,5 +1192,155 @@ Used for one shared input stream across the whole application session.
         assert_eq!(contract.roles.len(), 2);
         assert_eq!(contract.roles[0].name, "CommandInputContext");
         assert_eq!(contract.roles[1].name, "GameLoopContext");
+    }
+
+    #[test]
+    fn validation_rejects_non_receiver_context_dep_on_receiver_context() {
+        let content = r#"# AccountProjection
+
+## Purpose
+Reads from a receiver.
+
+## Message Receiver
+no
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| WikiEditReceiverContext | Supplies updates | Streams edits |
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| cache | Local cache | Derived |
+
+## Role Methods
+### WikiEditReceiverContext
+- **next**
+  Returns the next edit.
+
+## Functionalities
+### refresh
+- Uses `WikiEditReceiverContext` directly.
+"#;
+
+        let contract = build_contract_artifact(
+            Path::new("specifications/contexts/account_projection.md"),
+            content,
+            Some(Path::new("src/contexts/account_projection.rs")),
+            None,
+        );
+        let dependency_context = HashMap::from([(
+            "direct_dependency_contracts".to_string(),
+            json!([
+                {
+                    "contract_version": "reen.contract/v2",
+                    "source_spec_path": "specifications/contexts/wiki_edit_receiver_context.md",
+                    "title": "WikiEditReceiverContext",
+                    "specification_kind": "context",
+                    "message_receiver": true,
+                    "target_artifact_kind": "context_module",
+                    "primary_output_path_hint": "src/contexts/wiki_edit_receiver_context.rs",
+                    "public_functionalities": [],
+                    "props": [],
+                    "roles": [],
+                    "role_methods": [],
+                    "required_call_edges": [],
+                    "shared_identity_constraints": [],
+                    "mutation_constraints": [],
+                    "output_obligations": [],
+                    "env_config_obligations": [],
+                    "lifecycle_obligations": [],
+                    "allowed_freedoms": [],
+                    "verification_targets": []
+                }
+            ]),
+        )]);
+
+        let report = validate_contract_artifact(
+            &contract,
+            Path::new("specifications/contexts/account_projection.md"),
+            content,
+            Some(&dependency_context),
+        );
+        assert!(!report.ok);
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|item| item.contains("must not depend on message receiver"))
+        );
+    }
+
+    #[test]
+    fn validation_allows_receiver_context_dep_on_receiver_context() {
+        let content = r#"# FeedReceiver
+
+## Purpose
+Receives and forwards events.
+
+## Message Receiver
+yes
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| WikiEditReceiverContext | Supplies updates | Streams edits |
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| cache | Local cache | Derived |
+
+## Role Methods
+### WikiEditReceiverContext
+- **next**
+  Returns the next edit.
+
+## Functionalities
+### refresh
+- Uses `WikiEditReceiverContext` directly.
+"#;
+
+        let contract = build_contract_artifact(
+            Path::new("specifications/contexts/feed_receiver.md"),
+            content,
+            Some(Path::new("src/contexts/feed_receiver.rs")),
+            None,
+        );
+        let dependency_context = HashMap::from([(
+            "direct_dependency_contracts".to_string(),
+            json!([
+                {
+                    "contract_version": "reen.contract/v2",
+                    "source_spec_path": "specifications/contexts/wiki_edit_receiver_context.md",
+                    "title": "WikiEditReceiverContext",
+                    "specification_kind": "context",
+                    "message_receiver": true,
+                    "target_artifact_kind": "context_module",
+                    "primary_output_path_hint": "src/contexts/wiki_edit_receiver_context.rs",
+                    "public_functionalities": [],
+                    "props": [],
+                    "roles": [],
+                    "role_methods": [],
+                    "required_call_edges": [],
+                    "shared_identity_constraints": [],
+                    "mutation_constraints": [],
+                    "output_obligations": [],
+                    "env_config_obligations": [],
+                    "lifecycle_obligations": [],
+                    "allowed_freedoms": [],
+                    "verification_targets": []
+                }
+            ]),
+        )]);
+
+        let report = validate_contract_artifact(
+            &contract,
+            Path::new("specifications/contexts/feed_receiver.md"),
+            content,
+            Some(&dependency_context),
+        );
+        assert!(report.ok, "errors: {:?}", report.errors);
     }
 }

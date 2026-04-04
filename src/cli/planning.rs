@@ -279,6 +279,17 @@ fn build_sharing_constraints(
                 "Prefer immutable value-style handling for data-like collaborator {}.",
                 collaborator
             )
+        } else if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver
+        {
+            format!(
+                "Treat {} as part of a non-message-receiver context: avoid hidden evolving state and prefer immutable/value-style handling or explicit updated-value returns.",
+                collaborator
+            )
+        } else if matches!(contract.kind, SpecificationKind::Context) && contract.message_receiver {
+            format!(
+                "Treat {} as part of a message receiver: private mutable state and lifecycle are allowed, but do not expose shared mutable state across boundaries.",
+                collaborator
+            )
         } else {
             format!(
                 "Choose the most idiomatic ownership model for {} consistent with the specification.",
@@ -294,6 +305,11 @@ fn build_sharing_constraints(
         };
         let mutation_semantics = if matches!(contract.kind, SpecificationKind::Data) {
             "immutable".to_string()
+        } else if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver
+        {
+            "non_message_receiver".to_string()
+        } else if matches!(contract.kind, SpecificationKind::Context) && contract.message_receiver {
+            "message_receiver_private_state".to_string()
         } else if shared_required && matches!(plan_kind, PlanKind::SemanticRepair) {
             "preserve_existing".to_string()
         } else {
@@ -450,6 +466,12 @@ fn build_risks(
                 .to_string(),
         );
     }
+    if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver {
+        risks.push(
+            "Non-message-receiver contexts must not accumulate hidden mutable state or lifecycle behavior."
+                .to_string(),
+        );
+    }
     if !contract.env_vars.is_empty() {
         risks.push("Environment/config behavior is specified and must not be omitted during implementation or repair.".to_string());
     }
@@ -488,6 +510,11 @@ fn build_forbidden_regressions(contract: &BehaviorContract, plan_kind: PlanKind)
     if !contract.shared_state_requirements.is_empty() {
         regressions
             .push("Do not break required shared-state or stable-identity behavior.".to_string());
+    }
+    if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver {
+        regressions.push(
+            "Do not introduce hidden mutable state, interior mutability, or background lifecycle behavior into a non-message-receiver context.".to_string(),
+        );
     }
     if matches!(plan_kind, PlanKind::SemanticRepair) {
         regressions.push(
@@ -587,5 +614,59 @@ mod tests {
         .contract;
         let report = validate_plan(&plan, &contract, &[PathBuf::from("src/main.rs")]);
         assert!(report.ok);
+    }
+
+    #[test]
+    fn default_plan_marks_non_receiver_contexts_explicitly() {
+        let content = r#"# ProjectionContext
+
+## Purpose
+Derived read model.
+
+## Message Receiver
+no
+
+## Role Players
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| Ledger | Source data | Provides transactions |
+
+## Role Methods
+### Ledger
+- **entries**
+  Returns entries.
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| account_id | Target account | Stable |
+
+## Functionalities
+### balance
+| Started by | Uses | Result |
+|---|---|---|
+| caller | Ledger, account_id | balance is returned |
+
+Rules:
+- Computes a derived balance.
+
+| Given | When | Then |
+|---|---|---|
+| entries exist | balance runs | current balance is returned |
+"#;
+
+        let plan = build_default_plan(
+            PlanKind::Implementation,
+            Path::new("specifications/contexts/projection_context.md"),
+            content,
+            &[PathBuf::from("src/contexts/projection_context.rs")],
+            &HashMap::new(),
+            None,
+        );
+        assert!(
+            plan.identity_and_sharing_constraints
+                .iter()
+                .any(|item| item.mutation_semantics == "non_message_receiver")
+        );
     }
 }

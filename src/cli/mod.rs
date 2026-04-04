@@ -5067,7 +5067,7 @@ Problem:
 
         fs::write(
             &external_draft,
-            "# AISStream API draft\n\n## OpenAPI\n- Local: specs/aisstream.yaml\n",
+            "# AISStream API draft\n\n## Description\n\nAISStream API.\n\n## Authoritative Sources\n\n- OpenAPI Local: specs/aisstream.yaml\n",
         )
         .expect("write draft");
         fs::create_dir_all(drafts.join("apis/specs")).expect("mkdir api specs");

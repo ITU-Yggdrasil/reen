@@ -32,6 +32,7 @@ pub(crate) struct BehaviorContract {
     pub(crate) title: String,
     pub(crate) kind: SpecificationKind,
     pub(crate) source_path: String,
+    pub(crate) message_receiver: bool,
     pub(crate) collaborators: Vec<String>,
     pub(crate) env_vars: Vec<String>,
     pub(crate) delegation_requirements: Vec<DelegationRequirement>,
@@ -110,6 +111,18 @@ pub(crate) fn analyze_specification(
     let sections = parse_markdown_sections(spec_content);
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
+    let message_receiver = validate_message_receiver_section(&sections);
+
+    if matches!(contract.kind, SpecificationKind::Context) {
+        match message_receiver {
+            Ok(Some(_)) => {}
+            Ok(None) => errors.push(
+                "Context specification is missing required `## Message Receiver` section"
+                    .to_string(),
+            ),
+            Err(err) => errors.push(err),
+        }
+    }
 
     if !contract.env_vars.is_empty() {
         if let Some(env_section) = find_section(&sections, "Environment Variables") {
@@ -426,11 +439,12 @@ pub(crate) fn verify_generated_implementation(
         }
     }
     for finding in detect_ignored_immutable_return_values(spec_content, &code) {
-        high_risk_findings.push(format!(
-            "{} in {}",
-            finding,
-            output_path.display()
-        ));
+        high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+    }
+    if matches!(plan.contract.kind, SpecificationKind::Context) && !plan.contract.message_receiver {
+        for finding in detect_non_receiver_context_findings(&code) {
+            high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+        }
     }
 
     Ok(StaticBehaviorVerifierReport {
@@ -587,6 +601,75 @@ fn detect_ignored_immutable_return_values(spec_content: &str, code: &str) -> Vec
     findings
 }
 
+fn detect_non_receiver_context_findings(code: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+
+    let public_mut_re =
+        Regex::new(r"\bpub(?:\([^)]*\))?\s+fn\s+[A-Za-z0-9_]+\s*\([^)]*(?:&mut self|mut self)")
+            .unwrap();
+    if public_mut_re.is_match(code) {
+        findings.push(
+            "Non-message-receiver context exposes a public mutable receiver (`&mut self`/`mut self`)"
+                .to_string(),
+        );
+    }
+
+    let mutability_patterns = [
+        (r"\bRefCell\s*<", "RefCell"),
+        (r"\bCell\s*<", "Cell"),
+        (r"\bMutex\s*<", "Mutex"),
+        (r"\bRwLock\s*<", "RwLock"),
+        (r"\bAtomic[A-Za-z0-9_]+\b", "atomic state"),
+    ];
+    for (pattern, label) in mutability_patterns {
+        let re = Regex::new(pattern).unwrap();
+        if re.is_match(code) {
+            findings.push(format!(
+                "Non-message-receiver context uses interior mutability/storage pattern `{}`",
+                label
+            ));
+        }
+    }
+
+    let spawn_patterns = [
+        (r"\bthread::spawn\s*\(", "thread::spawn"),
+        (r"\bstd::thread::spawn\s*\(", "std::thread::spawn"),
+        (r"\btokio::spawn\s*\(", "tokio::spawn"),
+        (r"\bspawn_blocking\s*\(", "spawn_blocking"),
+        (r"\basync_std::task::spawn\s*\(", "async_std::task::spawn"),
+    ];
+    for (pattern, label) in spawn_patterns {
+        let re = Regex::new(pattern).unwrap();
+        if re.is_match(code) {
+            findings.push(format!(
+                "Non-message-receiver context starts background lifecycle work via `{}`",
+                label
+            ));
+        }
+    }
+
+    let receiver_field_re =
+        Regex::new(r"(?m)^\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*[^,\n]*ReceiverContext\b").unwrap();
+    if receiver_field_re.is_match(code) {
+        findings.push(
+            "Non-message-receiver context stores a `*ReceiverContext` collaborator".to_string(),
+        );
+    }
+
+    let receiver_public_api_re =
+        Regex::new(r"\bpub(?:\([^)]*\))?\s+fn\s+[A-Za-z0-9_]+\s*\([^)]*ReceiverContext").unwrap();
+    if receiver_public_api_re.is_match(code) {
+        findings.push(
+            "Non-message-receiver context exposes a `*ReceiverContext` in its public API"
+                .to_string(),
+        );
+    }
+
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
 fn spec_declares_immutable_value_updates(spec_content: &str) -> bool {
     let sections = parse_markdown_sections(spec_content);
     if let Some(section) = find_section(&sections, "Mutability") {
@@ -594,9 +677,7 @@ fn spec_declares_immutable_value_updates(spec_content: &str) -> bool {
             return true;
         }
     }
-    spec_content
-        .to_ascii_lowercase()
-        .contains("returns a new")
+    spec_content.to_ascii_lowercase().contains("returns a new")
 }
 
 fn extract_immutable_transform_method_names(spec_content: &str) -> Vec<String> {
@@ -609,18 +690,19 @@ fn extract_immutable_transform_method_names(spec_content: &str) -> Vec<String> {
     let mut current_method: Option<String> = None;
     let mut current_body = Vec::new();
 
-    let flush =
-        |methods: &mut Vec<String>, current_method: &mut Option<String>, current_body: &mut Vec<String>| {
-            let Some(name) = current_method.take() else {
-                current_body.clear();
-                return;
-            };
-            let body = current_body.join("\n").to_ascii_lowercase();
-            if body.contains("returns a new") {
-                methods.push(normalize_symbol_name(&name));
-            }
+    let flush = |methods: &mut Vec<String>,
+                 current_method: &mut Option<String>,
+                 current_body: &mut Vec<String>| {
+        let Some(name) = current_method.take() else {
             current_body.clear();
+            return;
         };
+        let body = current_body.join("\n").to_ascii_lowercase();
+        if body.contains("returns a new") {
+            methods.push(normalize_symbol_name(&name));
+        }
+        current_body.clear();
+    };
 
     for line in section.body.lines() {
         let trimmed = line.trim();
@@ -727,6 +809,7 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
         .to_string();
     let sections = parse_markdown_sections(spec_content);
     let kind = infer_kind(spec_path, spec_content, &sections);
+    let message_receiver = extract_message_receiver_flag(&sections).unwrap_or(false);
     let collaborators = extract_collaborators(spec_content, &sections);
     let env_vars = extract_env_vars(spec_content);
     let delegation_requirements = extract_delegation_requirements(spec_content);
@@ -739,6 +822,7 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
         title,
         kind,
         source_path: spec_path.display().to_string(),
+        message_receiver,
         collaborators,
         env_vars,
         delegation_requirements,
@@ -749,13 +833,46 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
     }
 }
 
+fn validate_message_receiver_section(
+    sections: &[Section],
+) -> std::result::Result<Option<bool>, String> {
+    let Some(section) = find_section(sections, "Message Receiver") else {
+        return Ok(None);
+    };
+
+    parse_message_receiver_literal(&section.body)
+        .map(Some)
+        .ok_or_else(|| {
+            "Context specification `## Message Receiver` must be exactly `yes`, `no`, `true`, or `false` (case-insensitive)".to_string()
+        })
+}
+
+fn extract_message_receiver_flag(sections: &[Section]) -> Option<bool> {
+    find_section(sections, "Message Receiver")
+        .and_then(|section| parse_message_receiver_literal(&section.body))
+}
+
+fn parse_message_receiver_literal(body: &str) -> Option<bool> {
+    let value = body.trim();
+    if value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") {
+        return Some(true);
+    }
+    if value.eq_ignore_ascii_case("no") || value.eq_ignore_ascii_case("false") {
+        return Some(false);
+    }
+    None
+}
+
 fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> SpecificationKind {
     let path = spec_path.to_string_lossy().to_ascii_lowercase();
     if path.ends_with("/app.md") {
         return SpecificationKind::App;
     }
 
-    if has_any_section(sections, &["Purpose", "Role Players", "Role Methods", "Props"]) {
+    if has_any_section(
+        sections,
+        &["Purpose", "Role Players", "Role Methods", "Props"],
+    ) {
         return SpecificationKind::Context;
     }
     if has_any_section(sections, &["Description", "Fields", "Variants"]) {
@@ -1551,6 +1668,9 @@ Immutable. All mutation-like operations return a new GameState rather than modif
 ## Purpose
 Used for one shared input stream across the whole application session.
 
+## Message Receiver
+yes
+
 ## Role Players
 | Role Player | Why Involved | Expected Behaviour |
 |---|---|---|
@@ -1580,6 +1700,134 @@ Used for one shared input stream across the whole application session.
             report.contract.collaborators,
             vec!["stdin_source".to_string()]
         );
+    }
+
+    #[test]
+    fn context_specs_require_message_receiver_section() {
+        let content = r#"# ProjectionContext
+
+## Purpose
+Derived projection.
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| ledger | Source data | Provides entries |
+
+## Role Methods
+### ledger
+- **entries**
+  Returns entries.
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| account_id | Target account | Stable |
+
+## Functionalities
+### balance
+- Returns the current balance.
+"#;
+        let report = analyze_specification(
+            Path::new("specifications/contexts/projection_context.md"),
+            content,
+            None,
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|item| item.contains("Message Receiver"))
+        );
+    }
+
+    #[test]
+    fn verifier_flags_non_receiver_context_hidden_mutability_patterns() {
+        let root = make_temp_dir("pipeline_quality_non_receiver");
+        let specs = root.join("specifications").join("contexts");
+        let src = root.join("src").join("contexts");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("projection_context.md");
+        fs::write(
+            &spec_path,
+            r#"# ProjectionContext
+
+## Purpose
+Derived read model.
+
+## Message Receiver
+no
+
+## Role Players
+| Role Player | Why Involved | Expected Behaviour |
+|---|---|---|
+| ledger | Source data | Provides entries |
+
+## Role Methods
+### ledger
+- **entries**
+  Returns entries.
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| account_id | Target account | Stable |
+
+## Functionalities
+### refresh
+- Returns a refreshed projection.
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("projection_context.rs");
+        fs::write(
+            &output,
+            r#"use std::cell::RefCell;
+use std::thread;
+
+pub struct ProjectionContext {
+    cache: RefCell<Vec<String>>,
+}
+
+impl ProjectionContext {
+    pub fn refresh(&mut self) {
+        thread::spawn(|| {});
+        self.cache.borrow_mut().push(String::new());
+    }
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("public mutable receiver"))
+        );
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("RefCell"))
+        );
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("thread::spawn"))
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1619,6 +1867,7 @@ Used for one shared input stream across the whole application session.
                 title: "App".to_string(),
                 kind: SpecificationKind::App,
                 source_path: "specifications/app.md".to_string(),
+                message_receiver: false,
                 collaborators: Vec::new(),
                 env_vars: Vec::new(),
                 delegation_requirements: Vec::new(),

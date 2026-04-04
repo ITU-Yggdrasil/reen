@@ -37,10 +37,11 @@ static_prompt: |
      - Use exact types specified, if specified
      - No additional fields allowed
 
-  5. **Data types are immutable by default; contexts are not**
+  5. **Data types are immutable by default; context mutability is driven by `Message Receiver`**
      - For data types, keep immutable-by-default behavior unless the specification explicitly says otherwise.
-     - For contexts, do NOT assume immutability by default.
-     - Infer ownership, identity, and mutability from the specification plus the supplied implementation plan.
+     - For contexts with `## Message Receiver` = `no`, do NOT introduce hidden evolving state, interior mutability, or background lifecycle work. Prefer immutable/value-style handling or explicit updated-value returns when state-like behavior is required.
+     - For contexts with `## Message Receiver` = `yes`, private mutable state and lifecycle/background processing are allowed when required by the specification.
+     - Only message receivers may directly depend on other message receivers.
      - Terms such as "shared", "same instance", "one stream", "process lifetime", or "must not replace" are semantic identity constraints; preserve them without assuming a single Rust mechanism.
 
   6. **Prefer `Self` for inherent methods returning the declaring type**

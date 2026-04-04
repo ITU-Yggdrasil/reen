@@ -64,6 +64,7 @@ static_prompt: |
   - Modify only the files required to resolve compilation.
   - Preserve existing interfaces unless the error forces a correction.
   - When repairing immutable data APIs, preserve constructor/getter/transform patterns; never replace them with public `set_*` methods.
+  - When repairing a context marked `Message Receiver = no`, do NOT introduce interior mutability (`RefCell`, `Cell`, `Mutex`, `RwLock`, atomics-as-state), background lifecycle work (`thread::spawn`, task spawn), or new `*ReceiverContext` coupling.
   - When correcting a return type for an inherent method that returns the enclosing type, normalize it to `Self` when that preserves the same API shape.
   - If a safe fix is not possible under these guardrails, say so and DO NOT propose destructive changes.
 

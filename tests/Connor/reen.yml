@@ -1,4 +1,5 @@
 profile: sonnet
+max-attempts: 5
 create:
   token-limit: 30000.0
   specification:

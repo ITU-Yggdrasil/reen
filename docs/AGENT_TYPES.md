@@ -56,8 +56,10 @@ The system automatically selects the appropriate agent based on the file's locat
 - Includes interactions between entities
 - Uses sequence diagrams
 - Documents business rules
+- Includes a `Message Receiver` classification in the final specification (`yes` or `no`)
 
 **Output includes**:
+- Message Receiver classification
 - Props (context properties)
 - Roles and responsibilities
 - Role players and their capabilities
