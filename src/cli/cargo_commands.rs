@@ -3,16 +3,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::compilation_fix;
+use super::progress::{header_text, standard_text, success_text};
 use super::project_structure::{ProjectInfo, analyze_specifications};
 use super::stage_runner::ExecutionResources;
 use super::{Config, WorkspaceContext};
 use reen::execution::NativeExecutionControl;
 
 pub async fn compile(config: &Config) -> Result<()> {
-    println!("Compiling project with cargo build...");
+    println!("{}", header_text("Compiling project with cargo build..."));
 
     if config.dry_run {
-        println!("[DRY RUN] Would run: cargo build");
+        println!("{}", standard_text("[DRY RUN] Would run: cargo build"));
         return Ok(());
     }
 
@@ -27,7 +28,7 @@ pub async fn compile(config: &Config) -> Result<()> {
     }
 
     if output.status.success() {
-        println!("✓ Build successful");
+        println!("{}", success_text("✓ Build successful"));
         Ok(())
     } else {
         anyhow::bail!("Build failed");
@@ -42,12 +43,15 @@ pub async fn fix(
     config: &Config,
 ) -> Result<()> {
     println!(
-        "Attempting to restore compilation (max_attempts={})...",
-        max_compile_fix_attempts
+        "{}",
+        header_text(format!(
+            "Attempting to restore compilation (max_attempts={})...",
+            max_compile_fix_attempts
+        ))
     );
 
     if config.dry_run {
-        println!("[DRY RUN] Would run compilation-fix loop");
+        println!("{}", standard_text("[DRY RUN] Would run compilation-fix loop"));
         return Ok(());
     }
 
@@ -75,7 +79,13 @@ pub async fn fix(
         }
     }
 
-    let resources = ExecutionResources::new(rate_limit, token_limit, config.verbose);
+    let resources = ExecutionResources::new(
+        "fix",
+        artifact_root.as_path(),
+        rate_limit,
+        token_limit,
+        config.verbose,
+    );
 
     compilation_fix::ensure_compiles_with_auto_fix(
         config,
@@ -86,6 +96,7 @@ pub async fn fix(
         &recent_files,
         token_limit,
         clear_cache,
+        Some(&resources.usage_reporter),
         resources
             .execution_control
             .as_ref()
@@ -95,7 +106,7 @@ pub async fn fix(
 }
 
 pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
-    println!("Building and running project with cargo run...");
+    println!("{}", header_text("Building and running project with cargo run..."));
 
     if config.dry_run {
         let args_str = if args.is_empty() {
@@ -103,7 +114,10 @@ pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
         } else {
             format!(" -- {}", args.join(" "))
         };
-        println!("[DRY RUN] Would run: cargo run{}", args_str);
+        println!(
+            "{}",
+            standard_text(format!("[DRY RUN] Would run: cargo run{}", args_str))
+        );
         return Ok(());
     }
 
@@ -123,7 +137,7 @@ pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
 
     if output.status.success() {
         if config.verbose {
-            println!("✓ Run successful");
+            println!("{}", success_text("✓ Run successful"));
         }
         Ok(())
     } else {
@@ -132,10 +146,10 @@ pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
 }
 
 pub async fn test(config: &Config) -> Result<()> {
-    println!("Testing project with cargo test...");
+    println!("{}", header_text("Testing project with cargo test..."));
 
     if config.dry_run {
-        println!("[DRY RUN] Would run: cargo test");
+        println!("{}", standard_text("[DRY RUN] Would run: cargo test"));
         return Ok(());
     }
 
@@ -150,7 +164,7 @@ pub async fn test(config: &Config) -> Result<()> {
     }
 
     if output.status.success() {
-        println!("✓ Tests passed");
+        println!("{}", success_text("✓ Tests passed"));
         Ok(())
     } else {
         anyhow::bail!("Tests failed");

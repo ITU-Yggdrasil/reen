@@ -321,11 +321,11 @@ mod tests {
         [
             "create_specifications_data:
   model: qwen2.5:7b
-  parallel: false
+  parallel: true
   batch: false",
             "create_specifications_context:
   model: qwen2.5:7b
-  parallel: false
+  parallel: true
   batch: false",
             "create_specifications_external_api:
   model: qwen2.5:7b
@@ -333,15 +333,15 @@ mod tests {
   batch: false",
             "create_plan:
   model: qwen2.5:7b
-  parallel: false
+  parallel: true
   batch: false",
             "create_implementation:
   model: qwen2.5:7b
-  parallel: false
+  parallel: true
   batch: false",
             "create_test:
   model: qwen2.5:7b
-  parallel: false
+  parallel: true
   batch: false",
             "resolve_compilation_errors:
   model: qwen2.5:7b
@@ -448,8 +448,8 @@ fix_draft_blockers:
         fs::create_dir_all(&test_dir).expect("create temp dir");
         let registry_path = test_dir.join("agent_model_registry.yml");
         let content = complete_registry_yaml().replace(
-            "create_implementation:\n  model: qwen2.5:7b\n  parallel: false",
-            "create_implementation:\n  model: gpt-5\n  parallel: false",
+            "create_implementation:\n  model: qwen2.5:7b\n  parallel: true",
+            "create_implementation:\n  model: gpt-5\n  parallel: true",
         );
         fs::write(&registry_path, content).expect("write local registry");
 

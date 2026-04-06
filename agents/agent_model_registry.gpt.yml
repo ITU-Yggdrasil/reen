@@ -12,7 +12,7 @@ create_specifications_external_api:
   batch: false
 create_plan:
   model: gpt-5
-  parallel: false
+  parallel: true
 bootstrap_capability_registry:
   model: gpt-5
   parallel: false
@@ -21,7 +21,7 @@ create_implementation:
   parallel: true
 create_test:
   model: gpt-5 # qwen2.5:7b
-  parallel: false
+  parallel: true
 resolve_compilation_errors:
   model: gpt-5
   parallel: false

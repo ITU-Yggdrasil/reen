@@ -30,7 +30,7 @@ fn compact_dependency_entries(
                 return entry.clone();
             };
             let mut out = serde_json::Map::new();
-            for key in ["name", "path", "spec_path", "sha256"] {
+            for key in ["name", "path", "spec_path"] {
                 if let Some(v) = obj.get(key) {
                     out.insert(key.to_string(), v.clone());
                 }
@@ -597,5 +597,43 @@ mod tests {
         .expect("build spec context");
 
         assert!(!built.contains_key("specification_kind"));
+    }
+
+    #[test]
+    fn context_variants_keep_dependency_content_but_drop_hashes() {
+        let base = HashMap::from([(
+            "direct_dependencies".to_string(),
+            json!([
+                {
+                    "name": "command_input",
+                    "path": "drafts/contexts/command_input.md",
+                    "dependency_kind": "direct",
+                    "artifact_type": "draft_or_spec",
+                    "sha256": "a",
+                    "content": "# Command Input\nA".repeat(200)
+                }
+            ]),
+        )]);
+
+        let variants = build_context_variants(&base);
+        let compact_with_content = variants
+            .iter()
+            .find(|variant| {
+                let Some(item) = variant
+                    .get("direct_dependencies")
+                    .and_then(|value| value.as_array())
+                    .and_then(|items| items.first())
+                else {
+                    return false;
+                };
+                item.get("content").is_some() && item.get("sha256").is_none()
+            })
+            .expect("expected compact dependency artifact variant");
+
+        let item = &compact_with_content["direct_dependencies"][0];
+        assert!(item
+            .get("content")
+            .and_then(|value| value.as_str())
+            .is_some());
     }
 }

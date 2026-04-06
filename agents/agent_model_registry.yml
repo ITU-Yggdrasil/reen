@@ -2,11 +2,11 @@
 # Swap this file explicitly when you want a different provider preset.
 create_specifications_data:
   model: mistral/mistral-large-latest
-  parallel: false
+  parallel: true
   batch: false
 create_specifications_context:
   model: mistral/mistral-large-latest
-  parallel: false
+  parallel: true
   batch: false
 create_specifications_external_api:
   model: mistral/mistral-large-latest
@@ -14,7 +14,7 @@ create_specifications_external_api:
   batch: false
 create_plan:
   model: mistral/mistral-large-latest
-  parallel: false
+  parallel: true
   batch: false
 bootstrap_capability_registry:
   model: mistral/mistral-large-latest
@@ -26,10 +26,10 @@ create_implementation:
   batch: false
 create_test:
   model: mistral/codestral-latest
-  parallel: false
+  parallel: true
   batch: false
 resolve_compilation_errors:
-  model: istral/codestral-latest
+  model: mistral/codestral-latest
   parallel: false
   batch: false
 fix_draft_blockers:

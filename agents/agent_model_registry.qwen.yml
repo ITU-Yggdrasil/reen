@@ -2,17 +2,17 @@
 # Activate by copying this file over `agent_model_registry.yml` before building.
 create_specifications_data:
   model: qwen2.5:7b # gpt-5 # qwen2.5:7b
-  parallel: false
+  parallel: true
 create_specifications_context:
   model: qwen2.5:7b # gpt-5 # qwen2.5:7b
-  parallel: false
+  parallel: true
 create_specifications_external_api:
   model: qwen2.5:7b # gpt-5 # qwen2.5:7b
   parallel: false
   batch: false
 create_plan:
   model: qwen2.5:7b
-  parallel: false
+  parallel: true
   batch: false
 bootstrap_capability_registry:
   model: qwen2.5:7b
@@ -20,10 +20,10 @@ bootstrap_capability_registry:
   batch: false
 create_implementation:
   model: qwen2.5:7b # gpt-5
-  parallel: false
+  parallel: true
 create_test:
   model: qwen2.5:7b # gpt-5 # qwen2.5:7b
-  parallel: false
+  parallel: true
 resolve_compilation_errors:
   model: qwen2.5:7b # gpt-5
   parallel: false

@@ -1,15 +1,23 @@
 use anyhow::Result;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task::block_in_place;
+use tokio::task::JoinSet;
 use tokio::time::{Duration, sleep};
 
 use reen::execution::{NativeExecutionControl, NativeRequestStep, NativeStepUsage, TokenLimiter};
 
 use super::Config;
 use super::agent_executor::AgentExecutor;
-use super::progress::{ProgressIndicator, print_timed_status};
+use super::progress::{
+    ProgressIndicator, print_timed_status, standard_text, warning_text,
+};
 use super::rate_limiter::RateLimiter;
+use super::run_context::RunContextCache;
+use super::usage_report::UsageReporter;
+
+const MAX_IN_FLIGHT_STAGE_ITEMS: usize = 4;
 
 #[derive(Clone)]
 pub(crate) struct CliExecutionControl {
@@ -60,8 +68,11 @@ impl NativeExecutionControl for CliExecutionControl {
                 block_in_place(|| limiter.exceeds_limit_blocking(step.estimated_input_tokens));
             if exceeds_limit {
                 eprintln!(
-                    "Warning: estimated request size ({} input tokens) exceeds configured --token-limit/REEN_TOKEN_LIMIT budget for one minute; continuing request and relying on provider rate-limit handling (429 retry/backoff).",
-                    step.estimated_input_tokens
+                    "{}",
+                    warning_text(format!(
+                        "Warning: estimated request size ({} input tokens) exceeds configured --token-limit/REEN_TOKEN_LIMIT budget for one minute; continuing request and relying on provider rate-limit handling (429 retry/backoff).",
+                        step.estimated_input_tokens
+                    ))
                 );
             } else {
                 block_in_place(|| limiter.acquire_tokens_blocking(step.estimated_input_tokens));
@@ -112,10 +123,18 @@ pub(crate) struct ExecutionResources {
     pub(crate) token_limiter: Option<Arc<TokenLimiter>>,
     pub(crate) rate_limiter: Option<Arc<RateLimiter>>,
     pub(crate) execution_control: Option<CliExecutionControl>,
+    pub(crate) usage_reporter: UsageReporter,
+    pub(crate) run_context_cache: RunContextCache,
 }
 
 impl ExecutionResources {
-    pub(crate) fn new(rate_limit: Option<f64>, token_limit: Option<f64>, verbose: bool) -> Self {
+    pub(crate) fn new(
+        command_name: impl Into<String>,
+        project_root: impl AsRef<Path>,
+        rate_limit: Option<f64>,
+        token_limit: Option<f64>,
+        verbose: bool,
+    ) -> Self {
         let rate_limiter = rate_limit.map(RateLimiter::new).map(Arc::new);
         let token_limiter = token_limit.map(TokenLimiter::new).map(Arc::new);
         let execution_control = Some(CliExecutionControl::new(
@@ -123,10 +142,13 @@ impl ExecutionResources {
             rate_limiter.clone(),
             verbose,
         ));
+        let project_root = PathBuf::from(project_root.as_ref());
         Self {
             token_limiter,
             rate_limiter,
             execution_control,
+            usage_reporter: UsageReporter::new(command_name.into(), project_root, verbose),
+            run_context_cache: RunContextCache::default(),
         }
     }
 }
@@ -245,7 +267,10 @@ pub(crate) async fn acquire_request_capacity(
     if let Some(limiter) = token_limiter {
         if limiter.exceeds_limit(estimated).await {
             eprintln!(
-                "Warning: estimated request size ({estimated} input tokens) exceeds configured --token-limit/REEN_TOKEN_LIMIT budget for one minute; continuing request and relying on provider rate-limit handling (429 retry/backoff)."
+                "{}",
+                warning_text(format!(
+                    "Warning: estimated request size ({estimated} input tokens) exceeds configured --token-limit/REEN_TOKEN_LIMIT budget for one minute; continuing request and relying on provider rate-limit handling (429 retry/backoff)."
+                ))
             );
         }
     }
@@ -270,9 +295,12 @@ pub(crate) async fn prepare_rate_limit_retry(
             .map(|value| value.max(limiter_delay))
             .unwrap_or(limiter_delay);
         eprintln!(
-            "Rate limit (429) exceeded for {}, waiting {}s before retrying...",
-            item_name,
-            delay.as_secs()
+            "{}",
+            warning_text(format!(
+                "Rate limit (429) exceeded for {}, waiting {}s before retrying...",
+                item_name,
+                delay.as_secs()
+            ))
         );
         sleep(delay).await;
         waited = true;
@@ -284,9 +312,12 @@ pub(crate) async fn prepare_rate_limit_retry(
                 .map(|value| value.max(fallback_delay))
                 .unwrap_or(fallback_delay);
             eprintln!(
-                "Rate limit (429) exceeded for {}, waiting {}s and retrying with slower rate...",
-                item_name,
-                delay.as_secs()
+                "{}",
+                warning_text(format!(
+                    "Rate limit (429) exceeded for {}, waiting {}s and retrying with slower rate...",
+                    item_name,
+                    delay.as_secs()
+                ))
             );
             sleep(delay).await;
             waited = true;
@@ -296,9 +327,12 @@ pub(crate) async fn prepare_rate_limit_retry(
     if !waited {
         if let Some(delay) = server_delay {
             eprintln!(
-                "Rate limit (429) exceeded for {}, waiting {}s before retrying...",
-                item_name,
-                delay.as_secs()
+                "{}",
+                warning_text(format!(
+                    "Rate limit (429) exceeded for {}, waiting {}s before retrying...",
+                    item_name,
+                    delay.as_secs()
+                ))
             );
             sleep(delay).await;
             waited = true;
@@ -402,8 +436,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::parse_server_retry_delay;
+    use super::{ExecutionResources, StageItem, parse_server_retry_delay, run_stage_items};
+    use crate::cli::Config;
     use anyhow::anyhow;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::Duration;
 
     #[test]
@@ -432,6 +469,58 @@ mod tests {
             Some(Duration::from_secs_f64(3.5))
         );
     }
+
+    #[tokio::test]
+    async fn parallel_runner_limits_in_flight_work() {
+        let temp_root =
+            std::env::temp_dir().join(format!("reen_stage_runner_{}", std::process::id()));
+        let resources = ExecutionResources::new("stage_test", &temp_root, None, None, false);
+        let mut progress = crate::cli::progress::ProgressIndicator::new(8);
+        let current = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let items = (0..8)
+            .map(|idx| StageItem {
+                name: format!("item_{idx}"),
+                estimated: 100,
+                cache_hit: false,
+                payload: idx,
+            })
+            .collect::<Vec<_>>();
+        let config = Config {
+            verbose: false,
+            dry_run: false,
+            github_repo: None,
+        };
+
+        let results = run_stage_items(
+            items,
+            true,
+            &mut progress,
+            &resources,
+            &config,
+            {
+                let current = current.clone();
+                let peak = peak.clone();
+                move |value, _| {
+                    let current = current.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let in_flight = current.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(in_flight, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        current.fetch_sub(1, Ordering::SeqCst);
+                        Ok(value)
+                    }
+                }
+            },
+        )
+        .await
+        .expect("parallel run");
+
+        assert_eq!(results.len(), 8);
+        assert!(peak.load(Ordering::SeqCst) <= super::MAX_IN_FLIGHT_STAGE_ITEMS);
+        std::fs::remove_dir_all(temp_root).ok();
+    }
 }
 
 pub(crate) async fn run_stage_items<T, R, F, Fut>(
@@ -450,25 +539,34 @@ where
 {
     let process = Arc::new(process);
     if can_parallel {
-        let mut tasks = Vec::new();
-        for item in items {
-            if item.cache_hit {
-                progress.start_item_cached(&item.name);
-            } else {
-                progress.start_item(&item.name, Some(item.estimated));
-            }
-            let name = item.name.clone();
-            let resources = resources.clone();
-            let process = process.clone();
-            tasks.push(tokio::task::spawn(async move {
-                let result = run_stage_item(item, resources, process).await;
-                (name, result)
-            }));
-        }
-
+        let mut pending = items.into_iter();
+        let mut tasks = JoinSet::new();
         let mut results = Vec::new();
-        for task in tasks {
-            results.push(task.await?);
+        loop {
+            while tasks.len() < MAX_IN_FLIGHT_STAGE_ITEMS {
+                let Some(item) = pending.next() else {
+                    break;
+                };
+                if item.cache_hit {
+                    progress.start_item_cached(&item.name);
+                } else {
+                    progress.start_item(&item.name, Some(item.estimated));
+                }
+                let name = item.name.clone();
+                let resources = resources.clone();
+                let process = process.clone();
+                tasks.spawn(async move {
+                    let result = run_stage_item(item, resources, process).await;
+                    (name, result)
+                });
+            }
+
+            let Some(joined) = tasks.join_next().await else {
+                break;
+            };
+            results.push(
+                joined.map_err(|error| anyhow::anyhow!("Stage task join error: {}", error))?,
+            );
         }
         Ok(results)
     } else {
@@ -479,7 +577,7 @@ where
             } else {
                 progress.start_item(&item.name, Some(item.estimated));
                 if config.verbose {
-                    println!("Processing context: {}", item.name);
+                    println!("{}", standard_text(format!("Processing context: {}", item.name)));
                 }
             }
             let name = item.name.clone();

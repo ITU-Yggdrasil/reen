@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use reen::execution::{
-    AgentModelRegistry, AgentRunner, AgentRunnerError, NativeExecutionControl, PreparedExecution,
-    PreparedExecutionState, build_agent_input, execute_native_request_with_metadata,
+    AgentModelRegistry, AgentRunner, AgentRunnerError, NativeExecutionControl, build_agent_input,
     output_contains_questions,
 };
 use reen::registries::{
@@ -14,6 +14,8 @@ use reen::registries::{
 };
 
 use super::Config;
+use super::progress::{header_text, standard_text};
+use super::usage_report::{UsageReporter, UsageScope};
 
 /// Response types from agent execution
 pub enum AgentResponse {
@@ -21,6 +23,12 @@ pub enum AgentResponse {
     Final(String),
     /// Agent has questions that need answers
     Questions(String),
+}
+
+#[derive(Clone)]
+struct UsageTracking<'a> {
+    reporter: &'a UsageReporter,
+    scope: &'a UsageScope,
 }
 
 pub struct AgentExecutor {
@@ -46,13 +54,6 @@ impl AgentExecutor {
     pub fn can_run_parallel(&self) -> Result<bool> {
         self.model_registry
             .can_run_parallel(&self.agent_name)
-            .map_err(|e| anyhow::anyhow!("Failed to read model registry: {}", e))
-    }
-
-    /// Whether this agent is configured to use provider-side batch execution.
-    pub fn can_use_batch(&self) -> Result<bool> {
-        self.model_registry
-            .can_use_batch(&self.agent_name)
             .map_err(|e| anyhow::anyhow!("Failed to read model registry: {}", e))
     }
 
@@ -86,32 +87,58 @@ impl AgentExecutor {
         }
     }
 
-    /// Executes the agent with additional context (for conversational interactions)
-    pub async fn execute_with_context(
-        &self,
-        input: &str,
-        additional_context: HashMap<String, serde_json::Value>,
-        execution_control: Option<&dyn NativeExecutionControl>,
-    ) -> Result<AgentResponse> {
-        self.execute_with_context_options(input, additional_context, execution_control, false)
-            .await
-    }
-
-    pub async fn execute_with_context_options(
+    pub async fn execute_with_context_options_tracked(
         &self,
         input: &str,
         additional_context: HashMap<String, serde_json::Value>,
         execution_control: Option<&dyn NativeExecutionControl>,
         ignore_cache_reads: bool,
+        tracking: Option<(&UsageReporter, &UsageScope)>,
+    ) -> Result<AgentResponse> {
+        let tracking = tracking.map(|(reporter, scope)| UsageTracking { reporter, scope });
+        self.execute_with_context_options_inner(
+            input,
+            additional_context,
+            execution_control,
+            ignore_cache_reads,
+            tracking,
+        )
+        .await
+    }
+
+    async fn execute_with_context_options_inner(
+        &self,
+        input: &str,
+        additional_context: HashMap<String, serde_json::Value>,
+        execution_control: Option<&dyn NativeExecutionControl>,
+        ignore_cache_reads: bool,
+        tracking: Option<UsageTracking<'_>>,
     ) -> Result<AgentResponse> {
         if self.verbose {
-            println!("Executing agent: {}", self.agent_name);
+            println!(
+                "{}",
+                standard_text(format!("Executing agent: {}", self.agent_name))
+            );
         }
 
+        let (provider, model) = self.resolve_provider_model()?;
+        let started_at = Instant::now();
         let result = self
             .runner(input, additional_context)
             .run_with_control_options(execution_control, ignore_cache_reads)
             .map_err(Self::map_runner_error)?;
+        let elapsed_ms = started_at.elapsed().as_millis();
+        if let Some(tracking) = tracking {
+            tracking.reporter.record(
+                tracking.scope,
+                &self.agent_name,
+                &provider,
+                &model,
+                result.cached,
+                elapsed_ms,
+                result.usage.as_ref(),
+            );
+        }
 
         if output_contains_questions(&result.output) {
             Ok(AgentResponse::Questions(result.output))
@@ -142,48 +169,14 @@ impl AgentExecutor {
             .map_err(Self::map_runner_error)
     }
 
-    pub fn prepare_execution_options(
-        &self,
-        input: &str,
-        additional_context: HashMap<String, serde_json::Value>,
-        ignore_cache_reads: bool,
-    ) -> Result<PreparedExecutionState> {
-        self.runner(input, additional_context)
-            .prepare_execution_options(ignore_cache_reads)
-            .map_err(Self::map_runner_error)
-    }
-
-    /// Executes prepared requests sequentially via the native Rust runner.
-    pub fn execute_batch(
-        &self,
-        prepared: Vec<(String, PreparedExecution)>,
-        execution_control: Option<&dyn NativeExecutionControl>,
-    ) -> Result<HashMap<String, String>> {
-        if prepared.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let mut results = HashMap::new();
-
-        for (custom_id, item) in prepared {
-            let output = execute_native_request_with_metadata(&item.request, execution_control)
-                .map(|result| result.output)
-                .map_err(|error| {
-                    anyhow::anyhow!("Native runner failed for batch item '{custom_id}': {error}")
-                })?;
-            item.store_output(&output);
-            results.insert(custom_id, output);
-        }
-
-        Ok(results)
-    }
-
-    pub async fn execute_with_conversation_with_seed_options(
+    pub async fn execute_with_conversation_with_seed_options_tracked(
         &self,
         input: &str,
         context_name: &str,
         mut context: HashMap<String, serde_json::Value>,
         execution_control: Option<&dyn NativeExecutionControl>,
         ignore_cache_reads: bool,
+        tracking: Option<(&UsageReporter, &UsageScope)>,
     ) -> Result<String> {
         let mut conversation_round = 0;
 
@@ -191,15 +184,19 @@ impl AgentExecutor {
             conversation_round += 1;
 
             if self.verbose {
-                println!("Conversation round: {}", conversation_round);
+                println!(
+                    "{}",
+                    standard_text(format!("Conversation round: {}", conversation_round))
+                );
             }
 
             match self
-                .execute_with_context_options(
+                .execute_with_context_options_tracked(
                     input,
                     context.clone(),
                     execution_control,
                     ignore_cache_reads,
+                    tracking,
                 )
                 .await?
             {
@@ -215,15 +212,24 @@ impl AgentExecutor {
                     let questions_file = self.write_questions_file(context_name, &questions)?;
 
                     // Prompt user for answers
-                    println!("\n{}", "=".repeat(60));
-                    println!("The agent has questions that need answers.");
+                    println!("\n{}", header_text("=".repeat(60)));
+                    println!("{}", header_text("The agent has questions that need answers."));
                     println!(
-                        "Questions have been written to: {}",
-                        questions_file.display()
+                        "{}",
+                        standard_text(format!(
+                            "Questions have been written to: {}",
+                            questions_file.display()
+                        ))
                     );
-                    println!("Please edit the file to provide your answers.");
-                    println!("{}", "=".repeat(60));
-                    println!("\nPress Enter when you're ready to continue (or type 'ready'):");
+                    println!(
+                        "{}",
+                        standard_text("Please edit the file to provide your answers.")
+                    );
+                    println!("{}", header_text("=".repeat(60)));
+                    println!(
+                        "\n{}",
+                        standard_text("Press Enter when you're ready to continue (or type 'ready'):")
+                    );
 
                     // Wait for user input
                     let mut user_input = String::new();
@@ -269,6 +275,53 @@ impl AgentExecutor {
         fs::write(&questions_file, questions).context("Failed to write questions file")?;
 
         Ok(questions_file)
+    }
+
+    fn resolve_provider_model(&self) -> Result<(String, String)> {
+        let model = self
+            .model_registry
+            .get_model(&self.agent_name)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Failed to resolve model for agent '{}': {}",
+                    self.agent_name,
+                    error
+                )
+            })?;
+        Ok((provider_from_model(&model.name), model.name))
+    }
+}
+
+fn provider_from_model(model: &str) -> String {
+    if let Some((provider, _)) = model.split_once('/') {
+        return provider.to_lowercase();
+    }
+
+    let model_lower = model.to_lowercase();
+    if model_lower.contains("claude") || model_lower.contains("anthropic") {
+        "anthropic".to_string()
+    } else if ["gpt", "openai", "o1", "o3"]
+        .iter()
+        .any(|needle| model_lower.contains(needle))
+    {
+        "openai".to_string()
+    } else if model_lower.contains("mistral/") {
+        "mistral".to_string()
+    } else if [
+        "ollama",
+        "qwen",
+        "llama",
+        "mistral",
+        "phi",
+        "gemma",
+        "codellama",
+    ]
+    .iter()
+    .any(|needle| model_lower.contains(needle))
+    {
+        "ollama".to_string()
+    } else {
+        "ollama".to_string()
     }
 }
 

@@ -15,6 +15,32 @@ pub enum DependencySource {
     Fallback,
 }
 
+#[derive(Default)]
+pub(crate) struct DependencyGraphCache {
+    indexes: HashMap<String, Vec<IndexedArtifact>>,
+    by_canonical: HashMap<String, HashMap<String, Vec<IndexedArtifact>>>,
+}
+
+impl DependencyGraphCache {
+    fn index(&mut self, root: &str) -> Result<Vec<IndexedArtifact>> {
+        if let Some(index) = self.indexes.get(root) {
+            return Ok(index.clone());
+        }
+        let index = build_index(root)?;
+        self.indexes.insert(root.to_string(), index.clone());
+        Ok(index)
+    }
+
+    fn canonical_index(&mut self, root: &str) -> Result<HashMap<String, Vec<IndexedArtifact>>> {
+        if let Some(index) = self.by_canonical.get(root) {
+            return Ok(index.clone());
+        }
+        let index = index_by_canonical(&self.index(root)?);
+        self.by_canonical.insert(root.to_string(), index.clone());
+        Ok(index)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct DependencyArtifact {
     pub name: String,
@@ -201,6 +227,121 @@ impl ExecutionNode {
         resolved.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(resolved)
     }
+}
+
+pub(crate) fn resolve_dependency_closure_with_cache(
+    node: &ExecutionNode,
+    primary_root: &str,
+    fallback_root: Option<&str>,
+    cache: &mut DependencyGraphCache,
+) -> Result<Vec<DependencyArtifact>> {
+    let primary_index = cache.index(primary_root)?;
+    let fallback_index = match fallback_root {
+        Some(root) => cache.index(root)?,
+        None => Vec::new(),
+    };
+    let primary_by_canonical = cache.canonical_index(primary_root)?;
+    let fallback_by_canonical = match fallback_root {
+        Some(root) => cache.canonical_index(root)?,
+        None => HashMap::new(),
+    };
+    let primary_root_path = PathBuf::from(primary_root);
+    let fallback_root_path = fallback_root.map(PathBuf::from);
+
+    let mut queue = node.direct_dependencies.clone();
+    let mut seen_paths = HashSet::new();
+    let mut resolved = Vec::new();
+
+    while let Some(dep) = queue.pop() {
+        let (path, source) = match resolve_dependency_locator(&dep) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        if path == node.input_path {
+            continue;
+        }
+
+        let key = path.to_string_lossy().to_string();
+        if !seen_paths.insert(key.clone()) {
+            continue;
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed reading dependency artifact: {}", path.display()))?;
+        let mut hasher = Sha256::new();
+        hasher.update(content.as_bytes());
+        let sha256 = hex::encode(hasher.finalize());
+
+        resolved.push(DependencyArtifact {
+            name: dep.name.clone(),
+            path: key,
+            source,
+            content: content.clone(),
+            sha256,
+        });
+
+        let from_category =
+            categorize_artifact(&path, &primary_root_path, fallback_root_path.as_deref());
+
+        let canonicals =
+            extract_dependency_canonicals(&path, &content, &primary_index, &fallback_index);
+        for canonical in canonicals {
+            let primary_candidates = primary_by_canonical
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_default();
+            let fallback_candidates = fallback_by_canonical
+                .get(&canonical)
+                .cloned()
+                .unwrap_or_default();
+
+            if !primary_candidates.is_empty() {
+                for candidate in primary_candidates {
+                    if candidate.path == path || candidate.path == node.input_path {
+                        continue;
+                    }
+
+                    let to_category = categorize_artifact(
+                        &candidate.path,
+                        &primary_root_path,
+                        fallback_root_path.as_deref(),
+                    );
+                    if !dependency_allowed(from_category, to_category) {
+                        continue;
+                    }
+
+                    queue.push(DependencyLocator {
+                        name: candidate.name.clone(),
+                        primary_path: Some(candidate.path.clone()),
+                        fallback_path: fallback_candidates.first().map(|f| f.path.clone()),
+                    });
+                }
+            } else {
+                for candidate in fallback_candidates {
+                    if candidate.path == path || candidate.path == node.input_path {
+                        continue;
+                    }
+                    let to_category = categorize_artifact(
+                        &candidate.path,
+                        &primary_root_path,
+                        fallback_root_path.as_deref(),
+                    );
+                    if !dependency_allowed(from_category, to_category) {
+                        continue;
+                    }
+                    queue.push(DependencyLocator {
+                        name: candidate.name.clone(),
+                        primary_path: None,
+                        fallback_path: Some(candidate.path.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    resolved.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(resolved)
 }
 
 #[derive(Clone, Debug)]

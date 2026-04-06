@@ -27,8 +27,9 @@ use super::pipeline_quality::{
     determine_spec_path_for_output, verify_generated_implementation,
 };
 use super::planning::{PlanKind, build_default_plan, parse_plan_output, plan_to_context_value};
-use super::progress::print_timed_status;
+use super::progress::{error_tag, print_timed_status, success_text};
 use super::project_structure::ProjectInfo;
+use super::usage_report::{UsageReporter, UsageScope};
 use reen::execution::NativeExecutionControl;
 
 /// Configuration for compilation fix context size, read from env vars:
@@ -111,6 +112,7 @@ pub async fn ensure_compiles_with_auto_fix(
     recent_generated_files: &[PathBuf],
     request_token_limit: Option<f64>,
     ignore_cache_reads: bool,
+    reporter: Option<&UsageReporter>,
     execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<()> {
     if config.dry_run {
@@ -120,7 +122,7 @@ pub async fn ensure_compiles_with_auto_fix(
     let mut output = run_cargo_build(project_root)?;
     if output.status_success {
         if config.verbose {
-            println!("✓ Build successful");
+            println!("{}", success_text("✓ Build successful"));
         }
         return Ok(());
     }
@@ -135,8 +137,10 @@ pub async fn ensure_compiles_with_auto_fix(
     let session_dir = create_session_dir(project_root)?;
     let session_dir_display = session_dir.display().to_string();
     eprintln!(
-        "error[compile]: build failed; attempting automatic compilation fixes (max_attempts={}). Logs: {}",
-        max_attempts, session_dir_display
+        "{} build failed; attempting automatic compilation fixes (max_attempts={}). Logs: {}",
+        error_tag("compile"),
+        max_attempts,
+        session_dir_display
     );
 
     let cfg = compile_fix_config();
@@ -247,6 +251,7 @@ pub async fn ensure_compiles_with_auto_fix(
             &plan_diagnostics,
             request_token_limit,
             ignore_cache_reads,
+            reporter,
             execution_control,
         )
         .await?;
@@ -282,12 +287,21 @@ pub async fn ensure_compiles_with_auto_fix(
         let executor = AgentExecutor::new("resolve_compilation_errors", config)
             .context("Failed to create compilation error resolver agent")?;
 
+        let repair_scope = UsageScope::new(
+            "compilation_repair",
+            summarize_paths(&round_context.relevant_paths),
+        )
+        .with_estimated_input_tokens(estimate_request_tokens(
+            "Compilation failed; propose minimal fix patch.",
+            &round_context.additional_context,
+        ));
         let agent_response = executor
-            .execute_with_context_options(
+            .execute_with_context_options_tracked(
                 "Compilation failed; propose minimal fix patch.",
                 round_context.additional_context.clone(),
                 execution_control,
                 ignore_cache_reads,
+                reporter.map(|reporter| (reporter, &repair_scope)),
             )
             .await
             .context("Failed to execute compilation error resolver agent")?;
@@ -354,6 +368,7 @@ pub async fn ensure_compiles_with_auto_fix(
                     &attempt_dir,
                     request_token_limit,
                     ignore_cache_reads,
+                    reporter,
                     execution_control,
                 )
                 .await?;
@@ -430,8 +445,11 @@ pub async fn ensure_compiles_with_auto_fix(
             fs::write(attempt_dir.join("cargo_stdout_after.txt"), &output.stdout).ok();
             fs::write(attempt_dir.join("cargo_stderr_after.txt"), &output.stderr).ok();
             println!(
-                "✓ Build restored after {} compilation fix attempt(s). Logs: {}",
-                attempt, session_dir_display
+                "{}",
+                success_text(format!(
+                    "✓ Build restored after {} compilation fix attempt(s). Logs: {}",
+                    attempt, session_dir_display
+                ))
             );
             return Ok(());
         }
@@ -592,6 +610,7 @@ async fn regenerate_patch_after_apply_failure(
     attempt_dir: &Path,
     request_token_limit: Option<f64>,
     ignore_cache_reads: bool,
+    reporter: Option<&UsageReporter>,
     execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<String> {
     let touched_paths = dedupe_paths(touched_paths);
@@ -633,12 +652,15 @@ async fn regenerate_patch_after_apply_failure(
     )
     .ok();
 
+    let retry_scope = UsageScope::new("compilation_repair_retry", summarize_paths(&touched_paths))
+        .with_estimated_input_tokens(retry_estimated);
     let agent_response = executor
-        .execute_with_context_options(
+        .execute_with_context_options_tracked(
             RETRY_PATCH_PROMPT,
             retry_context,
             execution_control,
             ignore_cache_reads,
+            reporter.map(|reporter| (reporter, &retry_scope)),
         )
         .await
         .context("Failed to regenerate compilation patch after apply failure")?;
@@ -693,6 +715,7 @@ async fn generate_semantic_repair_plan(
     diagnostics: &[DiagnosticSpan],
     request_token_limit: Option<f64>,
     ignore_cache_reads: bool,
+    reporter: Option<&UsageReporter>,
     execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<serde_json::Value> {
     let target_summary = summarize_paths(relevant_paths);
@@ -767,13 +790,16 @@ async fn generate_semantic_repair_plan(
         context,
         request_token_limit,
     )?;
+    let scope =
+        UsageScope::new("semantic_repair_plan", target_summary.clone()).with_path(spec_path.clone());
     let response = planner
-        .execute_with_conversation_with_seed_options(
+        .execute_with_conversation_with_seed_options_tracked(
             "",
             "semantic_repair_plan",
             context,
             execution_control,
             ignore_cache_reads,
+            reporter.map(|reporter| (reporter, &scope)),
         )
         .await?;
     let plan = parse_plan_output(&response).unwrap_or(fallback);

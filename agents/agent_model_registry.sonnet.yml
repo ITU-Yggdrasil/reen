@@ -14,7 +14,7 @@ create_specifications_external_api:
   batch: false
 create_plan:
   model: claude-sonnet-4-6
-  parallel: false
+  parallel: true
   batch: false
 bootstrap_capability_registry:
   model: claude-sonnet-4-6
@@ -26,7 +26,7 @@ create_implementation:
   batch: false
 create_test:
   model: claude-sonnet-4-6
-  parallel: false
+  parallel: true
   batch: false
 resolve_compilation_errors:
   model: claude-sonnet-4-6
