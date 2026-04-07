@@ -179,6 +179,7 @@ pub fn resolve_token_limit(cli_arg: Option<f64>) -> Option<f64> {
 #[derive(Clone, Copy)]
 pub struct CategoryFilter {
     pub contexts: bool,
+    pub projections: bool,
     pub data: bool,
 }
 
@@ -186,16 +187,21 @@ impl CategoryFilter {
     pub fn all() -> Self {
         Self {
             contexts: false,
+            projections: false,
             data: false,
         }
     }
 
     fn is_active(&self) -> bool {
-        self.contexts || self.data
+        self.contexts || self.projections || self.data
     }
 
     fn include_data(&self) -> bool {
         !self.is_active() || self.data
+    }
+
+    fn include_projections(&self) -> bool {
+        !self.is_active() || self.projections
     }
 
     fn include_contexts(&self) -> bool {
@@ -218,6 +224,7 @@ impl CategoryFilter {
                 let component = first.as_os_str().to_string_lossy();
                 return match component.as_ref() {
                     "data" => self.include_data(),
+                    "projections" => self.include_projections(),
                     "contexts" | "external_apis" | "apis" => self.include_contexts(),
                     _ => self.include_root(),
                 };
@@ -5625,6 +5632,7 @@ Problem:
             "md",
             &CategoryFilter {
                 contexts: true,
+                projections: false,
                 data: false,
             },
         )
@@ -5638,6 +5646,7 @@ Problem:
             "md",
             &CategoryFilter {
                 contexts: true,
+                projections: false,
                 data: false,
             },
         )
@@ -5651,6 +5660,7 @@ Problem:
             "md",
             &CategoryFilter {
                 contexts: false,
+                projections: false,
                 data: true,
             },
         )

@@ -36,11 +36,18 @@ pub struct CreateConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contexts: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub projections: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_limit: Option<f64>,
+    /// Maximum number of items processed concurrently within each pipeline stage.
+    /// Overrides the built-in default of 4. Higher values reduce wall-clock time
+    /// at the cost of higher burst token/request usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_limit: Option<u32>,
     #[serde(default, skip_serializing_if = "OptionalYamlValue::is_missing")]
     pub fix: OptionalYamlValue,
     #[serde(skip_serializing_if = "Option::is_none")]

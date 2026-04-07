@@ -249,6 +249,9 @@ struct CreateArgs {
     #[arg(long, help = "Only process drafts from the contexts/ folder")]
     contexts: bool,
 
+    #[arg(long, help = "Only process drafts from the projections/ folder")]
+    projections: bool,
+
     #[arg(long, help = "Only process drafts from the data/ folder")]
     data: bool,
 
@@ -264,6 +267,12 @@ struct CreateArgs {
     )]
     token_limit: Option<f64>,
 
+    #[arg(
+        long,
+        help = "Maximum items processed concurrently per stage (default: 4, or from reen.yml create.parallel-limit)"
+    )]
+    parallel_limit: Option<u32>,
+
     #[command(subcommand)]
     command: CreateCommands,
 }
@@ -278,6 +287,9 @@ struct BuildArgs {
 
     #[arg(long, help = "Only process drafts from the contexts/ folder")]
     contexts: bool,
+
+    #[arg(long, help = "Only process drafts from the projections/ folder")]
+    projections: bool,
 
     #[arg(long, help = "Only process drafts from the data/ folder")]
     data: bool,
@@ -314,6 +326,12 @@ struct BuildArgs {
         help = "Maximum tokens per minute (overrides REEN_TOKEN_LIMIT and registry)"
     )]
     token_limit: Option<f64>,
+
+    #[arg(
+        long,
+        help = "Maximum items processed concurrently per stage (default: 4, or from reen.yml create.parallel-limit)"
+    )]
+    parallel_limit: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -366,9 +384,22 @@ async fn main() -> Result<()> {
             let clear_cache =
                 create_args.clear_cache || rc.and_then(|c| c.clear_cache).unwrap_or(false);
             let contexts = create_args.contexts || rc.and_then(|c| c.contexts).unwrap_or(false);
+            let projections =
+                create_args.projections || rc.and_then(|c| c.projections).unwrap_or(false);
             let data = create_args.data || rc.and_then(|c| c.data).unwrap_or(false);
 
-            let category_filter = cli::CategoryFilter { contexts, data };
+            let category_filter = cli::CategoryFilter {
+                contexts,
+                projections,
+                data,
+            };
+
+            // parallel_limit: CLI > reen.yml > built-in default
+            let parallel_limit = create_args
+                .parallel_limit
+                .or_else(|| rc.and_then(|c| c.parallel_limit))
+                .map(|v| v as usize)
+                .unwrap_or(cli::DEFAULT_PARALLEL_LIMIT);
 
             // rate/token limits: CLI > reen.yml > env > registry
             let rate_limit = cli::resolve_rate_limit(
@@ -410,6 +441,7 @@ async fn main() -> Result<()> {
                         &category_filter,
                         rate_limit,
                         token_limit,
+                        parallel_limit,
                         fix,
                         max_fix_attempts,
                         &config,
@@ -439,6 +471,7 @@ async fn main() -> Result<()> {
                         &category_filter,
                         rate_limit,
                         token_limit,
+                        parallel_limit,
                         &config,
                     )
                     .await?;
@@ -450,6 +483,7 @@ async fn main() -> Result<()> {
                         &category_filter,
                         rate_limit,
                         token_limit,
+                        parallel_limit,
                         &config,
                     )
                     .await?;
@@ -464,8 +498,14 @@ async fn main() -> Result<()> {
             let clear_cache =
                 build_args.clear_cache || rc.and_then(|c| c.clear_cache).unwrap_or(false);
             let contexts = build_args.contexts || rc.and_then(|c| c.contexts).unwrap_or(false);
+            let projections =
+                build_args.projections || rc.and_then(|c| c.projections).unwrap_or(false);
             let data = build_args.data || rc.and_then(|c| c.data).unwrap_or(false);
-            let category_filter = cli::CategoryFilter { contexts, data };
+            let category_filter = cli::CategoryFilter {
+                contexts,
+                projections,
+                data,
+            };
 
             let rate_limit = cli::resolve_rate_limit(
                 build_args
@@ -500,12 +540,19 @@ async fn main() -> Result<()> {
 
             let _ = build_args.fix;
 
+            let parallel_limit = build_args
+                .parallel_limit
+                .or_else(|| rc.and_then(|c| c.parallel_limit))
+                .map(|v| v as usize)
+                .unwrap_or(cli::DEFAULT_PARALLEL_LIMIT);
+
             cli::build(
                 build_args.names,
                 clear_cache,
                 &category_filter,
                 rate_limit,
                 token_limit,
+                parallel_limit,
                 max_fix_attempts,
                 max_compile_fix_attempts,
                 &config,
@@ -646,6 +693,8 @@ mod tests {
                 names,
                 rate_limit,
                 token_limit,
+                parallel_limit,
+                ..
             }) => {
                 assert!(clear_cache);
                 assert!(contexts);
@@ -656,6 +705,7 @@ mod tests {
                 assert_eq!(names, vec!["app".to_string(), "game_loop".to_string()]);
                 assert_eq!(rate_limit, Some(2.0));
                 assert_eq!(token_limit, Some(60000.0));
+                assert_eq!(parallel_limit, None);
             }
             other => panic!(
                 "expected build command, got {:?}",

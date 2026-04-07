@@ -58,6 +58,7 @@ pub fn build_agent_input(
         "create_specifications"
         | "create_specifications_context"
         | "create_specifications_data"
+        | "create_specifications_projection"
         | "create_specifications_external_api" => AgentInput {
             draft_content: Some(input.to_string()),
             context_content: None,
@@ -65,7 +66,11 @@ pub fn build_agent_input(
             documentation_urls,
             additional: additional_context,
         },
-        "create_implementation" | "create_test" => AgentInput {
+        "create_implementation"
+        | "create_implementation_data"
+        | "create_implementation_projection"
+        | "create_implementation_context"
+        | "create_test" => AgentInput {
             draft_content: None,
             context_content: Some(input.to_string()),
             openapi_content: None,
@@ -123,7 +128,60 @@ pub fn output_contains_questions(output: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::output_contains_questions;
+    use super::{build_agent_input, output_contains_questions};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn specification_variants_use_draft_content() {
+        let input = build_agent_input(
+            "create_specifications_projection",
+            "draft body",
+            HashMap::new(),
+        );
+        let value = serde_json::to_value(&input).expect("serialize agent input");
+
+        assert_eq!(value.get("draft_content"), Some(&json!("draft body")));
+        assert_eq!(value.get("context_content"), None);
+    }
+
+    #[test]
+    fn implementation_variants_use_context_content() {
+        let input = build_agent_input("create_implementation_data", "spec body", HashMap::new());
+        let value = serde_json::to_value(&input).expect("serialize agent input");
+
+        assert_eq!(value.get("draft_content"), None);
+        assert_eq!(value.get("context_content"), Some(&json!("spec body")));
+    }
+
+    #[test]
+    fn specification_variants_preserve_auxiliary_inputs() {
+        let mut additional = HashMap::new();
+        additional.insert("openapi_content".to_string(), json!("openapi"));
+        additional.insert(
+            "documentation_urls".to_string(),
+            json!(["https://example.com/docs"]),
+        );
+        additional.insert("draft_summary".to_string(), json!({"kind": "projection"}));
+
+        let input = build_agent_input(
+            "create_specifications_external_api",
+            "draft body",
+            additional,
+        );
+        let value = serde_json::to_value(&input).expect("serialize agent input");
+
+        assert_eq!(value.get("draft_content"), Some(&json!("draft body")));
+        assert_eq!(value.get("openapi_content"), Some(&json!("openapi")));
+        assert_eq!(
+            value.get("documentation_urls"),
+            Some(&json!(["https://example.com/docs"]))
+        );
+        assert_eq!(
+            value.get("draft_summary"),
+            Some(&json!({"kind": "projection"}))
+        );
+    }
 
     #[test]
     fn detects_explicit_questions_heading() {

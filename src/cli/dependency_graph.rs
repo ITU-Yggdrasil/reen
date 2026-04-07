@@ -385,6 +385,7 @@ struct IndexedArtifact {
 enum ArtifactCategory {
     App,
     Contexts,
+    Projections,
     ExternalApi,
     Data,
     Other,
@@ -423,6 +424,7 @@ fn categorize_artifact(
         .unwrap_or("");
     match first {
         "contexts" => ArtifactCategory::Contexts,
+        "projections" => ArtifactCategory::Projections,
         "external_apis" | "apis" => ArtifactCategory::ExternalApi,
         "data" => ArtifactCategory::Data,
         _ => ArtifactCategory::Other,
@@ -431,21 +433,32 @@ fn categorize_artifact(
 
 fn dependency_allowed(from: ArtifactCategory, to: ArtifactCategory) -> bool {
     match from {
-        // Architectural rule: data is pure and cannot depend on contexts or app.
+        // Architectural rule: data is pure and cannot depend on contexts, projections, or app.
         ArtifactCategory::Data => matches!(to, ArtifactCategory::Data),
-        // Contexts may depend on data and other contexts, but never on the app entrypoint.
+        // Projections are immutable CQRS read models: may depend on data and other projections,
+        // but NEVER on contexts (they are context-free by design).
+        ArtifactCategory::Projections => {
+            matches!(to, ArtifactCategory::Projections | ArtifactCategory::Data)
+        }
+        // Contexts may depend on data, projections, and other contexts, but never on the app entrypoint.
         ArtifactCategory::Contexts => {
             matches!(
                 to,
-                ArtifactCategory::Contexts | ArtifactCategory::ExternalApi | ArtifactCategory::Data
+                ArtifactCategory::Contexts
+                    | ArtifactCategory::Projections
+                    | ArtifactCategory::ExternalApi
+                    | ArtifactCategory::Data
             )
         }
         // External APIs are source-boundary leaves and do not depend on other drafts.
         ArtifactCategory::ExternalApi => false,
-        // The app entrypoint can depend on contexts and data.
+        // The app entrypoint can depend on contexts, projections, and data.
         ArtifactCategory::App => matches!(
             to,
-            ArtifactCategory::Contexts | ArtifactCategory::ExternalApi | ArtifactCategory::Data
+            ArtifactCategory::Contexts
+                | ArtifactCategory::Projections
+                | ArtifactCategory::ExternalApi
+                | ArtifactCategory::Data
         ),
         ArtifactCategory::Other => true,
     }
@@ -1348,6 +1361,71 @@ components:
                 .expect("deps")
                 .is_empty()
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn projections_do_not_depend_on_contexts_or_app() {
+        let root = temp_root("category_projections");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("projections")).expect("mkdir projections");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+
+        let summary = drafts.join("projections").join("account_summary.md");
+        let account = drafts.join("contexts").join("account.md");
+        let app = drafts.join("app.md");
+
+        fs::write(&summary, "Mentions Account and App").expect("write");
+        fs::write(&account, "account context").expect("write");
+        fs::write(&app, "app entrypoint").expect("write");
+
+        let levels = build_execution_plan(
+            vec![summary.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+        let closure = levels[0][0]
+            .resolve_dependency_closure(drafts.to_str().unwrap_or("drafts"), None)
+            .expect("closure");
+        let paths: Vec<String> = closure.iter().map(|d| d.path.clone()).collect();
+
+        assert!(
+            !paths.iter().any(|p| p.ends_with("contexts/account.md")),
+            "projections must not depend on contexts"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("app.md")),
+            "projections must not depend on app"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn contexts_may_depend_on_projections() {
+        let root = temp_root("context_uses_projection");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("projections")).expect("mkdir projections");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+
+        let summary = drafts.join("projections").join("account_summary.md");
+        let account = drafts.join("contexts").join("account.md");
+
+        fs::write(&summary, "pure read model").expect("write");
+        fs::write(&account, "Depends on: account_summary").expect("write");
+
+        let levels = build_execution_plan(
+            vec![summary.clone(), account.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[0][0].input_path, summary);
+        assert_eq!(levels[1][0].input_path, account);
 
         let _ = fs::remove_dir_all(root);
     }

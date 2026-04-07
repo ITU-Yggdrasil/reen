@@ -607,6 +607,9 @@ fn collect_filtered_markdown_paths(root: &Path, filter: &CategoryFilter) -> Resu
     if filter.include_data() {
         files.extend(collect_md_files_recursive(&root.join("data"))?);
     }
+    if filter.include_projections() {
+        files.extend(collect_md_files_recursive(&root.join("projections"))?);
+    }
     if filter.include_contexts() {
         files.extend(collect_md_files_recursive(&root.join("contexts"))?);
         files.extend(collect_md_files_recursive(&root.join("external_apis"))?);
@@ -649,6 +652,9 @@ fn resolve_named_artifacts(
     let mut files = Vec::new();
     if filter.include_data() {
         files.extend(resolve_named_in_category(&root.join("data"), name)?);
+    }
+    if filter.include_projections() {
+        files.extend(resolve_named_in_category(&root.join("projections"), name)?);
     }
     if filter.include_contexts() {
         files.extend(resolve_named_in_category(&root.join("contexts"), name)?);

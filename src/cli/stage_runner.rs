@@ -17,7 +17,7 @@ use super::rate_limiter::RateLimiter;
 use super::run_context::RunContextCache;
 use super::usage_report::UsageReporter;
 
-const MAX_IN_FLIGHT_STAGE_ITEMS: usize = 4;
+pub(crate) const DEFAULT_PARALLEL_LIMIT: usize = 4;
 
 #[derive(Clone)]
 pub(crate) struct CliExecutionControl {
@@ -495,6 +495,7 @@ mod tests {
         let results = run_stage_items(
             items,
             true,
+            super::DEFAULT_PARALLEL_LIMIT,
             &mut progress,
             &resources,
             &config,
@@ -518,7 +519,7 @@ mod tests {
         .expect("parallel run");
 
         assert_eq!(results.len(), 8);
-        assert!(peak.load(Ordering::SeqCst) <= super::MAX_IN_FLIGHT_STAGE_ITEMS);
+        assert!(peak.load(Ordering::SeqCst) <= super::DEFAULT_PARALLEL_LIMIT);
         std::fs::remove_dir_all(temp_root).ok();
     }
 }
@@ -526,6 +527,7 @@ mod tests {
 pub(crate) async fn run_stage_items<T, R, F, Fut>(
     items: Vec<StageItem<T>>,
     can_parallel: bool,
+    parallel_limit: usize,
     progress: &mut ProgressIndicator,
     resources: &ExecutionResources,
     config: &Config,
@@ -537,13 +539,14 @@ where
     F: Fn(T, Option<CliExecutionControl>) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<R>> + Send + 'static,
 {
+    let max_in_flight = parallel_limit.max(1);
     let process = Arc::new(process);
     if can_parallel {
         let mut pending = items.into_iter();
         let mut tasks = JoinSet::new();
         let mut results = Vec::new();
         loop {
-            while tasks.len() < MAX_IN_FLIGHT_STAGE_ITEMS {
+            while tasks.len() < max_in_flight {
                 let Some(item) = pending.next() else {
                     break;
                 };
