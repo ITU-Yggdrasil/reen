@@ -1,0 +1,21 @@
+# Derived and maintained by reen capability planning. Manual edits are allowed.
+schema: reen.capability-registry/v1
+providers:
+- domain: terminal
+  crate: crossterm
+  version: '0.27'
+  default_features: true
+  features: []
+  capabilities:
+  - terminal_raw_input
+  - terminal_screen_control
+  - terminal_size
+- domain: time
+  crate: chrono
+  version: '0.4'
+  default_features: true
+  features:
+  - serde
+  capabilities:
+  - datetime_utc
+unmapped_capabilities: []

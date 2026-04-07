@@ -1865,12 +1865,16 @@ pub async fn create_implementation(
 
     // Step 2: Generate individual implementation files
     let planner = Arc::new(AgentExecutor::new("create_plan", config)?);
-    let executor = Arc::new(AgentExecutor::new("create_implementation", config)?);
+    let data_executor = Arc::new(AgentExecutor::new("create_implementation_data", config)?);
+    let projection_executor =
+        Arc::new(AgentExecutor::new("create_implementation_projection", config)?);
+    let context_executor =
+        Arc::new(AgentExecutor::new("create_implementation_context", config)?);
     let plan_can_parallel = planner.can_run_parallel().unwrap_or(false);
-    let can_parallel = executor.can_run_parallel().unwrap_or(false);
+    let can_parallel = context_executor.can_run_parallel().unwrap_or(false);
 
     if config.verbose {
-        let path = executor.model_registry().registry_path();
+        let path = context_executor.model_registry().registry_path();
         println!(
             "{}",
             standard_text(format!(
@@ -1882,7 +1886,7 @@ pub async fn create_implementation(
     }
 
     let resources = ExecutionResources::new(
-        "create_implementation",
+        "create_implementation_context",
         workspace.artifact_workspace_root(),
         rate_limit,
         token_limit,
@@ -1977,14 +1981,21 @@ pub async fn create_implementation(
                 "public_import_guidance".to_string(),
                 json!({
                     "library_crate_name": library_crate_name.clone(),
-                    "library_import_roots": ["<crate>::TypeName", "<crate>::data::TypeName", "<crate>::contexts::TypeName"],
+                    "library_import_roots": [
+                        "<crate>::TypeName",
+                        "<crate>::data::TypeName",
+                        "<crate>::projections::TypeName",
+                        "<crate>::contexts::TypeName",
+                    ],
                     "main_import_examples": [
                         format!("use {}::TypeName;", library_crate_name),
                         format!("use {}::data::TypeName;", library_crate_name),
+                        format!("use {}::projections::TypeName;", library_crate_name),
                         format!("use {}::contexts::TypeName;", library_crate_name),
                     ],
                     "forbidden_leaf_examples": [
                         format!("use {}::data::direction::Direction;", library_crate_name),
+                        format!("use {}::projections::summary::Summary;", library_crate_name),
                         format!("use {}::contexts::command_input::CommandInputContext;", library_crate_name),
                         "use crate::data::direction::Direction;".to_string(),
                     ],
@@ -2177,8 +2188,15 @@ pub async fn create_implementation(
                     );
                     let compact_dependency_context =
                         compact_agent_dependency_context(&dependency_context);
+                    let impl_executor = select_implementation_executor(
+                        &context_file,
+                        &workspace.specifications_dir,
+                        &data_executor,
+                        &projection_executor,
+                        &context_executor,
+                    );
                     let (dependency_context, estimated) = fit_context_to_token_limit(
-                        &executor,
+                        impl_executor,
                         &context_content,
                         compact_dependency_context,
                         token_limit,
@@ -2186,7 +2204,7 @@ pub async fn create_implementation(
                     let cache_hit = if clear_cache {
                         false
                     } else {
-                        executor
+                        impl_executor
                             .is_cache_hit(&context_content, dependency_context.clone())
                             .unwrap_or(false)
                     };
@@ -2203,6 +2221,7 @@ pub async fn create_implementation(
                             dependency_context,
                             context_content,
                             estimated,
+                            impl_executor.clone(),
                         ),
                     });
                 }
@@ -2229,7 +2248,6 @@ pub async fn create_implementation(
             );
         }
         let cfg = config.clone();
-        let executor_clone = executor.clone();
         let specifications_dir = workspace.specifications_dir.clone();
         let implementation_usage_reporter = resources.usage_reporter.clone();
         let results = run_stage_items(
@@ -2247,9 +2265,10 @@ pub async fn create_implementation(
                 dependency_context,
                 context_content,
                 estimated,
+                item_executor,
             ),
                   execution_control| {
-                let executor = executor_clone.clone();
+                let executor = item_executor;
                 let cfg = cfg.clone();
                 let specifications_dir = specifications_dir.clone();
                 let implementation_usage_reporter = implementation_usage_reporter.clone();
@@ -3078,10 +3097,15 @@ fn primary_stage_agents(stage: Stage) -> &'static [&'static str] {
     match stage {
         Stage::Specification => &[
             "create_specifications_data",
+            "create_specifications_projection",
             "create_specifications_context",
             "create_specifications_external_api",
         ],
-        Stage::Implementation => &["create_implementation"],
+        Stage::Implementation => &[
+            "create_implementation_data",
+            "create_implementation_projection",
+            "create_implementation_context",
+        ],
         Stage::Tests => &["create_test"],
         Stage::Compile => &[],
     }
@@ -3239,8 +3263,12 @@ fn clear_stage_primary_agent_cache_entries_by_name(
                 )? {
                     additional.insert("target_type_name".to_string(), json!(target_type_name));
                 }
+                let impl_agent = determine_implementation_agent(
+                    &context_file,
+                    &workspace.specifications_dir,
+                );
                 candidates.push((
-                    "create_implementation".to_string(),
+                    impl_agent.to_string(),
                     CacheAgentInput {
                         draft_content: None,
                         context_content: Some(context_content),
@@ -4843,6 +4871,7 @@ fn determine_draft_input_path(
 ///
 /// Returns:
 /// - "create_specifications_data" for files in data/ folder
+/// - "create_specifications_projection" for files in projections/ folder
 /// - "create_specifications_context" for files in contexts/ folder
 /// - "create_specifications_external_api" for files in external_apis/ or apis/ folder
 /// - "create_specifications_context" for root folder drafts
@@ -4858,6 +4887,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
         let component_str = first_component.as_os_str().to_string_lossy();
         match component_str.as_ref() {
             "data" => "create_specifications_data",
+            "projections" => "create_specifications_projection",
             "contexts" => "create_specifications_context",
             "external_apis" | "apis" => "create_specifications_external_api",
             _ => "create_specifications_context",
@@ -4865,6 +4895,42 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
     } else {
         // Default to the shared context spec agent for root files.
         "create_specifications_context"
+    }
+}
+
+/// Determines which implementation agent to use based on specification file path
+///
+/// Returns:
+/// - "create_implementation_data" for files in data/ folder
+/// - "create_implementation_projection" for files in projections/ folder
+/// - "create_implementation_context" for all other files (contexts, app)
+fn determine_implementation_agent(context_file: &Path, specifications_dir: &str) -> &'static str {
+    let spec_path = PathBuf::from(specifications_dir);
+    if let Ok(rel) = context_file.strip_prefix(&spec_path) {
+        if let Some(first_component) = rel.components().next() {
+            let component_str = first_component.as_os_str().to_string_lossy();
+            return match component_str.as_ref() {
+                "data" => "create_implementation_data",
+                "projections" => "create_implementation_projection",
+                _ => "create_implementation_context",
+            };
+        }
+    }
+    "create_implementation_context"
+}
+
+/// Selects the appropriate AgentExecutor for a given specification file path.
+fn select_implementation_executor<'a>(
+    context_file: &Path,
+    specifications_dir: &str,
+    data_executor: &'a Arc<AgentExecutor>,
+    projection_executor: &'a Arc<AgentExecutor>,
+    context_executor: &'a Arc<AgentExecutor>,
+) -> &'a Arc<AgentExecutor> {
+    match determine_implementation_agent(context_file, specifications_dir) {
+        "create_implementation_data" => data_executor,
+        "create_implementation_projection" => projection_executor,
+        _ => context_executor,
     }
 }
 
@@ -5244,7 +5310,8 @@ mod tests {
         agent_response_cache_key, auxiliary_stage_agents, build_dependency_drafts_from_context,
         build_dependency_manifest, build_execution_plan, build_implementation_execution_plan,
         build_implemented_dependency_manifest, determine_bdd_test_paths,
-        determine_draft_input_path, determine_implementation_output_path,
+        determine_draft_input_path, determine_implementation_agent,
+        determine_implementation_output_path,
         determine_specification_agent, determine_specification_output_path,
         ensure_dev_dependency_entry, external_generated_context_output_path,
         external_generated_data_output_path, extract_actionable_blocking_bullets_for_path,
@@ -5859,10 +5926,47 @@ fn main() {}
             primary_stage_agents(Stage::Specification),
             &[
                 "create_specifications_data",
+                "create_specifications_projection",
                 "create_specifications_context",
                 "create_specifications_external_api",
             ]
         );
-        assert!(primary_stage_agents(Stage::Implementation).contains(&"create_implementation"));
+        let impl_agents = primary_stage_agents(Stage::Implementation);
+        assert!(impl_agents.contains(&"create_implementation_data"));
+        assert!(impl_agents.contains(&"create_implementation_projection"));
+        assert!(impl_agents.contains(&"create_implementation_context"));
+    }
+
+    #[test]
+    fn routes_data_spec_to_data_implementation_agent() {
+        assert_eq!(
+            determine_implementation_agent(
+                Path::new("specifications/data/amount.md"),
+                "specifications"
+            ),
+            "create_implementation_data"
+        );
+    }
+
+    #[test]
+    fn routes_projection_spec_to_projection_implementation_agent() {
+        assert_eq!(
+            determine_implementation_agent(
+                Path::new("specifications/projections/account_summary.md"),
+                "specifications"
+            ),
+            "create_implementation_projection"
+        );
+    }
+
+    #[test]
+    fn routes_context_spec_to_context_implementation_agent() {
+        assert_eq!(
+            determine_implementation_agent(
+                Path::new("specifications/contexts/money_transfer.md"),
+                "specifications"
+            ),
+            "create_implementation_context"
+        );
     }
 }

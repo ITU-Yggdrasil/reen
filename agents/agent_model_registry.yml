@@ -8,6 +8,10 @@ create_specifications_context:
   model: mistral/mistral-large-latest
   parallel: true
   batch: false
+create_specifications_projection:
+  model: mistral/mistral-large-latest
+  parallel: true
+  batch: false
 create_specifications_external_api:
   model: mistral/mistral-large-latest
   parallel: false
@@ -21,6 +25,18 @@ bootstrap_capability_registry:
   parallel: false
   batch: false
 create_implementation:
+  model: openai/gpt-5
+  parallel: true
+  batch: false
+create_implementation_data:
+  model: openai/gpt-5
+  parallel: true
+  batch: false
+create_implementation_projection:
+  model: openai/gpt-5
+  parallel: true
+  batch: false
+create_implementation_context:
   model: openai/gpt-5
   parallel: true
   batch: false

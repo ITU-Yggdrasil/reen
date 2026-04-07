@@ -1692,10 +1692,8 @@ fn check_guardrails(
             &added_pub_fns,
             &allowed_public_methods,
         ));
-        if target.starts_with("src/contexts/")
-            && spec_message_receiver_setting(artifact_root, &target) == Some(false)
-        {
-            issues.extend(evaluate_non_receiver_semantic_drift(&target, &added_lines));
+        if target.starts_with("src/projections/") {
+            issues.extend(evaluate_projection_semantic_drift(&target, &added_lines));
         }
 
         // Also ensure target resolves within root when joined.
@@ -1873,53 +1871,8 @@ fn spec_declared_public_methods(artifact_root: &Path, target: &str) -> HashSet<S
     methods
 }
 
-fn spec_message_receiver_setting(artifact_root: &Path, target: &str) -> Option<bool> {
-    let spec_rel = map_src_to_spec(target)?;
-    let spec_path = resolve_spec_path(artifact_root, &spec_rel)?;
-    let spec_text = fs::read_to_string(spec_path).ok()?;
-    parse_message_receiver_setting(&spec_text)
-}
 
-fn parse_message_receiver_setting(spec_text: &str) -> Option<bool> {
-    let mut current_section: Option<&str> = None;
-    for line in spec_text.lines() {
-        let trimmed = line.trim();
-        if let Some(title) = trimmed.strip_prefix("## ") {
-            current_section = Some(title.trim());
-            continue;
-        }
-        if current_section == Some("Message Receiver") {
-            if trimmed.is_empty() || is_markdown_thematic_break(trimmed) {
-                continue;
-            }
-            if trimmed.eq_ignore_ascii_case("yes") || trimmed.eq_ignore_ascii_case("true") {
-                return Some(true);
-            }
-            if trimmed.eq_ignore_ascii_case("no") || trimmed.eq_ignore_ascii_case("false") {
-                return Some(false);
-            }
-            return None;
-        }
-    }
-    Some(false)
-}
-
-fn is_markdown_thematic_break(line: &str) -> bool {
-    let compact = line
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    if compact.len() < 3 {
-        return false;
-    }
-    let mut chars = compact.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    matches!(first, '-' | '*' | '_') && chars.all(|ch| ch == first)
-}
-
-fn evaluate_non_receiver_semantic_drift(target: &str, added_lines: &[String]) -> Vec<String> {
+fn evaluate_projection_semantic_drift(target: &str, added_lines: &[String]) -> Vec<String> {
     let mut issues = Vec::new();
     let added_text = added_lines.join("\n");
 
@@ -1931,10 +1884,10 @@ fn evaluate_non_receiver_semantic_drift(target: &str, added_lines: &[String]) ->
         (r"\bAtomic[A-Za-z0-9_]+\b", "atomic state"),
     ];
     for (pattern, label) in mutability_patterns {
-        let re = Regex::new(pattern).expect("valid non-receiver mutability regex");
+        let re = Regex::new(pattern).expect("valid projection mutability regex");
         if re.is_match(&added_text) {
             issues.push(format!(
-                "{}: patch introduces `{}` into a non-message-receiver context; escalation required.",
+                "{}: patch introduces `{}` into a projection (immutable read model); escalation required.",
                 target, label
             ));
         }
@@ -1948,22 +1901,13 @@ fn evaluate_non_receiver_semantic_drift(target: &str, added_lines: &[String]) ->
         (r"\basync_std::task::spawn\s*\(", "async_std::task::spawn"),
     ];
     for (pattern, label) in lifecycle_patterns {
-        let re = Regex::new(pattern).expect("valid non-receiver lifecycle regex");
+        let re = Regex::new(pattern).expect("valid projection lifecycle regex");
         if re.is_match(&added_text) {
             issues.push(format!(
-                "{}: patch introduces background lifecycle work via `{}` into a non-message-receiver context; escalation required.",
+                "{}: patch introduces background lifecycle work via `{}` into a projection (immutable read model); escalation required.",
                 target, label
             ));
         }
-    }
-
-    let receiver_context_re =
-        Regex::new(r"ReceiverContext\b").expect("valid receiver-context regex");
-    if receiver_context_re.is_match(&added_text) {
-        issues.push(format!(
-            "{}: patch introduces `*ReceiverContext` coupling into a non-message-receiver context; escalation required.",
-            target
-        ));
     }
 
     issues
@@ -2317,8 +2261,7 @@ fn spec_method_bold_re() -> &'static Regex {
 mod tests {
     use super::{
         check_guardrails, dedupe_paths, explicit_implementation_failure_message_from_stderr,
-        map_src_to_spec, parse_message_receiver_setting, summarize_paths,
-        trim_retry_context_to_budget,
+        map_src_to_spec, summarize_paths, trim_retry_context_to_budget,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -2536,26 +2479,6 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    #[test]
-    fn parse_message_receiver_setting_ignores_thematic_breaks() {
-        let spec = r#"# CommandInputContext
-
-## Purpose
-Collects and reads key presses.
-
-## Message Receiver
-no
-
----
-
-## Role Players
-| Role player | Why involved | Expected behaviour |
-|---|---|---|
-| stdin_source | Supplies keyboard input | Provides non-blocking reads |
-"#;
-
-        assert_eq!(parse_message_receiver_setting(spec), Some(false));
-    }
 
     #[test]
     fn check_guardrails_allows_owned_mut_self_state_transition_without_spec() {

@@ -6,6 +6,9 @@ create_specifications_data:
 create_specifications_context:
   model: gpt-5 # qwen2.5:7b
   parallel: true
+create_specifications_projection:
+  model: gpt-5
+  parallel: true
 create_specifications_external_api:
   model: gpt-5 # qwen2.5:7b
   parallel: false
@@ -17,6 +20,15 @@ bootstrap_capability_registry:
   model: gpt-5
   parallel: false
 create_implementation:
+  model: gpt-5
+  parallel: true
+create_implementation_data:
+  model: gpt-5
+  parallel: true
+create_implementation_projection:
+  model: gpt-5
+  parallel: true
+create_implementation_context:
   model: gpt-5
   parallel: true
 create_test:

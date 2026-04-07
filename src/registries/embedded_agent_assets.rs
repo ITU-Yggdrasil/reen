@@ -5,12 +5,15 @@ pub fn embedded_default_model_registry() -> &'static str {
 
 /// Returns embedded agent specification YAML by filename.
 ///
-/// Expected keys are filenames like `create_implementation.yml`.
+/// Expected keys are filenames like `create_implementation_context.yml`.
 pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
     match filename {
         "create_specifications_data.yml" => {
             Some(include_str!("../../agents/create_specifications_data.yml"))
         }
+        "create_specifications_projection.yml" => Some(include_str!(
+            "../../agents/create_specifications_projection.yml"
+        )),
         "create_specifications_context.yml" => Some(include_str!(
             "../../agents/create_specifications_context.yml"
         )),
@@ -19,6 +22,15 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
         )),
         "create_plan.yml" => Some(include_str!("../../agents/create_plan.yml")),
         "create_implementation.yml" => Some(include_str!("../../agents/create_implementation.yml")),
+        "create_implementation_data.yml" => {
+            Some(include_str!("../../agents/create_implementation_data.yml"))
+        }
+        "create_implementation_projection.yml" => Some(include_str!(
+            "../../agents/create_implementation_projection.yml"
+        )),
+        "create_implementation_context.yml" => Some(include_str!(
+            "../../agents/create_implementation_context.yml"
+        )),
         "create_test.yml" => Some(include_str!("../../agents/create_test.yml")),
         "resolve_compilation_errors.yml" => {
             Some(include_str!("../../agents/resolve_compilation_errors.yml"))
@@ -32,10 +44,13 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
 pub fn embedded_expected_agent_names() -> &'static [&'static str] {
     &[
         "create_specifications_data",
+        "create_specifications_projection",
         "create_specifications_context",
         "create_specifications_external_api",
         "create_plan",
-        "create_implementation",
+        "create_implementation_data",
+        "create_implementation_projection",
+        "create_implementation_context",
         "create_test",
         "resolve_compilation_errors",
         "fix_draft_blockers",
@@ -51,12 +66,13 @@ mod tests {
     #[test]
     fn embedded_model_registry_is_available() {
         let content = embedded_default_model_registry();
-        assert!(content.contains("create_implementation"));
+        assert!(content.contains("create_implementation_context"));
     }
 
     #[test]
     fn embedded_agent_specs_are_available() {
-        let content = embedded_agent_spec("create_implementation.yml").expect("embedded spec");
+        let content =
+            embedded_agent_spec("create_implementation_context.yml").expect("embedded spec");
         assert!(
             content.contains("static_prompt:") && content.contains("variable_prompt:"),
             "agent spec must define both static_prompt and variable_prompt"

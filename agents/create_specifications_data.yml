@@ -62,11 +62,23 @@ static_prompt: |
   Turing-complete ecosystem. Language-specific details can be useful notes, but
   they MUST NEVER be treated as blocking ambiguities.
 
-  ## Context Immutability Rule (Mandatory)
+  ## Data Dependency Constraint (Mandatory)
 
-  If the draft includes context-like concepts with Role Players/Props:
-  - Treat Role Players and Props as immutable fields after construction unless mutability is explicitly stated.
-  - Do NOT classify "whether props/roles are updated in place" as a blocking ambiguity by default.
+  Data types may only reference other **Data** kinds and **primitives** (integers, strings,
+  booleans, standard library value types) as their field types and collaborators.
+
+  - If the draft references a **Context** or **Projection** as a field, role player, or
+    functional dependency, this is a **Blocking Ambiguity** — not an Implementation Choice.
+    A Data type must not depend on mutable or composite behavioral objects.
+  - If the draft references an external library type, it is acceptable if that type is an
+    immutable value type. If in doubt, document it as an **Implementation Choice Left Open**.
+  - Check every named type against the dependency context before concluding.
+
+  ## Data Immutability (Unconditional)
+
+  Data types are always immutable structs or enums after construction.
+  - Do NOT describe state mutation, lifecycle behavior, or message handling.
+  - Treat all fields as set at construction time and unchanged thereafter.
 
   ## Conventional Rust Defaults (Allowed, Non-Blocking)
 

@@ -9,6 +9,9 @@ create_specifications_data:
 create_specifications_context:
   model: mistral/mistral-large-latest
   parallel: true
+create_specifications_projection:
+  model: mistral/mistral-large-latest
+  parallel: true
 create_specifications_external_api:
   model: mistral/mistral-large-latest
   parallel: false
@@ -22,6 +25,15 @@ bootstrap_capability_registry:
   parallel: false
   batch: false
 create_implementation:
+  model: mistral/codestral-latest
+  parallel: true
+create_implementation_data:
+  model: mistral/codestral-latest
+  parallel: true
+create_implementation_projection:
+  model: mistral/codestral-latest
+  parallel: true
+create_implementation_context:
   model: mistral/codestral-latest
   parallel: true
 create_test:

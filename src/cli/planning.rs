@@ -279,15 +279,14 @@ fn build_sharing_constraints(
                 "Prefer immutable value-style handling for data-like collaborator {}.",
                 collaborator
             )
-        } else if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver
-        {
+        } else if matches!(contract.kind, SpecificationKind::Projection) {
             format!(
-                "Treat {} as part of a non-message-receiver context: avoid hidden evolving state and prefer immutable/value-style handling or explicit updated-value returns.",
+                "Treat {} as part of a projection (CQRS read model): avoid all mutation and prefer pure value-style handling. The projection is fully constructed at creation and does not change.",
                 collaborator
             )
-        } else if matches!(contract.kind, SpecificationKind::Context) && contract.message_receiver {
+        } else if matches!(contract.kind, SpecificationKind::Context) {
             format!(
-                "Treat {} as part of a message receiver: private mutable state and lifecycle are allowed, but do not expose shared mutable state across boundaries.",
+                "Treat {} as part of a mutable context: private evolving state and lifecycle are permitted. Choose the most idiomatic ownership model consistent with the specification.",
                 collaborator
             )
         } else {
@@ -303,13 +302,13 @@ fn build_sharing_constraints(
         } else {
             "replaceable".to_string()
         };
-        let mutation_semantics = if matches!(contract.kind, SpecificationKind::Data) {
+        let mutation_semantics = if matches!(
+            contract.kind,
+            SpecificationKind::Data | SpecificationKind::Projection
+        ) {
             "immutable".to_string()
-        } else if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver
-        {
-            "non_message_receiver".to_string()
-        } else if matches!(contract.kind, SpecificationKind::Context) && contract.message_receiver {
-            "message_receiver_private_state".to_string()
+        } else if matches!(contract.kind, SpecificationKind::Context) {
+            "mutable_context".to_string()
         } else if shared_required && matches!(plan_kind, PlanKind::SemanticRepair) {
             "preserve_existing".to_string()
         } else {
@@ -466,9 +465,9 @@ fn build_risks(
                 .to_string(),
         );
     }
-    if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver {
+    if matches!(contract.kind, SpecificationKind::Projection) {
         risks.push(
-            "Non-message-receiver contexts must not accumulate hidden mutable state or lifecycle behavior."
+            "Projections are immutable read models: they must not accumulate mutable state, interior mutability, or lifecycle behavior."
                 .to_string(),
         );
     }
@@ -511,9 +510,9 @@ fn build_forbidden_regressions(contract: &BehaviorContract, plan_kind: PlanKind)
         regressions
             .push("Do not break required shared-state or stable-identity behavior.".to_string());
     }
-    if matches!(contract.kind, SpecificationKind::Context) && !contract.message_receiver {
+    if matches!(contract.kind, SpecificationKind::Projection) {
         regressions.push(
-            "Do not introduce hidden mutable state, interior mutability, or background lifecycle behavior into a non-message-receiver context.".to_string(),
+            "Do not introduce mutable state, interior mutability, or background lifecycle behavior into a projection.".to_string(),
         );
     }
     if matches!(plan_kind, PlanKind::SemanticRepair) {
@@ -617,14 +616,11 @@ mod tests {
     }
 
     #[test]
-    fn default_plan_marks_non_receiver_contexts_explicitly() {
-        let content = r#"# ProjectionContext
+    fn default_plan_marks_projections_as_immutable() {
+        let content = r#"# AccountProjection
 
 ## Purpose
 Derived read model.
-
-## Message Receiver
-no
 
 ## Role Players
 | Role player | Why involved | Expected behaviour |
@@ -657,16 +653,18 @@ Rules:
 
         let plan = build_default_plan(
             PlanKind::Implementation,
-            Path::new("specifications/contexts/projection_context.md"),
+            Path::new("specifications/projections/account_projection.md"),
             content,
-            &[PathBuf::from("src/contexts/projection_context.rs")],
+            &[PathBuf::from("src/projections/account_projection.rs")],
             &HashMap::new(),
             None,
         );
         assert!(
             plan.identity_and_sharing_constraints
                 .iter()
-                .any(|item| item.mutation_semantics == "non_message_receiver")
+                .any(|item| item.mutation_semantics == "immutable"),
+            "expected immutable mutation semantics for projection, got: {:?}",
+            plan.identity_and_sharing_constraints
         );
     }
 }

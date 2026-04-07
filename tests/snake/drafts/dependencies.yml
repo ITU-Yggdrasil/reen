@@ -1,0 +1,13 @@
+# Derived from drafts/capability_registry.yml. Do not edit manually.
+schema: reen.dependencies/v1
+packages:
+- name: crossterm
+  version: '0.27'
+  capabilities:
+  - terminal_raw_input
+  - terminal_screen_control
+  - terminal_size
+- name: chrono
+  version: '{ version = "0.4", features = ["serde"] }'
+  capabilities:
+  - datetime_utc

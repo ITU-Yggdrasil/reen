@@ -51,6 +51,7 @@ pub enum ArtifactKind {
 pub enum ArtifactCategory {
     Root,
     Data,
+    Projection,
     Context,
     Api,
 }
@@ -60,6 +61,7 @@ impl ArtifactCategory {
         match self {
             Self::Root => Some("app"),
             Self::Data => Some("data"),
+            Self::Projection => Some("projection"),
             Self::Context => Some("context"),
             Self::Api => Some("api"),
         }
@@ -69,10 +71,12 @@ impl ArtifactCategory {
         match (kind, self) {
             (ArtifactKind::Draft, ArtifactCategory::Root) => "",
             (ArtifactKind::Draft, ArtifactCategory::Data) => "data",
+            (ArtifactKind::Draft, ArtifactCategory::Projection) => "projections",
             (ArtifactKind::Draft, ArtifactCategory::Context) => "contexts",
             (ArtifactKind::Draft, ArtifactCategory::Api) => "apis",
             (ArtifactKind::Specification, ArtifactCategory::Root) => "",
             (ArtifactKind::Specification, ArtifactCategory::Data) => "data",
+            (ArtifactKind::Specification, ArtifactCategory::Projection) => "projections",
             (ArtifactKind::Specification, ArtifactCategory::Context) => "contexts",
             (ArtifactKind::Specification, ArtifactCategory::Api) => "contexts/external",
         }
@@ -691,6 +695,9 @@ fn determine_file_specification_path(
         let file_name = format!("{display_name}.md");
         return Ok(match category {
             ArtifactCategory::Data => specs_root.join("data").join("external").join(file_name),
+            ArtifactCategory::Projection => {
+                specs_root.join("projections").join("external").join(file_name)
+            }
             ArtifactCategory::Context | ArtifactCategory::Api | ArtifactCategory::Root => {
                 specs_root.join("contexts").join("external").join(file_name)
             }
@@ -740,6 +747,7 @@ fn file_artifact_from_path(
         .unwrap_or_default();
     let category = match first {
         "data" => ArtifactCategory::Data,
+        "projections" => ArtifactCategory::Projection,
         "contexts" if kind == ArtifactKind::Specification && second == "external" => {
             ArtifactCategory::Api
         }
@@ -839,6 +847,8 @@ fn parse_issue_artifact(
         ArtifactCategory::Root
     } else if labels.contains("data") {
         ArtifactCategory::Data
+    } else if labels.contains("projection") {
+        ArtifactCategory::Projection
     } else if labels.contains("context") {
         ArtifactCategory::Context
     } else if labels.contains("api") {

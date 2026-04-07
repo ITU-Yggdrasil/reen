@@ -14,6 +14,7 @@ use super::capability_registry::{
 pub(crate) enum SpecificationKind {
     App,
     Context,
+    Projection,
     Data,
     Unknown,
 }
@@ -36,7 +37,6 @@ pub(crate) struct BehaviorContract {
     pub(crate) title: String,
     pub(crate) kind: SpecificationKind,
     pub(crate) source_path: String,
-    pub(crate) message_receiver: bool,
     pub(crate) collaborators: Vec<String>,
     pub(crate) env_vars: Vec<String>,
     pub(crate) delegation_requirements: Vec<DelegationRequirement>,
@@ -44,6 +44,16 @@ pub(crate) struct BehaviorContract {
     pub(crate) shared_state_requirements: Vec<String>,
     pub(crate) role_method_names: Vec<String>,
     pub(crate) external_behavior_clues: Vec<String>,
+}
+
+impl BehaviorContract {
+    /// Returns true when the kind is always immutable by definition (Data or Projection).
+    pub(crate) fn is_immutable(&self) -> bool {
+        matches!(
+            self.kind,
+            SpecificationKind::Data | SpecificationKind::Projection
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -115,18 +125,6 @@ pub(crate) fn analyze_specification(
     let sections = parse_markdown_sections(spec_content);
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
-    let message_receiver = validate_message_receiver_section(&sections);
-
-    if matches!(contract.kind, SpecificationKind::Context) {
-        match message_receiver {
-            Ok(Some(_)) => {}
-            Ok(None) => errors.push(
-                "Context specification is missing required `## Message Receiver` section"
-                    .to_string(),
-            ),
-            Err(err) => errors.push(err),
-        }
-    }
 
     if !contract.env_vars.is_empty() {
         if let Some(env_section) = find_section(&sections, "Environment Variables") {
@@ -451,8 +449,23 @@ pub(crate) fn verify_generated_implementation(
     for finding in detect_external_crate_policy_findings(project_root, &code)? {
         high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
     }
-    if matches!(plan.contract.kind, SpecificationKind::Context) && !plan.contract.message_receiver {
-        for finding in detect_non_receiver_context_findings(&code) {
+    // Projections and Data are always immutable; apply the shared structural checks.
+    if plan.contract.is_immutable()
+        || matches!(plan.contract.kind, SpecificationKind::Projection)
+    {
+        for finding in detect_immutable_kind_findings(&code) {
+            high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+        }
+    }
+    // Projection-specific: must not import Context kinds.
+    if matches!(plan.contract.kind, SpecificationKind::Projection) {
+        for finding in detect_projection_kind_findings(&code) {
+            high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+        }
+    }
+    // Data-specific: must not import Context or Projection kinds.
+    if matches!(plan.contract.kind, SpecificationKind::Data) {
+        for finding in detect_data_kind_findings(&code) {
             high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
         }
     }
@@ -691,7 +704,8 @@ fn extract_external_crate_roots(code: &str) -> BTreeSet<String> {
 
 fn baseline_allowed_crate_roots() -> HashSet<&'static str> {
     HashSet::from([
-        "crate", "self", "super", "std", "core", "alloc", "data", "contexts", "tracing",
+        "crate", "self", "super", "std", "core", "alloc", "data", "contexts", "projections",
+        "tracing",
     ])
 }
 
@@ -703,7 +717,7 @@ fn known_capability_domain_for_crate(crate_name: &str) -> Option<&'static str> {
     }
 }
 
-fn detect_non_receiver_context_findings(code: &str) -> Vec<String> {
+fn detect_immutable_kind_findings(code: &str) -> Vec<String> {
     let mut findings = Vec::new();
 
     let public_mut_re =
@@ -711,7 +725,7 @@ fn detect_non_receiver_context_findings(code: &str) -> Vec<String> {
             .unwrap();
     if public_mut_re.is_match(code) {
         findings.push(
-            "Non-message-receiver context exposes a public mutable receiver (`&mut self`/`mut self`)"
+            "Immutable kind (Data or Projection) exposes a public mutable receiver (`&mut self`/`mut self`)"
                 .to_string(),
         );
     }
@@ -727,7 +741,7 @@ fn detect_non_receiver_context_findings(code: &str) -> Vec<String> {
         let re = Regex::new(pattern).unwrap();
         if re.is_match(code) {
             findings.push(format!(
-                "Non-message-receiver context uses interior mutability/storage pattern `{}`",
+                "Immutable kind (Data or Projection) uses interior mutability/storage pattern `{}`",
                 label
             ));
         }
@@ -744,25 +758,63 @@ fn detect_non_receiver_context_findings(code: &str) -> Vec<String> {
         let re = Regex::new(pattern).unwrap();
         if re.is_match(code) {
             findings.push(format!(
-                "Non-message-receiver context starts background lifecycle work via `{}`",
+                "Immutable kind (Data or Projection) starts background lifecycle work via `{}`",
                 label
             ));
         }
     }
 
-    let receiver_field_re =
-        Regex::new(r"(?m)^\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*[^,\n]*ReceiverContext\b").unwrap();
-    if receiver_field_re.is_match(code) {
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+/// Additional lint checks specific to Projection kinds.
+/// Projections are CQRS read models: they must never depend on Context kinds.
+fn detect_projection_kind_findings(code: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+
+    // Projections must not import from crate::contexts::
+    let context_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::contexts::").unwrap();
+    if context_import_re.is_match(code) {
         findings.push(
-            "Non-message-receiver context stores a `*ReceiverContext` collaborator".to_string(),
+            "Projection imports from `contexts` module; Projections must not depend on Context kinds"
+                .to_string(),
         );
     }
 
-    let receiver_public_api_re =
-        Regex::new(r"\bpub(?:\([^)]*\))?\s+fn\s+[A-Za-z0-9_]+\s*\([^)]*ReceiverContext").unwrap();
-    if receiver_public_api_re.is_match(code) {
+    // Projections must not have private &mut self methods either
+    let private_mut_re =
+        Regex::new(r"\bfn\s+[A-Za-z0-9_]+\s*\([^)]*(?:&mut self|mut self)").unwrap();
+    if private_mut_re.is_match(code) {
         findings.push(
-            "Non-message-receiver context exposes a `*ReceiverContext` in its public API"
+            "Projection contains a `&mut self`/`mut self` method; all Projection methods must be immutable"
+                .to_string(),
+        );
+    }
+
+    findings.sort();
+    findings.dedup();
+    findings
+}
+
+/// Additional lint checks specific to Data kinds.
+/// Data types must not reference Context or Projection kinds.
+fn detect_data_kind_findings(code: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+
+    // Data must not import from crate::contexts:: or crate::projections::
+    let context_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::contexts::").unwrap();
+    if context_import_re.is_match(code) {
+        findings.push(
+            "Data type imports from `contexts` module; Data kinds must only depend on other Data kinds and primitives"
+                .to_string(),
+        );
+    }
+    let projection_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::projections::").unwrap();
+    if projection_import_re.is_match(code) {
+        findings.push(
+            "Data type imports from `projections` module; Data kinds must only depend on other Data kinds and primitives"
                 .to_string(),
         );
     }
@@ -911,7 +963,6 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
         .to_string();
     let sections = parse_markdown_sections(spec_content);
     let kind = infer_kind(spec_path, spec_content, &sections);
-    let message_receiver = extract_message_receiver_flag(&sections).unwrap_or(false);
     let collaborators = extract_collaborators(spec_content, &sections);
     let env_vars = extract_env_vars(spec_content);
     let delegation_requirements = extract_delegation_requirements(spec_content);
@@ -924,7 +975,6 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
         title,
         kind,
         source_path: spec_path.display().to_string(),
-        message_receiver,
         collaborators,
         env_vars,
         delegation_requirements,
@@ -935,35 +985,6 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
     }
 }
 
-fn validate_message_receiver_section(
-    sections: &[Section],
-) -> std::result::Result<Option<bool>, String> {
-    let Some(section) = find_section(sections, "Message Receiver") else {
-        return Ok(None);
-    };
-
-    parse_message_receiver_literal(&section.body)
-        .map(Some)
-        .ok_or_else(|| {
-            "Context specification `## Message Receiver` must be exactly `yes`, `no`, `true`, or `false` (case-insensitive)".to_string()
-        })
-}
-
-fn extract_message_receiver_flag(sections: &[Section]) -> Option<bool> {
-    find_section(sections, "Message Receiver")
-        .and_then(|section| parse_message_receiver_literal(&section.body))
-}
-
-fn parse_message_receiver_literal(body: &str) -> Option<bool> {
-    let value = body.trim();
-    if value.eq_ignore_ascii_case("yes") || value.eq_ignore_ascii_case("true") {
-        return Some(true);
-    }
-    if value.eq_ignore_ascii_case("no") || value.eq_ignore_ascii_case("false") {
-        return Some(false);
-    }
-    None
-}
 
 fn is_markdown_thematic_break(line: &str) -> bool {
     let compact = line
@@ -984,6 +1005,10 @@ fn infer_kind(spec_path: &Path, spec_content: &str, sections: &[Section]) -> Spe
     let path = spec_path.to_string_lossy().to_ascii_lowercase();
     if path.ends_with("/app.md") {
         return SpecificationKind::App;
+    }
+    // Projection specs live under specifications/projections/
+    if path.contains("/projections/") {
+        return SpecificationKind::Projection;
     }
 
     if has_any_section(
@@ -1997,96 +2022,57 @@ yes
     }
 
     #[test]
-    fn context_specs_require_message_receiver_section() {
-        let content = r#"# ProjectionContext
+    fn context_specs_produce_no_errors_without_message_receiver_section() {
+        // Message Receiver is no longer part of the context schema; its absence is not an error.
+        let content = r#"# TransferContext
 
 ## Purpose
-Derived projection.
+Executes a money transfer.
 
 ## Role Players
 | Role Player | Why Involved | Expected Behaviour |
 |---|---|---|
-| ledger | Source data | Provides entries |
+| source | Funds provider | Can withdraw |
 
 ## Role Methods
-### ledger
-- **entries**
-  Returns entries.
+### source
+- **withdraw** Removes the specified amount from the source account.
 
 ## Props
 | Prop | Meaning | Notes |
 |---|---|---|
-| account_id | Target account | Stable |
+| amount | Transfer amount | Positive |
 
 ## Functionalities
-### balance
-- Returns the current balance.
+### execute
+| Started by | Uses | Result |
+|---|---|---|
+| caller | source | funds moved |
+
+Rules:
+- Amount must be positive.
+
+| Given | When | Then |
+|---|---|---|
+| valid amount | execute runs | funds are moved |
 "#;
         let report = analyze_specification(
-            Path::new("specifications/contexts/projection_context.md"),
+            Path::new("specifications/contexts/transfer_context.md"),
             content,
             None,
         );
         assert!(
-            report
-                .errors
-                .iter()
-                .any(|item| item.contains("Message Receiver"))
-        );
-    }
-
-    #[test]
-    fn context_specs_accept_message_receiver_with_thematic_break_separator() {
-        let content = r#"# ProjectionContext
-
-## Purpose
-Derived projection.
-
-## Message Receiver
-no
-
----
-
-## Role Players
-| Role Player | Why Involved | Expected Behaviour |
-|---|---|---|
-| ledger | Source data | Provides entries |
-
-## Role Methods
-### ledger
-- **entries**
-  Returns entries.
-
-## Props
-| Prop | Meaning | Notes |
-|---|---|---|
-| account_id | Target account | Stable |
-
-## Functionalities
-### balance
-- Returns the current balance.
-"#;
-        let report = analyze_specification(
-            Path::new("specifications/contexts/projection_context.md"),
-            content,
-            None,
-        );
-        assert!(
-            !report
-                .errors
-                .iter()
-                .any(|item| item.contains("Message Receiver")),
-            "errors: {:?}",
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
             report.errors
         );
-        assert!(!report.contract.message_receiver);
     }
 
     #[test]
-    fn verifier_flags_non_receiver_context_hidden_mutability_patterns() {
-        let root = make_temp_dir("pipeline_quality_non_receiver");
-        let specs = root.join("specifications").join("contexts");
-        let src = root.join("src").join("contexts");
+    fn verifier_flags_immutable_kind_hidden_mutability_patterns() {
+        let root = make_temp_dir("pipeline_quality_immutable_kind");
+        let specs = root.join("specifications").join("projections");
+        let src = root.join("src").join("projections");
         fs::create_dir_all(&specs).expect("mkdir specs");
         fs::create_dir_all(&src).expect("mkdir src");
 
@@ -2097,9 +2083,6 @@ no
 
 ## Purpose
 Derived read model.
-
-## Message Receiver
-no
 
 ## Role Players
 | Role Player | Why Involved | Expected Behaviour |
@@ -2208,7 +2191,6 @@ impl ProjectionContext {
                 title: "App".to_string(),
                 kind: SpecificationKind::App,
                 source_path: "specifications/app.md".to_string(),
-                message_receiver: false,
                 collaborators: Vec::new(),
                 env_vars: Vec::new(),
                 delegation_requirements: Vec::new(),
