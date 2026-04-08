@@ -38,7 +38,6 @@ fn implementation_cache_allowed_keys() -> &'static [&'static str] {
         "library_crate_name",
         "public_import_guidance",
         "target_type_name",
-        "implementation_plan",
         "previous_output",
         "verifier_feedback",
     ]
@@ -257,6 +256,9 @@ mod tests {
             "create_implementation_context",
             json!({
                 "context_content": "spec body",
+                "dependency_fingerprint": "abc",
+                "implemented_dependencies": [{"path": "src/data/amount.rs"}],
+                "dependency_tool_context": {"dependency_artifacts": []},
                 "behavior_contract": { "kind": "Context" },
                 "implementation_plan": { "tasks": ["build"] },
                 "plan_validation": { "ok": true },

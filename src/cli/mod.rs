@@ -74,7 +74,7 @@ use pipeline_quality::{
 };
 use planning::{
     ExecutionPlan, PlanKind, build_default_plan, parse_plan_output, plan_to_context_value,
-    validate_plan, validation_to_context_value,
+    validate_plan,
 };
 use progress::{
     ProgressIndicator, error_tag, error_text, header_text, print_timed_status, standard_text,
@@ -5829,7 +5829,8 @@ mod tests {
         build_dependency_manifest, build_execution_plan, build_implementation_execution_plan,
         build_implemented_dependency_manifest, determine_bdd_test_paths,
         determine_draft_input_path, determine_implementation_agent,
-        determine_implementation_output_path,
+        determine_implementation_output_path, implementation_dependency_fingerprint_from_context,
+        prune_implementation_prompt_context,
         determine_specification_agent, determine_specification_output_path,
         ensure_dev_dependency_entry, external_generated_context_output_path,
         external_generated_data_output_path, extract_actionable_blocking_bullets_for_path,
@@ -6478,6 +6479,11 @@ fn main() {}
     #[test]
     fn implementation_agent_cache_key_ignores_planning_fields() {
         let mut additional_a = HashMap::new();
+        additional_a.insert("dependency_fingerprint".to_string(), serde_json::json!("first"));
+        additional_a.insert(
+            "implemented_dependencies".to_string(),
+            serde_json::json!([{ "path": "src/data/amount.rs" }]),
+        );
         additional_a.insert("behavior_contract".to_string(), serde_json::json!({"kind": "Context"}));
         additional_a.insert(
             "implementation_plan".to_string(),
@@ -6486,6 +6492,11 @@ fn main() {}
         additional_a.insert("plan_validation".to_string(), serde_json::json!({"ok": true}));
 
         let mut additional_b = HashMap::new();
+        additional_b.insert("dependency_fingerprint".to_string(), serde_json::json!("second"));
+        additional_b.insert(
+            "implemented_dependencies".to_string(),
+            serde_json::json!([{ "path": "src/data/amount.rs" }]),
+        );
         additional_b.insert("behavior_contract".to_string(), serde_json::json!({"kind": "Context"}));
         additional_b.insert(
             "implementation_plan".to_string(),
@@ -6510,6 +6521,51 @@ fn main() {}
         assert_eq!(
             agent_response_cache_key("create_implementation_context", "instructions", &input_a),
             agent_response_cache_key("create_implementation_context", "instructions", &input_b)
+        );
+    }
+
+    #[test]
+    fn implementation_prompt_context_prunes_generated_dependency_inputs() {
+        let pruned = prune_implementation_prompt_context(HashMap::from([
+            ("behavior_contract".to_string(), serde_json::json!({"kind": "Context"})),
+            (
+                "implemented_dependencies".to_string(),
+                serde_json::json!([{ "path": "src/data/amount.rs" }]),
+            ),
+            ("dependency_fingerprint".to_string(), serde_json::json!("abc")),
+            ("direct_dependencies".to_string(), serde_json::json!([])),
+        ]));
+
+        assert!(pruned.contains_key("behavior_contract"));
+        assert!(pruned.contains_key("direct_dependencies"));
+        assert!(!pruned.contains_key("implemented_dependencies"));
+        assert!(!pruned.contains_key("dependency_fingerprint"));
+    }
+
+    #[test]
+    fn implementation_dependency_fingerprint_ignores_generated_dependency_inputs() {
+        let first = HashMap::from([
+            ("behavior_contract".to_string(), serde_json::json!({"kind": "Context"})),
+            ("library_crate_name".to_string(), serde_json::json!("snake")),
+            (
+                "implemented_dependencies".to_string(),
+                serde_json::json!([{ "path": "src/data/amount.rs" }]),
+            ),
+        ]);
+        let second = HashMap::from([
+            ("behavior_contract".to_string(), serde_json::json!({"kind": "Context"})),
+            ("library_crate_name".to_string(), serde_json::json!("snake")),
+            (
+                "implemented_dependencies".to_string(),
+                serde_json::json!([{ "path": "src/data/other.rs" }]),
+            ),
+        ]);
+
+        assert_eq!(
+            implementation_dependency_fingerprint_from_context(&first)
+                .expect("first fingerprint"),
+            implementation_dependency_fingerprint_from_context(&second)
+                .expect("second fingerprint")
         );
     }
 

@@ -680,6 +680,8 @@ mod tests {
     #[derive(Serialize)]
     struct ImplementationCacheInput {
         context_content: String,
+        dependency_fingerprint: String,
+        implemented_dependencies: serde_json::Value,
         behavior_contract: serde_json::Value,
         implementation_plan: serde_json::Value,
         plan_validation: serde_json::Value,
@@ -827,6 +829,8 @@ mod tests {
 
         let cached_input = ImplementationCacheInput {
             context_content: "# Spec".to_string(),
+            dependency_fingerprint: "first".to_string(),
+            implemented_dependencies: serde_json::json!([{"path": "src/data/amount.rs"}]),
             behavior_contract: serde_json::json!({"kind": "Context"}),
             implementation_plan: serde_json::json!({"tasks": ["first"]}),
             plan_validation: serde_json::json!({"ok": true}),
@@ -846,6 +850,8 @@ mod tests {
             agent_name,
             ImplementationCacheInput {
                 context_content: "# Spec".to_string(),
+                dependency_fingerprint: "second".to_string(),
+                implemented_dependencies: serde_json::json!([{"path": "src/data/amount.rs"}]),
                 behavior_contract: serde_json::json!({"kind": "Context"}),
                 implementation_plan: serde_json::json!({"tasks": ["second"]}),
                 plan_validation: serde_json::json!({"ok": false, "errors": ["x"]}),

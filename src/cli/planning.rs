@@ -256,10 +256,6 @@ pub(crate) fn plan_to_context_value(plan: &ExecutionPlan) -> serde_json::Value {
     json!(plan)
 }
 
-pub(crate) fn validation_to_context_value(report: &PlanValidationReport) -> serde_json::Value {
-    json!(report)
-}
-
 fn build_sharing_constraints(
     contract: &BehaviorContract,
     dependency_context: &HashMap<String, serde_json::Value>,
