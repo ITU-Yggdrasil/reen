@@ -270,19 +270,8 @@ fn create_specification_inner(
             return Ok(());
         }
 
-        let dependency_roots =
-            select_dependency_roots(draft_files, DRAFTS_DIR, names_provided, &filter)?;
-        let expanded_draft_files =
-            expand_with_transitive_dependencies(dependency_roots, DRAFTS_DIR, None)?;
-        let filtered_draft_files = if filter.is_active() {
-            expanded_draft_files
-                .into_iter()
-                .filter(|f| filter.matches_path(f, DRAFTS_DIR))
-                .collect()
-        } else {
-            expanded_draft_files
-        };
-        let execution_levels = build_execution_plan(filtered_draft_files, DRAFTS_DIR, None)?;
+        let execution_levels =
+            build_specification_execution_plan(draft_files, DRAFTS_DIR, names_provided, &filter)?;
 
         // Load build tracker
         let mut tracker = BuildTracker::load()?;
@@ -933,18 +922,20 @@ pub async fn create_implementation(
         println!("⚠ Upstream specifications have changed. Run 'reen create specification' first.");
     }
 
-    let dependency_roots = select_dependency_roots(
+    let execution_levels = build_implementation_execution_plan(
         context_files.clone(),
         SPECIFICATIONS_DIR,
+        DRAFTS_DIR,
         names_provided,
         filter,
     )?;
-    let execution_levels = build_implementation_execution_plan(dependency_roots, filter)?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!(
         "Creating implementation for {} specification(s)",
         total_count
     );
+
+    validate_implementation_scaffold_ownership(&context_files)?;
 
     // Step 1: Generate project structure (Cargo.toml, lib.rs, mod.rs files)
     if config.verbose {
@@ -1537,6 +1528,23 @@ fn implementation_agent_name(context_file: &Path) -> &'static str {
     } else {
         "create_implementation"
     }
+}
+
+fn validate_implementation_scaffold_ownership(context_files: &[PathBuf]) -> Result<()> {
+    let has_brand_targets = context_files
+        .iter()
+        .any(|path| is_brand_spec_path(path, SPECIFICATIONS_DIR));
+    let has_non_brand_targets = context_files
+        .iter()
+        .any(|path| !is_brand_spec_path(path, SPECIFICATIONS_DIR));
+
+    if has_brand_targets && has_non_brand_targets {
+        anyhow::bail!(
+            "Mixed implementation run detected: brand specifications and non-brand specifications both need root scaffold ownership. Run brand-only and non-brand generation separately."
+        );
+    }
+
+    Ok(())
 }
 
 fn finalize_implementation_output(
@@ -2448,7 +2456,13 @@ fn clear_stage_agent_cache_entries_by_name(
         Stage::Implementation => {
             let files =
                 resolve_input_files(SPECIFICATIONS_DIR, names_vec, "md", &CategoryFilter::all())?;
-            let levels = build_implementation_execution_plan(files, &CategoryFilter::all())?;
+            let levels = build_implementation_execution_plan(
+                files,
+                SPECIFICATIONS_DIR,
+                DRAFTS_DIR,
+                false,
+                &CategoryFilter::all(),
+            )?;
             for node in levels.into_iter().flatten() {
                 let context_file = resolve_implementation_context_file(&node.input_path)?;
                 let context_content = fs::read_to_string(&context_file).with_context(|| {
@@ -2847,11 +2861,14 @@ fn build_dependency_context(node: &ExecutionNode) -> Result<HashMap<String, serd
 
 fn build_implementation_execution_plan(
     spec_files: Vec<PathBuf>,
+    specifications_dir: &str,
+    drafts_dir: &str,
+    names_provided: bool,
     filter: &CategoryFilter,
 ) -> Result<Vec<Vec<ExecutionNode>>> {
     let mut draft_inputs = Vec::new();
     for spec_file in spec_files {
-        let draft_path = determine_draft_input_path(&spec_file, SPECIFICATIONS_DIR, DRAFTS_DIR)?;
+        let draft_path = determine_draft_input_path(&spec_file, specifications_dir, drafts_dir)?;
         if draft_path.exists() {
             draft_inputs.push(draft_path);
         } else {
@@ -2859,16 +2876,49 @@ fn build_implementation_execution_plan(
         }
     }
 
-    let expanded_inputs = expand_with_transitive_dependencies(draft_inputs, DRAFTS_DIR, None)?;
-    let filtered_inputs = if filter.is_active() {
-        expanded_inputs
-            .into_iter()
-            .filter(|f| filter.matches_path(f, DRAFTS_DIR))
-            .collect()
+    let inputs = if names_provided {
+        let dependency_roots =
+            select_dependency_roots(draft_inputs, drafts_dir, names_provided, filter)?;
+        let expanded_inputs =
+            expand_with_transitive_dependencies(dependency_roots, drafts_dir, None)?;
+        if filter.is_active() {
+            expanded_inputs
+                .into_iter()
+                .filter(|f| filter.matches_path(f, drafts_dir))
+                .collect()
+        } else {
+            expanded_inputs
+        }
     } else {
-        expanded_inputs
+        draft_inputs
     };
-    build_execution_plan(filtered_inputs, DRAFTS_DIR, None)
+    build_execution_plan(inputs, drafts_dir, None)
+}
+
+fn build_specification_execution_plan(
+    draft_files: Vec<PathBuf>,
+    drafts_dir: &str,
+    names_provided: bool,
+    filter: &CategoryFilter,
+) -> Result<Vec<Vec<ExecutionNode>>> {
+    let inputs = if names_provided {
+        let dependency_roots =
+            select_dependency_roots(draft_files, drafts_dir, names_provided, filter)?;
+        let expanded_inputs =
+            expand_with_transitive_dependencies(dependency_roots, drafts_dir, None)?;
+        if filter.is_active() {
+            expanded_inputs
+                .into_iter()
+                .filter(|f| filter.matches_path(f, drafts_dir))
+                .collect()
+        } else {
+            expanded_inputs
+        }
+    } else {
+        draft_files
+    };
+
+    build_execution_plan(inputs, drafts_dir, None)
 }
 
 fn dependency_fingerprint_for_node(
@@ -4000,7 +4050,7 @@ fn determine_implementation_output_path(
         "main.rs"
     } else {
         let mut output_rel = relative_path.to_path_buf();
-        output_rel.set_file_name(format!("{}.rs", file_stem.to_ascii_lowercase()));
+        output_rel.set_file_name(format!("{}.rs", to_snake_case(file_stem)));
         return Ok(PathBuf::from("src").join(output_rel));
     };
 
@@ -4036,17 +4086,53 @@ fn generated_project_structure_paths(project_info: &ProjectInfo) -> Vec<PathBuf>
     paths
 }
 
+fn to_snake_case(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_was_lower_or_digit = false;
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_alphanumeric() {
+            let is_upper = ch.is_ascii_uppercase();
+            let next_is_lower = chars
+                .peek()
+                .copied()
+                .is_some_and(|next| next.is_ascii_lowercase());
+            if is_upper
+                && !out.is_empty()
+                && (prev_was_lower_or_digit || next_is_lower)
+                && !out.ends_with('_')
+            {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+            prev_was_lower_or_digit = false;
+        } else {
+            prev_was_lower_or_digit = false;
+        }
+    }
+
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         build_dependency_drafts_from_context, build_dependency_manifest,
-        build_implemented_dependency_manifest, determine_bdd_test_paths,
-        determine_draft_input_path, determine_implementation_output_path,
-        determine_specification_output_path, ensure_dev_dependency_entry,
-        extract_actionable_blocking_bullets, extract_compile_error_message,
-        generated_project_structure_paths, implementation_agent_name, parse_generated_files,
-        parse_generated_output_files, resolve_input_files, sync_managed_block,
-        validate_brand_generated_output, CategoryFilter, BDD_TEST_TARGETS_END,
+        build_implementation_execution_plan, build_implemented_dependency_manifest,
+        build_specification_execution_plan, determine_bdd_test_paths, determine_draft_input_path,
+        determine_implementation_output_path, determine_specification_output_path,
+        ensure_dev_dependency_entry, extract_actionable_blocking_bullets,
+        extract_compile_error_message, generated_project_structure_paths,
+        implementation_agent_name, parse_generated_files, parse_generated_output_files,
+        resolve_input_files, sync_managed_block, validate_brand_generated_output,
+        validate_implementation_scaffold_ownership, CategoryFilter, BDD_TEST_TARGETS_END,
         BDD_TEST_TARGETS_START,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
@@ -4166,6 +4252,16 @@ Problem:
     }
 
     #[test]
+    fn determine_implementation_output_path_uses_snake_case_for_camel_case_stems() {
+        let path = determine_implementation_output_path(
+            Path::new("specifications/contexts/FileCache.md"),
+            "specifications",
+        )
+        .expect("implementation path");
+        assert_eq!(path, Path::new("src/contexts/file_cache.rs"));
+    }
+
+    #[test]
     fn determine_implementation_output_path_maps_brand_specs_to_scaffold_tracking_file() {
         let path = determine_implementation_output_path(
             Path::new("specifications/brands/acme.md"),
@@ -4185,6 +4281,20 @@ Problem:
             implementation_agent_name(Path::new("specifications/contexts/account.md")),
             "create_implementation"
         );
+    }
+
+    #[test]
+    fn mixed_brand_and_non_brand_implementation_runs_are_rejected() {
+        let context_files = vec![
+            PathBuf::from("specifications/brands/acme.md"),
+            PathBuf::from("specifications/contexts/account.md"),
+        ];
+
+        let err = validate_implementation_scaffold_ownership(&context_files)
+            .expect_err("mixed targets should be rejected");
+        assert!(err
+            .to_string()
+            .contains("Mixed implementation run detected"));
     }
 
     #[test]
@@ -4278,6 +4388,261 @@ Problem:
         .expect("brand lookup");
         assert_eq!(by_brand_name.len(), 1);
         assert!(by_brand_name[0].ends_with("brands/acme.md"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_spec_execution_plan_includes_unreferenced_visuals_and_data() {
+        let root = temp_root("spec_plan_all");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+        fs::create_dir_all(drafts.join("visuals")).expect("mkdir");
+
+        fs::write(drafts.join("app.md"), "Depends on: game_loop").expect("write");
+        fs::write(drafts.join("contexts/game_loop.md"), "# Game Loop").expect("write");
+        fs::write(drafts.join("data/CollisionType.md"), "# CollisionType").expect("write");
+        fs::write(drafts.join("visuals/snake_visuals.md"), "# Snake Visuals").expect("write");
+
+        let draft_files = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            Vec::new(),
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("draft files");
+        let levels = build_specification_execution_plan(
+            draft_files,
+            drafts.to_str().expect("drafts path"),
+            false,
+            &CategoryFilter::all(),
+        )
+        .expect("execution plan");
+
+        let planned_inputs: Vec<PathBuf> = levels
+            .into_iter()
+            .flatten()
+            .map(|node| node.input_path)
+            .collect();
+
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("app.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("contexts/game_loop.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("data/CollisionType.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("visuals/snake_visuals.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn named_spec_execution_plan_still_expands_dependencies_without_including_all_drafts() {
+        let root = temp_root("spec_plan_named");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+        fs::create_dir_all(drafts.join("visuals")).expect("mkdir");
+
+        fs::write(drafts.join("app.md"), "Depends on: game_loop").expect("write");
+        fs::write(
+            drafts.join("contexts/game_loop.md"),
+            "Depends on: CollisionType",
+        )
+        .expect("write");
+        fs::write(drafts.join("data/CollisionType.md"), "# CollisionType").expect("write");
+        fs::write(drafts.join("visuals/snake_visuals.md"), "# Snake Visuals").expect("write");
+
+        let draft_files = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["game_loop".to_string()],
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("draft files");
+        let levels = build_specification_execution_plan(
+            draft_files,
+            drafts.to_str().expect("drafts path"),
+            true,
+            &CategoryFilter::all(),
+        )
+        .expect("execution plan");
+
+        let planned_inputs: Vec<PathBuf> = levels
+            .into_iter()
+            .flatten()
+            .map(|node| node.input_path)
+            .collect();
+
+        assert_eq!(planned_inputs.len(), 2);
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("contexts/game_loop.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("data/CollisionType.md")));
+        assert!(!planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("app.md")));
+        assert!(!planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("visuals/snake_visuals.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn default_implementation_execution_plan_includes_unreferenced_visuals_and_data() {
+        let root = temp_root("impl_plan_all");
+        let drafts = root.join("drafts");
+        let specifications = root.join("specifications");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+        fs::create_dir_all(drafts.join("visuals")).expect("mkdir");
+        fs::create_dir_all(specifications.join("contexts")).expect("mkdir");
+        fs::create_dir_all(specifications.join("data")).expect("mkdir");
+        fs::create_dir_all(specifications.join("visuals")).expect("mkdir");
+
+        fs::write(drafts.join("app.md"), "Depends on: game_loop").expect("write");
+        fs::write(drafts.join("contexts/game_loop.md"), "# Game Loop").expect("write");
+        fs::write(drafts.join("data/CollisionType.md"), "# CollisionType").expect("write");
+        fs::write(drafts.join("visuals/snake_visuals.md"), "# Snake Visuals").expect("write");
+
+        fs::write(specifications.join("app.md"), "# App Spec").expect("write");
+        fs::write(
+            specifications.join("contexts/game_loop.md"),
+            "# Game Loop Spec",
+        )
+        .expect("write");
+        fs::write(
+            specifications.join("data/CollisionType.md"),
+            "# CollisionType Spec",
+        )
+        .expect("write");
+        fs::write(
+            specifications.join("visuals/snake_visuals.md"),
+            "# Snake Visuals Spec",
+        )
+        .expect("write");
+
+        let spec_files = resolve_input_files(
+            specifications.to_str().expect("specifications path"),
+            Vec::new(),
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("spec files");
+        let levels = build_implementation_execution_plan(
+            spec_files,
+            specifications.to_str().expect("specifications path"),
+            drafts.to_str().expect("drafts path"),
+            false,
+            &CategoryFilter::all(),
+        )
+        .expect("execution plan");
+
+        let planned_inputs: Vec<PathBuf> = levels
+            .into_iter()
+            .flatten()
+            .map(|node| node.input_path)
+            .collect();
+
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("app.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("contexts/game_loop.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("data/CollisionType.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("visuals/snake_visuals.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn named_implementation_execution_plan_still_expands_dependencies_without_including_all_specs()
+    {
+        let root = temp_root("impl_plan_named");
+        let drafts = root.join("drafts");
+        let specifications = root.join("specifications");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+        fs::create_dir_all(drafts.join("visuals")).expect("mkdir");
+        fs::create_dir_all(specifications.join("contexts")).expect("mkdir");
+        fs::create_dir_all(specifications.join("data")).expect("mkdir");
+        fs::create_dir_all(specifications.join("visuals")).expect("mkdir");
+
+        fs::write(drafts.join("app.md"), "Depends on: game_loop").expect("write");
+        fs::write(
+            drafts.join("contexts/game_loop.md"),
+            "Depends on: CollisionType",
+        )
+        .expect("write");
+        fs::write(drafts.join("data/CollisionType.md"), "# CollisionType").expect("write");
+        fs::write(drafts.join("visuals/snake_visuals.md"), "# Snake Visuals").expect("write");
+
+        fs::write(specifications.join("app.md"), "# App Spec").expect("write");
+        fs::write(
+            specifications.join("contexts/game_loop.md"),
+            "# Game Loop Spec",
+        )
+        .expect("write");
+        fs::write(
+            specifications.join("data/CollisionType.md"),
+            "# CollisionType Spec",
+        )
+        .expect("write");
+        fs::write(
+            specifications.join("visuals/snake_visuals.md"),
+            "# Snake Visuals Spec",
+        )
+        .expect("write");
+
+        let spec_files = resolve_input_files(
+            specifications.to_str().expect("specifications path"),
+            vec!["game_loop".to_string()],
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("spec files");
+        let levels = build_implementation_execution_plan(
+            spec_files,
+            specifications.to_str().expect("specifications path"),
+            drafts.to_str().expect("drafts path"),
+            true,
+            &CategoryFilter::all(),
+        )
+        .expect("execution plan");
+
+        let planned_inputs: Vec<PathBuf> = levels
+            .into_iter()
+            .flatten()
+            .map(|node| node.input_path)
+            .collect();
+
+        assert_eq!(planned_inputs.len(), 2);
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("contexts/game_loop.md")));
+        assert!(planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("data/CollisionType.md")));
+        assert!(!planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("app.md")));
+        assert!(!planned_inputs
+            .iter()
+            .any(|p: &PathBuf| p.ends_with("visuals/snake_visuals.md")));
 
         let _ = fs::remove_dir_all(root);
     }

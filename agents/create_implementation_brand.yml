@@ -16,6 +16,7 @@ static_prompt: |
     - Rust
     - Leptos with SSR
     - cargo-leptos conventions
+  - This agent owns the project-root scaffold only for brand-only runs. If non-brand specifications are present in the same run, fail explicitly rather than sharing ownership of `Cargo.toml`, `src/lib.rs`, or `src/main.rs`.
 
   ## Required Scaffold Outcomes
 
