@@ -94,11 +94,11 @@ impl ProgressIndicator {
     }
 
     pub fn start_item_cached(&self, name: &str) {
-        self.start_item_with_label("Cached", name, None);
+        self.start_item_with_label("Agent-cache", name, None);
     }
 
     pub fn start_item_up_to_date(&self, name: &str) {
-        self.start_item_with_label("Up-to-date", name, None);
+        self.start_item_with_label("Tracker-skip", name, None);
     }
 
     fn start_item_with_label(&self, label: &str, name: &str, estimated_tokens: Option<usize>) {
@@ -187,7 +187,7 @@ fn tone_for_label(label: &str) -> OutputTone {
     match label {
         "Processing" | "Submitting request" | "Received response" | "Still processing"
         | "Planning repair" | "Regenerating patch" => OutputTone::Progress,
-        "Cached" | "Up-to-date" => OutputTone::CacheHit,
+        "Agent-cache" | "Tracker-skip" => OutputTone::CacheHit,
         _ => OutputTone::Standard,
     }
 }

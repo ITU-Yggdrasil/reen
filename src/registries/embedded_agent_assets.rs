@@ -21,7 +21,6 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
             "../../agents/create_specifications_external_api.yml"
         )),
         "create_plan.yml" => Some(include_str!("../../agents/create_plan.yml")),
-        "create_implementation.yml" => Some(include_str!("../../agents/create_implementation.yml")),
         "create_implementation_data.yml" => {
             Some(include_str!("../../agents/create_implementation_data.yml"))
         }

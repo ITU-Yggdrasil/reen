@@ -362,6 +362,22 @@ token-limit: 45000
     }
 
     #[test]
+    fn parses_create_projection_and_parallel_limit_settings() {
+        let parsed: ReenConfig = serde_yaml::from_str(
+            r#"
+create:
+  projections: true
+  parallel-limit: 9
+"#,
+        )
+        .expect("parse config");
+
+        let create = parsed.create.expect("create config");
+        assert_eq!(create.projections, Some(true));
+        assert_eq!(create.parallel_limit, Some(9));
+    }
+
+    #[test]
     fn parses_create_parent_fix_as_enabled() {
         let parsed: ReenConfig = serde_yaml::from_str(
             r#"

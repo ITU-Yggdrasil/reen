@@ -2,13 +2,15 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use tokio::task::JoinSet;
 
 mod agent_executor;
 mod artifact_backend;
@@ -50,7 +52,8 @@ use contracts::{
     contract_validation_to_context_value, validate_contract_artifact,
 };
 use dependency_graph::{
-    DependencyArtifact, ExecutionNode, build_execution_plan, expand_with_transitive_dependencies,
+    DependencyArtifact, ExecutionDag, ExecutionNode, ExecutionUnit, build_execution_dag,
+    build_execution_plan, expand_with_transitive_dependencies,
 };
 use dependency_tooling::{
     ensure_tooling_artifacts_fresh, load_dependency_manifest, merge_manifest_dependencies,
@@ -62,10 +65,12 @@ use external_api_expansion::{
 use interface_capsules::InterfaceCapsule;
 use openapi_fetcher::is_external_api_draft_path;
 use patch_service::apply_draft_patches;
-use pipeline_context::{build_specification_context, fit_context_to_token_limit};
+use pipeline_context::{
+    build_specification_context, find_cached_context_variant, fit_context_to_token_limit,
+};
 use pipeline_quality::{
-    analyze_specification, contract_to_context_value, verify_generated_implementation,
-    write_json_report,
+    StaticBehaviorVerifierReport, SpecificationKind, analyze_specification,
+    contract_to_context_value, verify_generated_implementation, write_json_report,
 };
 use planning::{
     ExecutionPlan, PlanKind, build_default_plan, parse_plan_output, plan_to_context_value,
@@ -79,12 +84,15 @@ use project_structure::{
     ProjectInfo, analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files,
 };
 use reen::build_tracker::{BuildTracker, Stage};
-use reen::execution::{AgentModelRegistry, AgentRegistry, NativeExecutionControl};
+use reen::execution::{
+    AgentModelRegistry, AgentRegistry, NativeExecutionControl, normalize_cache_input_value,
+};
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
 use run_context::RunContextCache;
+pub use stage_runner::DEFAULT_PARALLEL_LIMIT;
 use stage_runner::{
     CliExecutionControl, ExecutionResources, StageItem, is_rate_limit_error,
-    prepare_rate_limit_retry, run_stage_items,
+    prepare_rate_limit_retry,
 };
 use usage_report::{UsageReporter, UsageScope};
 
@@ -143,6 +151,35 @@ pub fn ensure_create_preconditions(config: &Config) -> Result<()> {
         &workspace.artifact_workspace_root(),
         config.verbose,
     )
+}
+
+fn log_build_tracker_skip(verbose: bool, stage: &str, artifact_name: &str) {
+    if verbose {
+        println!(
+            "{}",
+            standard_text(format!(
+                "⊚ Build tracker skip for {} '{}'; artifact is up to date",
+                stage, artifact_name
+            ))
+        );
+    }
+}
+
+fn log_agent_response_cache_hit(
+    verbose: bool,
+    stage: &str,
+    artifact_name: &str,
+    agent_name: &str,
+) {
+    if verbose {
+        println!(
+            "{}",
+            standard_text(format!(
+                "⊚ Agent response cache hit for {} '{}' via {}; reusing cached model output",
+                stage, artifact_name, agent_name
+            ))
+        );
+    }
 }
 
 /// Resolves rate limit (requests per second) from CLI, env, or registry.
@@ -265,6 +302,218 @@ const BDD_TEST_TARGETS_START: &str = "# reen:bdd-tests:start";
 const BDD_TEST_TARGETS_END: &str = "# reen:bdd-tests:end";
 pub(crate) const IMPLEMENTATION_FAILURE_MARKER: &str =
     "ERROR: Cannot implement specification as written.";
+const IMPLEMENTATION_VERIFIER_RETRY_LIMIT: usize = 1;
+
+#[derive(Clone, Default)]
+struct SerialAgentGates {
+    gates: Arc<HashMap<String, Arc<AsyncMutex<()>>>>,
+}
+
+impl SerialAgentGates {
+    fn new<I, S>(serial_agents: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let gates = serial_agents
+            .into_iter()
+            .map(|agent_name| (agent_name.into(), Arc::new(AsyncMutex::new(()))))
+            .collect();
+        Self {
+            gates: Arc::new(gates),
+        }
+    }
+
+    async fn acquire(&self, agent_name: &str) -> Option<OwnedMutexGuard<()>> {
+        let gate = self.gates.get(agent_name)?.clone();
+        Some(gate.lock_owned().await)
+    }
+}
+
+async fn run_execution_dag_units<R, F, Fut, L, C, S>(
+    dag: &ExecutionDag,
+    parallel_limit: usize,
+    mut on_launch: L,
+    mut on_complete: C,
+    classify_success: S,
+    process_unit: F,
+) -> Result<Vec<(usize, Result<R>)>>
+where
+    R: Send + 'static,
+    F: Fn(ExecutionUnit) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<R>> + Send + 'static,
+    L: FnMut(&ExecutionUnit),
+    C: FnMut(usize, &Result<R>),
+    S: Fn(&R) -> bool,
+{
+    let units = dag.units().to_vec();
+    if units.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let max_in_flight = parallel_limit.max(1);
+    let mut remaining_deps = units
+        .iter()
+        .map(|unit| unit.dependency_units.len())
+        .collect::<Vec<_>>();
+    let mut dependents = vec![Vec::new(); units.len()];
+    for unit in &units {
+        for dep in &unit.dependency_units {
+            dependents[*dep].push(unit.id);
+        }
+    }
+    for dep_list in &mut dependents {
+        dep_list.sort_unstable();
+        dep_list.dedup();
+    }
+
+    let sort_keys = units.iter().map(ExecutionUnit::sort_key).collect::<Vec<_>>();
+    let mut ready = BTreeSet::new();
+    for unit in &units {
+        if remaining_deps[unit.id] == 0 {
+            ready.insert((sort_keys[unit.id].clone(), unit.id));
+        }
+    }
+
+    let process_unit = Arc::new(process_unit);
+    let mut tasks = JoinSet::new();
+    let mut results = Vec::new();
+    let mut stop_launching = false;
+
+    loop {
+        while !stop_launching && tasks.len() < max_in_flight {
+            let Some((_, unit_id)) = ready.iter().next().cloned() else {
+                break;
+            };
+            ready.remove(&(sort_keys[unit_id].clone(), unit_id));
+            let unit = units[unit_id].clone();
+            on_launch(&unit);
+            let process_unit = process_unit.clone();
+            tasks.spawn(async move {
+                let result = process_unit(unit).await;
+                (unit_id, result)
+            });
+        }
+
+        let Some(joined) = tasks.join_next().await else {
+            break;
+        };
+        let (unit_id, result) =
+            joined.map_err(|error| anyhow::anyhow!("Execution DAG task join error: {}", error))?;
+
+        if let Ok(ref unit_result) = result {
+            if classify_success(unit_result) && !stop_launching {
+                for dependent_id in &dependents[unit_id] {
+                    if remaining_deps[*dependent_id] == 0 {
+                        continue;
+                    }
+                    remaining_deps[*dependent_id] -= 1;
+                    if remaining_deps[*dependent_id] == 0 {
+                        ready.insert((sort_keys[*dependent_id].clone(), *dependent_id));
+                    }
+                }
+            } else {
+                stop_launching = true;
+            }
+        } else {
+            stop_launching = true;
+        }
+
+        on_complete(unit_id, &result);
+        results.push((unit_id, result));
+
+        if tasks.is_empty() && (ready.is_empty() || stop_launching) {
+            break;
+        }
+    }
+
+    Ok(results)
+}
+
+#[derive(Clone)]
+enum PreparedSpecAction {
+    PrepFailure {
+        error: String,
+    },
+    UpToDate,
+    Run {
+        agent_name: String,
+        executor: Arc<AgentExecutor>,
+        draft_file: PathBuf,
+        output_path: PathBuf,
+        dependency_fingerprint: String,
+        draft_content: String,
+        dependency_context: HashMap<String, serde_json::Value>,
+        estimated: usize,
+        cache_hit: bool,
+    },
+}
+
+#[derive(Clone)]
+struct PreparedSpecItem {
+    name: String,
+    action: PreparedSpecAction,
+}
+
+enum SpecNodeResult {
+    UpToDate {
+        draft_name: String,
+    },
+    Success {
+        draft_name: String,
+        draft_file: PathBuf,
+        output_path: PathBuf,
+        dependency_fingerprint: String,
+    },
+    BlockingAmbiguities {
+        draft_name: String,
+        draft_file: PathBuf,
+        draft_content: String,
+        spec_content: String,
+        actionable: Vec<String>,
+        additional_context: HashMap<String, serde_json::Value>,
+    },
+    Failure {
+        draft_name: String,
+        error: anyhow::Error,
+    },
+}
+
+impl SpecNodeResult {
+    fn draft_name(&self) -> &str {
+        match self {
+            Self::UpToDate { draft_name, .. }
+            | Self::Success { draft_name, .. }
+            | Self::BlockingAmbiguities { draft_name, .. }
+            | Self::Failure { draft_name, .. } => draft_name,
+        }
+    }
+
+    fn succeeded(&self) -> bool {
+        matches!(self, Self::UpToDate { .. } | Self::Success { .. })
+    }
+}
+
+enum ImplNodeResult {
+    UpToDate,
+    Success {
+        context_name: String,
+        context_file: PathBuf,
+        output_path: PathBuf,
+        dependency_fingerprint: String,
+    },
+    Failure {
+        context_name: String,
+        error: anyhow::Error,
+        unfinished_specification: bool,
+    },
+}
+
+impl ImplNodeResult {
+    fn succeeded(&self) -> bool {
+        matches!(self, Self::UpToDate { .. } | Self::Success { .. })
+    }
+}
 
 pub async fn create_specification(
     names: Vec<String>,
@@ -272,6 +521,7 @@ pub async fn create_specification(
     filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
+    parallel_limit: usize,
     fix: bool,
     max_fix_attempts: usize,
     config: &Config,
@@ -282,6 +532,7 @@ pub async fn create_specification(
         filter,
         rate_limit,
         token_limit,
+        parallel_limit,
         fix,
         max_fix_attempts,
         0,
@@ -296,6 +547,7 @@ pub async fn build(
     filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
+    parallel_limit: usize,
     max_fix_attempts: usize,
     max_compile_fix_attempts: usize,
     config: &Config,
@@ -306,6 +558,7 @@ pub async fn build(
         filter,
         rate_limit,
         token_limit,
+        parallel_limit,
         true,
         max_fix_attempts,
         config,
@@ -319,6 +572,7 @@ pub async fn build(
         filter,
         rate_limit,
         token_limit,
+        parallel_limit,
         config,
     )
     .await
@@ -330,6 +584,7 @@ fn create_specification_inner(
     filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
+    parallel_limit: usize,
     fix: bool,
     max_fix_attempts: usize,
     fix_attempt: usize,
@@ -370,13 +625,12 @@ fn create_specification_inner(
         } else {
             expanded_draft_files
         };
-        let execution_levels =
-            build_execution_plan(filtered_draft_files, &workspace.drafts_dir, None)?;
+        let execution_dag = build_execution_dag(filtered_draft_files, &workspace.drafts_dir, None)?;
 
         // Load build tracker
         let mut tracker = BuildTracker::load()?;
 
-        let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
+        let total_count: usize = execution_dag.units().iter().map(|unit| unit.nodes.len()).sum();
         println!(
             "{}",
             header_text(format!("Creating specifications for {} draft(s)", total_count))
@@ -390,126 +644,115 @@ fn create_specification_inner(
             config.verbose,
         );
 
-        let mut progress = ProgressIndicator::new(total_count);
+        let progress = Arc::new(StdMutex::new(ProgressIndicator::new(total_count)));
         let mut updated_count = 0;
-        let mut updated_in_run: HashSet<String> = HashSet::new();
         let mut executors: HashMap<String, Arc<AgentExecutor>> = HashMap::new();
-
-        for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
-            if config.verbose {
-                println!(
-                    "{}",
-                    standard_text(format!(
-                        "Processing dependency level {} ({} item(s))",
-                        level_idx,
-                        level_nodes.len()
-                    ))
-                );
-            }
-
-            let mut nodes_by_agent: HashMap<String, Vec<ExecutionNode>> = HashMap::new();
-            for node in level_nodes {
-                let agent = determine_specification_agent(&node.input_path, &workspace.drafts_dir)
-                    .to_string();
-                nodes_by_agent.entry(agent).or_default().push(node);
-            }
-
-            let mut parallel_stage_items = Vec::new();
-            let mut serial_stage_items = Vec::new();
-            for (agent_name, nodes) in nodes_by_agent {
+        let mut serial_agents = HashSet::new();
+        let mut prepared = HashMap::new();
+        for unit in execution_dag.units() {
+            for node in &unit.nodes {
+                let agent_name =
+                    determine_specification_agent(&node.input_path, &workspace.drafts_dir)
+                        .to_string();
                 if !executors.contains_key(&agent_name) {
-                    executors.insert(
-                        agent_name.clone(),
-                        Arc::new(AgentExecutor::new(&agent_name, &config)?),
-                    );
+                    let executor = Arc::new(AgentExecutor::new(&agent_name, &config)?);
+                    if !executor.can_run_parallel().unwrap_or(false) {
+                        serial_agents.insert(agent_name.clone());
+                    }
+                    executors.insert(agent_name.clone(), executor);
                 }
                 let executor = executors
                     .get(&agent_name)
                     .cloned()
                     .context("missing specification executor")?;
-                let can_parallel = executor.can_run_parallel().unwrap_or(false);
-                if config.verbose {
-                    println!(
-                        "{}",
-                        standard_text(format!(
-                            "{} execution for {}",
-                            if can_parallel { "Parallel" } else { "Serial" },
-                            agent_name
-                        ))
-                    );
-                }
+                let draft_file = node.input_path.clone();
+                let draft_name = node.name.clone();
+                let dependency_fingerprint = dependency_fingerprint_for_node(
+                    node,
+                    &workspace.drafts_dir,
+                    None,
+                    &resources.run_context_cache,
+                )?;
+                let output_path = determine_specification_output_path(
+                    &draft_file,
+                    &workspace.drafts_dir,
+                    &workspace.specifications_dir,
+                )?;
 
-                let mut stage_items = Vec::new();
-                for node in nodes {
-                    let draft_file = node.input_path.clone();
-                    let draft_name = node.name.clone();
-                    let dependency_invalidated = node
-                        .direct_dependency_names()
-                        .iter()
-                        .any(|dep_name| updated_in_run.contains(dep_name));
-                    let dependency_fingerprint =
-                        dependency_fingerprint_for_node(
-                            &node,
-                            &workspace.drafts_dir,
-                            None,
-                            &resources.run_context_cache,
-                        )?;
-                    let output_path = determine_specification_output_path(
+                let needs_update = if clear_cache {
+                    true
+                } else {
+                    tracker.needs_update(
+                        Stage::Specification,
+                        &draft_name,
                         &draft_file,
-                        &workspace.drafts_dir,
-                        &workspace.specifications_dir,
-                    )?;
+                        &output_path,
+                        &dependency_fingerprint,
+                    )?
+                };
 
-                    let needs_update = if clear_cache || dependency_invalidated {
-                        true
-                    } else {
-                        tracker.needs_update(
-                            Stage::Specification,
-                            &draft_name,
-                            &draft_file,
-                            &output_path,
-                            &dependency_fingerprint,
-                        )?
-                    };
-                    if !needs_update {
-                        progress.start_item_up_to_date(&draft_name);
-                        if config.verbose {
-                            println!(
-                                "{}",
-                                standard_text(format!("⊚ Skipping {} (up to date)", draft_name))
-                            );
-                        }
-                        progress.complete_item(&draft_name, true);
-                        continue;
-                    }
-
+                let action = if !needs_update {
+                    PreparedSpecAction::UpToDate
+                } else {
                     let dependency_context = match build_dependency_context(
-                        &node,
+                        node,
                         &workspace.drafts_dir,
                         None,
                         &resources.run_context_cache,
                     ) {
-                            Ok(context) => context,
-                            Err(e) => {
-                                progress.complete_item(&draft_name, false);
-                                eprintln!("{}", error_text(format!(
-                                    "✗ Failed to create specification for {}: {}",
-                                    draft_name, e
-                                )));
-                                continue;
-                            }
-                        };
+                        Ok(context) => context,
+                        Err(e) => {
+                            prepared.insert(
+                                node.input_path.clone(),
+                                PreparedSpecItem {
+                                    name: draft_name,
+                                    action: PreparedSpecAction::PrepFailure {
+                                        error: e.to_string(),
+                                    },
+                                },
+                            );
+                            continue;
+                        }
+                    };
 
                     let draft_content = fs::read_to_string(&draft_file).unwrap_or_default();
                     let parsed_draft =
-                        parse_repo_draft(&draft_file, &workspace.drafts_dir, &draft_content)?;
-                    let dependency_context = build_specification_context(
+                        match parse_repo_draft(&draft_file, &workspace.drafts_dir, &draft_content) {
+                            Ok(parsed) => parsed,
+                            Err(e) => {
+                                prepared.insert(
+                                    node.input_path.clone(),
+                                    PreparedSpecItem {
+                                        name: draft_name,
+                                        action: PreparedSpecAction::PrepFailure {
+                                            error: e.to_string(),
+                                        },
+                                    },
+                                );
+                                continue;
+                            }
+                        };
+                    let dependency_context = match build_specification_context(
                         &draft_file,
                         &draft_content,
                         dependency_context,
                         &workspace.drafts_dir,
                         parsed_draft.as_ref(),
-                    )?;
+                    ) {
+                        Ok(context) => context,
+                        Err(e) => {
+                            prepared.insert(
+                                node.input_path.clone(),
+                                PreparedSpecItem {
+                                    name: draft_name,
+                                    action: PreparedSpecAction::PrepFailure {
+                                        error: e.to_string(),
+                                    },
+                                },
+                            );
+                            continue;
+                        }
+                    };
                     let (dependency_context, estimated) = fit_context_to_token_limit(
                         &executor,
                         &draft_content,
@@ -523,288 +766,315 @@ fn create_specification_inner(
                             .is_cache_hit(&draft_content, dependency_context.clone())
                             .unwrap_or(false)
                     };
-                    stage_items.push(StageItem {
-                        name: draft_name.clone(),
+                    PreparedSpecAction::Run {
+                        agent_name,
+                        executor,
+                        draft_file,
+                        output_path,
+                        dependency_fingerprint,
+                        draft_content,
+                        dependency_context,
                         estimated,
                         cache_hit,
-                        payload: (
-                            executor.clone(),
-                            draft_file,
-                            draft_name,
-                            output_path,
-                            dependency_fingerprint,
-                            draft_content,
-                            dependency_context,
+                    }
+                };
+
+                prepared.insert(
+                    node.input_path.clone(),
+                    PreparedSpecItem {
+                        name: draft_name,
+                        action,
+                    },
+                );
+            }
+        }
+
+        let serial_gates = SerialAgentGates::new(serial_agents);
+        let workspace_ctx = workspace.clone();
+        let cfg = config.clone();
+        let usage_reporter = resources.usage_reporter.clone();
+        let execution_control = resources.execution_control.clone();
+        let prepared_for_launch = prepared.clone();
+        let prepared_for_run = prepared.clone();
+        let launch_progress = progress.clone();
+        let completion_progress = progress.clone();
+        let results = run_execution_dag_units(
+            &execution_dag,
+            parallel_limit,
+            |unit| {
+                for node in &unit.nodes {
+                    let Some(item) = prepared_for_launch.get(&node.input_path) else {
+                        continue;
+                    };
+                    match &item.action {
+                        PreparedSpecAction::PrepFailure { .. } => {
+                            launch_progress
+                                .lock()
+                                .expect("progress mutex should not be poisoned")
+                                .start_item(&item.name, None);
+                        }
+                        PreparedSpecAction::UpToDate { .. } => {
+                            launch_progress
+                                .lock()
+                                .expect("progress mutex should not be poisoned")
+                                .start_item_up_to_date(&item.name);
+                            log_build_tracker_skip(config.verbose, "specification", &item.name);
+                        }
+                        PreparedSpecAction::Run {
+                            agent_name,
+                            cache_hit,
                             estimated,
-                        ),
-                    });
+                            ..
+                        } => {
+                            if *cache_hit {
+                                launch_progress
+                                    .lock()
+                                    .expect("progress mutex should not be poisoned")
+                                    .start_item_cached(&item.name);
+                                log_agent_response_cache_hit(
+                                    config.verbose,
+                                    "specification",
+                                    &item.name,
+                                    agent_name,
+                                );
+                            } else {
+                                launch_progress
+                                    .lock()
+                                    .expect("progress mutex should not be poisoned")
+                                    .start_item(&item.name, Some(*estimated));
+                            }
+                        }
+                    }
                 }
-                if can_parallel {
-                    parallel_stage_items.extend(stage_items);
-                } else {
-                    serial_stage_items.extend(stage_items);
+            },
+            |_unit_id, result: &Result<Vec<SpecNodeResult>>| match result {
+                Ok(entries) => {
+                    for entry in entries {
+                        completion_progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .complete_item(entry.draft_name(), entry.succeeded());
+                    }
                 }
-            }
-
-            let parallel_results = run_stage_items(
-                parallel_stage_items,
-                true,
-                &mut progress,
-                &resources,
-                &config,
-                {
-                    let cfg = config.clone();
-                    let workspace_ctx = workspace.clone();
-                    let usage_reporter = resources.usage_reporter.clone();
-                    move |(
-                        executor,
-                        draft_file,
-                        draft_name,
-                        output_path,
-                        dependency_fingerprint,
-                        draft_content,
-                        dependency_context,
-                        estimated,
-                    ),
-                          execution_control| {
-                        let cfg = cfg.clone();
-                        let workspace_ctx = workspace_ctx.clone();
-                        let usage_reporter = usage_reporter.clone();
-                        async move {
-                            let result = process_specification(
-                                &executor,
-                                &draft_content,
-                                &draft_file,
-                                &draft_name,
-                                &workspace_ctx,
-                                &cfg,
-                                clear_cache,
+                Err(_) => {}
+            },
+            |entries: &Vec<SpecNodeResult>| entries.iter().all(SpecNodeResult::succeeded),
+            move |unit| {
+                let workspace_ctx = workspace_ctx.clone();
+                let cfg = cfg.clone();
+                let usage_reporter = usage_reporter.clone();
+                let execution_control = execution_control.clone();
+                let serial_gates = serial_gates.clone();
+                let prepared = prepared_for_run.clone();
+                async move {
+                    let mut unit_results = Vec::new();
+                    for node in unit.nodes {
+                        let item = prepared
+                            .get(&node.input_path)
+                            .cloned()
+                            .context("missing prepared specification item")?;
+                        match item.action {
+                            PreparedSpecAction::PrepFailure { error } => {
+                                unit_results.push(SpecNodeResult::Failure {
+                                    draft_name: item.name,
+                                    error: anyhow::anyhow!(error),
+                                });
+                            }
+                            PreparedSpecAction::UpToDate => {
+                                unit_results.push(SpecNodeResult::UpToDate {
+                                    draft_name: item.name,
+                                });
+                            }
+                            PreparedSpecAction::Run {
+                                agent_name,
+                                executor,
+                                draft_file,
+                                output_path,
+                                dependency_fingerprint,
+                                draft_content,
                                 dependency_context,
-                                execution_control,
-                                &usage_reporter,
                                 estimated,
-                            )
-                            .await?;
-                            Ok((draft_file, output_path, dependency_fingerprint, result))
+                                ..
+                            } => {
+                                let _serial_guard = serial_gates.acquire(&agent_name).await;
+                                match process_specification(
+                                    &executor,
+                                    &draft_content,
+                                    &draft_file,
+                                    &item.name,
+                                    &workspace_ctx,
+                                    &cfg,
+                                    clear_cache,
+                                    dependency_context,
+                                    execution_control.clone(),
+                                    &usage_reporter,
+                                    estimated,
+                                )
+                                .await
+                                {
+                                    Ok(ProcessSpecOutcome::Success) => {
+                                        unit_results.push(SpecNodeResult::Success {
+                                            draft_name: item.name,
+                                            draft_file,
+                                            output_path,
+                                            dependency_fingerprint,
+                                        });
+                                    }
+                                    Ok(ProcessSpecOutcome::BlockingAmbiguities {
+                                        draft_file,
+                                        draft_name,
+                                        draft_content,
+                                        spec_content,
+                                        actionable,
+                                        additional_context,
+                                    }) => {
+                                        unit_results.push(SpecNodeResult::BlockingAmbiguities {
+                                            draft_name,
+                                            draft_file,
+                                            draft_content,
+                                            spec_content,
+                                            actionable,
+                                            additional_context,
+                                        });
+                                    }
+                                    Err(error) => {
+                                        unit_results.push(SpecNodeResult::Failure {
+                                            draft_name: item.name,
+                                            error,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
-                },
-            )
-            .await?;
-            for (draft_name, result) in parallel_results {
-                match result {
-                    Ok((
-                        draft_file,
-                        output_path,
-                        dependency_fingerprint,
-                        ProcessSpecOutcome::Success,
-                    )) => {
-                        tracker.record(
-                            Stage::Specification,
-                            &draft_name,
-                            &draft_file,
-                            &output_path,
-                            &dependency_fingerprint,
-                        )?;
-                        tracker.save()?;
-                        updated_count += 1;
-                        updated_in_run.insert(draft_name.clone());
-                        progress.complete_item(&draft_name, true);
-                        if config.verbose {
-                            println!(
-                                "{}",
-                                success_text(format!(
-                                    "✓ Successfully created specification for {}",
-                                    draft_name
-                                ))
-                            );
+                    Ok(unit_results)
+                }
+            },
+        )
+        .await?;
+
+        let mut blocking_retry = None;
+        let mut first_error = None;
+        for (_unit_id, result) in results {
+            match result {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            SpecNodeResult::UpToDate { .. } => {}
+                            SpecNodeResult::Success {
+                                draft_name,
+                                draft_file,
+                                output_path,
+                                dependency_fingerprint,
+                            } => {
+                                tracker.record(
+                                    Stage::Specification,
+                                    &draft_name,
+                                    &draft_file,
+                                    &output_path,
+                                    &dependency_fingerprint,
+                                )?;
+                                tracker.save()?;
+                                updated_count += 1;
+                                if config.verbose {
+                                    println!(
+                                        "{}",
+                                        success_text(format!(
+                                            "✓ Successfully created specification for {}",
+                                            draft_name
+                                        ))
+                                    );
+                                }
+                            }
+                            SpecNodeResult::BlockingAmbiguities {
+                                draft_name: ba_draft_name,
+                                draft_file: ba_draft_file,
+                                draft_content: ba_draft_content,
+                                spec_content: ba_spec_content,
+                                actionable: ba_actionable,
+                                additional_context: ba_context,
+                            } => {
+                                if blocking_retry.is_none() {
+                                    blocking_retry = Some((
+                                        ba_draft_file,
+                                        ba_draft_name,
+                                        ba_draft_content,
+                                        ba_spec_content,
+                                        ba_actionable,
+                                        ba_context,
+                                    ));
+                                }
+                            }
+                            SpecNodeResult::Failure { draft_name, error } => {
+                                eprintln!(
+                                    "{}",
+                                    error_text(format!(
+                                        "✗ Failed to create specification for {}: {}",
+                                        draft_name, error
+                                    ))
+                                );
+                                if first_error.is_none() {
+                                    first_error = Some(error);
+                                }
+                            }
                         }
-                    }
-                    Ok((
-                        _draft_file,
-                        _output_path,
-                        _dependency_fingerprint,
-                        ProcessSpecOutcome::BlockingAmbiguities {
-                            draft_file: ba_draft_file,
-                            draft_name: ba_draft_name,
-                            draft_content: ba_draft_content,
-                            spec_content: ba_spec_content,
-                            actionable: ba_actionable,
-                            additional_context: ba_context,
-                        },
-                    )) => {
-                        progress.complete_item(&draft_name, false);
-                        if fix && fix_attempt < max_fix_attempts {
-                            return try_fix_and_retry(
-                                &ba_draft_file,
-                                &ba_draft_name,
-                                &ba_draft_content,
-                                &ba_spec_content,
-                                &ba_actionable,
-                                ba_context,
-                                fix_attempt,
-                                max_fix_attempts,
-                                &filter,
-                                rate_limit,
-                                token_limit,
-                                &config,
-                                resources.execution_control.clone(),
-                                &resources.usage_reporter,
-                            )
-                            .await;
-                        }
-                        eprintln!(
-                            "{}",
-                            error_text("✗ Blocking ambiguities (use --fix to auto-fix drafts)")
-                        );
-                        anyhow::bail!("generated specification contains blocking ambiguities");
-                    }
-                    Err(e) => {
-                        progress.complete_item(&draft_name, false);
-                        eprintln!(
-                            "{}",
-                            error_text(format!(
-                                "✗ Failed to create specification for {}: {}",
-                                draft_name, e
-                            ))
-                        );
-                        anyhow::bail!("{}", e);
                     }
                 }
-            }
-
-            let serial_results = run_stage_items(
-                serial_stage_items,
-                false,
-                &mut progress,
-                &resources,
-                &config,
-                {
-                    let cfg = config.clone();
-                    let workspace_ctx = workspace.clone();
-                    let usage_reporter = resources.usage_reporter.clone();
-                    move |(
-                        executor,
-                        draft_file,
-                        draft_name,
-                        output_path,
-                        dependency_fingerprint,
-                        draft_content,
-                        dependency_context,
-                        estimated,
-                    ),
-                          execution_control| {
-                        let cfg = cfg.clone();
-                        let workspace_ctx = workspace_ctx.clone();
-                        let usage_reporter = usage_reporter.clone();
-                        async move {
-                            let result = process_specification(
-                                &executor,
-                                &draft_content,
-                                &draft_file,
-                                &draft_name,
-                                &workspace_ctx,
-                                &cfg,
-                                clear_cache,
-                                dependency_context,
-                                execution_control,
-                                &usage_reporter,
-                                estimated,
-                            )
-                            .await?;
-                            Ok((draft_file, output_path, dependency_fingerprint, result))
-                        }
-                    }
-                },
-            )
-            .await?;
-            for (draft_name, result) in serial_results {
-                match result {
-                    Ok((
-                        draft_file,
-                        output_path,
-                        dependency_fingerprint,
-                        ProcessSpecOutcome::Success,
-                    )) => {
-                        tracker.record(
-                            Stage::Specification,
-                            &draft_name,
-                            &draft_file,
-                            &output_path,
-                            &dependency_fingerprint,
-                        )?;
-                        tracker.save()?;
-                        updated_count += 1;
-                        updated_in_run.insert(draft_name.clone());
-                        progress.complete_item(&draft_name, true);
-                        if config.verbose {
-                            println!(
-                                "{}",
-                                success_text(format!(
-                                    "✓ Successfully created specification for {}",
-                                    draft_name
-                                ))
-                            );
-                        }
-                    }
-                    Ok((
-                        _draft_file,
-                        _output_path,
-                        _dependency_fingerprint,
-                        ProcessSpecOutcome::BlockingAmbiguities {
-                            draft_file: ba_draft_file,
-                            draft_name: ba_draft_name,
-                            draft_content: ba_draft_content,
-                            spec_content: ba_spec_content,
-                            actionable: ba_actionable,
-                            additional_context: ba_context,
-                        },
-                    )) => {
-                        progress.complete_item(&draft_name, false);
-                        if fix && fix_attempt < max_fix_attempts {
-                            return try_fix_and_retry(
-                                &ba_draft_file,
-                                &ba_draft_name,
-                                &ba_draft_content,
-                                &ba_spec_content,
-                                &ba_actionable,
-                                ba_context,
-                                fix_attempt,
-                                max_fix_attempts,
-                                &filter,
-                                rate_limit,
-                                token_limit,
-                                &config,
-                                resources.execution_control.clone(),
-                                &resources.usage_reporter,
-                            )
-                            .await;
-                        }
-                        eprintln!(
-                            "{}",
-                            error_text("✗ Blocking ambiguities (use --fix to auto-fix drafts)")
-                        );
-                        anyhow::bail!("generated specification contains blocking ambiguities");
-                    }
-                    Err(e) => {
-                        progress.complete_item(&draft_name, false);
-                        eprintln!(
-                            "{}",
-                            error_text(format!(
-                                "✗ Failed to create specification for {}: {}",
-                                draft_name, e
-                            ))
-                        );
-                        anyhow::bail!("{}", e);
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
                     }
                 }
             }
         }
 
+        if let Some((
+            ba_draft_file,
+            ba_draft_name,
+            ba_draft_content,
+            ba_spec_content,
+            ba_actionable,
+            ba_context,
+        )) = blocking_retry
+        {
+            if fix && fix_attempt < max_fix_attempts {
+                return try_fix_and_retry(
+                    &ba_draft_file,
+                    &ba_draft_name,
+                    &ba_draft_content,
+                    &ba_spec_content,
+                    &ba_actionable,
+                    ba_context,
+                    fix_attempt,
+                    max_fix_attempts,
+                    &filter,
+                    rate_limit,
+                    token_limit,
+                    parallel_limit,
+                    &config,
+                    resources.execution_control.clone(),
+                    &resources.usage_reporter,
+                )
+                .await;
+            }
+            eprintln!(
+                "{}",
+                error_text("✗ Blocking ambiguities (use --fix to auto-fix drafts)")
+            );
+            anyhow::bail!("generated specification contains blocking ambiguities");
+        }
+
+        if let Some(error) = first_error {
+            anyhow::bail!("{}", error);
+        }
+
         // Save tracker
         tracker.save()?;
 
-        progress.finish();
+        progress
+            .lock()
+            .expect("progress mutex should not be poisoned")
+            .finish();
 
         if updated_count == 0 && config.verbose {
             println!("{}", standard_text("All specifications are up to date"));
@@ -1298,7 +1568,7 @@ async fn generate_execution_plan_with_agent(
         diagnostic_text,
     );
 
-    let mut planning_context = compact_agent_dependency_context(dependency_context);
+    let mut planning_context = dependency_context.clone();
     planning_context.insert("plan_kind".to_string(), json!(plan_kind.as_str()));
     planning_context.insert("context_content".to_string(), json!(spec_content));
     planning_context.insert(
@@ -1695,6 +1965,7 @@ async fn try_fix_and_retry(
     filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
+    parallel_limit: usize,
     config: &Config,
     execution_control: Option<CliExecutionControl>,
     reporter: &UsageReporter,
@@ -1775,6 +2046,7 @@ async fn try_fix_and_retry(
         filter,
         rate_limit,
         token_limit,
+        parallel_limit,
         true,
         max_fix_attempts,
         fix_attempt + 1,
@@ -1791,6 +2063,7 @@ pub async fn create_implementation(
     filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
+    parallel_limit: usize,
     config: &Config,
 ) -> Result<()> {
     let workspace = WorkspaceContext::resolve(config)?;
@@ -1823,13 +2096,13 @@ pub async fn create_implementation(
         names_provided,
         filter,
     )?;
-    let execution_levels = build_implementation_execution_plan(
+    let execution_dag = build_implementation_execution_dag(
         dependency_roots,
         filter,
         &workspace.specifications_dir,
         &workspace.drafts_dir,
     )?;
-    let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
+    let total_count: usize = execution_dag.units().iter().map(|unit| unit.nodes.len()).sum();
     println!(
         "{}",
         header_text(format!(
@@ -1878,268 +2151,294 @@ pub async fn create_implementation(
     let context_executor =
         Arc::new(AgentExecutor::new("create_implementation_context", config)?);
     let plan_can_parallel = planner.can_run_parallel().unwrap_or(false);
-    let can_parallel = context_executor.can_run_parallel().unwrap_or(false);
+    let data_can_parallel = data_executor.can_run_parallel().unwrap_or(false);
+    let projection_can_parallel = projection_executor.can_run_parallel().unwrap_or(false);
+    let context_can_parallel = context_executor.can_run_parallel().unwrap_or(false);
 
     if config.verbose {
         let path = context_executor.model_registry().registry_path();
         println!(
             "{}",
             standard_text(format!(
-                "Agent model registry: {}, create_implementation parallel: {}",
+                "Agent model registry: {}, implementation parallel: plan={}, data={}, projection={}, context={}",
                 path.display(),
-                can_parallel
+                plan_can_parallel,
+                data_can_parallel,
+                projection_can_parallel,
+                context_can_parallel
             ))
         );
     }
 
     let resources = ExecutionResources::new(
-        "create_implementation_context",
+        "implementation",
         workspace.artifact_workspace_root(),
         rate_limit,
         token_limit,
         config.verbose,
     );
 
-    let mut progress = ProgressIndicator::new(total_count);
+    let progress = Arc::new(StdMutex::new(ProgressIndicator::new(total_count)));
     let mut updated_count = 0;
-    let mut updated_in_run: HashSet<String> = HashSet::new();
     let mut had_unspecified = false;
-    for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
-        if config.verbose {
-            println!(
-                "{}",
-                standard_text(format!(
-                    "Processing dependency level {} ({} item(s))",
-                    level_idx,
-                    level_nodes.len()
-                ))
-            );
-        }
+    let mut had_failures = false;
+    let mut serial_agents = HashSet::new();
+    if !plan_can_parallel {
+        serial_agents.insert("create_plan".to_string());
+    }
+    if !data_can_parallel {
+        serial_agents.insert("create_implementation_data".to_string());
+    }
+    if !projection_can_parallel {
+        serial_agents.insert("create_implementation_projection".to_string());
+    }
+    if !context_can_parallel {
+        serial_agents.insert("create_implementation_context".to_string());
+    }
+    let serial_gates = SerialAgentGates::new(serial_agents);
 
-        let mut planning_items = Vec::new();
-        for node in level_nodes {
-            let context_file = resolve_implementation_context_file(&node.input_path)?;
-            let context_name = node.name.clone();
-            let dependency_invalidated = node
-                .direct_dependency_names()
-                .iter()
-                .any(|dep_name| updated_in_run.contains(dep_name));
-            let (fingerprint_primary_root, fingerprint_fallback_root) =
-                if node.input_path.starts_with(&workspace.specifications_root) {
-                    (
-                        &workspace.specifications_dir,
-                        Some(workspace.drafts_dir.as_str()),
-                    )
-                } else {
-                    (&workspace.drafts_dir, None)
-                };
-            let dependency_fingerprint = dependency_fingerprint_for_node(
-                &node,
-                fingerprint_primary_root,
-                fingerprint_fallback_root,
-                &resources.run_context_cache,
-            )?;
-            let output_path =
-                determine_implementation_output_path(&context_file, &workspace.specifications_dir)?;
+    let library_crate_name = project_info.package_name.clone();
+    let specifications_root = workspace.specifications_root.clone();
+    let drafts_root = workspace.drafts_root.clone();
+    let specifications_dir = workspace.specifications_dir.clone();
+    let drafts_dir = workspace.drafts_dir.clone();
+    let progress_for_tasks = progress.clone();
+    let tracker_snapshot = tracker.clone();
+    let resources_for_tasks = resources.clone();
+    let planner_for_tasks = planner.clone();
+    let data_executor_for_tasks = data_executor.clone();
+    let projection_executor_for_tasks = projection_executor.clone();
+    let context_executor_for_tasks = context_executor.clone();
+    let config_for_tasks = config.clone();
+    let results = run_execution_dag_units(
+        &execution_dag,
+        parallel_limit,
+        |_unit| {},
+        |_unit_id, _result: &Result<Vec<ImplNodeResult>>| {},
+        |entries: &Vec<ImplNodeResult>| entries.iter().all(ImplNodeResult::succeeded),
+        move |unit| {
+            let progress = progress_for_tasks.clone();
+            let tracker = tracker_snapshot.clone();
+            let resources = resources_for_tasks.clone();
+            let planner = planner_for_tasks.clone();
+            let data_executor = data_executor_for_tasks.clone();
+            let projection_executor = projection_executor_for_tasks.clone();
+            let context_executor = context_executor_for_tasks.clone();
+            let library_crate_name = library_crate_name.clone();
+            let specifications_root = specifications_root.clone();
+            let drafts_root = drafts_root.clone();
+            let specifications_dir = specifications_dir.clone();
+            let drafts_dir = drafts_dir.clone();
+            let serial_gates = serial_gates.clone();
+            let cfg = config_for_tasks.clone();
+            async move {
+                let mut unit_results = Vec::new();
 
-            if has_unfinished_specification(&context_file, &context_name, "implementation")? {
-                had_unspecified = true;
-                progress.start_item(&context_name, None);
-                progress.complete_item(&context_name, false);
-                continue;
-            }
-
-            let needs_update = if clear_cache || dependency_invalidated {
-                true
-            } else {
-                tracker.needs_update(
-                    Stage::Implementation,
-                    &context_name,
-                    &context_file,
-                    &output_path,
-                    &dependency_fingerprint,
-                )?
-            };
-
-            if !needs_update {
-                progress.start_item_up_to_date(&context_name);
-                if config.verbose {
-                    println!(
-                        "{}",
-                        standard_text(format!("⊚ Skipping {} (up to date)", context_name))
-                    );
-                }
-                progress.complete_item(&context_name, true);
-                continue;
-            }
-
-            let mut dependency_context = build_dependency_context(
-                &node,
-                &workspace.specifications_dir,
-                Some(&workspace.drafts_dir),
-                &resources.run_context_cache,
-            )?;
-            let library_crate_name = project_info.package_name.clone();
-            dependency_context.insert(
-                "library_crate_name".to_string(),
-                json!(library_crate_name.clone()),
-            );
-            dependency_context.insert(
-                "public_import_guidance".to_string(),
-                json!({
-                    "library_crate_name": library_crate_name.clone(),
-                    "library_import_roots": [
-                        "<crate>::TypeName",
-                        "<crate>::data::TypeName",
-                        "<crate>::projections::TypeName",
-                        "<crate>::contexts::TypeName",
-                    ],
-                    "main_import_examples": [
-                        format!("use {}::TypeName;", library_crate_name),
-                        format!("use {}::data::TypeName;", library_crate_name),
-                        format!("use {}::projections::TypeName;", library_crate_name),
-                        format!("use {}::contexts::TypeName;", library_crate_name),
-                    ],
-                    "forbidden_leaf_examples": [
-                        format!("use {}::data::direction::Direction;", library_crate_name),
-                        format!("use {}::projections::summary::Summary;", library_crate_name),
-                        format!("use {}::contexts::command_input::CommandInputContext;", library_crate_name),
-                        "use crate::data::direction::Direction;".to_string(),
-                    ],
-                    "note": "Generated mod.rs files re-export direct public types. Leaf module paths are private and must not be imported."
-                }),
-            );
-            let context_content = resources.run_context_cache.read_file(&context_file)?;
-            let target_contract = build_contract_artifact(
-                &context_file,
-                &context_content,
-                Some(&output_path),
-                Some(&dependency_context),
-            );
-            let target_contract_validation = validate_contract_artifact(
-                &target_contract,
-                &context_file,
-                &context_content,
-                Some(&dependency_context),
-            );
-            let _ = write_json_report(
-                Path::new("."),
-                "contracts",
-                &output_path,
-                "contract_artifact.json",
-                &target_contract,
-            );
-            let _ = write_json_report(
-                Path::new("."),
-                "contracts",
-                &output_path,
-                "contract_validation_report.json",
-                &target_contract_validation,
-            );
-            if let Some(target_type_name) = infer_target_type_name(
-                &context_file,
-                &workspace.specifications_root,
-                &workspace.drafts_root,
-            )? {
-                dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
-            }
-            let planning_estimated = planner
-                .estimate_request_tokens(
-                    &context_content,
-                    compact_agent_dependency_context(&dependency_context),
-                )
-                .unwrap_or(1)
-                .max(1);
-            planning_items.push(StageItem {
-                name: context_name.clone(),
-                estimated: planning_estimated,
-                cache_hit: false,
-                payload: (
-                    context_file,
-                    context_name,
-                    output_path,
-                    dependency_fingerprint,
-                    dependency_context,
-                    context_content,
-                    target_contract,
-                    target_contract_validation,
-                ),
-            });
-        }
-
-        if plan_can_parallel && config.verbose {
-            println!("{}", standard_text("Parallel execution enabled for create_plan"));
-        }
-        let mut planning_progress = ProgressIndicator::new(planning_items.len());
-        let planner_clone = planner.clone();
-        let planning_usage_reporter = resources.usage_reporter.clone();
-        let planning_results = run_stage_items(
-            planning_items,
-            plan_can_parallel,
-            &mut planning_progress,
-            &resources,
-            config,
-            move |(
-                context_file,
-                context_name,
-                output_path,
-                dependency_fingerprint,
-                dependency_context,
-                context_content,
-                target_contract,
-                target_contract_validation,
-            ),
-                  execution_control| {
-                let planner = planner_clone.clone();
-                let planning_usage_reporter = planning_usage_reporter.clone();
-                async move {
-                    let (implementation_plan, plan_validation) = generate_execution_plan_with_agent(
-                        &planner,
-                        PlanKind::Implementation,
+                for node in unit.nodes {
+                    let context_file = resolve_implementation_context_file(&node.input_path)?;
+                    let context_name = node.name.clone();
+                    let output_path = determine_implementation_output_path(
                         &context_file,
-                        &context_name,
-                        &context_content,
-                        std::slice::from_ref(&output_path),
-                        &dependency_context,
-                        None,
-                        token_limit,
-                        clear_cache,
-                        execution_control,
-                        &planning_usage_reporter,
-                    )
-                    .await?;
-                    Ok((
-                        context_file,
-                        context_name,
-                        output_path,
-                        dependency_fingerprint,
-                        dependency_context,
-                        context_content,
-                        target_contract,
-                        target_contract_validation,
-                        implementation_plan,
-                        plan_validation,
-                    ))
-                }
-            },
-        )
-        .await?;
+                        &specifications_dir,
+                    )?;
 
-        let mut runnable = Vec::new();
-        for (context_name, result) in planning_results {
-            match result {
-                Ok((
-                    context_file,
-                    _planned_name,
-                    output_path,
-                    dependency_fingerprint,
-                    mut dependency_context,
-                    context_content,
-                    target_contract,
-                    target_contract_validation,
-                    implementation_plan,
-                    plan_validation,
-                )) => {
+                    if has_unfinished_specification(&context_file, &context_name, "implementation")?
+                    {
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .start_item(&context_name, None);
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .complete_item(&context_name, false);
+                        unit_results.push(ImplNodeResult::Failure {
+                            context_name,
+                            error: anyhow::anyhow!("unfinished specification"),
+                            unfinished_specification: true,
+                        });
+                        break;
+                    }
+
+                    let (fingerprint_primary_root, fingerprint_fallback_root) =
+                        if node.input_path.starts_with(&specifications_root) {
+                            (&specifications_dir, Some(drafts_dir.as_str()))
+                        } else {
+                            (&drafts_dir, None)
+                        };
+
+                    let mut dependency_context = build_dependency_context(
+                        &node,
+                        fingerprint_primary_root,
+                        fingerprint_fallback_root,
+                        &resources.run_context_cache,
+                    )?;
+                    dependency_context.insert(
+                        "library_crate_name".to_string(),
+                        json!(library_crate_name.clone()),
+                    );
+                    dependency_context.insert(
+                        "public_import_guidance".to_string(),
+                        json!({
+                            "library_crate_name": library_crate_name.clone(),
+                            "library_import_roots": [
+                                "<crate>::TypeName",
+                                "<crate>::data::TypeName",
+                                "<crate>::projections::TypeName",
+                                "<crate>::contexts::TypeName",
+                            ],
+                            "main_import_examples": [
+                                format!("use {}::TypeName;", library_crate_name),
+                                format!("use {}::data::TypeName;", library_crate_name),
+                                format!("use {}::projections::TypeName;", library_crate_name),
+                                format!("use {}::contexts::TypeName;", library_crate_name),
+                            ],
+                            "forbidden_leaf_examples": [
+                                format!("use {}::data::direction::Direction;", library_crate_name),
+                                format!("use {}::projections::summary::Summary;", library_crate_name),
+                                format!("use {}::contexts::command_input::CommandInputContext;", library_crate_name),
+                                "use crate::data::direction::Direction;".to_string(),
+                            ],
+                            "note": "Generated mod.rs files re-export direct public types. Leaf module paths are private and must not be imported."
+                        }),
+                    );
+
+                    let context_content = resources.run_context_cache.read_file(&context_file)?;
+                    let target_contract = build_contract_artifact(
+                        &context_file,
+                        &context_content,
+                        Some(&output_path),
+                        Some(&dependency_context),
+                    );
+                    let target_contract_validation = validate_contract_artifact(
+                        &target_contract,
+                        &context_file,
+                        &context_content,
+                        Some(&dependency_context),
+                    );
+                    let _ = write_json_report(
+                        Path::new("."),
+                        "contracts",
+                        &output_path,
+                        "contract_artifact.json",
+                        &target_contract,
+                    );
+                    let _ = write_json_report(
+                        Path::new("."),
+                        "contracts",
+                        &output_path,
+                        "contract_validation_report.json",
+                        &target_contract_validation,
+                    );
+                    if let Some(target_type_name) =
+                        infer_target_type_name(&context_file, &specifications_root, &drafts_root)?
+                    {
+                        dependency_context
+                            .insert("target_type_name".to_string(), json!(target_type_name));
+                    }
+
+                    let behavior_contract = analyze_specification(
+                        &context_file,
+                        &context_content,
+                        Some(&dependency_context),
+                    )
+                    .contract;
+
+                    dependency_context.insert(
+                        "contract_artifact".to_string(),
+                        contract_artifact_to_context_value(&target_contract),
+                    );
+                    dependency_context.insert(
+                        "behavior_contract".to_string(),
+                        contract_to_context_value(&behavior_contract),
+                    );
+                    let dependency_context =
+                        prune_implementation_prompt_context(dependency_context);
+                    let dependency_fingerprint =
+                        implementation_dependency_fingerprint_from_context(&dependency_context)?;
+                    let needs_update = if clear_cache {
+                        true
+                    } else {
+                        tracker.needs_update(
+                            Stage::Implementation,
+                            &context_name,
+                            &context_file,
+                            &output_path,
+                            &dependency_fingerprint,
+                        )?
+                    };
+
+                    if !needs_update {
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .start_item_up_to_date(&context_name);
+                        log_build_tracker_skip(cfg.verbose, "implementation", &context_name);
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .complete_item(&context_name, true);
+                        unit_results.push(ImplNodeResult::UpToDate);
+                        continue;
+                    }
+
+                    let impl_executor = select_implementation_executor(
+                        &context_file,
+                        &specifications_dir,
+                        &data_executor,
+                        &projection_executor,
+                        &context_executor,
+                    );
+                    let impl_agent_name =
+                        determine_implementation_agent(&context_file, &specifications_dir)
+                            .to_string();
+                    let cached_execution_context = if clear_cache {
+                        None
+                    } else {
+                        find_cached_context_variant(
+                            impl_executor,
+                            &context_content,
+                            dependency_context.clone(),
+                        )?
+                    };
+
+                    let (implementation_plan, plan_validation) =
+                        if matches!(behavior_contract.kind, SpecificationKind::Data)
+                            || cached_execution_context.is_some()
+                        {
+                            let implementation_plan = build_default_plan(
+                                PlanKind::Implementation,
+                                &context_file,
+                                &context_content,
+                                std::slice::from_ref(&output_path),
+                                &dependency_context,
+                                None,
+                            );
+                            let plan_validation = validate_plan(
+                                &implementation_plan,
+                                &behavior_contract,
+                                std::slice::from_ref(&output_path),
+                            );
+                            (implementation_plan, plan_validation)
+                        } else {
+                            let _plan_guard = serial_gates.acquire("create_plan").await;
+                            generate_execution_plan_with_agent(
+                                &planner,
+                                PlanKind::Implementation,
+                                &context_file,
+                                &context_name,
+                                &context_content,
+                                std::slice::from_ref(&output_path),
+                                &dependency_context,
+                                None,
+                                token_limit,
+                                clear_cache,
+                                resources.execution_control.clone(),
+                                &resources.usage_reporter,
+                            )
+                            .await?
+                        };
+
                     let _ = write_json_report(
                         Path::new("."),
                         "planning",
@@ -2154,8 +2453,18 @@ pub async fn create_implementation(
                         "plan_validation_report.json",
                         &plan_validation,
                     );
-                    if !plan_validation.ok {
-                        progress.complete_item(&context_name, false);
+                    let require_plan_validation =
+                        matches!(behavior_contract.kind, SpecificationKind::Data)
+                            || cached_execution_context.is_none();
+                    if require_plan_validation && !plan_validation.ok {
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .start_item(&context_name, None);
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .complete_item(&context_name, false);
                         eprintln!("{}", error_tag("plan:validation"));
                         eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
                         eprintln!("  Planning validation failed for '{}'.", context_name);
@@ -2164,124 +2473,64 @@ pub async fn create_implementation(
                             eprintln!("  - {}", issue);
                         }
                         eprintln!();
-                        continue;
+                        unit_results.push(ImplNodeResult::Failure {
+                            context_name,
+                            error: anyhow::anyhow!("planning validation failed"),
+                            unfinished_specification: false,
+                        });
+                        break;
                     }
 
-                    let contract = analyze_specification(
-                        &context_file,
-                        &context_content,
-                        Some(&dependency_context),
-                    )
-                    .contract;
-                    dependency_context.insert(
-                        "contract_artifact".to_string(),
-                        contract_artifact_to_context_value(&target_contract),
-                    );
-                    dependency_context.insert(
-                        "contract_validation".to_string(),
-                        contract_validation_to_context_value(&target_contract_validation),
-                    );
-                    dependency_context.insert(
-                        "behavior_contract".to_string(),
-                        contract_to_context_value(&contract),
-                    );
-                    dependency_context.insert(
+                    let mut execution_context = if let Some((cached_context, _estimated)) =
+                        cached_execution_context.clone()
+                    {
+                        cached_context
+                    } else {
+                        dependency_context
+                    };
+                    execution_context.insert(
                         "implementation_plan".to_string(),
                         plan_to_context_value(&implementation_plan),
                     );
-                    dependency_context.insert(
-                        "plan_validation".to_string(),
-                        validation_to_context_value(&plan_validation),
-                    );
-                    let compact_dependency_context =
-                        compact_agent_dependency_context(&dependency_context);
-                    let impl_executor = select_implementation_executor(
-                        &context_file,
-                        &workspace.specifications_dir,
-                        &data_executor,
-                        &projection_executor,
-                        &context_executor,
-                    );
-                    let (dependency_context, estimated) = fit_context_to_token_limit(
-                        impl_executor,
-                        &context_content,
-                        compact_dependency_context,
-                        token_limit,
-                    )?;
-                    let cache_hit = if clear_cache {
-                        false
-                    } else {
-                        impl_executor
-                            .is_cache_hit(&context_content, dependency_context.clone())
-                            .unwrap_or(false)
-                    };
-                    runnable.push(StageItem {
-                        name: context_name.clone(),
-                        estimated,
-                        cache_hit,
-                        payload: (
-                            context_file,
-                            context_name,
-                            output_path,
-                            dependency_fingerprint,
-                            implementation_plan,
-                            dependency_context,
-                            context_content,
-                            estimated,
-                            impl_executor.clone(),
-                        ),
-                    });
-                }
-                Err(e) => {
-                    if e.to_string().contains("unfinished specification") {
-                        had_unspecified = true;
-                    }
-                    progress.complete_item(&context_name, false);
-                    eprintln!(
-                        "{}",
-                        error_text(format!(
-                            "✗ Failed to create implementation plan for {}: {}",
-                            context_name, e
-                        ))
-                    );
-                }
-            }
-        }
+                    let (execution_context, estimated, cache_hit) =
+                        if let Some((cached_context, cached_estimated)) = cached_execution_context {
+                            let mut cached_context = cached_context;
+                            cached_context.insert(
+                                "implementation_plan".to_string(),
+                                plan_to_context_value(&implementation_plan),
+                            );
+                            (cached_context, cached_estimated, true)
+                        } else {
+                            let (dependency_context, estimated) = fit_context_to_token_limit(
+                                impl_executor,
+                                &context_content,
+                                execution_context,
+                                token_limit,
+                            )?;
+                            (dependency_context, estimated, false)
+                        };
 
-        if can_parallel && config.verbose {
-            println!(
-                "{}",
-                standard_text("Parallel execution enabled for create_implementation")
-            );
-        }
-        let cfg = config.clone();
-        let specifications_dir = workspace.specifications_dir.clone();
-        let implementation_usage_reporter = resources.usage_reporter.clone();
-        let results = run_stage_items(
-            runnable,
-            can_parallel,
-            &mut progress,
-            &resources,
-            config,
-            move |(
-                context_file,
-                context_name,
-                output_path,
-                dependency_fingerprint,
-                implementation_plan,
-                dependency_context,
-                context_content,
-                estimated,
-                item_executor,
-            ),
-                  execution_control| {
-                let executor = item_executor;
-                let cfg = cfg.clone();
-                let specifications_dir = specifications_dir.clone();
-                let implementation_usage_reporter = implementation_usage_reporter.clone();
-                async move {
-                    process_implementation(
-                        &executor,
+                    if cache_hit {
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .start_item_cached(&context_name);
+                        log_agent_response_cache_hit(
+                            cfg.verbose,
+                            "implementation",
+                            &context_name,
+                            &impl_agent_name,
+                        );
+                    } else {
+                        progress
+                            .lock()
+                            .expect("progress mutex should not be poisoned")
+                            .start_item(&context_name, Some(estimated));
+                    }
+
+                    let _impl_guard = serial_gates.acquire(&impl_agent_name).await;
+                    match process_implementation(
+                        impl_executor,
                         &context_content,
                         &context_file,
                         &context_name,
@@ -2289,61 +2538,121 @@ pub async fn create_implementation(
                         &cfg,
                         clear_cache,
                         &implementation_plan,
-                        dependency_context,
-                        execution_control,
-                        &implementation_usage_reporter,
+                        execution_context,
+                        resources.execution_control.clone(),
+                        &resources.usage_reporter,
                         estimated,
                     )
-                    .await?;
-                    Ok((context_file, output_path, dependency_fingerprint))
+                    .await
+                    {
+                        Ok(_) => {
+                            progress
+                                .lock()
+                                .expect("progress mutex should not be poisoned")
+                                .complete_item(&context_name, true);
+                            unit_results.push(ImplNodeResult::Success {
+                                context_name,
+                                context_file,
+                                output_path,
+                                dependency_fingerprint,
+                            });
+                        }
+                        Err(error) => {
+                            let unfinished =
+                                error.to_string().contains("unfinished specification");
+                            progress
+                                .lock()
+                                .expect("progress mutex should not be poisoned")
+                                .complete_item(&context_name, false);
+                            unit_results.push(ImplNodeResult::Failure {
+                                context_name,
+                                error,
+                                unfinished_specification: unfinished,
+                            });
+                            break;
+                        }
+                    }
                 }
-            },
-        )
-        .await?;
 
-        for (context_name, result) in results {
-            match result {
-                Ok((context_file, output_path, dependency_fingerprint)) => {
-                    tracker.record(
-                        Stage::Implementation,
-                        &context_name,
-                        &context_file,
-                        &output_path,
-                        &dependency_fingerprint,
-                    )?;
-                    tracker.save()?;
-                    updated_count += 1;
-                    updated_in_run.insert(context_name.clone());
-                    recent_generated_files.push(output_path.clone());
-                    progress.complete_item(&context_name, true);
-                    if config.verbose {
-                        println!(
-                            "{}",
-                            success_text(format!(
-                                "✓ Successfully created implementation for {}",
-                                context_name
-                            ))
-                        );
+                Ok(unit_results)
+            }
+        },
+    )
+    .await?;
+
+    for (_unit_id, result) in results {
+        match result {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        ImplNodeResult::UpToDate => {}
+                        ImplNodeResult::Success {
+                            context_name,
+                            context_file,
+                            output_path,
+                            dependency_fingerprint,
+                        } => {
+                            tracker.record(
+                                Stage::Implementation,
+                                &context_name,
+                                &context_file,
+                                &output_path,
+                                &dependency_fingerprint,
+                            )?;
+                            tracker.save()?;
+                            updated_count += 1;
+                            recent_generated_files.push(output_path.clone());
+                            if config.verbose {
+                                println!(
+                                    "{}",
+                                    success_text(format!(
+                                        "✓ Successfully created implementation for {}",
+                                        context_name
+                                    ))
+                                );
+                            }
+                        }
+                        ImplNodeResult::Failure {
+                            context_name,
+                            error,
+                            unfinished_specification,
+                        } => {
+                            had_failures = true;
+                            if unfinished_specification {
+                                had_unspecified = true;
+                            }
+                            eprintln!(
+                                "{}",
+                                error_text(format!(
+                                    "✗ Failed to create implementation for {}: {}",
+                                    context_name, error
+                                ))
+                            );
+                        }
                     }
-                }
-                Err(e) => {
-                    if e.to_string().contains("unfinished specification") {
-                        had_unspecified = true;
-                    }
-                    progress.complete_item(&context_name, false);
-                    eprintln!(
-                        "{}",
-                        error_text(format!(
-                            "✗ Failed to create implementation for {}: {}",
-                            context_name, e
-                        ))
-                    );
                 }
             }
+            Err(error) => anyhow::bail!("{}", error),
         }
     }
 
-    // Always compile after generation. Auto-fix is opt-in via --fix.
+    if had_unspecified {
+        progress
+            .lock()
+            .expect("progress mutex should not be poisoned")
+            .finish();
+        anyhow::bail!("Unfinished specifications were detected. Aborting.");
+    }
+
+    if had_failures {
+        progress
+            .lock()
+            .expect("progress mutex should not be poisoned")
+            .finish();
+        anyhow::bail!("Implementation generation failed. Skipping compilation and compile-fix.");
+    }
+
+    // Compile only after successful generation. Auto-fix is opt-in via --fix.
     if fix {
         let artifact_root = workspace.artifact_workspace_root();
         compilation_fix::ensure_compiles_with_auto_fix(
@@ -2366,17 +2675,16 @@ pub async fn create_implementation(
         cargo_commands::compile(config).await?;
     }
 
-    progress.finish();
+    progress
+        .lock()
+        .expect("progress mutex should not be poisoned")
+        .finish();
 
     if updated_count == 0 && config.verbose && !had_unspecified {
         println!("{}", standard_text("All implementations are up to date"));
     }
 
-    if had_unspecified {
-        anyhow::bail!("Unfinished specifications were detected. Aborting.");
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 
 async fn process_implementation(
@@ -2405,29 +2713,102 @@ async fn process_implementation(
         return Ok(());
     }
 
-    // Use conversational execution to handle questions
-    let impl_result = execute_tracked_agent_conversation(
-        executor,
-        &context_content,
-        context_name,
-        additional_context,
-        execution_control,
-        ignore_cache_reads,
-        reporter,
-        UsageScope::new("implementation", context_name)
-            .with_path(context_file.display().to_string())
-            .with_estimated_input_tokens(estimated_tokens),
-    )
-    .await?;
+    let mut additional_context = additional_context;
 
-    finalize_implementation_output(
-        context_file,
-        context_name,
-        specifications_dir,
-        config,
-        implementation_plan,
-        impl_result,
-    )
+    for verifier_retry in 0..=IMPLEMENTATION_VERIFIER_RETRY_LIMIT {
+        let impl_result = execute_tracked_agent_conversation(
+            executor,
+            context_content,
+            context_name,
+            additional_context.clone(),
+            execution_control.clone(),
+            ignore_cache_reads || verifier_retry > 0,
+            reporter,
+            UsageScope::new("implementation", context_name)
+                .with_path(context_file.display().to_string())
+                .with_estimated_input_tokens(estimated_tokens),
+        )
+        .await?;
+
+        let previous_output = extract_code_from_output(&impl_result, context_name);
+        match finalize_implementation_output(
+            context_file,
+            context_name,
+            specifications_dir,
+            config,
+            implementation_plan,
+            impl_result,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(FinalizeImplementationError::Verification { verifier_report })
+                if verifier_retry < IMPLEMENTATION_VERIFIER_RETRY_LIMIT =>
+            {
+                eprintln!(
+                    "{}",
+                    warning_text(format!(
+                        "Retrying implementation for {} after verifier feedback ({}/{})",
+                        context_name,
+                        verifier_retry + 1,
+                        IMPLEMENTATION_VERIFIER_RETRY_LIMIT
+                    ))
+                );
+                additional_context.insert("previous_output".to_string(), json!(previous_output));
+                additional_context.insert(
+                    "verifier_feedback".to_string(),
+                    build_implementation_verifier_feedback(
+                        context_name,
+                        verifier_retry + 1,
+                        &verifier_report,
+                    ),
+                );
+            }
+            Err(error) => return Err(error.into_anyhow()),
+        }
+    }
+
+    unreachable!("implementation verifier retry loop should return on success or terminal failure")
+}
+
+#[derive(Debug)]
+enum FinalizeImplementationError {
+    Verification {
+        verifier_report: StaticBehaviorVerifierReport,
+    },
+    Failure(anyhow::Error),
+}
+
+impl FinalizeImplementationError {
+    fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            Self::Verification { verifier_report } => anyhow::anyhow!(
+                "Generated implementation for '{}' failed behavioral verification",
+                verifier_report.contract.title
+            ),
+            Self::Failure(error) => error,
+        }
+    }
+}
+
+fn build_implementation_verifier_feedback(
+    context_name: &str,
+    attempt: usize,
+    verifier_report: &StaticBehaviorVerifierReport,
+) -> serde_json::Value {
+    json!({
+        "artifact": context_name,
+        "attempt": attempt,
+        "output_path": verifier_report.output_path,
+        "errors": verifier_report.errors,
+        "warnings": verifier_report.warnings,
+        "high_risk_findings": verifier_report.high_risk_findings,
+        "evidence": verifier_report.evidence,
+        "revision_instructions": [
+            "Revise the previous output instead of starting over.",
+            "Fix every verifier error and high-risk finding before returning the final Rust file.",
+            "Do not add external crates unless they already appear in input.resolved_dependency_plan or input.scaffold_dependencies.",
+            "If you need a custom error type and no crate is authorized, implement it with std traits instead of using thiserror."
+        ]
+    })
 }
 
 fn finalize_implementation_output(
@@ -2437,7 +2818,7 @@ fn finalize_implementation_output(
     config: &Config,
     implementation_plan: &ExecutionPlan,
     impl_result: String,
-) -> Result<()> {
+) -> std::result::Result<(), FinalizeImplementationError> {
     // Extract code from the agent output and write to file
     // The agent output may contain markdown code blocks or raw code
     let code = extract_code_from_output(&impl_result, context_name);
@@ -2456,18 +2837,27 @@ fn finalize_implementation_output(
             eprintln!("  {}", line);
         }
         eprintln!();
+        return Err(FinalizeImplementationError::Failure(anyhow::anyhow!(
+            "Generated implementation for '{}' contains explicit failure marker",
+            context_name
+        )));
     }
 
     // Determine output path preserving folder structure
-    let output_path = determine_implementation_output_path(context_file, specifications_dir)?;
+    let output_path = determine_implementation_output_path(context_file, specifications_dir)
+        .map_err(FinalizeImplementationError::Failure)?;
 
     // Ensure the output directory exists
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).context("Failed to create implementation output directory")?;
+        fs::create_dir_all(parent)
+            .context("Failed to create implementation output directory")
+            .map_err(FinalizeImplementationError::Failure)?;
     }
 
     // Write the implementation file
-    fs::write(&output_path, code).context("Failed to write implementation file")?;
+    fs::write(&output_path, code)
+        .context("Failed to write implementation file")
+        .map_err(FinalizeImplementationError::Failure)?;
 
     if config.verbose {
         println!("✓ Written implementation to: {}", output_path.display());
@@ -2485,7 +2875,8 @@ fn finalize_implementation_output(
         context_file,
         &fs::read_to_string(context_file).unwrap_or_default(),
         &output_path,
-    )?;
+    )
+    .map_err(FinalizeImplementationError::Failure)?;
     let _ = write_json_report(
         Path::new("."),
         "implementation",
@@ -2508,17 +2899,7 @@ fn finalize_implementation_output(
             eprintln!("  - {}", issue);
         }
         eprintln!();
-        return Err(anyhow::anyhow!(
-            "Generated implementation for '{}' failed behavioral verification",
-            context_name
-        ));
-    }
-
-    if implementation_failure.is_some() {
-        return Err(anyhow::anyhow!(
-            "Generated implementation for '{}' contains explicit failure marker",
-            context_name
-        ));
+        return Err(FinalizeImplementationError::Verification { verifier_report });
     }
 
     Ok(())
@@ -2903,6 +3284,7 @@ pub async fn create_tests(
     filter: &CategoryFilter,
     rate_limit: Option<f64>,
     token_limit: Option<f64>,
+    parallel_limit: usize,
     config: &Config,
 ) -> Result<()> {
     let workspace = WorkspaceContext::resolve(config)?;
@@ -2920,12 +3302,12 @@ pub async fn create_tests(
         names_provided,
         filter,
     )?;
-    let execution_levels = build_execution_plan(
+    let execution_dag = build_execution_dag(
         dependency_roots,
         &workspace.specifications_dir,
         Some(&workspace.drafts_dir),
     )?;
-    let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
+    let total_count: usize = execution_dag.units().iter().map(|unit| unit.nodes.len()).sum();
     println!(
         "{}",
         header_text(format!("Creating tests for {} context(s)", total_count))
@@ -2935,33 +3317,22 @@ pub async fn create_tests(
     let can_parallel = executor.can_run_parallel().unwrap_or(false);
 
     let resources = ExecutionResources::new(
-        "create_implementation",
+        "tests",
         workspace.artifact_workspace_root(),
         rate_limit,
         token_limit,
         config.verbose,
     );
 
-    let mut progress = ProgressIndicator::new(total_count);
+    let progress = std::cell::RefCell::new(ProgressIndicator::new(total_count));
     let mut had_unspecified = false;
-    for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
-        if config.verbose {
-            println!(
-                "{}",
-                standard_text(format!(
-                    "Processing dependency level {} ({} item(s))",
-                    level_idx,
-                    level_nodes.len()
-                ))
-            );
-        }
-
-        let mut runnable = Vec::new();
-        for node in level_nodes {
+    let mut prepared = HashMap::new();
+    for unit in execution_dag.units() {
+        for node in &unit.nodes {
             let context_file = node.input_path.clone();
             let context_name = node.name.clone();
             let mut dependency_context = build_dependency_context(
-                &node,
+                node,
                 &workspace.specifications_dir,
                 Some(&workspace.drafts_dir),
                 &resources.run_context_cache,
@@ -2986,41 +3357,90 @@ pub async fn create_tests(
                     .is_cache_hit(&context_content, dependency_context.clone())
                     .unwrap_or(false)
             };
-            runnable.push(StageItem {
-                name: context_name.clone(),
-                estimated,
-                cache_hit,
-                payload: (
-                    context_file,
-                    context_name.clone(),
-                    dependency_context,
-                    context_content,
+            prepared.insert(
+                context_file.clone(),
+                StageItem {
+                    name: context_name,
                     estimated,
-                ),
-            });
+                    cache_hit,
+                    payload: (context_file, dependency_context, context_content, estimated),
+                },
+            );
         }
+    }
 
-        if can_parallel && config.verbose {
-            println!("{}", standard_text("Parallel execution enabled for create_test"));
-        }
-        let cfg = config.clone();
-        let executor_clone = executor.clone();
-        let specifications_dir = workspace.specifications_dir.clone();
-        let usage_reporter = resources.usage_reporter.clone();
-        let results = run_stage_items(
-            runnable,
-            can_parallel,
-            &mut progress,
-            &resources,
-            config,
-            move |(context_file, context_name, dependency_context, context_content, estimated),
-                  execution_control| {
-                let executor = executor_clone.clone();
-                let cfg = cfg.clone();
-                let specifications_dir = specifications_dir.clone();
-                let usage_reporter = usage_reporter.clone();
-                async move {
-                    process_tests(
+    if can_parallel && config.verbose {
+        println!("{}", standard_text("Parallel execution enabled for create_test"));
+    }
+
+    let serial_gates = if can_parallel {
+        SerialAgentGates::default()
+    } else {
+        SerialAgentGates::new(["create_test"])
+    };
+    let cfg = config.clone();
+    let executor_clone = executor.clone();
+    let specifications_dir = workspace.specifications_dir.clone();
+    let usage_reporter = resources.usage_reporter.clone();
+    let execution_control = resources.execution_control.clone();
+    let dag_units = execution_dag.units().to_vec();
+    let prepared_for_launch = prepared.clone();
+    let prepared_for_run = prepared.clone();
+    let results = run_execution_dag_units(
+        &execution_dag,
+        parallel_limit,
+        |unit| {
+            for node in &unit.nodes {
+                if let Some(item) = prepared_for_launch.get(&node.input_path) {
+                    if item.cache_hit {
+                        progress.borrow().start_item_cached(&item.name);
+                        log_agent_response_cache_hit(
+                            config.verbose,
+                            "test generation",
+                            &item.name,
+                            "create_test",
+                        );
+                    } else {
+                        progress.borrow().start_item(&item.name, Some(item.estimated));
+                    }
+                }
+            }
+        },
+        |unit_id, result: &Result<Vec<(String, Result<()>)>>| match result {
+            Ok(entries) => {
+                for (context_name, entry) in entries {
+                    progress.borrow_mut().complete_item(context_name, entry.is_ok());
+                }
+            }
+            Err(_) => {
+                for node in &dag_units[unit_id].nodes {
+                    if let Some(item) = prepared.get(&node.input_path) {
+                        progress.borrow_mut().complete_item(&item.name, false);
+                    }
+                }
+            }
+        },
+        |entries: &Vec<(String, Result<()>)>| entries.iter().all(|(_, entry)| entry.is_ok()),
+        move |unit| {
+            let executor = executor_clone.clone();
+            let cfg = cfg.clone();
+            let specifications_dir = specifications_dir.clone();
+            let usage_reporter = usage_reporter.clone();
+            let execution_control = execution_control.clone();
+            let serial_gates = serial_gates.clone();
+            let prepared = prepared_for_run.clone();
+            async move {
+                let _serial_guard = serial_gates.acquire("create_test").await;
+                let mut unit_results = Vec::new();
+                for node in unit.nodes {
+                    let item = prepared
+                        .get(&node.input_path)
+                        .cloned()
+                        .context("missing prepared test item")?;
+                    let context_name = item.name.clone();
+                    let (context_file, dependency_context, context_content, estimated) =
+                        item.payload;
+                    let result = process_tests(
                         &executor,
                         &context_content,
                         &context_file,
@@ -3029,44 +3449,55 @@ pub async fn create_tests(
                         &cfg,
                         clear_cache,
                         dependency_context,
-                        execution_control,
+                        execution_control.clone(),
                         &usage_reporter,
                         estimated,
                     )
-                    .await
+                    .await;
+                    unit_results.push((context_name, result));
                 }
-            },
-        )
-        .await?;
+                Ok(unit_results)
+            }
+        },
+    )
+    .await?;
 
-        for (context_name, result) in results {
-            match result {
-                Ok(_) => {
-                    progress.complete_item(&context_name, true);
-                    if config.verbose {
-                        println!(
-                            "{}",
-                            success_text(format!(
-                                "✓ Successfully created tests for {}",
-                                context_name
-                            ))
-                        );
+    for (_unit_id, result) in results {
+        match result {
+            Ok(entries) => {
+                for (context_name, entry) in entries {
+                    match entry {
+                        Ok(_) => {
+                            if config.verbose {
+                                println!(
+                                    "{}",
+                                    success_text(format!(
+                                        "✓ Successfully created tests for {}",
+                                        context_name
+                                    ))
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if e.to_string().contains("unfinished specification") {
+                                had_unspecified = true;
+                            }
+                            eprintln!(
+                                "{}",
+                                error_text(format!(
+                                    "✗ Failed to create tests for {}: {}",
+                                    context_name, e
+                                ))
+                            );
+                        }
                     }
-                }
-                Err(e) => {
-                    if e.to_string().contains("unfinished specification") {
-                        had_unspecified = true;
-                    }
-                    progress.complete_item(&context_name, false);
-                    eprintln!(
-                        "{}",
-                        error_text(format!("✗ Failed to create tests for {}: {}", context_name, e))
-                    );
                 }
             }
+            Err(e) => anyhow::bail!("{}", e),
         }
     }
 
+    let progress = progress.into_inner();
     progress.finish();
     if !config.dry_run {
         sync_bdd_cargo_support(config)?;
@@ -3389,7 +3820,7 @@ fn clear_single_agent_cache_entry(
     };
 
     let folder_hash = instructions_model_hash(&instructions, &model.name);
-    let cache_key = agent_response_cache_key(&instructions, input);
+    let cache_key = agent_response_cache_key(agent_name, &instructions, input);
     let cache_path = PathBuf::from(".reen")
         .join(folder_hash)
         .join(format!("{}.cache", cache_key));
@@ -3443,9 +3874,13 @@ fn canonicalize_cache_json_value(v: serde_json::Value) -> serde_json::Value {
     }
 }
 
-fn agent_response_cache_key(agent_instructions: &str, input: &CacheAgentInput) -> String {
+fn agent_response_cache_key(
+    agent_name: &str,
+    agent_instructions: &str,
+    input: &CacheAgentInput,
+) -> String {
     let input_json = serde_json::to_value(input)
-        .map(canonicalize_cache_json_value)
+        .map(|value| normalize_cache_input_value(agent_name, value))
         .and_then(|v| serde_json::to_string(&v))
         .unwrap_or_else(|_| "{}".to_string());
     let mut hasher = Sha256::new();
@@ -3701,6 +4136,17 @@ fn filter_direct_implemented_dependencies(
         .collect()
 }
 
+pub(super) fn full_implementation_dependency_context_enabled() -> bool {
+    env::var("REEN_FULL_IMPLEMENTATION_DEPS")
+        .map(|v| {
+            matches!(
+                v.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn build_dependency_context(
     node: &ExecutionNode,
     primary_root: &str,
@@ -3714,9 +4160,10 @@ fn build_dependency_context(
     let dependency_manifest = build_dependency_manifest(&dependency_closure, &direct_dependencies);
     let direct_dependency_manifest =
         build_dependency_manifest(&direct_dependencies, &direct_dependencies);
+    // Direct dependency manifest only — transitive entries live in `dependency_closure`.
     context.insert(
         "direct_dependencies".to_string(),
-        json!(dependency_manifest.clone()),
+        json!(direct_dependency_manifest.clone()),
     );
     context.insert(
         "direct_dependencies_only".to_string(),
@@ -3726,8 +4173,9 @@ fn build_dependency_context(
         "dependency_closure".to_string(),
         json!(dependency_manifest.clone()),
     );
-    // Backward compatibility with agent prompts that still reference mcp_context
-    context.insert("mcp_context".to_string(), json!(dependency_manifest));
+    if full_implementation_dependency_context_enabled() {
+        context.insert("mcp_context".to_string(), json!(dependency_manifest));
+    }
     context.insert(
         "dependency_fingerprint".to_string(),
         json!(snapshot.dependency_fingerprint),
@@ -3802,6 +4250,45 @@ fn build_dependency_context(
     Ok(context)
 }
 
+fn implementation_prompt_context_keys() -> &'static [&'static str] {
+    &[
+        "direct_dependencies",
+        "dependency_closure",
+        "tooling_symbols",
+        "direct_dependency_contracts",
+        "contract_artifact",
+        "behavior_contract",
+        "resolved_dependency_plan",
+        "scaffold_dependencies",
+        "library_crate_name",
+        "public_import_guidance",
+        "target_type_name",
+        "implementation_plan",
+        "previous_output",
+        "verifier_feedback",
+    ]
+}
+
+fn prune_implementation_prompt_context(
+    mut context: HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    context.retain(|key, _| implementation_prompt_context_keys().contains(&key.as_str()));
+    context
+}
+
+fn implementation_dependency_fingerprint_from_context(
+    context: &HashMap<String, serde_json::Value>,
+) -> Result<String> {
+    let canonical = canonicalize_cache_json_value(serde_json::to_value(
+        prune_implementation_prompt_context(context.clone()),
+    )?);
+    let serialized =
+        serde_json::to_string(&canonical).context("failed to serialize dependency fingerprint")?;
+    let mut hasher = Sha256::new();
+    hasher.update(serialized.as_bytes());
+    Ok(hex::encode(hasher.finalize()))
+}
+
 fn infer_drafts_root(primary_root: &str, fallback_root: Option<&str>) -> Option<PathBuf> {
     let primary = Path::new(primary_root);
     if primary.file_name().and_then(|value| value.to_str()) == Some("drafts") {
@@ -3822,6 +4309,16 @@ fn build_implementation_execution_plan(
     specifications_dir: &str,
     drafts_dir: &str,
 ) -> Result<Vec<Vec<ExecutionNode>>> {
+    Ok(build_implementation_execution_dag(spec_files, filter, specifications_dir, drafts_dir)?
+        .levelize())
+}
+
+fn build_implementation_execution_dag(
+    spec_files: Vec<PathBuf>,
+    filter: &CategoryFilter,
+    specifications_dir: &str,
+    drafts_dir: &str,
+) -> Result<ExecutionDag> {
     let implementation_inputs =
         resolve_implementation_dependency_inputs(spec_files, specifications_dir, drafts_dir)?;
 
@@ -3845,7 +4342,7 @@ fn build_implementation_execution_plan(
     } else {
         expanded_inputs
     };
-    build_execution_plan(filtered_inputs, specifications_dir, Some(drafts_dir))
+    build_execution_dag(filtered_inputs, specifications_dir, Some(drafts_dir))
 }
 
 fn resolve_implementation_dependency_inputs(
@@ -4045,14 +4542,6 @@ fn filter_direct_role_capsules(
         .filter(|capsule| direct_paths.contains(&capsule.spec_path))
         .cloned()
         .collect()
-}
-
-fn compact_agent_dependency_context(
-    context: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, serde_json::Value> {
-    let mut compact = context.clone();
-    compact.remove("dependency_tool_context");
-    compact
 }
 
 pub async fn capabilities_init(use_agent: bool, force: bool, config: &Config) -> Result<()> {
@@ -4611,6 +5100,11 @@ fn resolve_input_files(
             files.extend(collect_md_files_recursive(&apis_dir, extension)?);
         }
 
+        if filter.include_projections() {
+            let projections_dir = dir_path.join("projections");
+            files.extend(collect_md_files_recursive(&projections_dir, extension)?);
+        }
+
         if filter.include_root() {
             let entries =
                 fs::read_dir(&dir_path).context(format!("Failed to read {} directory", dir))?;
@@ -4669,6 +5163,18 @@ fn resolve_input_files(
                 }
             }
 
+            if !found && filter.include_projections() {
+                let projection_matches = resolve_named_input_in_category(
+                    &dir_path.join("projections"),
+                    &name,
+                    extension,
+                )?;
+                if !projection_matches.is_empty() {
+                    files.extend(projection_matches);
+                    found = true;
+                }
+            }
+
             if !found && filter.include_root() {
                 let root_path = dir_path.join(format!("{}.{}", name, extension));
                 if root_path.exists() {
@@ -4680,15 +5186,20 @@ fn resolve_input_files(
             if !found {
                 let searched = match (
                     filter.include_data(),
+                    filter.include_projections(),
                     filter.include_contexts(),
                     filter.include_root(),
                 ) {
-                    (true, true, true) => "data/, contexts/, and root",
-                    (true, true, false) => "data/ and contexts/",
-                    (true, false, false) => "data/",
-                    (false, true, false) => "contexts/",
-                    (false, false, true) => "root",
-                    _ => "data/, contexts/, and root",
+                    (true, true, true, true) => "data/, projections/, contexts/, and root",
+                    (true, true, true, false) => "data/, projections/, and contexts/",
+                    (true, true, false, false) => "data/ and projections/",
+                    (true, false, true, false) => "data/ and contexts/",
+                    (false, true, true, false) => "projections/ and contexts/",
+                    (true, false, false, false) => "data/",
+                    (false, true, false, false) => "projections/",
+                    (false, false, true, false) => "contexts/",
+                    (false, false, false, true) => "root",
+                    _ => "data/, projections/, contexts/, and root",
                 };
                 eprintln!(
                     "Warning: File not found: {}.{} (searched in {})",
@@ -5324,15 +5835,20 @@ mod tests {
         external_generated_data_output_path, extract_actionable_blocking_bullets_for_path,
         extract_compile_error_message, generated_project_structure_paths, parse_generated_files,
         primary_stage_agents, resolve_implementation_dependency_inputs, resolve_input_files,
-        sync_managed_block,
+        run_execution_dag_units, sync_managed_block,
     };
-    use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
+    use super::pipeline_quality::{analyze_specification, SpecificationKind};
+    use crate::cli::dependency_graph::{
+        DependencyArtifact, DependencySource, ExecutionUnit, build_execution_dag,
+    };
     use crate::cli::project_structure::ProjectInfo;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::time::{Duration, timeout};
 
     fn temp_root(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -5345,6 +5861,14 @@ mod tests {
     fn cwd_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unit_label(unit: &ExecutionUnit) -> String {
+        unit.nodes
+            .iter()
+            .map(|node| node.name.clone())
+            .collect::<Vec<_>>()
+            .join("+")
     }
 
     #[test]
@@ -5585,6 +6109,7 @@ Problem:
         fs::create_dir_all(drafts.join("external_apis")).expect("mkdir");
         fs::create_dir_all(drafts.join("apis")).expect("mkdir");
         fs::create_dir_all(drafts.join("data/payments")).expect("mkdir");
+        fs::create_dir_all(drafts.join("projections")).expect("mkdir");
         fs::write(
             drafts.join("contexts/ui/terminal_renderer.md"),
             "# Terminal Renderer",
@@ -5592,6 +6117,11 @@ Problem:
         .expect("write");
         fs::write(drafts.join("external_apis/stripe.md"), "# Stripe API").expect("write");
         fs::write(drafts.join("apis/aisstream.md"), "# AISStream API").expect("write");
+        fs::write(
+            drafts.join("projections/account_summary.md"),
+            "# Account Summary",
+        )
+        .expect("write");
         fs::write(
             drafts.join("data/payments/ledger_entry.md"),
             "# Ledger Entry",
@@ -5611,6 +6141,7 @@ Problem:
         );
         assert!(all.iter().any(|p| p.ends_with("external_apis/stripe.md")));
         assert!(all.iter().any(|p| p.ends_with("apis/aisstream.md")));
+        assert!(all.iter().any(|p| p.ends_with("projections/account_summary.md")));
         assert!(
             all.iter()
                 .any(|p| p.ends_with("data/payments/ledger_entry.md"))
@@ -5668,6 +6199,20 @@ Problem:
         assert_eq!(by_nested_name.len(), 1);
         assert!(by_nested_name[0].ends_with("data/payments/ledger_entry.md"));
 
+        let projection_only = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["account_summary".to_string()],
+            "md",
+            &CategoryFilter {
+                contexts: false,
+                projections: true,
+                data: false,
+            },
+        )
+        .expect("projection lookup");
+        assert_eq!(projection_only.len(), 1);
+        assert!(projection_only[0].ends_with("projections/account_summary.md"));
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -5676,6 +6221,14 @@ Problem:
         assert_eq!(
             determine_specification_agent(Path::new("drafts/app.md"), "drafts"),
             "create_specifications_context"
+        );
+    }
+
+    #[test]
+    fn routes_projection_drafts_to_projection_specification_agent() {
+        assert_eq!(
+            determine_specification_agent(Path::new("drafts/projections/account_summary.md"), "drafts"),
+            "create_specifications_projection"
         );
     }
 
@@ -5917,8 +6470,46 @@ fn main() {}
         };
 
         assert_eq!(
-            agent_response_cache_key("instructions", &input_a),
-            agent_response_cache_key("instructions", &input_b)
+            agent_response_cache_key("create_specifications_context", "instructions", &input_a),
+            agent_response_cache_key("create_specifications_context", "instructions", &input_b)
+        );
+    }
+
+    #[test]
+    fn implementation_agent_cache_key_ignores_planning_fields() {
+        let mut additional_a = HashMap::new();
+        additional_a.insert("behavior_contract".to_string(), serde_json::json!({"kind": "Context"}));
+        additional_a.insert(
+            "implementation_plan".to_string(),
+            serde_json::json!({"tasks": ["first"]}),
+        );
+        additional_a.insert("plan_validation".to_string(), serde_json::json!({"ok": true}));
+
+        let mut additional_b = HashMap::new();
+        additional_b.insert("behavior_contract".to_string(), serde_json::json!({"kind": "Context"}));
+        additional_b.insert(
+            "implementation_plan".to_string(),
+            serde_json::json!({"tasks": ["second"]}),
+        );
+        additional_b.insert(
+            "plan_validation".to_string(),
+            serde_json::json!({"ok": false, "errors": ["x"]}),
+        );
+
+        let input_a = CacheAgentInput {
+            draft_content: None,
+            context_content: Some("spec".to_string()),
+            additional: additional_a,
+        };
+        let input_b = CacheAgentInput {
+            draft_content: None,
+            context_content: Some("spec".to_string()),
+            additional: additional_b,
+        };
+
+        assert_eq!(
+            agent_response_cache_key("create_implementation_context", "instructions", &input_a),
+            agent_response_cache_key("create_implementation_context", "instructions", &input_b)
         );
     }
 
@@ -5978,5 +6569,269 @@ fn main() {}
             ),
             "create_implementation_context"
         );
+    }
+
+    #[test]
+    fn data_specifications_infer_data_kind_for_default_implementation_plan() {
+        let data_spec = r#"# Amount
+## Description
+Payment amount.
+## Fields
+- value: numeric
+"#;
+        let report = analyze_specification(
+            Path::new("specifications/data/amount.md"),
+            data_spec,
+            None,
+        );
+        assert!(matches!(report.contract.kind, SpecificationKind::Data));
+
+        let projection_spec = r#"# Summary
+## Purpose
+Read model.
+## Role Players
+- ledger: reads balances
+## Props
+- id: Id
+## Functionalities
+- total: returns money
+"#;
+        let report = analyze_specification(
+            Path::new("specifications/projections/account_summary.md"),
+            projection_spec,
+            None,
+        );
+        assert!(!matches!(report.contract.kind, SpecificationKind::Data));
+    }
+
+    #[tokio::test]
+    async fn eager_scheduler_releases_dependent_unit_before_unrelated_slow_unit_finishes() {
+        let root = temp_root("eager_scheduler");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir data");
+
+        let amount = drafts.join("data/amount.md");
+        let account = drafts.join("contexts/account.md");
+        let slow_branch = drafts.join("contexts/slow_branch.md");
+        fs::write(&amount, "# Amount").expect("write amount");
+        fs::write(&account, "Depends on: amount").expect("write account");
+        fs::write(&slow_branch, "# Slow Branch").expect("write slow branch");
+
+        let selected = super::expand_with_transitive_dependencies(
+            vec![account.clone(), slow_branch.clone()],
+            drafts.to_str().expect("drafts path"),
+            None,
+        )
+        .expect("expanded inputs");
+        let dag =
+            build_execution_dag(selected, drafts.to_str().expect("drafts path"), None).expect("dag");
+
+        let launched = Arc::new(Mutex::new(Vec::<String>::new()));
+        let account_started = Arc::new(AtomicBool::new(false));
+
+        let launched_log = launched.clone();
+        let results = timeout(
+            Duration::from_secs(1),
+            run_execution_dag_units(
+                &dag,
+                2,
+                move |unit| {
+                    launched_log
+                        .lock()
+                        .expect("launch log mutex")
+                        .push(unit_label(unit));
+                },
+                |_unit_id, _result| {},
+                |_result: &String| true,
+                {
+                    let account_started = account_started.clone();
+                    move |unit| {
+                        let account_started = account_started.clone();
+                        async move {
+                            let label = unit_label(&unit);
+                            if label == "amount" {
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            } else if label == "slow_branch" {
+                                while !account_started.load(Ordering::SeqCst) {
+                                    tokio::time::sleep(Duration::from_millis(5)).await;
+                                }
+                            } else if label == "account" {
+                                account_started.store(true, Ordering::SeqCst);
+                            }
+                            Ok(label)
+                        }
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("scheduler should not deadlock")
+        .expect("scheduler run");
+
+        let launched = launched.lock().expect("launch log mutex");
+        assert!(launched.iter().any(|label| label == "account"));
+        assert_eq!(results.len(), 3);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn eager_scheduler_does_not_release_dependents_after_failure() {
+        let root = temp_root("scheduler_failure");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir data");
+
+        let amount = drafts.join("data/amount.md");
+        let account = drafts.join("contexts/account.md");
+        fs::write(&amount, "# Amount").expect("write amount");
+        fs::write(&account, "Depends on: amount").expect("write account");
+
+        let selected = super::expand_with_transitive_dependencies(
+            vec![account.clone()],
+            drafts.to_str().expect("drafts path"),
+            None,
+        )
+        .expect("expanded inputs");
+        let dag =
+            build_execution_dag(selected, drafts.to_str().expect("drafts path"), None).expect("dag");
+
+        let launched = Arc::new(Mutex::new(Vec::<String>::new()));
+        let launched_log = launched.clone();
+        let results = run_execution_dag_units(
+            &dag,
+            2,
+            move |unit| {
+                launched_log
+                    .lock()
+                    .expect("launch log mutex")
+                    .push(unit_label(unit));
+            },
+            |_unit_id, _result| {},
+            |_result: &String| true,
+            move |unit| async move {
+                let label = unit_label(&unit);
+                if label == "amount" {
+                    Err(anyhow::anyhow!("simulated failure"))
+                } else {
+                    Ok(label)
+                }
+            },
+        )
+        .await
+        .expect("scheduler run");
+
+        let launched = launched.lock().expect("launch log mutex");
+        assert_eq!(launched.as_slice(), ["amount"]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn eager_scheduler_keeps_scc_units_atomic() {
+        let root = temp_root("scheduler_scc");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+
+        let left = drafts.join("contexts/left.md");
+        let right = drafts.join("contexts/right.md");
+        let app = drafts.join("app.md");
+        fs::write(&left, "Depends on: right").expect("write left");
+        fs::write(&right, "Depends on: left").expect("write right");
+        fs::write(&app, "Depends on: left").expect("write app");
+
+        let selected = super::expand_with_transitive_dependencies(
+            vec![app.clone()],
+            drafts.to_str().expect("drafts path"),
+            None,
+        )
+        .expect("expanded inputs");
+        let dag =
+            build_execution_dag(selected, drafts.to_str().expect("drafts path"), None).expect("dag");
+        assert_eq!(dag.units().len(), 2);
+        assert!(dag.units().iter().any(|unit| unit.nodes.len() == 2));
+
+        let cycle_completed = Arc::new(AtomicBool::new(false));
+        let results = run_execution_dag_units(
+            &dag,
+            2,
+            |_unit| {},
+            |_unit_id, _result| {},
+            |_result: &String| true,
+            {
+                let cycle_completed = cycle_completed.clone();
+                move |unit| {
+                    let cycle_completed = cycle_completed.clone();
+                    async move {
+                        if unit.nodes.len() == 2 {
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                            cycle_completed.store(true, Ordering::SeqCst);
+                            Ok(unit_label(&unit))
+                        } else {
+                            if !cycle_completed.load(Ordering::SeqCst) {
+                                anyhow::bail!("dependent launched before SCC completed");
+                            }
+                            Ok(unit_label(&unit))
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("scheduler run");
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(_, result)| result.is_ok()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn eager_scheduler_respects_parallel_limit() {
+        let root = temp_root("scheduler_parallel_limit");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir data");
+
+        let selected = ["a", "b", "c", "d"]
+            .into_iter()
+            .map(|name| {
+                let path = drafts.join("data").join(format!("{name}.md"));
+                fs::write(&path, format!("# {name}")).expect("write data draft");
+                path
+            })
+            .collect::<Vec<_>>();
+        let dag =
+            build_execution_dag(selected, drafts.to_str().expect("drafts path"), None).expect("dag");
+
+        let current = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let results = run_execution_dag_units(
+            &dag,
+            2,
+            |_unit| {},
+            |_unit_id, _result| {},
+            |_result: &String| true,
+            {
+                let current = current.clone();
+                let peak = peak.clone();
+                move |unit| {
+                    let current = current.clone();
+                    let peak = peak.clone();
+                    async move {
+                        let in_flight = current.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(in_flight, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                        current.fetch_sub(1, Ordering::SeqCst);
+                        Ok(unit_label(&unit))
+                    }
+                }
+            },
+        )
+        .await
+        .expect("scheduler run");
+
+        assert_eq!(results.len(), 4);
+        assert!(peak.load(Ordering::SeqCst) <= 2);
+        let _ = fs::remove_dir_all(root);
     }
 }

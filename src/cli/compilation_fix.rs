@@ -1392,6 +1392,12 @@ fn map_src_to_spec(src_rel: &str) -> Option<String> {
     {
         return Some(format!("specifications/data/{}.md", stem));
     }
+    if let Some(stem) = src_rel
+        .strip_prefix("src/projections/")
+        .and_then(|s| s.strip_suffix(".rs"))
+    {
+        return Some(format!("specifications/projections/{}.md", stem));
+    }
     if src_rel == "src/main.rs" {
         return Some("specifications/app.md".to_string());
     }
@@ -2434,10 +2440,10 @@ mod tests {
     }
 
     #[test]
-    fn check_guardrails_blocks_non_receiver_context_semantic_drift() {
-        let root = make_temp_test_dir("compile_fix_guardrail_non_receiver");
-        let src = root.join("src/contexts/projection_context.rs");
-        let draft = root.join("drafts/contexts/projection_context.md");
+    fn check_guardrails_blocks_projection_semantic_drift() {
+        let root = make_temp_test_dir("compile_fix_guardrail_projection_semantic_drift");
+        let src = root.join("src/projections/projection_context.rs");
+        let draft = root.join("drafts/projections/projection_context.md");
         fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
         fs::create_dir_all(draft.parent().expect("draft parent")).expect("create draft dir");
         fs::write(
@@ -2451,13 +2457,13 @@ mod tests {
         )
         .expect("write draft");
 
-        let diff = r#"diff --git a/src/contexts/projection_context.rs b/src/contexts/projection_context.rs
---- a/src/contexts/projection_context.rs
-+++ b/src/contexts/projection_context.rs
+        let diff = r#"diff --git a/src/projections/projection_context.rs b/src/projections/projection_context.rs
+--- a/src/projections/projection_context.rs
++++ b/src/projections/projection_context.rs
 @@ -1,4 +1,9 @@
 +use std::sync::Mutex;
 +
- pub struct ProjectionContext;
+pub struct ProjectionContext;
  impl ProjectionContext {
      pub fn refresh(&self) {}
  }
@@ -2471,7 +2477,7 @@ mod tests {
             report
                 .issues
                 .iter()
-                .any(|issue| issue.contains("non-message-receiver context")),
+                .any(|issue| issue.contains("immutable read model")),
             "issues: {:?}",
             report.issues
         );

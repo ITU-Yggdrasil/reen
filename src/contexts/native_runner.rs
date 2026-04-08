@@ -1323,7 +1323,7 @@ mod tests {
             "model": "gpt-5.4",
             "static_prompt": "system",
             "variable_prompt": "user",
-            "agent_name": "create_implementation",
+            "agent_name": "create_implementation_context",
         });
 
         let normalized = normalize_request(&request).expect("normalize request");
@@ -1331,7 +1331,7 @@ mod tests {
         assert_eq!(normalized.user_content, "user");
         assert_eq!(
             normalized.agent_name.as_deref(),
-            Some("create_implementation")
+            Some("create_implementation_context")
         );
     }
 
@@ -1448,7 +1448,7 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
             "user",
             None,
             None,
-            Some("create_implementation"),
+            Some("create_implementation_context"),
             true,
             None,
             |body| {
@@ -1471,7 +1471,8 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
 
         assert_eq!(result.output, "final answer");
         let body = captured_body.expect("request body should be captured");
-        let expected_key = openai_prompt_cache_key("create_implementation", &long_system);
+        let expected_key =
+            openai_prompt_cache_key("create_implementation_context", &long_system);
         assert_eq!(
             body.get("prompt_cache_key").and_then(Value::as_str),
             Some(expected_key.as_str())
@@ -1493,7 +1494,7 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
             "user",
             None,
             None,
-            Some("create_implementation"),
+            Some("create_implementation_context"),
             true,
             None,
             |body| {
@@ -1637,7 +1638,7 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
             "user",
             Some(&tools),
             Some(&tool_context),
-            Some("create_implementation"),
+            Some("create_implementation_context"),
             true,
             Some(&control),
             |body| {

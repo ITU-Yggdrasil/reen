@@ -15,6 +15,75 @@ pub struct AgentInput {
     additional: HashMap<String, serde_json::Value>,
 }
 
+fn is_implementation_agent(agent_name: &str) -> bool {
+    matches!(
+        agent_name,
+        "create_implementation_data"
+            | "create_implementation_projection"
+            | "create_implementation_context"
+    )
+}
+
+fn implementation_cache_allowed_keys() -> &'static [&'static str] {
+    &[
+        "context_content",
+        "direct_dependencies",
+        "dependency_closure",
+        "tooling_symbols",
+        "direct_dependency_contracts",
+        "contract_artifact",
+        "behavior_contract",
+        "resolved_dependency_plan",
+        "scaffold_dependencies",
+        "library_crate_name",
+        "public_import_guidance",
+        "target_type_name",
+        "implementation_plan",
+        "previous_output",
+        "verifier_feedback",
+    ]
+}
+
+fn canonicalize_cache_json_value(v: serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(canonicalize_cache_json_value)
+                .collect::<Vec<_>>(),
+        ),
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut out = serde_json::Map::new();
+            for (k, val) in entries {
+                out.insert(k, canonicalize_cache_json_value(val));
+            }
+            serde_json::Value::Object(out)
+        }
+        other => other,
+    }
+}
+
+pub fn normalize_cache_input_value(
+    agent_name: &str,
+    value: serde_json::Value,
+) -> serde_json::Value {
+    let value = if is_implementation_agent(agent_name) {
+        match value {
+            serde_json::Value::Object(mut map) => {
+                map.retain(|key, _| implementation_cache_allowed_keys().contains(&key.as_str()));
+                serde_json::Value::Object(map)
+            }
+            other => other,
+        }
+    } else {
+        value
+    };
+
+    canonicalize_cache_json_value(value)
+}
+
 fn json_value_to_string(value: serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) => Some(s),
@@ -66,8 +135,7 @@ pub fn build_agent_input(
             documentation_urls,
             additional: additional_context,
         },
-        "create_implementation"
-        | "create_implementation_data"
+        "create_implementation_data"
         | "create_implementation_projection"
         | "create_implementation_context"
         | "create_test" => AgentInput {
@@ -128,7 +196,7 @@ pub fn output_contains_questions(output: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_agent_input, output_contains_questions};
+    use super::{build_agent_input, normalize_cache_input_value, output_contains_questions};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -180,6 +248,46 @@ mod tests {
         assert_eq!(
             value.get("draft_summary"),
             Some(&json!({"kind": "projection"}))
+        );
+    }
+
+    #[test]
+    fn implementation_cache_normalization_drops_planning_fields() {
+        let normalized = normalize_cache_input_value(
+            "create_implementation_context",
+            json!({
+                "context_content": "spec body",
+                "behavior_contract": { "kind": "Context" },
+                "implementation_plan": { "tasks": ["build"] },
+                "plan_validation": { "ok": true },
+            }),
+        );
+
+        assert_eq!(
+            normalized,
+            json!({
+                "behavior_contract": { "kind": "Context" },
+                "context_content": "spec body",
+            })
+        );
+    }
+
+    #[test]
+    fn non_implementation_cache_normalization_keeps_planning_fields() {
+        let normalized = normalize_cache_input_value(
+            "create_plan",
+            json!({
+                "context_content": "spec body",
+                "implementation_plan": { "tasks": ["build"] },
+            }),
+        );
+
+        assert_eq!(
+            normalized,
+            json!({
+                "context_content": "spec body",
+                "implementation_plan": { "tasks": ["build"] },
+            })
         );
     }
 

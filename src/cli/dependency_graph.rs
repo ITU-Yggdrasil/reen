@@ -57,7 +57,74 @@ pub struct ExecutionNode {
     direct_dependencies: Vec<DependencyLocator>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExecutionUnit {
+    pub id: usize,
+    pub nodes: Vec<ExecutionNode>,
+    pub dependency_units: Vec<usize>,
+}
+
+impl ExecutionUnit {
+    pub fn sort_key(&self) -> String {
+        self.nodes
+            .first()
+            .map(|node| node.input_path.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionDag {
+    units: Vec<ExecutionUnit>,
+}
+
+impl ExecutionDag {
+    pub fn units(&self) -> &[ExecutionUnit] {
+        &self.units
+    }
+
+    pub fn into_units(self) -> Vec<ExecutionUnit> {
+        self.units
+    }
+
+    pub fn levelize(&self) -> Vec<Vec<ExecutionNode>> {
+        let mut remaining: HashSet<usize> = (0..self.units.len()).collect();
+        let mut levels = Vec::new();
+
+        while !remaining.is_empty() {
+            let mut current_units: Vec<usize> = remaining
+                .iter()
+                .copied()
+                .filter(|unit_id| {
+                    self.units[*unit_id]
+                        .dependency_units
+                        .iter()
+                        .all(|dep| !remaining.contains(dep))
+                })
+                .collect();
+
+            if current_units.is_empty() {
+                current_units = remaining.iter().copied().collect();
+            }
+
+            current_units.sort_by(|a, b| self.units[*a].sort_key().cmp(&self.units[*b].sort_key()));
+
+            let mut level_nodes = Vec::new();
+            for unit_id in current_units {
+                remaining.remove(&unit_id);
+                level_nodes.extend(self.units[unit_id].nodes.clone());
+            }
+
+            level_nodes.sort_by(|a, b| a.input_path.cmp(&b.input_path));
+            levels.push(level_nodes);
+        }
+
+        levels
+    }
+}
+
 impl ExecutionNode {
+    #[cfg(test)]
     pub fn direct_dependency_names(&self) -> Vec<String> {
         self.direct_dependencies
             .iter()
@@ -464,13 +531,13 @@ fn dependency_allowed(from: ArtifactCategory, to: ArtifactCategory) -> bool {
     }
 }
 
-pub fn build_execution_plan(
+pub fn build_execution_dag(
     selected_inputs: Vec<PathBuf>,
     primary_root: &str,
     fallback_root: Option<&str>,
-) -> Result<Vec<Vec<ExecutionNode>>> {
+) -> Result<ExecutionDag> {
     if selected_inputs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ExecutionDag { units: Vec::new() });
     }
 
     let primary_index = build_index(primary_root)?;
@@ -598,8 +665,15 @@ pub fn build_execution_plan(
         edges.push(edge_targets);
     }
 
-    let levels = levelize_with_cycles(nodes, edges);
-    Ok(levels)
+    Ok(build_dag_with_cycles(nodes, edges))
+}
+
+pub fn build_execution_plan(
+    selected_inputs: Vec<PathBuf>,
+    primary_root: &str,
+    fallback_root: Option<&str>,
+) -> Result<Vec<Vec<ExecutionNode>>> {
+    Ok(build_execution_dag(selected_inputs, primary_root, fallback_root)?.levelize())
 }
 
 pub fn expand_with_transitive_dependencies(
@@ -611,14 +685,16 @@ pub fn expand_with_transitive_dependencies(
         return Ok(Vec::new());
     }
 
-    let levels = build_execution_plan(selected_inputs.clone(), primary_root, fallback_root)?;
+    let dag = build_execution_dag(selected_inputs.clone(), primary_root, fallback_root)?;
     let mut expanded: HashSet<PathBuf> = selected_inputs.into_iter().collect();
 
-    for node in levels.into_iter().flatten() {
-        for dep in node.resolve_dependency_closure(primary_root, fallback_root)? {
-            let dep_path = PathBuf::from(dep.path);
-            if dep_path.exists() {
-                expanded.insert(dep_path);
+    for unit in dag.into_units() {
+        for node in unit.nodes {
+            for dep in node.resolve_dependency_closure(primary_root, fallback_root)? {
+                let dep_path = PathBuf::from(dep.path);
+                if dep_path.exists() {
+                    expanded.insert(dep_path);
+                }
             }
         }
     }
@@ -628,10 +704,10 @@ pub fn expand_with_transitive_dependencies(
     Ok(result)
 }
 
-fn levelize_with_cycles(
+fn build_dag_with_cycles(
     nodes: Vec<ExecutionNode>,
     edges: Vec<Vec<usize>>,
-) -> Vec<Vec<ExecutionNode>> {
+) -> ExecutionDag {
     let components = strongly_connected_components(edges.as_slice());
     let component_count = components.len();
     let mut node_component = vec![0usize; nodes.len()];
@@ -660,47 +736,44 @@ fn levelize_with_cycles(
         group.sort_by(|a, b| a.input_path.cmp(&b.input_path));
     }
 
-    let mut remaining: HashSet<usize> = (0..component_count).collect();
-    let mut levels = Vec::new();
-
-    while !remaining.is_empty() {
-        let mut current_components: Vec<usize> = remaining
-            .iter()
-            .copied()
-            .filter(|component| {
-                component_deps[*component]
-                    .iter()
-                    .all(|dep| !remaining.contains(dep))
-            })
-            .collect();
-
-        if current_components.is_empty() {
-            current_components = remaining.iter().copied().collect();
-        }
-
-        current_components.sort_by(|a, b| {
-            let a_key = nodes_by_component[*a]
-                .first()
-                .map(|n| n.input_path.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let b_key = nodes_by_component[*b]
-                .first()
-                .map(|n| n.input_path.to_string_lossy().to_string())
-                .unwrap_or_default();
-            a_key.cmp(&b_key)
+    let mut units = Vec::with_capacity(component_count);
+    for component_id in 0..component_count {
+        let mut dependency_units: Vec<usize> =
+            component_deps[component_id].iter().copied().collect();
+        dependency_units.sort_unstable();
+        units.push(ExecutionUnit {
+            id: component_id,
+            nodes: nodes_by_component[component_id].clone(),
+            dependency_units,
         });
-
-        let mut level_nodes = Vec::new();
-        for component in &current_components {
-            remaining.remove(component);
-            level_nodes.extend(nodes_by_component[*component].clone());
-        }
-
-        level_nodes.sort_by(|a, b| a.input_path.cmp(&b.input_path));
-        levels.push(level_nodes);
     }
 
-    levels
+    units.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+    for (new_id, unit) in units.iter_mut().enumerate() {
+        unit.id = new_id;
+    }
+
+    let id_by_key = units
+        .iter()
+        .map(|unit| (unit.sort_key(), unit.id))
+        .collect::<HashMap<_, _>>();
+    for unit in &mut units {
+        let mut remapped = unit
+            .dependency_units
+            .iter()
+            .filter_map(|original_id| {
+                let key = nodes_by_component[*original_id]
+                    .first()
+                    .map(|node| node.input_path.to_string_lossy().to_string())?;
+                id_by_key.get(&key).copied()
+            })
+            .collect::<Vec<_>>();
+        remapped.sort_unstable();
+        remapped.dedup();
+        unit.dependency_units = remapped;
+    }
+
+    ExecutionDag { units }
 }
 
 fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {

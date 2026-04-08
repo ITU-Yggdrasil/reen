@@ -1,6 +1,6 @@
 use crate::execution::{
     Cache, FileCache, NativeExecutionControl, NativeExecutionMetadata, REQUEST_OVERHEAD_TOKENS,
-    estimate_tokens,
+    estimate_tokens, normalize_cache_input_value,
 };
 use serde::Serialize;
 use serde_json;
@@ -393,31 +393,10 @@ where
     /// The cache key is a hash of agent_instructions + input_json, ensuring that
     /// changes to either the instructions or input will result in a cache miss.
     fn generate_cache_key(&self, agent_instructions: &str) -> String {
-        fn canonicalize_json_value(v: serde_json::Value) -> serde_json::Value {
-            match v {
-                serde_json::Value::Array(items) => serde_json::Value::Array(
-                    items
-                        .into_iter()
-                        .map(canonicalize_json_value)
-                        .collect::<Vec<_>>(),
-                ),
-                serde_json::Value::Object(map) => {
-                    let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
-                    entries.sort_by(|a, b| a.0.cmp(&b.0));
-                    let mut out = serde_json::Map::new();
-                    for (k, val) in entries {
-                        out.insert(k, canonicalize_json_value(val));
-                    }
-                    serde_json::Value::Object(out)
-                }
-                other => other,
-            }
-        }
-
         // Serialize the input to JSON in a stable way (sorted object keys), so cache keys
         // do not depend on HashMap iteration order.
         let input_json = serde_json::to_value(&self.input)
-            .map(canonicalize_json_value)
+            .map(|value| normalize_cache_input_value(&self.agent, value))
             .and_then(|v| serde_json::to_string(&v))
             .unwrap_or_else(|_| "{}".to_string());
 
@@ -698,6 +677,14 @@ mod tests {
         dependency_tool_context: serde_json::Value,
     }
 
+    #[derive(Serialize)]
+    struct ImplementationCacheInput {
+        context_content: String,
+        behavior_contract: serde_json::Value,
+        implementation_plan: serde_json::Value,
+        plan_validation: serde_json::Value,
+    }
+
     struct TestRegistry;
 
     impl AgentRegistry for TestRegistry {
@@ -823,6 +810,55 @@ mod tests {
         assert_eq!(result.output, "cached-output");
         assert!(result.cached);
         assert!(result.usage.is_none());
+
+        let _ = fs::remove_file(cache_path);
+        let _ = fs::remove_dir(cache_dir);
+    }
+
+    #[test]
+    fn implementation_cache_hit_ignores_planning_fields() {
+        let agent_name = "create_implementation_context".to_string();
+        let registry = MissingPlaceholderRegistry;
+        let model_registry = TestModelRegistry;
+        let template = registry
+            .get_specification(&agent_name)
+            .expect("template should load");
+        let canonical = template.canonical_for_cache();
+
+        let cached_input = ImplementationCacheInput {
+            context_content: "# Spec".to_string(),
+            behavior_contract: serde_json::json!({"kind": "Context"}),
+            implementation_plan: serde_json::json!({"tasks": ["first"]}),
+            plan_validation: serde_json::json!({"ok": true}),
+        };
+        let cached_runner = AgentRunner::new(agent_name.clone(), cached_input, registry, model_registry);
+        let cache_key = cached_runner.generate_cache_key(&canonical);
+        let instructions_model_hash =
+            cached_runner.generate_instructions_model_hash(&canonical, "test-model");
+        let cache = cached_runner
+            .get_cached_artefact(&canonical, "test-model")
+            .expect("cache should initialize");
+        let cache_dir = PathBuf::from(".reen").join(&instructions_model_hash);
+        let cache_path = cache_dir.join(format!("{}.cache", cache_key));
+        cache.set(&cache_key, "cached-output");
+
+        let lookup_runner = AgentRunner::new(
+            agent_name,
+            ImplementationCacheInput {
+                context_content: "# Spec".to_string(),
+                behavior_contract: serde_json::json!({"kind": "Context"}),
+                implementation_plan: serde_json::json!({"tasks": ["second"]}),
+                plan_validation: serde_json::json!({"ok": false, "errors": ["x"]}),
+            },
+            MissingPlaceholderRegistry,
+            TestModelRegistry,
+        );
+
+        let result = lookup_runner
+            .run()
+            .expect("cache hit should ignore implementation planning fields");
+        assert_eq!(result.output, "cached-output");
+        assert!(result.cached);
 
         let _ = fs::remove_file(cache_path);
         let _ = fs::remove_dir(cache_dir);
@@ -976,7 +1012,7 @@ mod tests {
             }),
         };
         let runner = AgentRunner::new(
-            "create_implementation".to_string(),
+            "create_implementation_context".to_string(),
             input,
             TestRegistry,
             TestModelRegistry,

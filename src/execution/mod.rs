@@ -10,7 +10,9 @@ mod native_runner;
 #[path = "../cli/token_limiter.rs"]
 mod token_limiter;
 
-pub use agent_input::{AgentInput, build_agent_input, output_contains_questions};
+pub use agent_input::{
+    AgentInput, build_agent_input, normalize_cache_input_value, output_contains_questions,
+};
 pub use agent_runner::{
     AgentModelRegistry, AgentRegistry, AgentRunner, AgentRunnerError, AgentSpecification,
     AgentSpecificationTemplate, ExecutionError, ExecutionResult, Model, PopulateError,

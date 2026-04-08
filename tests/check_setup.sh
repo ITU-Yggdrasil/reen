@@ -115,10 +115,24 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
-if [ -f "agents/create_implementation.yml" ]; then
-    echo -e "${GREEN}✓${NC} create_implementation agent exists"
+if [ -f "agents/create_implementation_data.yml" ]; then
+    echo -e "${GREEN}✓${NC} create_implementation_data agent exists"
 else
-    echo -e "${RED}✗${NC} create_implementation agent not found"
+    echo -e "${RED}✗${NC} create_implementation_data agent not found"
+    ERRORS=$((ERRORS + 1))
+fi
+
+if [ -f "agents/create_implementation_projection.yml" ]; then
+    echo -e "${GREEN}✓${NC} create_implementation_projection agent exists"
+else
+    echo -e "${RED}✗${NC} create_implementation_projection agent not found"
+    ERRORS=$((ERRORS + 1))
+fi
+
+if [ -f "agents/create_implementation_context.yml" ]; then
+    echo -e "${GREEN}✓${NC} create_implementation_context agent exists"
+else
+    echo -e "${RED}✗${NC} create_implementation_context agent not found"
     ERRORS=$((ERRORS + 1))
 fi
 

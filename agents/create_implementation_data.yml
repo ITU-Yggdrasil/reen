@@ -8,12 +8,6 @@ static_prompt: |
   and no side effects. They are fully defined by their fields or variants plus optional
   pure-computation functionalities.
 
-  ## CRITICAL: Strict Specification Compliance
-
-  **You MUST follow the specification EXACTLY. No deviations are allowed.**
-  **Interpret this as strict compliance of externally observable behavior and public API,
-  not rigid low-level implementation details.**
-
   ### RUst feature toggles
 
   Data types are not guarded by feature flags unless the specification explicitly requires it.
@@ -398,64 +392,23 @@ static_prompt: |
      - If you added a public method NOT in the spec, remove it
      - Private helper functions are explicitly allowed and encouraged
 
-  ## CRITICAL: Output Format
-
-  **Your output must be ONLY the Rust code for the single .rs file being generated.**
-
-  ### What to Output:
-
-  - **ONLY Rust code** for the specific module/type being implemented
-  - Start directly with `use` statements, doc comments, or the struct/enum definition
-  - NO preamble like "I will implement..."
-  - NO file listings or project structure
-  - NO Cargo.toml content
-  - NO markdown formatting around the code
-  - NO explanations before or after the code
-
-  ### What Gets Written Where:
-
-  The system automatically determines the output file based on the specification location:
-  - `specifications/data/X.md` → `src/data/X.rs` (your output goes here)
-  - `specifications/data/group/X.md` → `src/data/group/X.rs` (your output goes here)
-
-  The Cargo.toml and src/lib.rs are managed separately. You ONLY generate the code for the
-  specific .rs file.
-
-  ## Direct Dependency Context (Authoritative)
-
-  If `input.direct_dependencies` is present, it is authoritative project context.
-
-  You MUST:
-  - Treat `input.resolved_dependency_plan` as the authoritative external-crate plan when present
-  - Treat `input.scaffold_dependencies` as the authoritative list of scaffold-selected external
-    crates when present
-  - Treat `input.direct_dependencies` as an authoritative dependency manifest
-  - Treat `input.contract_artifact` as the authoritative machine-readable contract when present
-  - Prefer provided dependency artifacts over inference
-  - Reuse existing definitions from dependency context instead of creating duplicates
-  - If `input.tooling_symbols` is present, treat it as the authoritative crate/type inventory
-  - Do NOT introduce new external crates outside `input.resolved_dependency_plan` /
-    `input.scaffold_dependencies` when those are present
 variable_prompt: |
   ## Input
 
   Specification content:
   {{input.context_content}}
 
-  Dependency manifest (optional, authoritative):
+  Dependency manifest (optional, authoritative — direct specs only):
   {{input.direct_dependencies?}}
+
+  Full dependency closure (optional, metadata paths for transitive specs):
+  {{input.dependency_closure?}}
 
   Dependency symbol inventory (optional, authoritative for external crate APIs):
   {{input.tooling_symbols?}}
 
-  Implemented dependency source manifest (optional, authoritative for existing APIs):
-  {{input.implemented_dependencies?}}
-
   Direct dependency contracts (optional, compact):
   {{input.direct_dependency_contracts?}}
-
-  Implemented direct role capsules (optional, compact):
-  {{input.implemented_direct_role_capsules?}}
 
   Contract artifact (optional, authoritative):
   {{input.contract_artifact?}}
@@ -468,6 +421,12 @@ variable_prompt: |
 
   Scaffold-selected dependencies (optional, authoritative crate list):
   {{input.scaffold_dependencies?}}
+
+  Previous generated output to revise (optional):
+  {{input.previous_output?}}
+
+  Verifier feedback for the previous attempt (optional, authoritative when present):
+  {{input.verifier_feedback?}}
 
   Library crate name for `src/main.rs` imports (optional, authoritative):
   {{input.library_crate_name?}}

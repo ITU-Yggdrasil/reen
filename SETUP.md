@@ -185,7 +185,7 @@ agents/agent_model_registry.sonnet.yml
 
 ## 8. Optional Rate Limits
 
-These only affect `create` commands.
+These affect `create` commands and `build`.
 
 ### Environment variables
 
@@ -199,13 +199,30 @@ export REEN_TOKEN_LIMIT=60000
 ```bash
 ./target/release/reen create --rate-limit 2 specification
 ./target/release/reen create --token-limit 60000 implementation
+./target/release/reen create --parallel-limit 8 implementation
+./target/release/reen build --projections --parallel-limit 8
 ```
 
 Resolution order:
 
 1. CLI flags
-2. `REEN_RATE_LIMIT` / `REEN_TOKEN_LIMIT`
-3. Top-level values in the active model registry file
+2. `reen.yml`
+3. `REEN_RATE_LIMIT` / `REEN_TOKEN_LIMIT`
+4. Top-level values in the active model registry file
+
+### Optional `reen.yml`
+
+You can also keep shared `create` defaults in `reen.yml`:
+
+```yaml
+create:
+  projections: true
+  parallel-limit: 6
+  rate-limit: 2
+  token-limit: 60000
+```
+
+`parallel-limit` applies per stage. Values below `1` are clamped to `1`.
 
 ## 9. First Commands To Try
 

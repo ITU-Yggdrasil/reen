@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
             let parallel_limit = create_args
                 .parallel_limit
                 .or_else(|| rc.and_then(|c| c.parallel_limit))
-                .map(|v| v as usize)
+                .map(|v| (v as usize).max(1))
                 .unwrap_or(cli::DEFAULT_PARALLEL_LIMIT);
 
             // rate/token limits: CLI > reen.yml > env > registry
@@ -543,7 +543,7 @@ async fn main() -> Result<()> {
             let parallel_limit = build_args
                 .parallel_limit
                 .or_else(|| rc.and_then(|c| c.parallel_limit))
-                .map(|v| v as usize)
+                .map(|v| (v as usize).max(1))
                 .unwrap_or(cli::DEFAULT_PARALLEL_LIMIT);
 
             cli::build(
@@ -660,8 +660,44 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildArgs, CapabilityCommands, Cli, Commands};
+    use super::{BuildArgs, CapabilityCommands, Cli, Commands, CreateArgs};
     use clap::Parser;
+
+    #[test]
+    fn parses_create_command_with_projection_and_parallel_limit() {
+        let cli = Cli::parse_from([
+            "reen",
+            "create",
+            "--projections",
+            "--parallel-limit",
+            "6",
+            "--rate-limit",
+            "1.5",
+            "implementation",
+            "account_summary",
+        ]);
+
+        match cli.command {
+            Commands::Create(CreateArgs {
+                projections,
+                contexts,
+                data,
+                rate_limit,
+                parallel_limit,
+                ..
+            }) => {
+                assert!(projections);
+                assert!(!contexts);
+                assert!(!data);
+                assert_eq!(rate_limit, Some(1.5));
+                assert_eq!(parallel_limit, Some(6));
+            }
+            other => panic!(
+                "expected create command, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
 
     #[test]
     fn parses_build_command_with_shared_and_stage_flags() {
@@ -670,10 +706,13 @@ mod tests {
             "build",
             "--clear-cache",
             "--contexts",
+            "--projections",
             "--rate-limit",
             "2",
             "--token-limit",
             "60000",
+            "--parallel-limit",
+            "7",
             "--max-fix-attempts",
             "4",
             "--max-compile-fix-attempts",
@@ -686,6 +725,7 @@ mod tests {
             Commands::Build(BuildArgs {
                 clear_cache,
                 contexts,
+                projections,
                 data,
                 fix,
                 max_fix_attempts,
@@ -698,6 +738,7 @@ mod tests {
             }) => {
                 assert!(clear_cache);
                 assert!(contexts);
+                assert!(projections);
                 assert!(!data);
                 assert!(!fix);
                 assert_eq!(max_fix_attempts, Some(4));
@@ -705,7 +746,7 @@ mod tests {
                 assert_eq!(names, vec!["app".to_string(), "game_loop".to_string()]);
                 assert_eq!(rate_limit, Some(2.0));
                 assert_eq!(token_limit, Some(60000.0));
-                assert_eq!(parallel_limit, None);
+                assert_eq!(parallel_limit, Some(7));
             }
             other => panic!(
                 "expected build command, got {:?}",

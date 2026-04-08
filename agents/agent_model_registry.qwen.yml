@@ -21,9 +21,6 @@ bootstrap_capability_registry:
   model: qwen2.5:7b
   parallel: false
   batch: false
-create_implementation:
-  model: qwen2.5:7b # gpt-5
-  parallel: true
 create_implementation_data:
   model: qwen2.5:7b
   parallel: true

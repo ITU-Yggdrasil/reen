@@ -323,6 +323,10 @@ mod tests {
   model: qwen2.5:7b
   parallel: true
   batch: false",
+            "create_specifications_projection:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
             "create_specifications_context:
   model: qwen2.5:7b
   parallel: true
@@ -335,7 +339,15 @@ mod tests {
   model: qwen2.5:7b
   parallel: true
   batch: false",
-            "create_implementation:
+            "create_implementation_data:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
+            "create_implementation_projection:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
+            "create_implementation_context:
   model: qwen2.5:7b
   parallel: true
   batch: false",
@@ -362,7 +374,7 @@ mod tests {
     fn test_parse_registry_rejects_old_format() {
         let yaml = r#"
 create_specifications_data: gpt-4
-create_implementation: claude-3-opus
+create_implementation_data: claude-3-opus
 create_test: gpt-4
 create_specifications_context: gpt-4
 create_specifications_external_api: gpt-4
@@ -382,7 +394,16 @@ create_specifications_data:
   model: gpt-4
   parallel: true
   batch: true
-create_implementation:
+create_specifications_projection:
+  model: gpt-4
+  parallel: true
+create_implementation_data:
+  model: claude-3-opus
+  parallel: false
+create_implementation_projection:
+  model: claude-3-opus
+  parallel: false
+create_implementation_context:
   model: claude-3-opus
   parallel: false
 create_test:
@@ -414,7 +435,7 @@ fix_draft_blockers:
         assert_eq!(spec_config.parallel, true);
         assert_eq!(spec_config.batch, true);
 
-        let impl_config = registry.get("create_implementation").unwrap();
+        let impl_config = registry.get("create_implementation_data").unwrap();
         assert_eq!(impl_config.model, "claude-3-opus");
         assert_eq!(impl_config.parallel, false);
         assert_eq!(impl_config.batch, false);
@@ -437,7 +458,7 @@ fix_draft_blockers:
             Some(false),
         );
         let model = registry
-            .get_model("create_implementation")
+            .get_model("create_implementation_data")
             .expect("embedded default registry should resolve model");
         assert_eq!(model.name, "openai/gpt-5");
     }
@@ -448,14 +469,14 @@ fix_draft_blockers:
         fs::create_dir_all(&test_dir).expect("create temp dir");
         let registry_path = test_dir.join("agent_model_registry.yml");
         let content = complete_registry_yaml().replace(
-            "create_implementation:\n  model: qwen2.5:7b\n  parallel: true",
-            "create_implementation:\n  model: gpt-5\n  parallel: true",
+            "create_implementation_context:\n  model: qwen2.5:7b\n  parallel: true",
+            "create_implementation_context:\n  model: gpt-5\n  parallel: true",
         );
         fs::write(&registry_path, content).expect("write local registry");
 
         let registry = FileAgentModelRegistry::new(Some(registry_path), None, None);
         let model = registry
-            .get_model("create_implementation")
+            .get_model("create_implementation_context")
             .expect("local override should resolve");
         assert_eq!(model.name, "gpt-5");
 

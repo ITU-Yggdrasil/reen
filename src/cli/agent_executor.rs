@@ -376,12 +376,12 @@ mod tests {
         let registry_path = test_dir.join("agent_model_registry.yml");
         fs::write(
             &registry_path,
-            "create_implementation:\n  model: claude-3-sonnet\n  parallel: false\n",
+            "create_implementation_data:\n  model: claude-3-sonnet\n  parallel: false\n",
         )
         .expect("write model registry");
 
         let registry = FileAgentModelRegistry::new(Some(registry_path), None, None);
-        validate_agent_exists_with_registry("create_implementation", &registry)
+        validate_agent_exists_with_registry("create_implementation_data", &registry)
             .expect("default fallback should validate");
         fs::remove_dir_all(&test_dir).expect("cleanup");
     }

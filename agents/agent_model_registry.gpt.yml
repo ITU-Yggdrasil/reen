@@ -19,9 +19,6 @@ create_plan:
 bootstrap_capability_registry:
   model: gpt-5
   parallel: false
-create_implementation:
-  model: gpt-5
-  parallel: true
 create_implementation_data:
   model: gpt-5
   parallel: true

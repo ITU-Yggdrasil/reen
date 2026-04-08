@@ -1,10 +1,17 @@
 use anyhow::{Context, Result};
+use proc_macro2::Span;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use syn::{
+    Expr, File, FnArg, ImplItem, ImplItemFn, Item, ItemExternCrate, ItemUse,
+    Path as SynPath, Stmt, UseTree, Visibility,
+    spanned::Spanned,
+    visit::{self, Visit},
+};
 
 use super::capability_registry::{
     allowed_external_crate_roots, registry_provider_domains_by_crate,
@@ -90,6 +97,60 @@ pub(crate) struct VerificationEvidence {
     pub(crate) obligation: String,
     pub(crate) satisfied: bool,
     pub(crate) evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeLocation {
+    line: usize,
+    column: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodeFinding {
+    message: String,
+    location: Option<CodeLocation>,
+}
+
+impl CodeFinding {
+    fn without_location(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            location: None,
+        }
+    }
+
+    fn with_span(message: impl Into<String>, span: Span) -> Self {
+        Self {
+            message: message.into(),
+            location: location_from_span(span),
+        }
+    }
+
+    fn with_offset(message: impl Into<String>, code: &str, offset: usize) -> Self {
+        Self {
+            message: message.into(),
+            location: Some(location_from_offset(code, offset)),
+        }
+    }
+
+    fn with_location(mut self, location: Option<CodeLocation>) -> Self {
+        self.location = location;
+        self
+    }
+
+    fn render_for_path(&self, output_path: &Path) -> String {
+        if let Some(location) = &self.location {
+            format!(
+                "{}:{}:{}: {}",
+                output_path.display(),
+                location.line,
+                location.column,
+                self.message
+            )
+        } else {
+            format!("{}: {}", output_path.display(), self.message)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -417,56 +478,63 @@ pub(crate) fn verify_generated_implementation(
         || !plan.contract.env_vars.is_empty()
         || !plan.contract.output_requirements.is_empty();
     for (pattern, message) in placeholder_patterns {
-        if pattern.is_match(&code) {
+        if let Some(found) = pattern.find(&code) {
+            let finding = CodeFinding::with_offset(message, &code, found.start());
             if behavior_sensitive {
-                high_risk_findings.push(format!(
-                    "{} in behavior-sensitive implementation {}",
-                    message,
-                    output_path.display()
-                ));
+                high_risk_findings.push(
+                    CodeFinding::without_location(format!(
+                        "{} in behavior-sensitive implementation",
+                        finding.message
+                    ))
+                    .with_location(finding.location)
+                    .render_for_path(output_path),
+                );
             } else {
-                warnings.push(message.to_string());
+                warnings.push(finding.render_for_path(output_path));
             }
         }
     }
     for finding in detect_trivial_obligation_stubs(&code, &plan.contract.role_method_names) {
         if behavior_sensitive {
-            high_risk_findings.push(format!(
-                "{} in behavior-sensitive implementation {}",
-                finding,
-                output_path.display()
-            ));
+            high_risk_findings.push(
+                CodeFinding::without_location(format!(
+                    "{} in behavior-sensitive implementation",
+                    finding.message
+                ))
+                .with_location(finding.location.clone())
+                .render_for_path(output_path),
+            );
         } else {
-            warnings.push(finding);
+            warnings.push(finding.render_for_path(output_path));
         }
     }
     for finding in detect_ignored_immutable_return_values(spec_content, &code) {
-        high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+        high_risk_findings.push(finding.render_for_path(output_path));
     }
     for finding in detect_private_leaf_module_import_findings(&code) {
-        high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+        high_risk_findings.push(finding.render_for_path(output_path));
     }
     for finding in detect_external_crate_policy_findings(project_root, &code)? {
-        high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+        high_risk_findings.push(finding.render_for_path(output_path));
     }
     // Projections and Data are always immutable; apply the shared structural checks.
     if plan.contract.is_immutable()
         || matches!(plan.contract.kind, SpecificationKind::Projection)
     {
         for finding in detect_immutable_kind_findings(&code) {
-            high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+            high_risk_findings.push(finding.render_for_path(output_path));
         }
     }
     // Projection-specific: must not import Context kinds.
     if matches!(plan.contract.kind, SpecificationKind::Projection) {
         for finding in detect_projection_kind_findings(&code) {
-            high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+            high_risk_findings.push(finding.render_for_path(output_path));
         }
     }
     // Data-specific: must not import Context or Projection kinds.
     if matches!(plan.contract.kind, SpecificationKind::Data) {
         for finding in detect_data_kind_findings(&code) {
-            high_risk_findings.push(format!("{} in {}", finding, output_path.display()));
+            high_risk_findings.push(finding.render_for_path(output_path));
         }
     }
 
@@ -518,20 +586,109 @@ pub(crate) fn compare_verifier_reports(
     }
 }
 
-fn detect_trivial_obligation_stubs(code: &str, role_method_names: &[String]) -> Vec<String> {
+fn location_from_span(span: Span) -> Option<CodeLocation> {
+    let start = span.start();
+    if start.line == 0 {
+        None
+    } else {
+        Some(CodeLocation {
+            line: start.line,
+            column: start.column + 1,
+        })
+    }
+}
+
+fn location_from_offset(code: &str, offset: usize) -> CodeLocation {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for ch in code[..offset.min(code.len())].chars() {
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    CodeLocation { line, column }
+}
+
+fn dedup_code_findings(findings: &mut Vec<CodeFinding>) {
+    findings.sort_by(|left, right| {
+        let left_key = (
+            left.location.as_ref().map(|item| item.line).unwrap_or(0),
+            left.location.as_ref().map(|item| item.column).unwrap_or(0),
+            left.message.as_str(),
+        );
+        let right_key = (
+            right.location.as_ref().map(|item| item.line).unwrap_or(0),
+            right.location.as_ref().map(|item| item.column).unwrap_or(0),
+            right.message.as_str(),
+        );
+        left_key.cmp(&right_key)
+    });
+    findings.dedup();
+}
+
+fn detect_trivial_obligation_stubs(code: &str, role_method_names: &[String]) -> Vec<CodeFinding> {
     if role_method_names.is_empty() {
         return Vec::new();
     }
-
-    let fn_re = Regex::new(r"(?s)fn\s+([A-Za-z0-9_]+)[^{]*\{([^{}]*)\}").unwrap();
-    let vec_new_re = Regex::new(r"^Vec(?:::<[^>]+>)?::new\s*\(\)\s*;?$").unwrap();
-    let string_new_re = Regex::new(r"^String::new\s*\(\)\s*;?$").unwrap();
-    let none_re = Regex::new(r"^(?:return\s+)?None\s*;?$").unwrap();
 
     let normalized_role_names = role_method_names
         .iter()
         .map(|name| name.to_ascii_lowercase())
         .collect::<Vec<_>>();
+    let mut findings = match syn::parse_file(code) {
+        Ok(file) => detect_trivial_obligation_stubs_from_ast(&file, &normalized_role_names),
+        Err(_) => detect_trivial_obligation_stubs_fallback(code, &normalized_role_names),
+    };
+    dedup_code_findings(&mut findings);
+    findings
+}
+
+fn detect_trivial_obligation_stubs_from_ast(
+    file: &File,
+    normalized_role_names: &[String],
+) -> Vec<CodeFinding> {
+    let mut findings = Vec::new();
+    for item in &file.items {
+        match item {
+            Item::Fn(function) => {
+                if let Some(message) =
+                    trivial_named_block_message(&function.sig.ident.to_string(), &function.block, normalized_role_names)
+                {
+                    findings.push(CodeFinding::with_span(message, function.sig.ident.span()));
+                }
+            }
+            Item::Impl(item_impl) => {
+                if item_impl.trait_.is_some() {
+                    continue;
+                }
+                for impl_item in &item_impl.items {
+                    let ImplItem::Fn(method) = impl_item else {
+                        continue;
+                    };
+                    if let Some(message) =
+                        trivial_named_block_message(&method.sig.ident.to_string(), &method.block, normalized_role_names)
+                    {
+                        findings.push(CodeFinding::with_span(message, method.sig.ident.span()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    findings
+}
+
+fn detect_trivial_obligation_stubs_fallback(
+    code: &str,
+    normalized_role_names: &[String],
+) -> Vec<CodeFinding> {
+    let fn_re = Regex::new(r"(?s)fn\s+([A-Za-z0-9_]+)[^{]*\{([^{}]*)\}").unwrap();
+    let vec_new_re = Regex::new(r"^Vec(?:::<[^>]+>)?::new\s*\(\)\s*;?$").unwrap();
+    let string_new_re = Regex::new(r"^String::new\s*\(\)\s*;?$").unwrap();
+    let none_re = Regex::new(r"^(?:return\s+)?None\s*;?$").unwrap();
     let mut findings = Vec::new();
 
     for captures in fn_re.captures_iter(code) {
@@ -578,14 +735,139 @@ fn detect_trivial_obligation_stubs(code: &str, role_method_names: &[String]) -> 
         };
 
         if let Some(message) = finding {
-            findings.push(message);
+            findings.push(CodeFinding::with_offset(message, code, name_match.start()));
         }
     }
 
     findings
 }
 
-fn detect_ignored_immutable_return_values(spec_content: &str, code: &str) -> Vec<String> {
+fn trivial_named_block_message(
+    function_name: &str,
+    block: &syn::Block,
+    normalized_role_names: &[String],
+) -> Option<String> {
+    let fn_name_lower = function_name.to_ascii_lowercase();
+    let is_obligation_method = normalized_role_names.iter().any(|role_name| {
+        fn_name_lower == *role_name
+            || fn_name_lower.ends_with(&format!("_{}", role_name))
+            || fn_name_lower.contains(role_name)
+    });
+    if !is_obligation_method {
+        return None;
+    }
+
+    let mut relevant = Vec::new();
+    for stmt in &block.stmts {
+        if is_logging_statement(stmt) {
+            continue;
+        }
+        relevant.push(stmt);
+    }
+
+    if relevant.len() != 1 {
+        return None;
+    }
+
+    let expr = stmt_expr(relevant[0])?;
+    let expr = unwrap_return_expr(expr);
+    if expr_is_vec_new(expr) {
+        Some(format!(
+            "Role method '{}' has a trivial body returning Vec::new()",
+            function_name
+        ))
+    } else if expr_is_string_new(expr) {
+        Some(format!(
+            "Role method '{}' has a trivial body returning String::new()",
+            function_name
+        ))
+    } else if expr_is_none(expr) {
+        Some(format!(
+            "Role method '{}' has a trivial body returning None",
+            function_name
+        ))
+    } else {
+        None
+    }
+}
+
+fn is_logging_statement(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Macro(item) => macro_path_is_logging(&item.mac.path),
+        Stmt::Expr(Expr::Macro(expr), _) => macro_path_is_logging(&expr.mac.path),
+        _ => false,
+    }
+}
+
+fn stmt_expr(stmt: &Stmt) -> Option<&Expr> {
+    match stmt {
+        Stmt::Expr(expr, _) => Some(expr),
+        _ => None,
+    }
+}
+
+fn unwrap_return_expr(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Return(item) => item.expr.as_deref().unwrap_or(expr),
+        _ => expr,
+    }
+}
+
+fn macro_path_is_logging(path: &SynPath) -> bool {
+    let rendered = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    rendered.as_slice() == ["tracing", "debug"]
+        || rendered.as_slice() == ["tracing", "info"]
+        || rendered.as_slice() == ["tracing", "warn"]
+        || rendered.as_slice() == ["tracing", "error"]
+        || rendered.as_slice() == ["log", "debug"]
+        || rendered.as_slice() == ["log", "info"]
+        || rendered.as_slice() == ["log", "warn"]
+        || rendered.as_slice() == ["log", "error"]
+        || rendered.as_slice() == ["println"]
+        || rendered.as_slice() == ["eprintln"]
+}
+
+fn expr_is_none(expr: &Expr) -> bool {
+    matches!(expr, Expr::Path(item) if item.path.is_ident("None"))
+}
+
+fn expr_is_vec_new(expr: &Expr) -> bool {
+    expr_call_matches(expr, &["Vec", "new"])
+}
+
+fn expr_is_string_new(expr: &Expr) -> bool {
+    expr_call_matches(expr, &["String", "new"])
+}
+
+fn expr_call_matches(expr: &Expr, expected: &[&str]) -> bool {
+    let Expr::Call(item) = expr else {
+        return false;
+    };
+    let Expr::Path(path) = item.func.as_ref() else {
+        return false;
+    };
+    path_ends_with_segments(&path.path, expected)
+}
+
+fn path_ends_with_segments(path: &SynPath, expected: &[&str]) -> bool {
+    if path.segments.len() < expected.len() {
+        return false;
+    }
+    path.segments
+        .iter()
+        .rev()
+        .zip(expected.iter().rev())
+        .all(|(actual, expected)| actual.ident == *expected)
+}
+
+fn detect_ignored_immutable_return_values(
+    spec_content: &str,
+    code: &str,
+) -> Vec<CodeFinding> {
     if !spec_declares_immutable_value_updates(spec_content) {
         return Vec::new();
     }
@@ -596,7 +878,7 @@ fn detect_ignored_immutable_return_values(spec_content: &str, code: &str) -> Vec
     }
 
     let mut findings = Vec::new();
-    for line in code.lines() {
+    for (index, line) in code.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty()
             || trimmed.starts_with("//")
@@ -611,42 +893,55 @@ fn detect_ignored_immutable_return_values(spec_content: &str, code: &str) -> Vec
         for method in &methods {
             let pattern = format!(".{}(", method);
             if trimmed.contains(&pattern) && trimmed.ends_with(';') {
-                findings.push(format!(
-                    "Immutable transform method '{}' appears to have its return value ignored",
-                    method
-                ));
+                findings.push(CodeFinding {
+                    message: format!(
+                        "Immutable transform method '{}' appears to have its return value ignored",
+                        method
+                    ),
+                    location: Some(CodeLocation {
+                        line: index + 1,
+                        column: line.find(&pattern).map(|value| value + 1).unwrap_or(1),
+                    }),
+                });
             }
         }
     }
 
-    findings.sort();
-    findings.dedup();
+    dedup_code_findings(&mut findings);
     findings
 }
 
-fn detect_private_leaf_module_import_findings(code: &str) -> Vec<String> {
+fn detect_private_leaf_module_import_findings(code: &str) -> Vec<CodeFinding> {
     let mut findings = Vec::new();
     let leaf_import_re = Regex::new(
         r"(?m)^\s*use\s+(?:crate|[A-Za-z_][A-Za-z0-9_]*)::(?:data|contexts)::[a-z_][A-Za-z0-9_]*::",
     )
     .unwrap();
 
-    for line in code.lines() {
+    for (index, line) in code.lines().enumerate() {
         let trimmed = line.trim();
-        if leaf_import_re.is_match(trimmed) {
-            findings.push(format!(
-                "Import uses a private leaf-module path; rewrite it to a public re-export path (`{}`)",
-                trimmed
-            ));
+        if let Some(found) = leaf_import_re.find(trimmed) {
+            findings.push(CodeFinding {
+                message: format!(
+                    "Import uses a private leaf-module path; rewrite it to a public re-export path (`{}`)",
+                    trimmed
+                ),
+                location: Some(CodeLocation {
+                    line: index + 1,
+                    column: found.start() + 1,
+                }),
+            });
         }
     }
 
-    findings.sort();
-    findings.dedup();
+    dedup_code_findings(&mut findings);
     findings
 }
 
-fn detect_external_crate_policy_findings(project_root: &Path, code: &str) -> Result<Vec<String>> {
+fn detect_external_crate_policy_findings(
+    project_root: &Path,
+    code: &str,
+) -> Result<Vec<CodeFinding>> {
     let drafts_root = project_root.join("drafts");
     let Some(allowed) = allowed_external_crate_roots(&drafts_root)? else {
         return Ok(Vec::new());
@@ -664,42 +959,263 @@ fn detect_external_crate_policy_findings(project_root: &Path, code: &str) -> Res
         if allowed.contains(&root) || baseline_allowed_crate_roots().contains(root.as_str()) {
             continue;
         }
+        let location = find_first_root_path_location(code, &root);
         let known_domain = provider_domains
             .get(&root)
             .cloned()
             .or_else(|| known_capability_domain_for_crate(&root).map(str::to_string));
         if let Some(domain) = known_domain.as_deref() {
             if let Some(planned) = planned_by_domain.get(domain) {
-                findings.push(format!(
-                    "Code imports external crate '{}' but capability domain '{}' is planned to use '{}'",
-                    root, domain, planned
-                ));
+                findings.push(CodeFinding {
+                    message: format!(
+                        "Code imports external crate '{}' but capability domain '{}' is planned to use '{}'",
+                        root, domain, planned
+                    ),
+                    location: location.clone(),
+                });
                 continue;
             }
         }
-        findings.push(format!(
-            "Code imports external crate '{}' which is not declared in the resolved dependency plan",
-            root
-        ));
+        findings.push(CodeFinding {
+            message: format!(
+                "Code imports external crate '{}' which is not declared in the resolved dependency plan",
+                root
+            ),
+            location,
+        });
     }
 
-    findings.sort();
-    findings.dedup();
+    dedup_code_findings(&mut findings);
     Ok(findings)
 }
 
 fn extract_external_crate_roots(code: &str) -> BTreeSet<String> {
-    let qualified_path_re = Regex::new(r"\b([a-z_][a-z0-9_]*)::").unwrap();
-    qualified_path_re
-        .captures_iter(code)
-        .filter_map(|captures| captures.get(1))
-        .filter(|capture| {
-            let start = capture.start();
-            !(start >= 2 && &code[start - 2..start] == "::")
-        })
-        .map(|capture| capture.as_str().to_string())
-        .filter(|root| !baseline_allowed_crate_roots().contains(root.as_str()))
-        .collect()
+    match syn::parse_file(code) {
+        Ok(file) => extract_external_crate_roots_from_file(&file),
+        Err(_) => extract_external_crate_roots_fallback(code),
+    }
+}
+
+fn extract_external_crate_roots_from_file(file: &File) -> BTreeSet<String> {
+    let mut collector = ExternalCrateRootCollector::new(collect_local_root_bindings(file));
+
+    for item in &file.items {
+        match item {
+            Item::Use(item_use) => {
+                collector.record_use_roots(item_use);
+                collector.record_use_bindings(item_use);
+            }
+            Item::ExternCrate(item) => collector.record_extern_crate(item),
+            _ => {}
+        }
+    }
+
+    collector.visit_file(file);
+    collector.roots
+}
+
+fn extract_external_crate_roots_fallback(code: &str) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    let use_root_re =
+        Regex::new(r"(?m)^\s*use\s+([a-z_][a-z0-9_]*)\b(?:\s*::|\s*;|\s+as\b)").unwrap();
+    let extern_crate_re =
+        Regex::new(r"(?m)^\s*extern\s+crate\s+([a-z_][a-z0-9_]*)\b").unwrap();
+
+    for capture in use_root_re.captures_iter(code) {
+        if let Some(root) = capture.get(1).map(|m| m.as_str()) {
+            if is_possible_external_crate_root(root) {
+                roots.insert(root.to_string());
+            }
+        }
+    }
+
+    for capture in extern_crate_re.captures_iter(code) {
+        if let Some(root) = capture.get(1).map(|m| m.as_str()) {
+            if is_possible_external_crate_root(root) {
+                roots.insert(root.to_string());
+            }
+        }
+    }
+
+    roots
+}
+
+fn collect_local_root_bindings(file: &File) -> HashSet<String> {
+    file.items
+        .iter()
+        .filter_map(local_item_binding)
+        .collect::<HashSet<_>>()
+}
+
+fn local_item_binding(item: &Item) -> Option<String> {
+    match item {
+        Item::Const(item) => Some(item.ident.to_string()),
+        Item::Enum(item) => Some(item.ident.to_string()),
+        Item::Fn(item) => Some(item.sig.ident.to_string()),
+        Item::Macro(item) => item.ident.as_ref().map(|ident| ident.to_string()),
+        Item::Mod(item) => Some(item.ident.to_string()),
+        Item::Static(item) => Some(item.ident.to_string()),
+        Item::Struct(item) => Some(item.ident.to_string()),
+        Item::Trait(item) => Some(item.ident.to_string()),
+        Item::TraitAlias(item) => Some(item.ident.to_string()),
+        Item::Type(item) => Some(item.ident.to_string()),
+        Item::Union(item) => Some(item.ident.to_string()),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct ExternalCrateRootCollector {
+    roots: BTreeSet<String>,
+    local_bindings: HashSet<String>,
+    imported_bindings: HashSet<String>,
+}
+
+impl ExternalCrateRootCollector {
+    fn new(local_bindings: HashSet<String>) -> Self {
+        Self {
+            roots: BTreeSet::new(),
+            local_bindings,
+            imported_bindings: HashSet::new(),
+        }
+    }
+
+    fn record_extern_crate(&mut self, item: &ItemExternCrate) {
+        self.record_use_root_candidate(&item.ident.to_string());
+        let binding = item
+            .rename
+            .as_ref()
+            .map(|(_, ident)| ident)
+            .unwrap_or(&item.ident)
+            .to_string();
+        self.imported_bindings.insert(binding);
+    }
+
+    fn record_use_roots(&mut self, item: &ItemUse) {
+        self.record_use_tree_roots(&item.tree, None);
+    }
+
+    fn record_use_bindings(&mut self, item: &ItemUse) {
+        self.record_use_tree_bindings(&item.tree, None);
+    }
+
+    fn record_use_tree_roots(&mut self, tree: &UseTree, top_root: Option<&str>) {
+        match tree {
+            UseTree::Path(path) => {
+                let ident = path.ident.to_string();
+                let next_root = top_root.unwrap_or(&ident);
+                if top_root.is_none() {
+                    self.record_use_root_candidate(next_root);
+                }
+                self.record_use_tree_roots(&path.tree, Some(next_root));
+            }
+            UseTree::Name(name) => {
+                if let Some(root) = top_root {
+                    self.record_use_root_candidate(root);
+                } else {
+                    let root = name.ident.to_string();
+                    self.record_use_root_candidate(&root);
+                }
+            }
+            UseTree::Rename(rename) => {
+                if let Some(root) = top_root {
+                    self.record_use_root_candidate(root);
+                } else {
+                    let root = rename.ident.to_string();
+                    self.record_use_root_candidate(&root);
+                }
+            }
+            UseTree::Glob(_) => {
+                if let Some(root) = top_root {
+                    self.record_use_root_candidate(root);
+                }
+            }
+            UseTree::Group(group) => {
+                for item in &group.items {
+                    self.record_use_tree_roots(item, top_root);
+                }
+            }
+        }
+    }
+
+    fn record_use_tree_bindings(&mut self, tree: &UseTree, current_leaf: Option<&str>) {
+        match tree {
+            UseTree::Path(path) => {
+                let ident = path.ident.to_string();
+                self.record_use_tree_bindings(&path.tree, Some(&ident));
+            }
+            UseTree::Name(name) => {
+                if name.ident == "self" {
+                    if let Some(binding) = current_leaf {
+                        self.imported_bindings.insert(binding.to_string());
+                    }
+                } else {
+                    self.imported_bindings.insert(name.ident.to_string());
+                }
+            }
+            UseTree::Rename(rename) => {
+                self.imported_bindings.insert(rename.rename.to_string());
+            }
+            UseTree::Glob(_) => {}
+            UseTree::Group(group) => {
+                for item in &group.items {
+                    self.record_use_tree_bindings(item, current_leaf);
+                }
+            }
+        }
+    }
+
+    fn record_use_root_candidate(&mut self, root: &str) {
+        if is_possible_external_crate_root(root) && !self.local_bindings.contains(root) {
+            self.roots.insert(root.to_string());
+        }
+    }
+
+    fn record_path_root(&mut self, path: &SynPath) {
+        if path.segments.len() < 2 {
+            return;
+        }
+
+        let Some(root_segment) = path.segments.first() else {
+            return;
+        };
+        let root = root_segment.ident.to_string();
+
+        if !is_possible_external_crate_root(&root) {
+            return;
+        }
+        if self.local_bindings.contains(&root) || self.imported_bindings.contains(&root) {
+            return;
+        }
+
+        self.roots.insert(root);
+    }
+}
+
+impl<'ast> Visit<'ast> for ExternalCrateRootCollector {
+    fn visit_item_use(&mut self, _node: &'ast ItemUse) {}
+
+    fn visit_item_extern_crate(&mut self, _node: &'ast ItemExternCrate) {}
+
+    fn visit_path(&mut self, path: &'ast SynPath) {
+        self.record_path_root(path);
+        visit::visit_path(self, path);
+    }
+}
+
+fn is_possible_external_crate_root(root: &str) -> bool {
+    let first = root.chars().next();
+    first.map(|ch| ch.is_ascii_lowercase()).unwrap_or(false)
+        && root.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        && !baseline_allowed_crate_roots().contains(root)
+        && !primitive_path_roots().contains(root)
+}
+
+fn primitive_path_roots() -> HashSet<&'static str> {
+    HashSet::from([
+        "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str", "u8",
+        "u16", "u32", "u64", "u128", "usize",
+    ])
 }
 
 fn baseline_allowed_crate_roots() -> HashSet<&'static str> {
@@ -717,17 +1233,56 @@ fn known_capability_domain_for_crate(crate_name: &str) -> Option<&'static str> {
     }
 }
 
-fn detect_immutable_kind_findings(code: &str) -> Vec<String> {
+fn find_first_root_path_location(code: &str, root: &str) -> Option<CodeLocation> {
+    let pattern = format!(r"(?m)\b{}\b(?:(?:\s*::)|(?:\s*;)|(?:\s+as\b))", regex::escape(root));
+    let regex = Regex::new(&pattern).ok()?;
+    regex.find(code).map(|matched| location_from_offset(code, matched.start()))
+}
+
+fn method_receiver_mut_span(method: &ImplItemFn) -> Option<Span> {
+    method.sig.inputs.iter().find_map(|arg| match arg {
+        FnArg::Receiver(receiver) if receiver.mutability.is_some() => Some(receiver.span()),
+        _ => None,
+    })
+}
+
+fn is_public_visibility(visibility: &Visibility) -> bool {
+    !matches!(visibility, Visibility::Inherited)
+}
+
+fn detect_immutable_kind_findings(code: &str) -> Vec<CodeFinding> {
     let mut findings = Vec::new();
 
-    let public_mut_re =
-        Regex::new(r"\bpub(?:\([^)]*\))?\s+fn\s+[A-Za-z0-9_]+\s*\([^)]*(?:&mut self|mut self)")
-            .unwrap();
-    if public_mut_re.is_match(code) {
-        findings.push(
-            "Immutable kind (Data or Projection) exposes a public mutable receiver (`&mut self`/`mut self`)"
-                .to_string(),
-        );
+    if let Ok(file) = syn::parse_file(code) {
+        for item in &file.items {
+            let Item::Impl(item_impl) = item else {
+                continue;
+            };
+            for impl_item in &item_impl.items {
+                let ImplItem::Fn(method) = impl_item else {
+                    continue;
+                };
+                if is_public_visibility(&method.vis) {
+                    if let Some(span) = method_receiver_mut_span(method) {
+                        findings.push(CodeFinding::with_span(
+                            "Immutable kind (Data or Projection) exposes a public mutable receiver (`&mut self`/`mut self`)",
+                            span,
+                        ));
+                    }
+                }
+            }
+        }
+    } else {
+        let public_mut_re =
+            Regex::new(r"\bpub(?:\([^)]*\))?\s+fn\s+[A-Za-z0-9_]+\s*\([^)]*(?:&mut self|mut self)")
+                .unwrap();
+        if let Some(found) = public_mut_re.find(code) {
+            findings.push(CodeFinding::with_offset(
+                "Immutable kind (Data or Projection) exposes a public mutable receiver (`&mut self`/`mut self`)",
+                code,
+                found.start(),
+            ));
+        }
     }
 
     let mutability_patterns = [
@@ -739,10 +1294,14 @@ fn detect_immutable_kind_findings(code: &str) -> Vec<String> {
     ];
     for (pattern, label) in mutability_patterns {
         let re = Regex::new(pattern).unwrap();
-        if re.is_match(code) {
-            findings.push(format!(
-                "Immutable kind (Data or Projection) uses interior mutability/storage pattern `{}`",
-                label
+        if let Some(found) = re.find(code) {
+            findings.push(CodeFinding::with_offset(
+                format!(
+                    "Immutable kind (Data or Projection) uses interior mutability/storage pattern `{}`",
+                    label
+                ),
+                code,
+                found.start(),
             ));
         }
     }
@@ -756,71 +1315,143 @@ fn detect_immutable_kind_findings(code: &str) -> Vec<String> {
     ];
     for (pattern, label) in spawn_patterns {
         let re = Regex::new(pattern).unwrap();
-        if re.is_match(code) {
-            findings.push(format!(
-                "Immutable kind (Data or Projection) starts background lifecycle work via `{}`",
-                label
+        if let Some(found) = re.find(code) {
+            findings.push(CodeFinding::with_offset(
+                format!(
+                    "Immutable kind (Data or Projection) starts background lifecycle work via `{}`",
+                    label
+                ),
+                code,
+                found.start(),
             ));
         }
     }
 
-    findings.sort();
-    findings.dedup();
+    dedup_code_findings(&mut findings);
     findings
 }
 
 /// Additional lint checks specific to Projection kinds.
 /// Projections are CQRS read models: they must never depend on Context kinds.
-fn detect_projection_kind_findings(code: &str) -> Vec<String> {
+fn use_tree_references_module(tree: &UseTree, target_module: &str) -> bool {
+    fn walk(tree: &UseTree, prefix: &mut Vec<String>, target_module: &str) -> bool {
+        match tree {
+            UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                let found = walk(&path.tree, prefix, target_module);
+                prefix.pop();
+                found
+            }
+            UseTree::Name(_) | UseTree::Rename(_) | UseTree::Glob(_) => {
+                prefix.first().is_some_and(|item| item == target_module)
+                    || prefix.get(1).is_some_and(|item| item == target_module)
+            }
+            UseTree::Group(group) => group
+                .items
+                .iter()
+                .any(|item| walk(item, prefix, target_module)),
+        }
+    }
+
+    walk(tree, &mut Vec::new(), target_module)
+}
+
+fn detect_projection_kind_findings(code: &str) -> Vec<CodeFinding> {
     let mut findings = Vec::new();
 
-    // Projections must not import from crate::contexts::
-    let context_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::contexts::").unwrap();
-    if context_import_re.is_match(code) {
-        findings.push(
-            "Projection imports from `contexts` module; Projections must not depend on Context kinds"
-                .to_string(),
-        );
+    if let Ok(file) = syn::parse_file(code) {
+        for item in &file.items {
+            match item {
+                Item::Use(item_use) if use_tree_references_module(&item_use.tree, "contexts") => {
+                    findings.push(CodeFinding::with_span(
+                        "Projection imports from `contexts` module; Projections must not depend on Context kinds",
+                        item_use.span(),
+                    ));
+                }
+                Item::Impl(item_impl) => {
+                    for impl_item in &item_impl.items {
+                        let ImplItem::Fn(method) = impl_item else {
+                            continue;
+                        };
+                        if let Some(span) = method_receiver_mut_span(method) {
+                            findings.push(CodeFinding::with_span(
+                                "Projection contains a `&mut self`/`mut self` method; all Projection methods must be immutable",
+                                span,
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        let context_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::contexts::").unwrap();
+        if let Some(found) = context_import_re.find(code) {
+            findings.push(CodeFinding::with_offset(
+                "Projection imports from `contexts` module; Projections must not depend on Context kinds",
+                code,
+                found.start(),
+            ));
+        }
+
+        let private_mut_re =
+            Regex::new(r"\bfn\s+[A-Za-z0-9_]+\s*\([^)]*(?:&mut self|mut self)").unwrap();
+        if let Some(found) = private_mut_re.find(code) {
+            findings.push(CodeFinding::with_offset(
+                "Projection contains a `&mut self`/`mut self` method; all Projection methods must be immutable",
+                code,
+                found.start(),
+            ));
+        }
     }
 
-    // Projections must not have private &mut self methods either
-    let private_mut_re =
-        Regex::new(r"\bfn\s+[A-Za-z0-9_]+\s*\([^)]*(?:&mut self|mut self)").unwrap();
-    if private_mut_re.is_match(code) {
-        findings.push(
-            "Projection contains a `&mut self`/`mut self` method; all Projection methods must be immutable"
-                .to_string(),
-        );
-    }
-
-    findings.sort();
-    findings.dedup();
+    dedup_code_findings(&mut findings);
     findings
 }
 
 /// Additional lint checks specific to Data kinds.
 /// Data types must not reference Context or Projection kinds.
-fn detect_data_kind_findings(code: &str) -> Vec<String> {
+fn detect_data_kind_findings(code: &str) -> Vec<CodeFinding> {
     let mut findings = Vec::new();
 
-    // Data must not import from crate::contexts:: or crate::projections::
-    let context_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::contexts::").unwrap();
-    if context_import_re.is_match(code) {
-        findings.push(
-            "Data type imports from `contexts` module; Data kinds must only depend on other Data kinds and primitives"
-                .to_string(),
-        );
-    }
-    let projection_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::projections::").unwrap();
-    if projection_import_re.is_match(code) {
-        findings.push(
-            "Data type imports from `projections` module; Data kinds must only depend on other Data kinds and primitives"
-                .to_string(),
-        );
+    if let Ok(file) = syn::parse_file(code) {
+        for item in &file.items {
+            let Item::Use(item_use) = item else {
+                continue;
+            };
+            if use_tree_references_module(&item_use.tree, "contexts") {
+                findings.push(CodeFinding::with_span(
+                    "Data type imports from `contexts` module; Data kinds must only depend on other Data kinds and primitives",
+                    item_use.span(),
+                ));
+            }
+            if use_tree_references_module(&item_use.tree, "projections") {
+                findings.push(CodeFinding::with_span(
+                    "Data type imports from `projections` module; Data kinds must only depend on other Data kinds and primitives",
+                    item_use.span(),
+                ));
+            }
+        }
+    } else {
+        let context_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::contexts::").unwrap();
+        if let Some(found) = context_import_re.find(code) {
+            findings.push(CodeFinding::with_offset(
+                "Data type imports from `contexts` module; Data kinds must only depend on other Data kinds and primitives",
+                code,
+                found.start(),
+            ));
+        }
+        let projection_import_re = Regex::new(r"\buse\s+[A-Za-z0-9_]+::projections::").unwrap();
+        if let Some(found) = projection_import_re.find(code) {
+            findings.push(CodeFinding::with_offset(
+                "Data type imports from `projections` module; Data kinds must only depend on other Data kinds and primitives",
+                code,
+                found.start(),
+            ));
+        }
     }
 
-    findings.sort();
-    findings.dedup();
+    dedup_code_findings(&mut findings);
     findings
 }
 
@@ -1533,8 +2164,10 @@ mod tests {
     };
     use super::{
         SpecificationKind, analyze_specification, compare_verifier_reports,
-        determine_spec_path_for_output, verify_generated_implementation,
+        determine_spec_path_for_output, extract_external_crate_roots,
+        verify_generated_implementation,
     };
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1642,6 +2275,84 @@ Used for one shared input stream across the whole application session.
                 .high_risk_findings
                 .iter()
                 .any(|item| item.contains("stdin_source_read_available"))
+        );
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("command_input.rs:1:")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_ignores_trivial_trait_impl_for_collaborator_role_methods() {
+        let root = make_temp_dir("pipeline_quality_trait_role_impl");
+        let specs = root.join("specifications").join("contexts");
+        let src = root.join("src").join("contexts");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("game_loop.md");
+        fs::write(
+            &spec_path,
+            r#"# GameLoopContext
+
+## Purpose
+Runs the game loop.
+
+## Role Methods
+### food_dropper
+- **drop**
+  Returns `Some(food)` or `None`.
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("game_loop.rs");
+        fs::write(
+            &output,
+            r#"trait FoodDropper {
+    fn drop(&mut self) -> Option<u32>;
+}
+
+struct EmptyFoodDropper;
+
+impl FoodDropper for EmptyFoodDropper {
+    fn drop(&mut self) -> Option<u32> {
+        None
+    }
+}
+
+struct GameLoopContext {
+    food_dropper: EmptyFoodDropper,
+}
+
+impl GameLoopContext {
+    fn food_dropper_drop(&mut self) -> Option<u32> {
+        self.food_dropper.drop()
+    }
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            !report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("trivial body returning None")),
+            "findings: {:?}",
+            report.high_risk_findings
         );
 
         fs::remove_dir_all(root).ok();
@@ -1817,6 +2528,42 @@ fn main() {
     }
 
     #[test]
+    fn external_crate_extractor_collapses_nested_use_trees_to_top_level_crates() {
+        let roots = extract_external_crate_roots(
+            r#"use std::io::{self, Write};
+use crossterm::{
+    cursor::{MoveToColumn, MoveUp},
+    queue,
+    style::Print,
+};
+
+fn render() -> Result<(), io::Error> {
+    let _line_count = u16::MAX;
+    let mut out = io::stdout();
+    queue!(out, MoveUp(1), MoveToColumn(0), Print("x"))?;
+    out.flush()?;
+    Ok(())
+}"#,
+        );
+
+        assert_eq!(roots, BTreeSet::from(["crossterm".to_string()]));
+    }
+
+    #[test]
+    fn external_crate_extractor_ignores_imported_module_bindings() {
+        let roots = extract_external_crate_roots(
+            r#"use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use std::time::Duration;
+
+fn read_one() {
+    let _ = event::poll(Duration::from_secs(0));
+}"#,
+        );
+
+        assert_eq!(roots, BTreeSet::from(["crossterm".to_string()]));
+    }
+
+    #[test]
     fn verifier_flags_conflicting_domain_provider() {
         let root = make_temp_dir("pipeline_quality_conflicting_provider");
         let specs = root.join("specifications");
@@ -1868,6 +2615,90 @@ fn main() {}"#,
             report.high_risk_findings.iter().any(|item| {
                 item.contains("capability domain 'terminal' is planned to use 'crossterm'")
             }),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_allows_planned_terminal_crate_with_nested_use_tree_and_primitives() {
+        let root = make_temp_dir("pipeline_quality_planned_crossterm_nested");
+        let specs = root.join("specifications");
+        let drafts = root.join("drafts");
+        let src = root.join("src");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir drafts");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let mut registry = empty_registry();
+        add_capability_mapping_to_registry(
+            &mut registry,
+            "terminal_screen_control",
+            "crossterm",
+            "terminal",
+            "0.27",
+            &[],
+            true,
+        )
+        .expect("map screen control");
+        add_capability_mapping_to_registry(
+            &mut registry,
+            "terminal_raw_input",
+            "crossterm",
+            "terminal",
+            "0.27",
+            &[],
+            true,
+        )
+        .expect("map raw input");
+        write_capability_registry(&drafts.join("capability_registry.yml"), &registry)
+            .expect("write registry");
+        fs::write(
+            drafts.join("contexts/terminal_renderer.md"),
+            "# TerminalRenderer\n\nUses terminal render and keypress handling.\n",
+        )
+        .expect("write draft");
+
+        let spec_path = specs.join("app.md");
+        fs::write(&spec_path, "# App\n\n## Behavior\n- Runs.\n").expect("write spec");
+
+        let output = src.join("main.rs");
+        fs::write(
+            &output,
+            r#"use std::io::{self, Write};
+use crossterm::{
+    cursor::{MoveToColumn, MoveUp},
+    queue,
+    style::Print,
+};
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use std::time::Duration;
+
+fn main() -> Result<(), io::Error> {
+    let _line_count = u16::MAX;
+    let _ = event::poll(Duration::from_secs(0));
+    let mut out = io::stdout();
+    queue!(out, MoveUp(1), MoveToColumn(0), Print("x"))?;
+    out.flush()?;
+    Ok(())
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            !report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("resolved dependency plan")),
             "findings: {:?}",
             report.high_risk_findings
         );
@@ -2137,6 +2968,14 @@ impl ProjectionContext {
                 .high_risk_findings
                 .iter()
                 .any(|item| item.contains("public mutable receiver"))
+        );
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("projection_context.rs:")),
+            "findings: {:?}",
+            report.high_risk_findings
         );
         assert!(
             report

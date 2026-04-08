@@ -24,10 +24,6 @@ bootstrap_capability_registry:
   model: mistral/mistral-large-latest
   parallel: false
   batch: false
-create_implementation:
-  model: openai/gpt-5
-  parallel: true
-  batch: false
 create_implementation_data:
   model: openai/gpt-5
   parallel: true

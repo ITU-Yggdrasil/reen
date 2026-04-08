@@ -24,9 +24,6 @@ bootstrap_capability_registry:
   model: mistral/mistral-large-latest
   parallel: false
   batch: false
-create_implementation:
-  model: mistral/codestral-latest
-  parallel: true
 create_implementation_data:
   model: mistral/codestral-latest
   parallel: true

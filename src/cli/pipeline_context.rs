@@ -111,16 +111,58 @@ fn compact_single_contract_value(value: &serde_json::Value) -> serde_json::Value
 fn build_context_variants(
     base_context: &HashMap<String, serde_json::Value>,
 ) -> Vec<HashMap<String, serde_json::Value>> {
-    let mut variants = vec![base_context.clone()];
+    let manifest_sources = [
+        "direct_dependencies",
+        "dependency_closure",
+        "mcp_context",
+        "implemented_dependencies",
+        "implemented_direct_dependencies",
+    ];
 
-    if base_context.contains_key("implemented_dependencies") {
-        let mut without_impl = base_context.clone();
+    // Preferred default: proactively compact manifest-like structures and strip the raw
+    // dependency tool payload before estimating or executing agent requests (unless the user
+    // opts into full dependency payloads via REEN_FULL_IMPLEMENTATION_DEPS).
+    let mut preferred = base_context.clone();
+    if !super::full_implementation_dependency_context_enabled() {
+        preferred.remove("dependency_tool_context");
+    }
+    for key in manifest_sources {
+        if let Some(value) = preferred.get(key).cloned() {
+            preferred.insert(key.to_string(), compact_dependency_manifest_entries(&value));
+        }
+    }
+    if let Some(value) = preferred.get("contract_artifact").cloned() {
+        preferred.insert(
+            "contract_artifact".to_string(),
+            compact_single_contract_value(&value),
+        );
+    }
+    for (key, max_entries) in [
+        ("dependency_contracts", 8usize),
+        ("direct_dependency_contracts", 8usize),
+        ("implemented_role_capsules", 6usize),
+        ("implemented_direct_role_capsules", 8usize),
+    ] {
+        if let Some(value) = preferred.get(key).cloned() {
+            let reduced = if key.contains("capsules") {
+                compact_capsule_entries(&value, max_entries)
+            } else {
+                compact_contract_entries(&value, max_entries)
+            };
+            preferred.insert(key.to_string(), reduced);
+        }
+    }
+
+    let mut variants = vec![preferred.clone()];
+
+    if preferred.contains_key("implemented_dependencies") {
+        let mut without_impl = preferred.clone();
         without_impl.remove("implemented_dependencies");
         variants.push(without_impl);
     }
 
-    if let Some(openapi_content) = base_context.get("openapi_content").and_then(|v| v.as_str()) {
-        let mut compact_openapi = base_context.clone();
+    if let Some(openapi_content) = preferred.get("openapi_content").and_then(|v| v.as_str()) {
+        let mut compact_openapi = preferred.clone();
         let truncated = if openapi_content.chars().count() > 12000 {
             format!(
                 "{}\n...[truncated OpenAPI by reen]",
@@ -133,14 +175,7 @@ fn build_context_variants(
         variants.push(compact_openapi);
     }
 
-    let manifest_sources = [
-        "direct_dependencies",
-        "dependency_closure",
-        "mcp_context",
-        "implemented_dependencies",
-        "implemented_direct_dependencies",
-    ];
-    let mut compact_manifest = base_context.clone();
+    let mut compact_manifest = preferred.clone();
     let mut compact_manifest_changed = false;
     for key in manifest_sources {
         if let Some(value) = compact_manifest.get(key).cloned() {
@@ -160,7 +195,7 @@ fn build_context_variants(
         }
     }
 
-    let mut contract_compact = base_context.clone();
+    let mut contract_compact = preferred.clone();
     let mut contract_changed = false;
     for (key, max_entries) in [
         ("dependency_contracts", 8usize),
@@ -198,7 +233,7 @@ fn build_context_variants(
         ("implemented_dependencies", 800usize, 6usize),
         ("implemented_direct_dependencies", 1600usize, 8usize),
     ];
-    let mut compact = base_context.clone();
+    let mut compact = preferred.clone();
     let mut changed = false;
     for (key, content_limit, max_entries) in compact_sources {
         if let Some(value) = compact.get(key).cloned() {
@@ -213,8 +248,8 @@ fn build_context_variants(
         variants.push(compact);
     }
 
-    if let Some(direct_only) = base_context.get("direct_dependencies_only") {
-        let mut direct_only_ctx = base_context.clone();
+    if let Some(direct_only) = preferred.get("direct_dependencies_only") {
+        let mut direct_only_ctx = preferred.clone();
         direct_only_ctx.insert(
             "direct_dependencies".to_string(),
             compact_dependency_manifest_entries(direct_only),
@@ -288,33 +323,93 @@ pub(super) fn fit_context_to_token_limit(
     base_context: HashMap<String, serde_json::Value>,
     token_limit: Option<f64>,
 ) -> Result<(HashMap<String, serde_json::Value>, usize)> {
-    let estimated = estimate_agent_request_tokens(executor, input, &base_context);
+    let mut variants = build_context_variants(&base_context).into_iter();
+    let preferred = variants.next().unwrap_or(base_context);
+    let preferred_estimate = estimate_agent_request_tokens(executor, input, &preferred);
     let Some(limit) = token_limit else {
-        return Ok((base_context, estimated));
+        return Ok((preferred, preferred_estimate));
     };
-    if estimated as f64 <= limit {
-        return Ok((base_context, estimated));
+    if preferred_estimate as f64 <= limit {
+        return Ok((preferred, preferred_estimate));
     }
 
-    for candidate in build_context_variants(&base_context) {
+    for candidate in variants {
         let candidate_estimate = estimate_agent_request_tokens(executor, input, &candidate);
         if candidate_estimate as f64 <= limit {
             return Ok((candidate, candidate_estimate));
         }
     }
 
-    Ok((base_context, estimated))
+    Ok((preferred, preferred_estimate))
+}
+
+pub(super) fn find_cached_context_variant(
+    executor: &AgentExecutor,
+    input: &str,
+    base_context: HashMap<String, serde_json::Value>,
+) -> Result<Option<(HashMap<String, serde_json::Value>, usize)>> {
+    for candidate in build_context_variants(&base_context) {
+        if executor.is_cache_hit(input, candidate.clone())? {
+            let estimated = estimate_agent_request_tokens(executor, input, &candidate);
+            return Ok(Some((candidate, estimated)));
+        }
+    }
+
+    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_context_variants, build_specification_context};
+    use super::{build_context_variants, build_specification_context, fit_context_to_token_limit};
+    use crate::cli::{Config, agent_executor::AgentExecutor};
     use serde_json::json;
     use std::collections::HashMap;
     use std::path::Path;
 
     #[test]
-    fn context_variants_prefer_full_closure_manifest_before_direct_only() {
+    fn preferred_context_variant_is_proactively_compacted() {
+        let base = HashMap::from([
+            (
+                "direct_dependencies".to_string(),
+                json!([
+                    {
+                        "name": "amount",
+                        "path": "drafts/data/amount.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "a",
+                        "content": "# Amount\nA very long dependency body"
+                    }
+                ]),
+            ),
+            (
+                "dependency_tool_context".to_string(),
+                json!({
+                    "dependency_artifacts": [
+                        {
+                            "path": "drafts/data/amount.md",
+                            "content": "full dependency draft"
+                        }
+                    ]
+                }),
+            ),
+        ]);
+
+        let preferred = build_context_variants(&base)
+            .into_iter()
+            .next()
+            .expect("preferred variant");
+
+        assert!(!preferred.contains_key("dependency_tool_context"));
+        let item = &preferred["direct_dependencies"][0];
+        assert_eq!(item["name"], json!("amount"));
+        assert_eq!(item["dependency_kind"], json!("direct"));
+        assert!(item.get("sha256").is_none());
+        assert!(item.get("content").is_none());
+    }
+
+    #[test]
+    fn context_variants_prefer_full_dependency_closure_before_direct_only_manifest() {
         let base = HashMap::from([
             (
                 "direct_dependencies".to_string(),
@@ -325,37 +420,11 @@ mod tests {
                         "dependency_kind": "direct",
                         "artifact_type": "draft_or_spec",
                         "sha256": "a"
-                    },
-                    {
-                        "name": "Snake",
-                        "path": "drafts/data/Snake.md",
-                        "dependency_kind": "transitive",
-                        "artifact_type": "draft_or_spec",
-                        "sha256": "b"
                     }
                 ]),
             ),
             (
                 "dependency_closure".to_string(),
-                json!([
-                    {
-                        "name": "command_input",
-                        "path": "drafts/contexts/command_input.md",
-                        "dependency_kind": "direct",
-                        "artifact_type": "draft_or_spec",
-                        "sha256": "a"
-                    },
-                    {
-                        "name": "Snake",
-                        "path": "drafts/data/Snake.md",
-                        "dependency_kind": "transitive",
-                        "artifact_type": "draft_or_spec",
-                        "sha256": "b"
-                    }
-                ]),
-            ),
-            (
-                "mcp_context".to_string(),
                 json!([
                     {
                         "name": "command_input",
@@ -414,23 +483,23 @@ mod tests {
         ]);
 
         let variants = build_context_variants(&base);
-        let compact_manifest_index = variants
+        let retains_transitive_closure_index = variants
             .iter()
             .position(|variant| {
                 variant
-                    .get("direct_dependencies")
+                    .get("dependency_closure")
                     .and_then(|value| value.as_array())
                     .map(|items| items.len() == 2)
                     .unwrap_or(false)
                     && variant
-                        .get("direct_dependencies")
+                        .get("dependency_closure")
                         .and_then(|value| value.as_array())
                         .and_then(|items| items.get(1))
                         .and_then(|item| item.get("dependency_kind"))
                         .and_then(|value| value.as_str())
                         == Some("transitive")
                     && variant
-                        .get("direct_dependencies")
+                        .get("dependency_closure")
                         .and_then(|value| value.as_array())
                         .and_then(|items| items.first())
                         .and_then(|item| item.get("sha256"))
@@ -442,16 +511,21 @@ mod tests {
             .iter()
             .position(|variant| {
                 variant
-                    .get("direct_dependencies")
+                    .get("dependency_closure")
                     .and_then(|value| value.as_array())
                     .map(|items| items.len() == 1)
                     .unwrap_or(false)
+                    && variant
+                        .get("direct_dependencies")
+                        .and_then(|value| value.as_array())
+                        .map(|items| items.len() == 1)
+                        .unwrap_or(false)
             })
             .expect("expected a direct-only fallback");
 
         assert!(
-            compact_manifest_index < direct_only_index,
-            "full-closure compact variant should be tried before direct-only fallback"
+            retains_transitive_closure_index < direct_only_index,
+            "full dependency_closure compact variant should be tried before direct-only fallback"
         );
 
         assert!(
@@ -597,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn context_variants_keep_dependency_content_but_drop_hashes() {
+    fn context_variants_drop_heavy_dependency_content_in_preferred_variant() {
         let base = HashMap::from([(
             "direct_dependencies".to_string(),
             json!([
@@ -613,24 +687,59 @@ mod tests {
         )]);
 
         let variants = build_context_variants(&base);
-        let compact_with_content = variants
-            .iter()
-            .find(|variant| {
-                let Some(item) = variant
-                    .get("direct_dependencies")
-                    .and_then(|value| value.as_array())
-                    .and_then(|items| items.first())
-                else {
-                    return false;
-                };
-                item.get("content").is_some() && item.get("sha256").is_none()
-            })
-            .expect("expected compact dependency artifact variant");
+        let preferred = variants.first().expect("preferred variant");
+        let item = &preferred["direct_dependencies"][0];
+        assert_eq!(item["name"], json!("command_input"));
+        assert_eq!(item["path"], json!("drafts/contexts/command_input.md"));
+        assert!(item.get("sha256").is_none());
+        assert!(item.get("content").is_none());
+    }
 
-        let item = &compact_with_content["direct_dependencies"][0];
-        assert!(item
-            .get("content")
-            .and_then(|value| value.as_str())
-            .is_some());
+    #[test]
+    fn fit_context_without_limit_uses_preferred_compact_variant() {
+        let executor = AgentExecutor::new(
+            "create_specifications_data",
+            &Config {
+                verbose: false,
+                dry_run: false,
+                github_repo: None,
+            },
+        )
+        .expect("executor");
+
+        let base = HashMap::from([
+            (
+                "direct_dependencies".to_string(),
+                json!([
+                    {
+                        "name": "amount",
+                        "path": "drafts/data/amount.md",
+                        "dependency_kind": "direct",
+                        "artifact_type": "draft_or_spec",
+                        "sha256": "a",
+                        "content": "# Amount\nA very long dependency body"
+                    }
+                ]),
+            ),
+            (
+                "dependency_tool_context".to_string(),
+                json!({
+                    "dependency_artifacts": [
+                        {
+                            "path": "drafts/data/amount.md",
+                            "content": "full dependency draft"
+                        }
+                    ]
+                }),
+            ),
+        ]);
+
+        let (selected, estimated) = fit_context_to_token_limit(&executor, "# Amount", base, None)
+            .expect("fit context");
+
+        assert!(estimated > 0);
+        assert!(!selected.contains_key("dependency_tool_context"));
+        assert!(selected["direct_dependencies"][0].get("sha256").is_none());
+        assert!(selected["direct_dependencies"][0].get("content").is_none());
     }
 }

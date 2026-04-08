@@ -84,20 +84,22 @@ mod tests {
     #[test]
     fn candidate_order_is_variant_then_default() {
         let agents_dir = Path::new("agents");
-        let paths = candidate_agent_spec_paths(agents_dir, "create_implementation", "gpt-5");
+        let paths =
+            candidate_agent_spec_paths(agents_dir, "create_implementation_context", "gpt-5");
         assert_eq!(paths.len(), 2);
-        assert!(paths[0].ends_with("create_implementation.gpt.yml"));
-        assert!(paths[1].ends_with("create_implementation.yml"));
+        assert!(paths[0].ends_with("create_implementation_context.gpt.yml"));
+        assert!(paths[1].ends_with("create_implementation_context.yml"));
     }
 
     #[test]
     fn filename_candidates_match_expected_order() {
-        let names = candidate_agent_spec_filenames("create_implementation", "claude-3-sonnet");
+        let names =
+            candidate_agent_spec_filenames("create_implementation_context", "claude-3-sonnet");
         assert_eq!(
             names,
             vec![
-                "create_implementation.sonnet.yml",
-                "create_implementation.yml"
+                "create_implementation_context.sonnet.yml",
+                "create_implementation_context.yml"
             ]
         );
     }

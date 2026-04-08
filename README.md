@@ -69,6 +69,26 @@ reen help <command>
 
 You can also use `-h` or `--help` at any level, for example `reen clear --help` or `reen create implementation --help`.
 
+### `reen.yml`
+
+`reen.yml` is optional. When present, shared `create` settings resolve in this order:
+
+1. CLI flags
+2. `reen.yml`
+3. Built-in defaults or environment/registry fallbacks
+
+Example:
+
+```yaml
+create:
+  contexts: false
+  projections: true
+  data: false
+  parallel-limit: 6
+  rate-limit: 2
+  token-limit: 60000
+```
+
 ### `create`
 
 `create` is the main generation command. It has its own shared options before the stage subcommand:
@@ -77,17 +97,20 @@ You can also use `-h` or `--help` at any level, for example `reen clear --help` 
 | --- | --- | --- |
 | `--clear-cache` | Ignore build-tracker state for this create run and refresh the stage cache first. | `reen create --clear-cache specification` |
 | `--contexts` | Only include `drafts/contexts/`, `drafts/apis/`, and `drafts/external_apis/`. | `reen create --contexts specification` |
+| `--projections` | Only include `drafts/projections/`. | `reen create --projections specification` |
 | `--data` | Only include `drafts/data/`. | `reen create --data specification` |
 | `--rate-limit <n>` | Maximum API requests per second. Overrides `REEN_RATE_LIMIT` and registry config. | `reen create --rate-limit 2 specification` |
 | `--token-limit <n>` | Maximum tokens per minute. Overrides `REEN_TOKEN_LIMIT` and registry config. | `reen create --token-limit 60000 implementation` |
+| `--parallel-limit <n>` | Maximum in-flight items per stage. `0` is clamped to `1`. Overrides `create.parallel-limit` in `reen.yml`. | `reen create --parallel-limit 8 implementation` |
 
 Examples:
 
 ```bash
 reen create --clear-cache specification
 reen create --contexts specification
+reen create --projections specification
 reen create --data specification
-reen create --rate-limit 2 --token-limit 60000 implementation
+reen create --rate-limit 2 --token-limit 60000 --parallel-limit 8 implementation
 ```
 
 #### `create specification`
@@ -202,12 +225,14 @@ Arguments and options:
 - `[NAMES]...`: Optional draft/specification names without the `.md` extension.
 - `--clear-cache`: Ignore build-tracker state for both stages and refresh the stage cache first.
 - `--contexts`: Only include `drafts/contexts/`, `drafts/apis/`, and `drafts/external_apis/`.
+- `--projections`: Only include `drafts/projections/`.
 - `--data`: Only include `drafts/data/`.
 - `--fix`: Accepted for parity with `create`; build always enables draft and compilation repair.
 - `--max-fix-attempts <n>`: Limit automatic draft-fix retries during specification creation. Default: `3`.
 - `--max-compile-fix-attempts <n>`: Limit automatic compilation-fix retries during implementation creation. Default: `3`.
 - `--rate-limit <n>`: Maximum API requests per second. Overrides `REEN_RATE_LIMIT` and registry config.
 - `--token-limit <n>`: Maximum tokens per minute. Overrides `REEN_TOKEN_LIMIT` and registry config.
+- `--parallel-limit <n>`: Maximum in-flight items per stage. `0` is clamped to `1`. Overrides `create.parallel-limit` in `reen.yml`.
 
 Examples:
 
@@ -215,7 +240,8 @@ Examples:
 reen build
 reen build app game_loop
 reen build --contexts
-reen build --clear-cache --max-fix-attempts 5 --max-compile-fix-attempts 5 app
+reen build --projections
+reen build --clear-cache --parallel-limit 8 --max-fix-attempts 5 --max-compile-fix-attempts 5 app
 ```
 
 ### `check`

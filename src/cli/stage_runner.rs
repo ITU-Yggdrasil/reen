@@ -1,23 +1,29 @@
 use anyhow::Result;
+#[cfg(test)]
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task::block_in_place;
+#[cfg(test)]
 use tokio::task::JoinSet;
 use tokio::time::{Duration, sleep};
 
 use reen::execution::{NativeExecutionControl, NativeRequestStep, NativeStepUsage, TokenLimiter};
 
+#[cfg(test)]
 use super::Config;
 use super::agent_executor::AgentExecutor;
+#[cfg(test)]
 use super::progress::{
     ProgressIndicator, print_timed_status, standard_text, warning_text,
 };
+#[cfg(not(test))]
+use super::progress::{print_timed_status, warning_text};
 use super::rate_limiter::RateLimiter;
 use super::run_context::RunContextCache;
 use super::usage_report::UsageReporter;
 
-pub(crate) const DEFAULT_PARALLEL_LIMIT: usize = 4;
+pub const DEFAULT_PARALLEL_LIMIT: usize = 4;
 
 #[derive(Clone)]
 pub(crate) struct CliExecutionControl {
@@ -47,6 +53,7 @@ impl CliExecutionControl {
         self.rate_limiter.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn verbose(&self) -> bool {
         self.verbose
     }
@@ -120,7 +127,9 @@ impl NativeExecutionControl for CliExecutionControl {
 
 #[derive(Clone)]
 pub(crate) struct ExecutionResources {
+    #[cfg(test)]
     pub(crate) token_limiter: Option<Arc<TokenLimiter>>,
+    #[cfg(test)]
     pub(crate) rate_limiter: Option<Arc<RateLimiter>>,
     pub(crate) execution_control: Option<CliExecutionControl>,
     pub(crate) usage_reporter: UsageReporter,
@@ -144,7 +153,9 @@ impl ExecutionResources {
         ));
         let project_root = PathBuf::from(project_root.as_ref());
         Self {
+            #[cfg(test)]
             token_limiter,
+            #[cfg(test)]
             rate_limiter,
             execution_control,
             usage_reporter: UsageReporter::new(command_name.into(), project_root, verbose),
@@ -259,6 +270,7 @@ fn parse_duration_prefix(input: &str) -> Option<Duration> {
     Some(Duration::from_secs_f64(seconds.max(1.0)))
 }
 
+#[cfg(test)]
 pub(crate) async fn acquire_request_capacity(
     token_limiter: Option<&Arc<TokenLimiter>>,
     rate_limiter: Option<&Arc<RateLimiter>>,
@@ -341,6 +353,7 @@ pub(crate) async fn prepare_rate_limit_retry(
     waited
 }
 
+#[cfg(test)]
 async fn await_with_heartbeat<R, Fut>(item_name: &str, verbose: bool, future: Fut) -> Result<R>
 where
     Fut: Future<Output = Result<R>> + Send + 'static,
@@ -374,6 +387,7 @@ where
     }
 }
 
+#[cfg(test)]
 async fn run_stage_item<T, R, F, Fut>(
     item: StageItem<T>,
     resources: ExecutionResources,
@@ -524,6 +538,7 @@ mod tests {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn run_stage_items<T, R, F, Fut>(
     items: Vec<StageItem<T>>,
     can_parallel: bool,
