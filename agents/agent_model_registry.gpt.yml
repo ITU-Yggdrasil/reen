@@ -20,6 +20,10 @@ create_specifications_brand:
 create_implementation:
   model: gpt-5
   parallel: true
+create_implementation_brand:
+  model: gpt-5
+  parallel: false
+  batch: false
 create_test:
   model: gpt-5 # qwen2.5:7b
   parallel: false

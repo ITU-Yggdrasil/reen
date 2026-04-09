@@ -346,6 +346,10 @@ mod tests {
   model: qwen2.5:7b
   parallel: false
   batch: false",
+            "create_implementation_brand:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
             "create_test:
   model: qwen2.5:7b
   parallel: false
@@ -370,6 +374,7 @@ mod tests {
         let yaml = r#"
 create_specifications_data: gpt-4
 create_implementation: claude-3-opus
+create_implementation_brand: claude-3-opus
 create_test: gpt-4
 create_specifications_context: gpt-4
 create_specifications_main: gpt-4
@@ -405,6 +410,9 @@ create_specifications_data:
   parallel: true
   batch: true
 create_implementation:
+  model: claude-3-opus
+  parallel: false
+create_implementation_brand:
   model: claude-3-opus
   parallel: false
 create_test:
@@ -443,6 +451,11 @@ fix_draft_blockers:
         assert_eq!(impl_config.model, "claude-3-opus");
         assert_eq!(impl_config.parallel, false);
         assert_eq!(impl_config.batch, false);
+
+        let brand_impl_config = registry.get("create_implementation_brand").unwrap();
+        assert_eq!(brand_impl_config.model, "claude-3-opus");
+        assert_eq!(brand_impl_config.parallel, false);
+        assert_eq!(brand_impl_config.batch, false);
     }
 
     #[test]

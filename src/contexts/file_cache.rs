@@ -107,9 +107,11 @@ mod tests {
 
     #[test]
     fn test_cache_get_set() {
-        // Use a temporary directory for testing
-        let test_dir = format!("/tmp/reen_test_{}", std::process::id());
-        let cache = FileCache::new(Some(test_dir.clone()), "test_hash".to_string());
+        let test_dir = std::env::temp_dir().join(format!("reen_test_{}", std::process::id()));
+        let cache = FileCache::new(
+            Some(test_dir.to_string_lossy().to_string()),
+            "test_hash".to_string(),
+        );
 
         // Test cache miss
         assert_eq!(cache.get("nonexistent"), None);

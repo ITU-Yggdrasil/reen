@@ -1231,11 +1231,16 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
     if old.name != new.name {
         return Some("function name changed".to_string());
     }
-    if matches!(new.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf) {
+    if matches!(
+        new.receiver,
+        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+    ) {
         return Some("introduces mutable receiver (`&mut self`/`mut self`)".to_string());
     }
-    if matches!(old.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
-        && !is_allowed_immutable_receiver_transition(old, new)
+    if matches!(
+        old.receiver,
+        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+    ) && !is_allowed_immutable_receiver_transition(old, new)
     {
         return Some(
             "changes a mutable receiver outside the allowed immutable transform patterns"
@@ -1273,9 +1278,13 @@ fn disallowed_pub_fn_modification(old: &FnSig, new: &FnSig) -> Option<String> {
 }
 
 fn is_allowed_immutable_receiver_transition(old: &FnSig, new: &FnSig) -> bool {
-    matches!(old.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
-        && !matches!(new.receiver, ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf)
-        && is_self_family_return(&old.return_type)
+    matches!(
+        old.receiver,
+        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+    ) && !matches!(
+        new.receiver,
+        ReceiverKind::MutRefSelf | ReceiverKind::MutValSelf
+    ) && is_self_family_return(&old.return_type)
         && is_self_family_return(&new.return_type)
 }
 
@@ -1315,7 +1324,10 @@ fn is_self_family_return(return_type: &Option<String>) -> bool {
     let Some(return_type) = return_type else {
         return false;
     };
-    let normalized = return_type.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let normalized = return_type
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
     normalized == "Self"
         || normalized.starts_with("Result<Self,")
         || normalized.starts_with("core::result::Result<Self,")

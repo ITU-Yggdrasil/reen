@@ -81,12 +81,13 @@ fn analyze_spec_file(
     let relative_path = spec_path.strip_prefix(base_dir).unwrap_or(spec_path);
 
     if let Some(parent) = relative_path.parent() {
-        let folder = parent.to_string_lossy().to_string();
+        let folder = canonical_module_path(&parent.to_string_lossy());
         let module_name = spec_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
-            .to_lowercase(); // Ensure snake_case module names
+            .to_string();
+        let module_name = to_snake_case(&module_name);
 
         ensure_module_folder_hierarchy(&folder, project_info);
         project_info
@@ -118,7 +119,8 @@ fn analyze_spec_file(
 
 fn ensure_module_folder_hierarchy(folder: &str, project_info: &mut ProjectInfo) {
     let mut current = String::new();
-    for part in folder.split('/') {
+    let canonical = canonical_module_path(folder);
+    for part in canonical.split('/') {
         if part.is_empty() {
             continue;
         }
@@ -311,7 +313,7 @@ pub fn generate_cargo_toml(project_info: &ProjectInfo, output_dir: &Path) -> Res
         .modules
         .iter()
         .filter(|(folder, _)| *folder == "contexts" || folder.starts_with("contexts/"))
-        .flat_map(|(_, modules)| modules.iter().cloned())
+        .flat_map(|(_, modules)| modules.iter().map(|module| to_snake_case(module)))
         .collect();
     context_features.sort();
     context_features.dedup();
@@ -407,7 +409,10 @@ pub fn generate_mod_files(project_info: &ProjectInfo, output_dir: &Path) -> Resu
             .modules
             .get(&folder)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(|module| to_snake_case(&module))
+            .collect::<Vec<_>>();
         sorted_modules.sort();
         sorted_modules.dedup();
 
@@ -459,7 +464,7 @@ fn direct_child_subdirs(project_info: &ProjectInfo, folder: &str) -> Vec<String>
         }
         if let Some(child) = remainder.split('/').next() {
             if !child.is_empty() {
-                subdirs.insert(child.to_string());
+                subdirs.insert(to_snake_case(child));
             }
         }
     }
@@ -480,6 +485,51 @@ fn to_pascal_case(s: &str) -> String {
         .collect()
 }
 
+/// Converts a name into a Rust-friendly snake_case module identifier.
+fn to_snake_case(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_was_lower_or_digit = false;
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_alphanumeric() {
+            let is_upper = ch.is_ascii_uppercase();
+            let next_is_lower = chars
+                .peek()
+                .copied()
+                .is_some_and(|next| next.is_ascii_lowercase());
+            if is_upper
+                && !out.is_empty()
+                && (prev_was_lower_or_digit || next_is_lower)
+                && !out.ends_with('_')
+            {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_was_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+            prev_was_lower_or_digit = false;
+        } else {
+            prev_was_lower_or_digit = false;
+        }
+    }
+
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
+}
+
+fn canonical_module_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(to_snake_case)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +539,13 @@ mod tests {
         assert_eq!(to_pascal_case("ledger_entry"), "LedgerEntry");
         assert_eq!(to_pascal_case("account"), "Account");
         assert_eq!(to_pascal_case("money_transfer"), "MoneyTransfer");
+    }
+
+    #[test]
+    fn test_to_snake_case() {
+        assert_eq!(to_snake_case("FileCache"), "file_cache");
+        assert_eq!(to_snake_case("interaction_API"), "interaction_api");
+        assert_eq!(to_snake_case("money_transfer"), "money_transfer");
     }
 
     #[test]
@@ -554,6 +611,81 @@ mod tests {
         assert!(cargo_toml.contains(
             "tokio = { version = \"1.40\", features = [\"macros\", \"rt-multi-thread\"] }"
         ));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_lib_rs_uses_top_level_modules_only() {
+        let root = std::env::temp_dir().join("reen_project_structure_lib");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+
+        let mut project_info = ProjectInfo::default();
+        project_info
+            .modules
+            .insert("contexts".to_string(), vec!["FileCache".to_string()]);
+        project_info.modules.insert(
+            "visuals/components".to_string(),
+            vec!["ComponentsPlaceholder".to_string()],
+        );
+
+        generate_lib_rs(&project_info, &root).expect("generate lib rs");
+
+        let lib_rs = fs::read_to_string(root.join("src/lib.rs")).expect("read lib rs");
+        assert!(lib_rs.contains("pub mod contexts;"));
+        assert!(lib_rs.contains("pub mod visuals;"));
+        assert!(!lib_rs.contains("pub mod contexts::"));
+        assert!(!lib_rs.contains("pub mod visuals::"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generated_mod_files_use_snake_case_module_names() {
+        let root = std::env::temp_dir().join("reen_project_structure_mods");
+        let _ = fs::remove_dir_all(&root);
+
+        let mut project_info = ProjectInfo::default();
+        project_info
+            .modules
+            .insert("visuals".to_string(), Vec::new());
+        project_info.modules.insert(
+            "visuals/components".to_string(),
+            vec!["ComponentsPlaceholder".to_string()],
+        );
+        project_info.type_names.insert(
+            "visuals/components/components_placeholder".to_string(),
+            "ComponentsPlaceholder".to_string(),
+        );
+        project_info
+            .modules
+            .insert("visuals/design_guide".to_string(), Vec::new());
+        project_info
+            .modules
+            .insert("contexts".to_string(), vec!["FileCache".to_string()]);
+        project_info
+            .type_names
+            .insert("contexts/file_cache".to_string(), "FileCache".to_string());
+
+        generate_mod_files(&project_info, &root).expect("generate mod files");
+
+        let visuals_mod = fs::read_to_string(root.join("src/visuals/mod.rs")).expect("visuals mod");
+        assert!(visuals_mod.contains("mod components;"));
+        assert!(visuals_mod.contains("mod design_guide;"));
+        assert!(!visuals_mod.contains("Components;"));
+        assert!(!visuals_mod.contains("DesignGuide;"));
+
+        let components_mod =
+            fs::read_to_string(root.join("src/visuals/components/mod.rs")).expect("components mod");
+        assert!(components_mod.contains("mod components_placeholder;"));
+        assert!(components_mod.contains("pub use components_placeholder::ComponentsPlaceholder;"));
+
+        let contexts_mod =
+            fs::read_to_string(root.join("src/contexts/mod.rs")).expect("contexts mod");
+        assert!(contexts_mod.contains("mod file_cache;"));
+        assert!(contexts_mod.contains("pub use file_cache::FileCache;"));
+        assert!(!contexts_mod.contains("filecache"));
 
         let _ = fs::remove_dir_all(root);
     }

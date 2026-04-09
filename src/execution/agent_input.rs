@@ -67,7 +67,7 @@ pub fn build_agent_input(
             documentation_urls,
             additional: additional_context,
         },
-        "create_implementation" | "create_test" => AgentInput {
+        "create_implementation" | "create_implementation_brand" | "create_test" => AgentInput {
             draft_content: None,
             context_content: Some(input.to_string()),
             openapi_content: None,
@@ -99,4 +99,31 @@ pub fn output_contains_questions(output: &str) -> bool {
         && (output.contains("clarification")
             || output.contains("answer")
             || output.contains("question"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_agent_input;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn brand_implementation_agent_uses_context_content_shape() {
+        let mut additional = HashMap::new();
+        additional.insert("direct_dependencies".to_string(), json!(["dep"]));
+
+        let value = serde_json::to_value(build_agent_input(
+            "create_implementation_brand",
+            "brand spec content",
+            additional,
+        ))
+        .expect("serialize agent input");
+
+        assert_eq!(
+            value.get("context_content"),
+            Some(&json!("brand spec content"))
+        );
+        assert!(value.get("draft_content").is_none());
+        assert_eq!(value["direct_dependencies"], json!(["dep"]));
+    }
 }
