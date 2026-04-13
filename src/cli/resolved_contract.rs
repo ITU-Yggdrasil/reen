@@ -254,6 +254,55 @@ fn should_drop_resolved_type_decision(item: &ResolvedType) -> bool {
     if lower.contains("static constructor") || lower == "null" {
         return true;
     }
+    // Receiver expressions (`&self`, `&mut self`, `self`) are not types and
+    // must not be validated as manifest-backed types.  An agent that writes
+    // `tick receiver -> &mut self` in type_decisions is making a structural
+    // mistake; drop the entry rather than surfacing a spurious validation error.
+    if is_receiver_expression(rust) {
+        return true;
+    }
+    // A top-level comma means the agent wrote a parameter list (`&Board, &Snake`)
+    // rather than a single type expression.  Drop these so the pipeline can
+    // continue; the agent prompt guides it to use correct type_decision form.
+    if type_expr_has_top_level_comma(rust) {
+        return true;
+    }
+    false
+}
+
+/// Returns `true` when `expr` is a Rust receiver pattern: `self`, `&self`,
+/// `&mut self`, or `&'lt self` / `&'lt mut self`.
+fn is_receiver_expression(expr: &str) -> bool {
+    let mut rest = expr.trim();
+    if let Some(after_amp) = rest.strip_prefix('&') {
+        rest = after_amp.trim_start();
+        // Optional lifetime
+        if let Some(after_lifetime) = rest.strip_prefix('\'') {
+            let offset = after_lifetime
+                .find(char::is_whitespace)
+                .unwrap_or(after_lifetime.len());
+            rest = after_lifetime[offset..].trim_start();
+        }
+        if let Some(after_mut) = rest.strip_prefix("mut") {
+            rest = after_mut.trim_start();
+        }
+    }
+    rest == "self"
+}
+
+/// Returns `true` when `expr` contains a comma that is not enclosed in
+/// brackets (`<>`, `()`, `[]`).  Such expressions are parameter lists, not
+/// valid single Rust type expressions.
+fn type_expr_has_top_level_comma(expr: &str) -> bool {
+    let mut depth: i32 = 0;
+    for ch in expr.chars() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => return true,
+            _ => {}
+        }
+    }
     false
 }
 
@@ -1737,6 +1786,48 @@ mod tests {
     use crate::cli::contract_store::DependencyMethodBinding;
     use crate::cli::contracts::ContractRole;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn receiver_expressions_are_dropped_from_type_decisions() {
+        for receiver in &["self", "&self", "&mut self", "& self", "&'a self", "&'a mut self"] {
+            let item = ResolvedType {
+                semantic_type: "tick receiver".to_string(),
+                rust_type: receiver.to_string(),
+                source: "test".to_string(),
+            };
+            assert!(
+                should_drop_resolved_type_decision(&item),
+                "expected receiver '{}' to be dropped",
+                receiver
+            );
+        }
+    }
+
+    #[test]
+    fn parameter_lists_are_dropped_from_type_decisions() {
+        for list in &["&Board, &Snake", "Board, Snake", "&mut Board, Snake, u32"] {
+            let item = ResolvedType {
+                semantic_type: "method parameters".to_string(),
+                rust_type: list.to_string(),
+                source: "test".to_string(),
+            };
+            assert!(
+                should_drop_resolved_type_decision(&item),
+                "expected parameter list '{}' to be dropped",
+                list
+            );
+        }
+        // Single types with commas only inside angle brackets must NOT be dropped.
+        let valid = ResolvedType {
+            semantic_type: "map type".to_string(),
+            rust_type: "HashMap<String, u32>".to_string(),
+            source: "test".to_string(),
+        };
+        assert!(
+            !should_drop_resolved_type_decision(&valid),
+            "HashMap<String, u32> must not be dropped"
+        );
+    }
 
     #[test]
     fn keyword_semantic_name_produces_rust_escape_binding() {

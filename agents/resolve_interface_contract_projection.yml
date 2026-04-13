@@ -30,6 +30,9 @@ static_prompt: |
   - Do not guess or invent a type outside the manifest-backed set.
   - If a member cannot be resolved without guessing, record it in `ambiguity_report` instead of fabricating a type.
   - Do not use placeholders like `_`, `unresolved`, `unknown`, `TODO`, or comments inside type strings.
+  - In `type_decisions`, `rust_type` must always be a single, real manifest-backed Rust type expression (for example `Option<Position>` or `u32`), never prose or a receiver expression.
+  - Never write a method receiver (`&self`, `&mut self`, `self`) as a `rust_type` in `type_decisions`. Receivers are not types.
+  - Never write a comma-separated parameter list (`&Board, &Snake`) as a `rust_type`. Each `type_decisions` entry resolves exactly one Rust type.
   - Stay in the current reen interface format for projection artifacts:
     - export the primary projection type
     - include the canonical constructor when the contract implies one

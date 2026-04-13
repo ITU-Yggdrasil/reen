@@ -2104,12 +2104,19 @@ pub(crate) fn contract_to_context_value(contract: &BehaviorContract) -> serde_js
 /// specification. These sections must not be fed to heuristic extraction functions
 /// because their prose can match extraction patterns (e.g. "must", "uses ") and
 /// produce false delegation requirements or output obligations.
+///
+/// "Role Methods" is included because role method descriptions (e.g. "Chooses a food
+/// placement using the current board and the current snake.") contain terms that look
+/// like delegation actors/targets but are private implementation helpers, not external
+/// call obligations. Stripping this section prevents role method names (e.g. `drop`,
+/// `symbol_at`) from being misread as required call-edge participants.
 const METADATA_SECTION_TITLES: &[&str] = &[
     "Blocking Ambiguities",
     "Implementation Choices Left Open",
     "Inferred Types or Structures",
     "Inferred Types",
     "Decision Sources",
+    "Role Methods",
 ];
 
 /// Reconstruct spec content with metadata-only sections removed so that heuristic
@@ -2665,8 +2672,23 @@ fn collaborator_name_is_actionable(name: &str) -> bool {
     !is_documentation_label(name)
 }
 
+/// Rust primitive scalar types and common stdlib types that can never be DCI
+/// collaborators. They appear in type-annotation prose ("`score` must be `i32`")
+/// and must not be treated as delegation targets.
+const RUST_PRIMITIVE_TYPES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
+    "f32", "f64", "bool", "char", "str", "String", "Vec", "Option", "Result", "Box", "Arc",
+    "Rc", "Cell", "RefCell", "Mutex", "RwLock",
+];
+
+fn is_rust_primitive(name: &str) -> bool {
+    RUST_PRIMITIVE_TYPES.contains(&name)
+}
+
 fn delegation_entity_name_is_actionable(name: &str) -> bool {
-    collaborator_name_is_actionable(name) && identifier_like_entity_name(name)
+    collaborator_name_is_actionable(name)
+        && identifier_like_entity_name(name)
+        && !is_rust_primitive(name)
 }
 
 fn identifier_like_entity_name(name: &str) -> bool {
@@ -2977,6 +2999,50 @@ Rules:
         assert!(
             report.contract.delegation_requirements.is_empty(),
             "delegation_requirements: {:?}",
+            report.contract.delegation_requirements
+        );
+    }
+
+    #[test]
+    fn primitive_rust_types_never_become_delegation_requirements() {
+        // Prose like "`score` must be `i32`" or "`value` uses `u32`" appears
+        // in synthesised contracts as type annotations. Rust primitives must
+        // never be interpreted as delegation targets.
+        let content = r#"# ScoreDisplay
+
+## Purpose
+
+Shows the score.
+
+## Role Players
+
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| Board | Supplies the picture | Read-only grid access |
+
+## Props
+
+| Prop | Meaning | Notes |
+|------|---------|-------|
+| score | The score value | Must be `i32` |
+
+## Functionalities
+
+### render
+
+Rules:
+- The `score` must be provided as `i32`.
+- Uses `score` of type `i32` to format the line.
+"#;
+
+        let report = analyze_specification(
+            Path::new("specifications/projections/score_display.md"),
+            content,
+            None,
+        );
+        assert!(
+            report.contract.delegation_requirements.is_empty(),
+            "primitive types produced false delegation requirements: {:?}",
             report.contract.delegation_requirements
         );
     }

@@ -30,7 +30,9 @@ static_prompt: |
   - Do not guess or invent a type outside the manifest-backed set.
   - If a member cannot be resolved without guessing, record it in `ambiguity_report` instead of fabricating a type.
   - Do not use placeholders like `_`, `unresolved`, `unknown`, `TODO`, or comments inside type strings.
-  - In `type_decisions`, `rust_type` must always be a real manifest-backed Rust type expression (for example `Box<dyn StdinSource>` or `()`), never prose such as `local trait StdinSource` or `null (static constructor)`.
+  - In `type_decisions`, `rust_type` must always be a single, real manifest-backed Rust type expression (for example `Box<dyn StdinSource>` or `()`), never prose such as `local trait StdinSource` or `null (static constructor)`.
+  - Never write a method receiver (`&self`, `&mut self`, `self`) as a `rust_type` in `type_decisions`. Receivers are not types. If a method's receiver is important to record, describe it in `decision_sources` instead.
+  - Never write a comma-separated parameter list (`&Board, &Snake`) as a `rust_type`. Parameter lists are not types. Each `type_decisions` entry must resolve to exactly one Rust type. If multiple parameter types need recording, create one `type_decisions` entry per parameter.
   - Stay in the current reen interface format for context/app artifacts:
     - export the primary context type
     - include the canonical constructor when the contract implies one

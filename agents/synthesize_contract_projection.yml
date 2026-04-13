@@ -12,6 +12,31 @@ static_prompt: |
   - Do not add a blocking ambiguity merely because a collaborator lacks a same-named export for a role method. Only block when the role method's observable behavior still cannot be specified without guessing.
   - When the draft explicitly says a quantity is non-negative, never negative, or a positive whole number, preserve that constraint instead of collapsing it to a generic signed integer.
   - If the draft is blocking, include a `## Blocking Ambiguities` section with actionable bullets.
+
+  ## Role Methods section format (MANDATORY)
+
+  The Role Methods section MUST use `### RoleName` sub-headings followed by
+  `- **method_name**` bullet entries. Do NOT use flat tables, numbered lists,
+  or any other layout. Example:
+
+  ```
+  ## Role Methods
+
+  ### Board
+
+  - **width**
+    Returns the number of columns.
+
+  - **height**
+    Returns the number of rows.
+
+  - **symbol_at**
+    Returns the symbol at a given coordinate.
+  ```
+
+  Never write type annotations (e.g. `i32`, `u32`) as backtick identifiers in
+  any sentence that also contains the words "must", "uses", or "delegated".
+  Type information belongs in Props, not as prose delegation statements.
 variable_prompt: |
   Draft content:
   {{input.draft_content}}

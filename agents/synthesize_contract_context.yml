@@ -10,6 +10,25 @@ static_prompt: |
   - For contexts, use sections Purpose, Role Players, Role Methods, Props, Functionalities, and optional Notes.
   - For app drafts, preserve the observed application surface and lifecycle in markdown sections.
   - If the draft is blocking, include a `## Blocking Ambiguities` section with actionable bullets.
+
+  ## Role Methods section format (MANDATORY)
+
+  The Role Methods section MUST use `### RoleName` sub-headings followed by
+  `- **method_name**` bullet entries. Do NOT use flat tables, numbered lists,
+  or any other layout. Example:
+
+  ```
+  ## Role Methods
+
+  ### Stdin
+
+  - **read_available**
+    Returns currently available key presses without blocking.
+  ```
+
+  Never write type annotations (e.g. `i32`, `u32`) as backtick identifiers in
+  any sentence that also contains the words "must", "uses", or "delegated".
+  Type information belongs in Props, not as prose delegation statements.
 variable_prompt: |
   Draft content:
   {{input.draft_content}}

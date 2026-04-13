@@ -596,8 +596,26 @@ fn extract_role_methods(sections: &[Section]) -> Vec<ContractRoleMethod> {
         return Vec::new();
     };
 
+    // Primary pass: canonical format with `### RoleName` sub-headings and
+    // `- **method_name**` bullets (or bold-column table rows).
+    let methods = extract_role_methods_subheading(section);
+    if !methods.is_empty() {
+        return methods;
+    }
+
+    // Fallback: flat table formats the synthesised contract may produce, e.g.
+    //   | Role  | Method     | Description |
+    //   | Board | width      | Returns columns |
+    // or
+    //   | **width** | Board | Returns columns |
+    extract_role_methods_flat_table(section)
+}
+
+fn extract_role_methods_subheading(section: &Section) -> Vec<ContractRoleMethod> {
     let mut methods = Vec::new();
     let table_row_re = Regex::new(r"^\|\s*\*\*([^*|`]+)\*\*\s*\|\s*(.+?)\s*\|$").unwrap();
+    // Also accept `**RoleName**` as a role heading (bold instead of ###).
+    let bold_role_re = Regex::new(r"^\*\*([^*]+)\*\*\s*$").unwrap();
     let mut current_role: Option<String> = None;
     let mut current_method_name: Option<String> = None;
     let mut current_body = Vec::new();
@@ -636,6 +654,20 @@ fn extract_role_methods(sections: &[Section]) -> Vec<ContractRoleMethod> {
             current_role = Some(normalize_symbol_name(rest));
             continue;
         }
+        // Accept `**RoleName**` as an alternative role heading.
+        if let Some(caps) = bold_role_re.captures(trimmed) {
+            let candidate = normalize_symbol_name(caps.get(1).map_or("", |m| m.as_str()));
+            if !candidate.is_empty() {
+                flush_method(
+                    &mut methods,
+                    &current_role,
+                    &mut current_method_name,
+                    &mut current_body,
+                );
+                current_role = Some(candidate);
+                continue;
+            }
+        }
 
         let next_method = trimmed
             .strip_prefix("- **")
@@ -671,6 +703,114 @@ fn extract_role_methods(sections: &[Section]) -> Vec<ContractRoleMethod> {
         &mut current_method_name,
         &mut current_body,
     );
+    methods
+}
+
+/// Fallback extractor for flat table layout:
+///   | Role  | Method | Description |  — role in first column
+///   | Method | Role  | Description |  — detected by checking header
+///   | **method** | Role | Description | — bold-method first column
+fn extract_role_methods_flat_table(section: &Section) -> Vec<ContractRoleMethod> {
+    let lines: Vec<&str> = section.body.lines().collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    // Detect header row to determine column layout.
+    let header_row = lines
+        .iter()
+        .find(|line| line.trim().starts_with('|') && !line.contains("---"))
+        .copied()
+        .unwrap_or("");
+
+    let header_cells: Vec<String> = header_row
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_ascii_lowercase())
+        .collect();
+
+    // Determine which column holds the role and which holds the method.
+    let role_col = header_cells
+        .iter()
+        .position(|h| h.contains("role") || h.contains("player"));
+    let method_col = header_cells
+        .iter()
+        .position(|h| h.contains("method") || h.contains("name"));
+    let desc_col = header_cells
+        .iter()
+        .position(|h| h.contains("desc") || h.contains("summary") || h.contains("behavior"));
+
+    let mut methods = Vec::new();
+    for line in &lines {
+        let trimmed = line.trim();
+        if !trimmed.starts_with('|') || trimmed.contains("---") {
+            continue;
+        }
+        let cells: Vec<String> = trimmed
+            .trim_matches('|')
+            .split('|')
+            .map(|cell| {
+                cell.trim()
+                    .trim_matches('*')
+                    .trim_matches('`')
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+
+        let (role, method) = match (role_col, method_col) {
+            (Some(r), Some(m)) if r < cells.len() && m < cells.len() => {
+                (cells[r].clone(), cells[m].clone())
+            }
+            // No clear headers: assume first col = method, second col = role
+            _ if cells.len() >= 2 => {
+                // Skip pure header rows
+                let first_lower = cells[0].to_ascii_lowercase();
+                if ["role", "method", "player", "name", "description"]
+                    .contains(&first_lower.as_str())
+                {
+                    continue;
+                }
+                (cells[1].clone(), cells[0].clone())
+            }
+            _ => continue,
+        };
+
+        let role_norm = normalize_symbol_name(&role);
+        let method_norm = normalize_symbol_name(&method);
+        if role_norm.is_empty() || method_norm.is_empty() {
+            continue;
+        }
+        // Skip header values
+        let role_lower = role_norm.to_ascii_lowercase();
+        let method_lower = method_norm.to_ascii_lowercase();
+        if ["role", "method", "player", "name", "description", "summary"]
+            .contains(&role_lower.as_str())
+            || ["role", "method", "player", "name", "description", "summary"]
+                .contains(&method_lower.as_str())
+        {
+            continue;
+        }
+
+        let summary = desc_col
+            .and_then(|d| cells.get(d))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s])
+            .unwrap_or_default();
+
+        methods.push(ContractRoleMethod {
+            role: role_norm,
+            method_name: method_norm,
+            signature_hint: None,
+            behavior_summary: summary,
+            required_inputs: Vec::new(),
+            required_outputs: Vec::new(),
+        });
+    }
     methods
 }
 
@@ -1427,6 +1567,109 @@ Rules:
                 .any(|item| item.contains("Required call edge")),
             "warnings: {:?}",
             report.warnings
+        );
+    }
+
+    #[test]
+    fn role_methods_flat_table_fallback() {
+        // Synthesised contracts sometimes emit a flat table instead of
+        // `### RoleName` / `- **method**` bullets. The extractor must
+        // handle both.
+        let content = r#"# StringRenderer
+
+## Purpose
+
+StringRenderer formats the board as plain text.
+
+## Role Players
+
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| Board | Supplies the picture | Read-only grid access |
+
+## Role Methods
+
+| Role | Method | Description |
+|------|--------|-------------|
+| Board | width | Returns the number of columns |
+| Board | height | Returns the number of rows |
+| Board | symbol_at | Returns the symbol at a coordinate |
+
+## Props
+
+| Prop | Meaning | Notes |
+|------|---------|-------|
+| score | Score shown below the board | Shown during play |
+
+## Functionalities
+
+### render
+
+- Returns a plain-text representation of the board and score.
+"#;
+        let contract = build_contract_artifact(
+            Path::new("specifications/projections/string_renderer.md"),
+            content,
+            Some(Path::new("src/projections/string_renderer.rs")),
+            None,
+        );
+        assert_eq!(contract.role_methods.len(), 3, "role_methods: {:?}", contract.role_methods);
+        let method_names: Vec<&str> =
+            contract.role_methods.iter().map(|m| m.method_name.as_str()).collect();
+        assert!(method_names.contains(&"width"), "method_names: {:?}", method_names);
+        assert!(method_names.contains(&"height"), "method_names: {:?}", method_names);
+        assert!(method_names.contains(&"symbol_at"), "method_names: {:?}", method_names);
+        // `score` is a prop, not a collaborator — it must not produce a delegation requirement.
+        assert!(
+            contract.required_call_edges.iter().all(|e| e.caller_surface != "score"),
+            "required_call_edges: {:?}",
+            contract.required_call_edges
+        );
+    }
+
+    #[test]
+    fn type_annotations_do_not_become_delegation_requirements() {
+        // Prose like "`score` must be `i32`" or "`score` uses `i32`" must not
+        // be treated as a delegation requirement — `i32` is a primitive type.
+        let content = r#"# ScoreDisplay
+
+## Purpose
+
+Renders score as text.
+
+## Role Players
+
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| Board | Provides cell data | Read-only |
+
+## Props
+
+| Prop | Meaning | Notes |
+|------|---------|-------|
+| score | The score value | Must be `i32` |
+
+## Functionalities
+
+### render
+
+- Uses `score` (of type `i32`) to format the output.
+- The `score` must be provided as `i32`.
+"#;
+        let contract = build_contract_artifact(
+            Path::new("specifications/projections/score_display.md"),
+            content,
+            Some(Path::new("src/projections/score_display.rs")),
+            None,
+        );
+        // No delegation requirement should reference a primitive type.
+        assert!(
+            contract
+                .required_call_edges
+                .iter()
+                .all(|e| e.callee_role != "i32" && e.caller_surface != "i32"),
+            "required_call_edges: {:?}",
+            contract.required_call_edges
         );
     }
 }

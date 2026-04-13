@@ -521,14 +521,36 @@ where
     let process_unit = Arc::new(process_unit);
     let mut tasks = JoinSet::new();
     let mut results = Vec::new();
-    let mut stop_launching = false;
+    // Track units whose upstream has failed so we never schedule them.
+    // This replaces the old global `stop_launching` flag: independent artifacts
+    // (those not downstream of a failure) continue to be processed.
+    let mut blocked: HashSet<usize> = HashSet::new();
+
+    // Transitively mark every descendant of `failed_id` as blocked so they are
+    // never added to `ready`, even if their `remaining_deps` counter reaches 0.
+    fn block_descendants(
+        failed_id: usize,
+        dependents: &[Vec<usize>],
+        blocked: &mut HashSet<usize>,
+    ) {
+        for &dep_id in &dependents[failed_id] {
+            if blocked.insert(dep_id) {
+                block_descendants(dep_id, dependents, blocked);
+            }
+        }
+    }
 
     loop {
-        while !stop_launching && tasks.len() < max_in_flight {
+        while tasks.len() < max_in_flight {
             let Some((_, unit_id)) = ready.iter().next().cloned() else {
                 break;
             };
             ready.remove(&(sort_keys[unit_id].clone(), unit_id));
+            // Skip units whose upstream dependency failed (should not normally
+            // be in `ready`, but guard defensively).
+            if blocked.contains(&unit_id) {
+                continue;
+            }
             let unit = units[unit_id].clone();
             on_launch(&unit);
             let process_unit = process_unit.clone();
@@ -544,28 +566,34 @@ where
         let (unit_id, result) =
             joined.map_err(|error| anyhow::anyhow!("Execution DAG task join error: {}", error))?;
 
-        if let Ok(ref unit_result) = result {
-            if classify_success(unit_result) && !stop_launching {
-                for dependent_id in &dependents[unit_id] {
-                    if remaining_deps[*dependent_id] == 0 {
-                        continue;
-                    }
-                    remaining_deps[*dependent_id] -= 1;
-                    if remaining_deps[*dependent_id] == 0 {
-                        ready.insert((sort_keys[*dependent_id].clone(), *dependent_id));
-                    }
+        let unit_succeeded = match &result {
+            Ok(unit_result) => classify_success(unit_result),
+            Err(_) => false,
+        };
+
+        if unit_succeeded {
+            // Unblock dependents whose remaining-dep counter reaches zero.
+            for dependent_id in &dependents[unit_id] {
+                if remaining_deps[*dependent_id] == 0 {
+                    continue;
                 }
-            } else {
-                stop_launching = true;
+                remaining_deps[*dependent_id] -= 1;
+                if remaining_deps[*dependent_id] == 0 && !blocked.contains(dependent_id) {
+                    ready.insert((sort_keys[*dependent_id].clone(), *dependent_id));
+                }
             }
         } else {
-            stop_launching = true;
+            // Transitively block all descendants of the failed unit.
+            block_descendants(unit_id, &dependents, &mut blocked);
         }
 
         on_complete(unit_id, &result);
         results.push((unit_id, result));
 
-        if tasks.is_empty() && (ready.is_empty() || stop_launching) {
+        // Exit when no tasks are running and nothing is ready to launch.
+        // Units stuck behind a failed dependency are in `blocked` and will
+        // never become ready, so they do not prevent termination.
+        if tasks.is_empty() && ready.is_empty() {
             break;
         }
     }
@@ -842,11 +870,12 @@ fn create_specification_inner(
                     )?,
                     &agent_name,
                 )?;
-                let output_path = determine_specification_output_path(
-                    &draft_file,
-                    &workspace.drafts_dir,
-                    &workspace.specifications_dir,
-                )?;
+                // Use the interface IR path as the tracker output — this is the file
+                // actually written in every (non-debug) successful Contract stage run.
+                // The spec markdown under `specifications/` is only written in debug
+                // mode, so it cannot be used to detect whether the stage is up-to-date.
+                let draft_rel = draft_relative_path(&draft_file, &workspace.drafts_root)?;
+                let output_path = ContractStore::new(".reen").interface_ir_path(&draft_rel);
 
                 let needs_update = if clear_cache {
                     true
