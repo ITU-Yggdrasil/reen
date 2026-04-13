@@ -1,6 +1,13 @@
 # Derived and maintained by reen capability planning. Manual edits are allowed.
 schema: reen.capability-registry/v1
 providers:
+- domain: errors
+  crate: anyhow
+  version: '1.0'
+  default_features: true
+  features: []
+  capabilities:
+  - error_handling
 - domain: terminal
   crate: crossterm
   version: '0.27'

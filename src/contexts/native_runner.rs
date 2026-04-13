@@ -1471,8 +1471,7 @@ Authentication\nUse API keys here.\n\nPagination\nUse cursor tokens here.\n\nErr
 
         assert_eq!(result.output, "final answer");
         let body = captured_body.expect("request body should be captured");
-        let expected_key =
-            openai_prompt_cache_key("create_implementation_context", &long_system);
+        let expected_key = openai_prompt_cache_key("create_implementation_context", &long_system);
         assert_eq!(
             body.get("prompt_cache_key").and_then(Value::as_str),
             Some(expected_key.as_str())

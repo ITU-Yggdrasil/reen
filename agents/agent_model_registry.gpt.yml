@@ -1,21 +1,30 @@
 # Preset profile: OpenAI-first defaults.
 # Activate by copying this file over `agent_model_registry.yml` before building.
-create_specifications_data:
+coordinate_contract_level:
+  model: gpt-5
+  parallel: false
+synthesize_contract_data:
   model: gpt-5 # qwen2.5:7b
   parallel: true
-create_specifications_context:
-  model: gpt-5 # qwen2.5:7b
-  parallel: true
-create_specifications_projection:
+resolve_interface_contract_data:
   model: gpt-5
   parallel: true
-create_specifications_external_api:
+synthesize_contract_context:
+  model: gpt-5 # qwen2.5:7b
+  parallel: true
+resolve_interface_contract_context:
+  model: gpt-5
+  parallel: true
+synthesize_contract_projection:
+  model: gpt-5
+  parallel: true
+resolve_interface_contract_projection:
+  model: gpt-5
+  parallel: true
+synthesize_contract_external_api:
   model: gpt-5 # qwen2.5:7b
   parallel: false
   batch: false
-create_plan:
-  model: gpt-5
-  parallel: true
 bootstrap_capability_registry:
   model: gpt-5
   parallel: false

@@ -4,9 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::agent_executor::AgentExecutor;
-use super::contracts::{
-    ContractArtifact, compact_contract_artifact_value, compact_contract_artifacts,
-};
+use super::contract_store::InterfaceIr;
+use super::contracts::{ContractArtifact, compact_contract_artifact_value};
 use super::draft_schema::DraftDocument;
 use super::interface_capsules::{InterfaceCapsule, compact_interface_capsules};
 use super::openapi_fetcher::{
@@ -80,17 +79,6 @@ fn compact_dependency_manifest_entries(value: &serde_json::Value) -> serde_json:
     serde_json::Value::Array(compacted)
 }
 
-fn compact_contract_entries(value: &serde_json::Value, max_entries: usize) -> serde_json::Value {
-    let Some(entries) = value.as_array() else {
-        return value.clone();
-    };
-    let parsed = entries
-        .iter()
-        .filter_map(|entry| serde_json::from_value::<ContractArtifact>(entry.clone()).ok())
-        .collect::<Vec<_>>();
-    compact_contract_artifacts(&parsed, max_entries)
-}
-
 fn compact_capsule_entries(value: &serde_json::Value, max_entries: usize) -> serde_json::Value {
     let Some(entries) = value.as_array() else {
         return value.clone();
@@ -100,6 +88,21 @@ fn compact_capsule_entries(value: &serde_json::Value, max_entries: usize) -> ser
         .filter_map(|entry| serde_json::from_value::<InterfaceCapsule>(entry.clone()).ok())
         .collect::<Vec<_>>();
     compact_interface_capsules(&parsed, max_entries)
+}
+
+fn compact_interface_ir_entries(
+    value: &serde_json::Value,
+    max_entries: usize,
+) -> serde_json::Value {
+    let Some(entries) = value.as_array() else {
+        return value.clone();
+    };
+    let parsed = entries
+        .iter()
+        .filter_map(|entry| serde_json::from_value::<InterfaceIr>(entry.clone()).ok())
+        .take(max_entries)
+        .collect::<Vec<_>>();
+    json!(parsed)
 }
 
 fn compact_single_contract_value(value: &serde_json::Value) -> serde_json::Value {
@@ -138,16 +141,16 @@ fn build_context_variants(
         );
     }
     for (key, max_entries) in [
-        ("dependency_contracts", 8usize),
-        ("direct_dependency_contracts", 8usize),
+        ("dependency_interfaces", 8usize),
+        ("direct_dependency_interfaces", 8usize),
         ("implemented_role_capsules", 6usize),
         ("implemented_direct_role_capsules", 8usize),
     ] {
         if let Some(value) = preferred.get(key).cloned() {
-            let reduced = if key.contains("capsules") {
-                compact_capsule_entries(&value, max_entries)
+            let reduced = if key.contains("interfaces") {
+                compact_interface_ir_entries(&value, max_entries)
             } else {
-                compact_contract_entries(&value, max_entries)
+                compact_capsule_entries(&value, max_entries)
             };
             preferred.insert(key.to_string(), reduced);
         }
@@ -198,16 +201,16 @@ fn build_context_variants(
     let mut contract_compact = preferred.clone();
     let mut contract_changed = false;
     for (key, max_entries) in [
-        ("dependency_contracts", 8usize),
-        ("direct_dependency_contracts", 8usize),
+        ("dependency_interfaces", 8usize),
+        ("direct_dependency_interfaces", 8usize),
         ("implemented_role_capsules", 6usize),
         ("implemented_direct_role_capsules", 8usize),
     ] {
         if let Some(value) = contract_compact.get(key).cloned() {
-            let reduced = if key.contains("capsules") {
-                compact_capsule_entries(&value, max_entries)
+            let reduced = if key.contains("interfaces") {
+                compact_interface_ir_entries(&value, max_entries)
             } else {
-                compact_contract_entries(&value, max_entries)
+                compact_capsule_entries(&value, max_entries)
             };
             if reduced != value {
                 contract_compact.insert(key.to_string(), reduced);
@@ -565,27 +568,22 @@ mod tests {
                 }),
             ),
             (
-                "direct_dependency_contracts".to_string(),
+                "direct_dependency_interfaces".to_string(),
                 json!([
                     {
-                        "contract_version": "reen.contract/v2",
-                        "source_spec_path": "specifications/contexts/string_renderer.md",
-                        "title": "StringRenderer",
+                        "version": "reen.interface/v2",
+                        "draft_identity": "StringRenderer",
+                        "draft_relative_path": "contexts/string_renderer.md",
                         "specification_kind": "context",
-                        "target_artifact_kind": "context_module",
-                        "primary_output_path_hint": "src/contexts/string_renderer.rs",
-                        "public_functionalities": [{"name": "render", "signature_hint": null, "behavior_summary": [], "required_inputs": [], "required_outputs": []}],
-                        "props": [],
-                        "roles": [{"name": "board", "kind": "role", "required": true, "capabilities": ["format"], "dependency_hint": null, "identity_semantics": "infer_from_behavior", "mutation_semantics": "infer_from_behavior", "notes": []}],
-                        "role_methods": [],
-                        "required_call_edges": [],
-                        "shared_identity_constraints": [],
-                        "mutation_constraints": [],
-                        "output_obligations": ["Score: <score>"],
-                        "env_config_obligations": [],
-                        "lifecycle_obligations": [],
-                        "allowed_freedoms": [],
-                        "verification_targets": ["functionality: render"]
+                        "artifact_kind": "context_module",
+                        "interface_fingerprint": "fp",
+                        "primary_export_name": "StringRenderer",
+                        "exported_types": [{"name": "StringRenderer", "kind": "struct", "fields": [], "visibility": "public"}],
+                        "exported_methods": [{"name": "render", "self_param": null, "parameters": [], "return_type": "String", "visibility": "public", "notes": []}],
+                        "role_method_exports": [],
+                        "name_bindings": [],
+                        "dependency_bindings": [],
+                        "resolved_types": []
                     }
                 ]),
             ),
@@ -593,12 +591,19 @@ mod tests {
                 "implemented_direct_role_capsules".to_string(),
                 json!([
                     {
+                        "version": "reen.interface/v2",
                         "name": "StringRenderer",
+                        "semantic_name": "StringRenderer",
+                        "export_name": "StringRenderer",
                         "spec_path": "specifications/contexts/string_renderer.md",
                         "source_path": "src/contexts/string_renderer.rs",
                         "artifact_kind": "context_module",
+                        "interface_fingerprint": "testfp",
                         "public_types": ["StringRenderer"],
                         "public_methods": ["render"],
+                        "exported_types": [],
+                        "exported_methods": [],
+                        "name_bindings": [],
                         "relevant_role_methods": ["formatter.render"],
                         "important_fields": ["buffer"],
                         "ownership_notes": ["formatter: infer_from_behavior"],
@@ -636,7 +641,7 @@ mod tests {
             .expect("expected a compact contract/capsule variant");
 
         assert!(compacted.get("contract_artifact").is_some());
-        assert!(compacted.get("direct_dependency_contracts").is_some());
+        assert!(compacted.get("direct_dependency_interfaces").is_some());
         assert!(compacted.get("implemented_direct_role_capsules").is_some());
     }
 
@@ -698,9 +703,10 @@ mod tests {
     #[test]
     fn fit_context_without_limit_uses_preferred_compact_variant() {
         let executor = AgentExecutor::new(
-            "create_specifications_data",
+            "synthesize_contract_data",
             &Config {
                 verbose: false,
+                debug: false,
                 dry_run: false,
                 github_repo: None,
             },
@@ -734,8 +740,8 @@ mod tests {
             ),
         ]);
 
-        let (selected, estimated) = fit_context_to_token_limit(&executor, "# Amount", base, None)
-            .expect("fit context");
+        let (selected, estimated) =
+            fit_context_to_token_limit(&executor, "# Amount", base, None).expect("fit context");
 
         assert!(estimated > 0);
         assert!(!selected.contains_key("dependency_tool_context"));

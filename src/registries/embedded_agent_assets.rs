@@ -8,19 +8,30 @@ pub fn embedded_default_model_registry() -> &'static str {
 /// Expected keys are filenames like `create_implementation_context.yml`.
 pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
     match filename {
-        "create_specifications_data.yml" => {
-            Some(include_str!("../../agents/create_specifications_data.yml"))
+        "coordinate_contract_level.yml" => {
+            Some(include_str!("../../agents/coordinate_contract_level.yml"))
         }
-        "create_specifications_projection.yml" => Some(include_str!(
-            "../../agents/create_specifications_projection.yml"
+        "synthesize_contract_data.yml" => {
+            Some(include_str!("../../agents/synthesize_contract_data.yml"))
+        }
+        "resolve_interface_contract_data.yml" => Some(include_str!(
+            "../../agents/resolve_interface_contract_data.yml"
         )),
-        "create_specifications_context.yml" => Some(include_str!(
-            "../../agents/create_specifications_context.yml"
+        "synthesize_contract_projection.yml" => Some(include_str!(
+            "../../agents/synthesize_contract_projection.yml"
         )),
-        "create_specifications_external_api.yml" => Some(include_str!(
-            "../../agents/create_specifications_external_api.yml"
+        "resolve_interface_contract_projection.yml" => Some(include_str!(
+            "../../agents/resolve_interface_contract_projection.yml"
         )),
-        "create_plan.yml" => Some(include_str!("../../agents/create_plan.yml")),
+        "synthesize_contract_context.yml" => {
+            Some(include_str!("../../agents/synthesize_contract_context.yml"))
+        }
+        "resolve_interface_contract_context.yml" => Some(include_str!(
+            "../../agents/resolve_interface_contract_context.yml"
+        )),
+        "synthesize_contract_external_api.yml" => Some(include_str!(
+            "../../agents/synthesize_contract_external_api.yml"
+        )),
         "create_implementation_data.yml" => {
             Some(include_str!("../../agents/create_implementation_data.yml"))
         }
@@ -42,11 +53,14 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
 /// Returns the canonical set of agent names expected in the model registry.
 pub fn embedded_expected_agent_names() -> &'static [&'static str] {
     &[
-        "create_specifications_data",
-        "create_specifications_projection",
-        "create_specifications_context",
-        "create_specifications_external_api",
-        "create_plan",
+        "coordinate_contract_level",
+        "synthesize_contract_data",
+        "resolve_interface_contract_data",
+        "synthesize_contract_projection",
+        "resolve_interface_contract_projection",
+        "synthesize_contract_context",
+        "resolve_interface_contract_context",
+        "synthesize_contract_external_api",
         "create_implementation_data",
         "create_implementation_projection",
         "create_implementation_context",

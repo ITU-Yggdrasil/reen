@@ -378,6 +378,8 @@ fn plan_unified_diff_writes(project_root: &Path, diff: &str) -> Result<Vec<(Path
     Ok(staged)
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn apply_draft_patches(project_root: &Path, agent_output: &str) -> Result<Vec<PathBuf>> {
     let diff = extract_unified_diff_from_agent_output(agent_output).ok_or_else(|| {
         anyhow::anyhow!(

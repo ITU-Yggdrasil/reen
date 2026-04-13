@@ -26,7 +26,7 @@ use super::pipeline_quality::{
     analyze_specification, compare_verifier_reports, contract_to_context_value,
     determine_spec_path_for_output, verify_generated_implementation,
 };
-use super::planning::{PlanKind, build_default_plan, parse_plan_output, plan_to_context_value};
+use super::planning::{PlanKind, build_default_plan, plan_to_context_value};
 use super::progress::{error_tag, print_timed_status, success_text};
 use super::project_structure::ProjectInfo;
 use super::usage_report::{UsageReporter, UsageScope};
@@ -189,9 +189,12 @@ pub async fn ensure_compiles_with_auto_fix(
             };
 
             let ctx = build_agent_context(
+                project_root,
+                artifact_root,
                 &output,
                 &truncated_stderr,
                 &diagnostics,
+                &relevant_paths,
                 &files_json,
                 &specs_json,
                 recent_generated_files,
@@ -358,6 +361,7 @@ pub async fn ensure_compiles_with_auto_fix(
                 let retry_patch = regenerate_patch_after_apply_failure(
                     &executor,
                     project_root,
+                    artifact_root,
                     &output,
                     &round_context,
                     recent_generated_files,
@@ -581,6 +585,7 @@ fn trim_retry_context_to_budget(
         "previous_patch",
         "contract_artifacts_json",
         "specs_json",
+        "semantic_verifier_json",
         "recent_changes",
         "semantic_repair_plan",
         "compiler_stdout",
@@ -600,6 +605,7 @@ fn trim_retry_context_to_budget(
 async fn regenerate_patch_after_apply_failure(
     executor: &AgentExecutor,
     project_root: &Path,
+    artifact_root: &Path,
     output: &CompilationOutput,
     round_context: &CompileFixRoundContext,
     recent_generated_files: &[PathBuf],
@@ -626,9 +632,12 @@ async fn regenerate_patch_after_apply_failure(
 
     let files_json = snapshot_files_json(project_root, &retry_paths)?;
     let mut retry_context = build_agent_context(
+        project_root,
+        artifact_root,
         output,
         &round_context.truncated_stderr,
         &round_context.diagnostics,
+        &retry_paths,
         &files_json,
         &round_context.specs_json,
         recent_generated_files,
@@ -708,24 +717,22 @@ fn write_attempt_compile_output(attempt_dir: &Path, output: &CompilationOutput) 
 }
 
 async fn generate_semantic_repair_plan(
-    config: &Config,
+    _config: &Config,
     relevant_paths: &[PathBuf],
     specs_json: &BTreeMap<String, String>,
     truncated_stderr: &str,
     diagnostics: &[DiagnosticSpan],
-    request_token_limit: Option<f64>,
-    ignore_cache_reads: bool,
-    reporter: Option<&UsageReporter>,
-    execution_control: Option<&dyn NativeExecutionControl>,
+    _request_token_limit: Option<f64>,
+    _ignore_cache_reads: bool,
+    _reporter: Option<&UsageReporter>,
+    _execution_control: Option<&dyn NativeExecutionControl>,
 ) -> Result<serde_json::Value> {
     let target_summary = summarize_paths(relevant_paths);
     print_timed_status("Planning repair", &target_summary);
 
-    let (spec_path, spec_content) = specs_json
-        .iter()
-        .next()
-        .map(|(path, content)| (path.clone(), content.clone()))
-        .unwrap_or_else(|| ("specifications/repair_bundle.md".to_string(), String::new()));
+    let (spec_path, spec_content) =
+        select_semantic_repair_spec(relevant_paths, diagnostics, specs_json)
+            .unwrap_or_else(|| ("specifications/repair_bundle.md".to_string(), String::new()));
     let fallback = build_default_plan(
         PlanKind::SemanticRepair,
         Path::new(&spec_path),
@@ -782,28 +789,100 @@ async fn generate_semantic_repair_plan(
         "diagnostics_json".to_string(),
         json!(serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())),
     );
+    let _ = context;
+    Ok(plan_to_context_value(&fallback))
+}
 
-    let planner = AgentExecutor::new("create_plan", config)?;
-    let (context, _) = super::pipeline_context::fit_context_to_token_limit(
-        &planner,
-        "",
-        context,
-        request_token_limit,
-    )?;
-    let scope =
-        UsageScope::new("semantic_repair_plan", target_summary.clone()).with_path(spec_path.clone());
-    let response = planner
-        .execute_with_conversation_with_seed_options_tracked(
-            "",
-            "semantic_repair_plan",
-            context,
-            execution_control,
-            ignore_cache_reads,
-            reporter.map(|reporter| (reporter, &scope)),
-        )
-        .await?;
-    let plan = parse_plan_output(&response).unwrap_or(fallback);
-    Ok(plan_to_context_value(&plan))
+fn select_semantic_repair_spec(
+    relevant_paths: &[PathBuf],
+    diagnostics: &[DiagnosticSpan],
+    specs_json: &BTreeMap<String, String>,
+) -> Option<(String, String)> {
+    for diagnostic in diagnostics {
+        if let Some(spec) = lookup_spec_for_src_rel(diagnostic.file.trim(), specs_json) {
+            return Some(spec);
+        }
+    }
+
+    for path in relevant_paths {
+        let rel = path.to_string_lossy().replace('\\', "/");
+        if let Some(spec) = lookup_spec_for_src_rel(&rel, specs_json) {
+            return Some(spec);
+        }
+    }
+
+    specs_json
+        .iter()
+        .next()
+        .map(|(path, content)| (path.clone(), content.clone()))
+}
+
+fn lookup_spec_for_src_rel(
+    src_rel: &str,
+    specs_json: &BTreeMap<String, String>,
+) -> Option<(String, String)> {
+    let spec_rel = map_src_to_spec(src_rel)?;
+    if let Some(content) = specs_json.get(&spec_rel) {
+        return Some((spec_rel, content.clone()));
+    }
+
+    let draft_rel = spec_rel.replacen("specifications/", "drafts/", 1);
+    specs_json
+        .get(&draft_rel)
+        .map(|content| (draft_rel, content.clone()))
+}
+
+fn build_compile_fix_semantic_verifier_context(
+    project_root: &Path,
+    artifact_root: &Path,
+    relevant_paths: &[PathBuf],
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut reports = BTreeMap::new();
+
+    for path in relevant_paths {
+        let full = if path.is_absolute() {
+            path.clone()
+        } else {
+            project_root.join(path)
+        };
+        if !full.is_file() {
+            continue;
+        }
+
+        let rel = full
+            .strip_prefix(project_root)
+            .unwrap_or(&full)
+            .to_string_lossy()
+            .to_string();
+        let Some(spec_rel) = map_src_to_spec(&rel) else {
+            continue;
+        };
+        let Some(spec_path) = resolve_spec_path(artifact_root, &spec_rel) else {
+            continue;
+        };
+        let Ok(spec_content) = fs::read_to_string(&spec_path) else {
+            continue;
+        };
+        let Ok(report) =
+            verify_generated_implementation(project_root, &spec_path, &spec_content, &full)
+        else {
+            continue;
+        };
+
+        if report.errors.is_empty()
+            && report.high_risk_findings.is_empty()
+            && report.warnings.is_empty()
+        {
+            continue;
+        }
+
+        reports.insert(
+            rel,
+            serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize"})),
+        );
+    }
+
+    Ok(reports)
 }
 
 fn capture_verifier_reports(
@@ -1421,9 +1500,12 @@ fn resolve_spec_path(artifact_root: &Path, spec_rel: &str) -> Option<PathBuf> {
 }
 
 fn build_agent_context(
+    project_root: &Path,
+    artifact_root: &Path,
     output: &CompilationOutput,
     truncated_stderr: &str,
     diagnostics: &[DiagnosticSpan],
+    relevant_paths: &[PathBuf],
     files_json: &BTreeMap<String, String>,
     specs_json: &BTreeMap<String, String>,
     recent_generated_files: &[PathBuf],
@@ -1460,6 +1542,17 @@ fn build_agent_context(
             "contract_artifacts_json".to_string(),
             json!(
                 serde_json::to_string_pretty(&contract_artifacts)
+                    .unwrap_or_else(|_| "{}".to_string())
+            ),
+        );
+    }
+    let semantic_verifier =
+        build_compile_fix_semantic_verifier_context(project_root, artifact_root, relevant_paths)?;
+    if !semantic_verifier.is_empty() {
+        ctx.insert(
+            "semantic_verifier_json".to_string(),
+            json!(
+                serde_json::to_string_pretty(&semantic_verifier)
                     .unwrap_or_else(|_| "{}".to_string())
             ),
         );
@@ -1877,7 +1970,6 @@ fn spec_declared_public_methods(artifact_root: &Path, target: &str) -> HashSet<S
     methods
 }
 
-
 fn evaluate_projection_semantic_drift(target: &str, added_lines: &[String]) -> Vec<String> {
     let mut issues = Vec::new();
     let added_text = added_lines.join("\n");
@@ -2004,7 +2096,14 @@ fn return_type_implies_owned_state_transition(sig: &FnSig) -> bool {
         return true;
     }
     for prefix in [
+        "Result<Self,",
         "Result<(Self,",
+        "core::result::Result<Self,",
+        "core::result::Result<(Self,",
+        "std::result::Result<Self,",
+        "std::result::Result<(Self,",
+        "anyhow::Result<Self>",
+        "anyhow::Result<(Self,",
         "Option<(Self,",
         "ControlFlow<(Self,",
         "Poll<(Self,",
@@ -2222,6 +2321,8 @@ fn is_self_family_return(return_type: &Option<String>) -> bool {
         || normalized.starts_with("Result<Self,")
         || normalized.starts_with("core::result::Result<Self,")
         || normalized.starts_with("std::result::Result<Self,")
+        || normalized == "anyhow::Result<Self>"
+        || normalized.starts_with("anyhow::Result<(Self,")
 }
 
 fn public_fn_re() -> &'static Regex {
@@ -2266,12 +2367,12 @@ fn spec_method_bold_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_guardrails, dedupe_paths, explicit_implementation_failure_message_from_stderr,
-        map_src_to_spec, summarize_paths, trim_retry_context_to_budget,
+        DiagnosticSpan, build_compile_fix_semantic_verifier_context, check_guardrails,
+        dedupe_paths, explicit_implementation_failure_message_from_stderr, map_src_to_spec,
+        select_semantic_repair_spec, summarize_paths, trim_retry_context_to_budget,
     };
     use serde_json::json;
-    use std::collections::HashMap;
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2366,6 +2467,119 @@ mod tests {
         assert!(estimated <= 4000, "estimated={estimated}");
         assert!(context.contains_key("files_json"));
         assert!(!context.contains_key("previous_patch"));
+    }
+
+    #[test]
+    fn semantic_repair_plan_targets_spec_for_primary_diagnostic() {
+        let relevant_paths = vec![
+            PathBuf::from("src/contexts/command_input.rs"),
+            PathBuf::from("src/projections/string_renderer.rs"),
+        ];
+        let diagnostics = vec![DiagnosticSpan {
+            file: "src/projections/string_renderer.rs".to_string(),
+            line: 62,
+            col: 20,
+            code: Some("E0599".to_string()),
+        }];
+        let specs_json = BTreeMap::from([
+            (
+                "drafts/contexts/command_input.md".to_string(),
+                "# CommandInputContext".to_string(),
+            ),
+            (
+                "drafts/projections/string_renderer.md".to_string(),
+                "# String Renderer".to_string(),
+            ),
+        ]);
+
+        let selected = select_semantic_repair_spec(&relevant_paths, &diagnostics, &specs_json)
+            .expect("selected spec");
+        assert_eq!(selected.0, "drafts/projections/string_renderer.md");
+    }
+
+    #[test]
+    fn compile_fix_verifier_context_records_undeclared_collaborator_calls() {
+        let root = make_temp_test_dir("compile_fix_semantic_verifier");
+        let src = root.join("src/projections/string_renderer.rs");
+        let draft = root.join("drafts/projections/string_renderer.md");
+        let interface = root.join(".reen/interfaces/data/Board.interface.json");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(draft.parent().expect("draft parent")).expect("create draft dir");
+        fs::create_dir_all(interface.parent().expect("interface parent"))
+            .expect("create interface dir");
+
+        fs::write(
+            &draft,
+            "# String Renderer\n\n## Purpose\nFormats a board.\n\n## Role Players\n| Role player | Why involved | Expected behaviour |\n|---|---|---|\n| board | Source picture | Provides board state |\n\n## Role Methods\n### board\n- **width** Returns width.\n- **symbol_at** Returns a cell symbol.\n\n## Props\n| Prop | Meaning | Notes |\n|---|---|---|\n| score | Visible score | Stable |\n\n## Functionalities\n### render\n| Started by | Uses | Result |\n|---|---|---|\n| caller | board, score | one frame |\n",
+        )
+        .expect("write draft");
+        fs::write(
+            &src,
+            "use crate::data::Board;\n\npub struct StringRenderer { board: Board, score: u32 }\nimpl StringRenderer {\n    pub fn render(&self) -> char { self.board_symbol_at() }\n    fn board_symbol_at(&self) -> char { let _ = self.score; self.board.symbol_at() }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &interface,
+            serde_json::to_string_pretty(&json!({
+                "version": "reen.interface-ir/v1",
+                "draft_identity": "Board",
+                "draft_relative_path": "data/board.md",
+                "specification_kind": "data",
+                "artifact_kind": "data_module",
+                "interface_fingerprint": "fp",
+                "primary_export_name": "Board",
+                "exported_types": [
+                    {
+                        "semantic_name": "Board",
+                        "rust_name": "Board",
+                        "export_name": "Board",
+                        "kind": "struct",
+                        "fields": []
+                    }
+                ],
+                "exported_methods": [
+                    {
+                        "semantic_name": "width",
+                        "rust_name": "width",
+                        "export_name": "width",
+                        "receiver": "&self",
+                        "parameters": [],
+                        "return_type": "u32",
+                        "failure_shape": "plain",
+                        "signature": "pub fn width(&self) -> u32"
+                    }
+                ],
+                "role_method_exports": [],
+                "name_bindings": [],
+                "dependency_bindings": [],
+                "resolved_types": []
+            }))
+            .expect("serialize interface"),
+        )
+        .expect("write interface");
+
+        let reports = build_compile_fix_semantic_verifier_context(
+            &root,
+            &root,
+            &[PathBuf::from("src/projections/string_renderer.rs")],
+        )
+        .expect("verifier context");
+
+        let report = reports
+            .get("src/projections/string_renderer.rs")
+            .expect("report");
+        let findings = report["high_risk_findings"]
+            .as_array()
+            .expect("high risk findings array");
+        assert!(
+            findings.iter().any(|item| {
+                item.as_str()
+                    .is_some_and(|value| value.contains("self.board.symbol_at"))
+            }),
+            "{findings:?}"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -2484,7 +2698,6 @@ pub struct ProjectionContext;
 
         fs::remove_dir_all(&root).ok();
     }
-
 
     #[test]
     fn check_guardrails_allows_owned_mut_self_state_transition_without_spec() {
@@ -2725,6 +2938,41 @@ pub struct ProjectionContext;
  impl GameState {
 -    pub fn increment_score(mut self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(self) }
 +    pub fn increment_score(&self, amount: i64) -> Result<Self, ()> { let _ = amount; Ok(Self) }
+ }
+"#;
+
+        let report = check_guardrails(&root, &root, diff).expect("guardrail report");
+        assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn check_guardrails_allows_anyhow_result_self_returning_api() {
+        let root = make_temp_test_dir("compile_fix_guardrail_anyhow_self");
+        let src = root.join("src/data/gamestate.rs");
+        let spec = root.join("specifications/data/gamestate.md");
+        fs::create_dir_all(src.parent().expect("src parent")).expect("create src dir");
+        fs::create_dir_all(spec.parent().expect("spec parent")).expect("create spec dir");
+        fs::write(
+            &src,
+            "pub struct GameState;\nimpl GameState {\n    pub fn increment_score(mut self, amount: i64) -> anyhow::Result<Self> { let _ = amount; Ok(self) }\n}\n",
+        )
+        .expect("write src");
+        fs::write(
+            &spec,
+            "# GameState\n\n## Functionalities\n- **increment_score**: returns a new GameState with score increased\n",
+        )
+        .expect("write spec");
+
+        let diff = r#"diff --git a/src/data/gamestate.rs b/src/data/gamestate.rs
+--- a/src/data/gamestate.rs
++++ b/src/data/gamestate.rs
+@@ -1,3 +1,3 @@
+ pub struct GameState;
+ impl GameState {
+-    pub fn increment_score(mut self, amount: i64) -> anyhow::Result<Self> { let _ = amount; Ok(self) }
++    pub fn increment_score(&self, amount: i64) -> anyhow::Result<Self> { let _ = amount; Ok(Self) }
  }
 "#;
 

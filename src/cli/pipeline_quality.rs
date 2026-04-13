@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::{
-    Expr, File, FnArg, ImplItem, ImplItemFn, Item, ItemExternCrate, ItemUse,
-    Path as SynPath, Stmt, UseTree, Visibility,
+    Expr, File, FnArg, ImplItem, ImplItemFn, Item, ItemExternCrate, ItemUse, Member, Pat,
+    Path as SynPath, Stmt, Type, UseTree, Visibility,
     spanned::Spanned,
     visit::{self, Visit},
 };
@@ -17,7 +17,7 @@ use super::capability_registry::{
     allowed_external_crate_roots, registry_provider_domains_by_crate,
 };
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub(crate) enum SpecificationKind {
     App,
     Context,
@@ -312,22 +312,12 @@ pub(crate) fn build_implementation_plan(
         }
     }));
 
-    let mut warnings = Vec::new();
-    for artifact in &required_artifacts {
-        if !artifact.exists {
-            warnings.push(format!(
-                "Collaborator '{}' does not have a matching generated artifact yet",
-                artifact.collaborator
-            ));
-        }
-    }
-
     ImplementationPlanReport {
         contract,
         output_path: output_path.display().to_string(),
         required_artifacts,
         verification_targets,
-        warnings,
+        warnings: Vec::new(),
     }
 }
 
@@ -349,12 +339,12 @@ pub(crate) fn verify_generated_implementation(
     let mut warnings = Vec::new();
     let mut high_risk_findings = Vec::new();
     let mut evidence = Vec::new();
+    let searchable_code = verification_search_text(&code);
+    let env_var_read_re = Regex::new(r"\b(?:std\s*::\s*)?env\s*::\s*(?:var|var_os)\b").unwrap();
 
     for env_var in &plan.contract.env_vars {
-        let satisfied = code.contains(env_var)
-            && (code.contains("env::var")
-                || code.contains("std::env::var")
-                || code.contains("var_os"));
+        let satisfied =
+            searchable_code.contains(env_var) && env_var_read_re.is_match(&searchable_code);
         evidence.push(VerificationEvidence {
             obligation: format!("Read environment variable {}", env_var),
             satisfied,
@@ -373,7 +363,7 @@ pub(crate) fn verify_generated_implementation(
     }
 
     for collaborator in &plan.contract.collaborators {
-        let satisfied = code.contains(collaborator);
+        let satisfied = searchable_code.contains(collaborator);
         evidence.push(VerificationEvidence {
             obligation: format!("Reference collaborator {}", collaborator),
             satisfied,
@@ -392,7 +382,8 @@ pub(crate) fn verify_generated_implementation(
     }
 
     for requirement in &plan.contract.delegation_requirements {
-        let satisfied = code.contains(&requirement.actor) && code.contains(&requirement.target);
+        let satisfied = searchable_code.contains(&requirement.actor)
+            && searchable_code.contains(&requirement.target);
         evidence.push(VerificationEvidence {
             obligation: format!("Delegation {} -> {}", requirement.actor, requirement.target),
             satisfied,
@@ -414,7 +405,7 @@ pub(crate) fn verify_generated_implementation(
     }
 
     for requirement in &plan.contract.output_requirements {
-        let satisfied = code.contains(&requirement.literal);
+        let satisfied = searchable_code.contains(&requirement.literal);
         evidence.push(VerificationEvidence {
             obligation: format!("Emit required output literal {}", requirement.literal),
             satisfied,
@@ -441,18 +432,16 @@ pub(crate) fn verify_generated_implementation(
             .any(|name| is_probably_domain_type(name))
     {
         high_risk_findings.push(
-            "Implementation uses `.clone()` despite shared-state requirements; verify semantics are actually shared"
+                "Implementation uses `.clone()` despite shared-state requirements; verify semantics are actually shared"
                 .to_string(),
         );
     }
-
-    for artifact in &plan.required_artifacts {
-        if !artifact.exists {
-            errors.push(format!(
-                "Required collaborator artifact for '{}' is missing (checked: {})",
-                artifact.collaborator,
-                artifact.candidate_paths.join(", ")
-            ));
+    for finding in detect_effectively_empty_implementation(&searchable_code) {
+        errors.push(finding.render_for_path(output_path));
+    }
+    if matches!(plan.contract.kind, SpecificationKind::App) {
+        for finding in detect_missing_binary_main_entrypoint(&code, &searchable_code) {
+            errors.push(finding.render_for_path(output_path));
         }
     }
 
@@ -517,10 +506,18 @@ pub(crate) fn verify_generated_implementation(
     for finding in detect_external_crate_policy_findings(project_root, &code)? {
         high_risk_findings.push(finding.render_for_path(output_path));
     }
+    if matches!(
+        plan.contract.kind,
+        SpecificationKind::Context | SpecificationKind::Projection
+    ) {
+        for finding in
+            detect_undeclared_collaborator_method_calls(project_root, &plan.contract.title, &code)?
+        {
+            high_risk_findings.push(finding.render_for_path(output_path));
+        }
+    }
     // Projections and Data are always immutable; apply the shared structural checks.
-    if plan.contract.is_immutable()
-        || matches!(plan.contract.kind, SpecificationKind::Projection)
-    {
+    if plan.contract.is_immutable() || matches!(plan.contract.kind, SpecificationKind::Projection) {
         for finding in detect_immutable_kind_findings(&code) {
             high_risk_findings.push(finding.render_for_path(output_path));
         }
@@ -646,6 +643,418 @@ fn detect_trivial_obligation_stubs(code: &str, role_method_names: &[String]) -> 
     findings
 }
 
+#[derive(Debug, Clone)]
+struct InterfaceMethodSurface {
+    draft_relative_path: String,
+    allowed_methods: HashSet<String>,
+}
+
+fn detect_undeclared_collaborator_method_calls(
+    project_root: &Path,
+    primary_type_name: &str,
+    code: &str,
+) -> Result<Vec<CodeFinding>> {
+    let interface_index = load_interface_method_surfaces(project_root)?;
+    if interface_index.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Ok(file) = syn::parse_file(code) else {
+        return Ok(Vec::new());
+    };
+
+    let self_field_types = collect_primary_struct_field_types(&file, primary_type_name);
+    let local_type_names = collect_local_type_names(&file);
+    let mut detector = UndeclaredCollaboratorMethodDetector {
+        interface_index: &interface_index,
+        self_field_types,
+        local_type_names,
+        scope_stack: Vec::new(),
+        findings: Vec::new(),
+    };
+    detector.visit_file(&file);
+    dedup_code_findings(&mut detector.findings);
+    Ok(detector.findings)
+}
+
+fn load_interface_method_surfaces(
+    project_root: &Path,
+) -> Result<HashMap<String, InterfaceMethodSurface>> {
+    let interfaces_root = project_root.join(".reen").join("interfaces");
+    if !interfaces_root.exists() {
+        return Ok(HashMap::new());
+    }
+
+    let mut interface_paths = Vec::new();
+    collect_interface_ir_paths(&interfaces_root, &mut interface_paths)?;
+    let mut surfaces = HashMap::new();
+
+    for path in interface_paths {
+        let Ok(content) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(interface_ir) = serde_json::from_str::<super::contract_store::InterfaceIr>(&content)
+        else {
+            continue;
+        };
+        if interface_ir.primary_export_name.trim().is_empty() {
+            continue;
+        }
+
+        let mut allowed_methods = interface_ir
+            .exported_methods
+            .iter()
+            .chain(interface_ir.role_method_exports.iter())
+            .flat_map(|method| {
+                [
+                    method.export_name.clone(),
+                    method.rust_name.clone(),
+                    method.semantic_name.clone(),
+                ]
+            })
+            .collect::<HashSet<_>>();
+
+        // Field-only interfaces are still meaningful collaborator surfaces. Treat exported
+        // field names as getter-shaped accessors so immutable data artifacts can be consumed
+        // through `value.field_name()` helpers without suppressing undeclared method checks.
+        allowed_methods.extend(
+            interface_ir
+                .exported_types
+                .iter()
+                .filter(|exported_type| {
+                    exported_type.export_name == interface_ir.primary_export_name
+                        || exported_type.rust_name == interface_ir.primary_export_name
+                        || exported_type.semantic_name == interface_ir.primary_export_name
+                })
+                .flat_map(|exported_type| {
+                    exported_type.fields.iter().flat_map(|field| {
+                        [
+                            field.export_name.clone(),
+                            field.rust_name.clone(),
+                            field.semantic_name.clone(),
+                        ]
+                    })
+                }),
+        );
+
+        surfaces.insert(
+            interface_ir.primary_export_name.clone(),
+            InterfaceMethodSurface {
+                draft_relative_path: interface_ir.draft_relative_path,
+                allowed_methods,
+            },
+        );
+    }
+
+    Ok(surfaces)
+}
+
+fn collect_interface_ir_paths(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(root).with_context(|| format!("Failed to read {}", root.display()))? {
+        let entry = entry.with_context(|| format!("Failed to read {}", root.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_interface_ir_paths(&path, out)?;
+        } else if path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value == "json")
+            && path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.ends_with(".interface.json"))
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn collect_primary_struct_field_types(
+    file: &File,
+    primary_type_name: &str,
+) -> HashMap<String, String> {
+    let name_candidates = rust_type_name_candidates(primary_type_name);
+    file.items
+        .iter()
+        .find_map(|item| {
+            let Item::Struct(item_struct) = item else {
+                return None;
+            };
+            if !name_candidates.contains(&item_struct.ident.to_string()) {
+                return None;
+            }
+
+            let syn::Fields::Named(fields) = &item_struct.fields else {
+                return Some(HashMap::new());
+            };
+            let mapped = fields
+                .named
+                .iter()
+                .filter_map(|field| {
+                    let field_name = field.ident.as_ref()?.to_string();
+                    let type_name = base_type_name(&field.ty)?;
+                    Some((field_name, type_name))
+                })
+                .collect::<HashMap<_, _>>();
+            Some(mapped)
+        })
+        .unwrap_or_default()
+}
+
+fn rust_type_name_candidates(name: &str) -> HashSet<String> {
+    let mut candidates = HashSet::new();
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return candidates;
+    }
+
+    candidates.insert(trimmed.to_string());
+
+    let mut pascal = String::new();
+    for raw in trimmed.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if raw.is_empty() {
+            continue;
+        }
+
+        let has_lower = raw.chars().any(|c| c.is_ascii_lowercase());
+        let has_upper = raw.chars().any(|c| c.is_ascii_uppercase());
+        let token = if has_lower && has_upper {
+            let mut chars = raw.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        } else {
+            let lower = raw.to_ascii_lowercase();
+            let mut chars = lower.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        };
+        pascal.push_str(&token);
+    }
+    if !pascal.is_empty() {
+        candidates.insert(pascal);
+    }
+
+    candidates
+}
+
+fn collect_local_type_names(file: &File) -> HashSet<String> {
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Struct(item_struct) => Some(item_struct.ident.to_string()),
+            Item::Enum(item_enum) => Some(item_enum.ident.to_string()),
+            Item::Trait(item_trait) => Some(item_trait.ident.to_string()),
+            Item::Type(item_type) => Some(item_type.ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn function_param_type_names(sig: &syn::Signature) -> HashMap<String, String> {
+    sig.inputs
+        .iter()
+        .filter_map(|arg| {
+            let FnArg::Typed(pat_type) = arg else {
+                return None;
+            };
+            let Pat::Ident(pat_ident) = pat_type.pat.as_ref() else {
+                return None;
+            };
+            let type_name = base_type_name(&pat_type.ty)?;
+            Some((pat_ident.ident.to_string(), type_name))
+        })
+        .collect()
+}
+
+fn base_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Reference(reference) => base_type_name(&reference.elem),
+        Type::Paren(paren) => base_type_name(&paren.elem),
+        Type::Group(group) => base_type_name(&group.elem),
+        Type::Path(type_path) => {
+            let segment = type_path.path.segments.last()?;
+            let ident = segment.ident.to_string();
+            match ident.as_str() {
+                "Box" | "Arc" | "Rc" | "Mutex" | "RwLock" | "RefCell" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        for arg in &args.args {
+                            if let syn::GenericArgument::Type(inner) = arg {
+                                if let Some(inner_name) = base_type_name(inner) {
+                                    return Some(inner_name);
+                                }
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => Some(ident),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn unwrap_receiver_expr(mut expr: &Expr) -> &Expr {
+    loop {
+        match expr {
+            Expr::Reference(reference) => expr = &reference.expr,
+            Expr::Paren(paren) => expr = &paren.expr,
+            Expr::Group(group) => expr = &group.expr,
+            _ => return expr,
+        }
+    }
+}
+
+struct UndeclaredCollaboratorMethodDetector<'a> {
+    interface_index: &'a HashMap<String, InterfaceMethodSurface>,
+    self_field_types: HashMap<String, String>,
+    local_type_names: HashSet<String>,
+    scope_stack: Vec<HashMap<String, String>>,
+    findings: Vec<CodeFinding>,
+}
+
+impl<'a> UndeclaredCollaboratorMethodDetector<'a> {
+    fn push_scope(&mut self, values: HashMap<String, String>) {
+        self.scope_stack.push(values);
+    }
+
+    fn pop_scope(&mut self) {
+        self.scope_stack.pop();
+    }
+
+    fn resolve_receiver_binding(&self, expr: &Expr) -> Option<(String, String)> {
+        let expr = unwrap_receiver_expr(expr);
+        match expr {
+            Expr::Field(field) => {
+                let Expr::Path(path) = unwrap_receiver_expr(&field.base) else {
+                    return None;
+                };
+                if !path.path.is_ident("self") {
+                    return None;
+                }
+                let Member::Named(member) = &field.member else {
+                    return None;
+                };
+                let field_name = member.to_string();
+                let type_name = self.self_field_types.get(&field_name)?.clone();
+                Some((field_name, type_name))
+            }
+            Expr::Path(path) => {
+                let ident = path.path.get_ident()?.to_string();
+                let type_name = self
+                    .scope_stack
+                    .iter()
+                    .rev()
+                    .find_map(|scope| scope.get(&ident))
+                    .cloned()?;
+                Some((ident, type_name))
+            }
+            _ => None,
+        }
+    }
+
+    fn maybe_record_finding(&mut self, receiver: &Expr, method_call: &syn::ExprMethodCall) {
+        let Some((binding_name, type_name)) = self.resolve_receiver_binding(receiver) else {
+            return;
+        };
+        if self.local_type_names.contains(&type_name) {
+            return;
+        }
+
+        let Some(surface) = self.interface_index.get(&type_name) else {
+            return;
+        };
+        let method_name = method_call.method.to_string();
+        if surface.allowed_methods.contains(&method_name) {
+            return;
+        }
+
+        let receiver_label = match unwrap_receiver_expr(receiver) {
+            Expr::Field(_) => format!("self.{binding_name}"),
+            _ => binding_name,
+        };
+        self.findings.push(CodeFinding::with_span(
+            format!(
+                "Direct collaborator call '{}.{}' targets type '{}' but method '{}' is not declared on interface '{}'; keep this behavior in a private context role method or local helper over the collaborator instead of expanding collaborator API",
+                receiver_label,
+                method_name,
+                type_name,
+                method_name,
+                surface.draft_relative_path
+            ),
+            method_call.method.span(),
+        ));
+    }
+}
+
+impl<'ast> Visit<'ast> for UndeclaredCollaboratorMethodDetector<'_> {
+    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+        self.push_scope(function_param_type_names(&function.sig));
+        visit::visit_item_fn(self, function);
+        self.pop_scope();
+    }
+
+    fn visit_impl_item_fn(&mut self, method: &'ast ImplItemFn) {
+        self.push_scope(function_param_type_names(&method.sig));
+        visit::visit_impl_item_fn(self, method);
+        self.pop_scope();
+    }
+
+    fn visit_expr_method_call(&mut self, method_call: &'ast syn::ExprMethodCall) {
+        self.maybe_record_finding(&method_call.receiver, method_call);
+        visit::visit_expr_method_call(self, method_call);
+    }
+}
+
+fn verification_search_text(code: &str) -> String {
+    code.parse::<proc_macro2::TokenStream>()
+        .map(|tokens| tokens.to_string())
+        .unwrap_or_else(|_| strip_comments_fallback(code))
+}
+
+fn strip_comments_fallback(code: &str) -> String {
+    let without_block_comments = Regex::new(r"(?s)/\*.*?\*/").unwrap().replace_all(code, " ");
+    Regex::new(r"(?m)//.*$")
+        .unwrap()
+        .replace_all(&without_block_comments, " ")
+        .into_owned()
+}
+
+fn detect_effectively_empty_implementation(searchable_code: &str) -> Vec<CodeFinding> {
+    if searchable_code.trim().is_empty() {
+        vec![CodeFinding::without_location(
+            "Implementation is effectively empty after removing comments and whitespace",
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn detect_missing_binary_main_entrypoint(code: &str, searchable_code: &str) -> Vec<CodeFinding> {
+    let has_main = match syn::parse_file(code) {
+        Ok(file) => file
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Fn(function) if function.sig.ident == "main")),
+        Err(_) => Regex::new(r"\bfn\s+main\b")
+            .unwrap()
+            .is_match(searchable_code),
+    };
+
+    if has_main {
+        Vec::new()
+    } else {
+        vec![CodeFinding::without_location(
+            "Application implementation does not define a top-level `main` function",
+        )]
+    }
+}
+
 fn detect_trivial_obligation_stubs_from_ast(
     file: &File,
     normalized_role_names: &[String],
@@ -654,9 +1063,11 @@ fn detect_trivial_obligation_stubs_from_ast(
     for item in &file.items {
         match item {
             Item::Fn(function) => {
-                if let Some(message) =
-                    trivial_named_block_message(&function.sig.ident.to_string(), &function.block, normalized_role_names)
-                {
+                if let Some(message) = trivial_named_block_message(
+                    &function.sig.ident.to_string(),
+                    &function.block,
+                    normalized_role_names,
+                ) {
                     findings.push(CodeFinding::with_span(message, function.sig.ident.span()));
                 }
             }
@@ -668,9 +1079,11 @@ fn detect_trivial_obligation_stubs_from_ast(
                     let ImplItem::Fn(method) = impl_item else {
                         continue;
                     };
-                    if let Some(message) =
-                        trivial_named_block_message(&method.sig.ident.to_string(), &method.block, normalized_role_names)
-                    {
+                    if let Some(message) = trivial_named_block_message(
+                        &method.sig.ident.to_string(),
+                        &method.block,
+                        normalized_role_names,
+                    ) {
                         findings.push(CodeFinding::with_span(message, method.sig.ident.span()));
                     }
                 }
@@ -864,10 +1277,7 @@ fn path_ends_with_segments(path: &SynPath, expected: &[&str]) -> bool {
         .all(|(actual, expected)| actual.ident == *expected)
 }
 
-fn detect_ignored_immutable_return_values(
-    spec_content: &str,
-    code: &str,
-) -> Vec<CodeFinding> {
+fn detect_ignored_immutable_return_values(spec_content: &str, code: &str) -> Vec<CodeFinding> {
     if !spec_declares_immutable_value_updates(spec_content) {
         return Vec::new();
     }
@@ -952,11 +1362,15 @@ fn detect_external_crate_policy_findings(
         .filter(|(crate_name, _)| allowed.contains(crate_name.as_str()))
         .map(|(crate_name, domain)| (domain.clone(), crate_name.clone()))
         .collect::<HashMap<_, _>>();
+    let local_crate_roots = detect_local_crate_roots(project_root)?;
     let external_roots = extract_external_crate_roots(code);
     let mut findings = Vec::new();
 
     for root in external_roots {
-        if allowed.contains(&root) || baseline_allowed_crate_roots().contains(root.as_str()) {
+        if allowed.contains(&root)
+            || local_crate_roots.contains(&root)
+            || baseline_allowed_crate_roots().contains(root.as_str())
+        {
             continue;
         }
         let location = find_first_root_path_location(code, &root);
@@ -989,6 +1403,92 @@ fn detect_external_crate_policy_findings(
     Ok(findings)
 }
 
+fn detect_local_crate_roots(project_root: &Path) -> Result<HashSet<String>> {
+    let cargo_toml = project_root.join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Ok(HashSet::new());
+    }
+
+    let content = fs::read_to_string(&cargo_toml)
+        .with_context(|| format!("Failed to read {}", cargo_toml.display()))?;
+    let package_name = extract_cargo_manifest_name(&content, "package");
+    let lib_name = extract_cargo_manifest_name(&content, "lib");
+
+    let mut roots = HashSet::new();
+    if let Some(name) = package_name {
+        roots.insert(normalize_cargo_crate_root(&name));
+    }
+    if let Some(name) = lib_name {
+        roots.insert(normalize_cargo_crate_root(&name));
+    }
+
+    Ok(roots)
+}
+
+fn extract_cargo_manifest_name(content: &str, section_name: &str) -> Option<String> {
+    let mut in_target_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_target_section = trimmed == format!("[{}]", section_name);
+            continue;
+        }
+
+        if !in_target_section {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "name" {
+            continue;
+        }
+
+        let raw = value.trim().trim_matches('"');
+        if raw.is_empty() {
+            return None;
+        }
+        return Some(raw.to_string());
+    }
+
+    None
+}
+
+fn normalize_cargo_crate_root(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_separator = false;
+
+    for ch in raw.chars() {
+        let lowered = ch.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            if out.is_empty() && lowered.is_ascii_digit() {
+                out.push('_');
+            }
+            out.push(lowered);
+            last_was_separator = false;
+        } else if !out.is_empty() && !last_was_separator {
+            out.push('_');
+            last_was_separator = true;
+        }
+    }
+
+    while out.ends_with('_') {
+        out.pop();
+    }
+
+    if out.is_empty() {
+        "generated_project".to_string()
+    } else {
+        out
+    }
+}
+
 fn extract_external_crate_roots(code: &str) -> BTreeSet<String> {
     match syn::parse_file(code) {
         Ok(file) => extract_external_crate_roots_from_file(&file),
@@ -1018,8 +1518,7 @@ fn extract_external_crate_roots_fallback(code: &str) -> BTreeSet<String> {
     let mut roots = BTreeSet::new();
     let use_root_re =
         Regex::new(r"(?m)^\s*use\s+([a-z_][a-z0-9_]*)\b(?:\s*::|\s*;|\s+as\b)").unwrap();
-    let extern_crate_re =
-        Regex::new(r"(?m)^\s*extern\s+crate\s+([a-z_][a-z0-9_]*)\b").unwrap();
+    let extern_crate_re = Regex::new(r"(?m)^\s*extern\s+crate\s+([a-z_][a-z0-9_]*)\b").unwrap();
 
     for capture in use_root_re.captures_iter(code) {
         if let Some(root) = capture.get(1).map(|m| m.as_str()) {
@@ -1206,7 +1705,9 @@ impl<'ast> Visit<'ast> for ExternalCrateRootCollector {
 fn is_possible_external_crate_root(root: &str) -> bool {
     let first = root.chars().next();
     first.map(|ch| ch.is_ascii_lowercase()).unwrap_or(false)
-        && root.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        && root
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
         && !baseline_allowed_crate_roots().contains(root)
         && !primitive_path_roots().contains(root)
 }
@@ -1220,7 +1721,15 @@ fn primitive_path_roots() -> HashSet<&'static str> {
 
 fn baseline_allowed_crate_roots() -> HashSet<&'static str> {
     HashSet::from([
-        "crate", "self", "super", "std", "core", "alloc", "data", "contexts", "projections",
+        "crate",
+        "self",
+        "super",
+        "std",
+        "core",
+        "alloc",
+        "data",
+        "contexts",
+        "projections",
         "tracing",
     ])
 }
@@ -1234,9 +1743,14 @@ fn known_capability_domain_for_crate(crate_name: &str) -> Option<&'static str> {
 }
 
 fn find_first_root_path_location(code: &str, root: &str) -> Option<CodeLocation> {
-    let pattern = format!(r"(?m)\b{}\b(?:(?:\s*::)|(?:\s*;)|(?:\s+as\b))", regex::escape(root));
+    let pattern = format!(
+        r"(?m)\b{}\b(?:(?:\s*::)|(?:\s*;)|(?:\s+as\b))",
+        regex::escape(root)
+    );
     let regex = Regex::new(&pattern).ok()?;
-    regex.find(code).map(|matched| location_from_offset(code, matched.start()))
+    regex
+        .find(code)
+        .map(|matched| location_from_offset(code, matched.start()))
 }
 
 fn method_receiver_mut_span(method: &ImplItemFn) -> Option<Span> {
@@ -1586,6 +2100,39 @@ pub(crate) fn contract_to_context_value(contract: &BehaviorContract) -> serde_js
     json!(contract)
 }
 
+/// Section titles that are documentation/analysis artifacts rather than behavioral
+/// specification. These sections must not be fed to heuristic extraction functions
+/// because their prose can match extraction patterns (e.g. "must", "uses ") and
+/// produce false delegation requirements or output obligations.
+const METADATA_SECTION_TITLES: &[&str] = &[
+    "Blocking Ambiguities",
+    "Implementation Choices Left Open",
+    "Inferred Types or Structures",
+    "Inferred Types",
+    "Decision Sources",
+];
+
+/// Reconstruct spec content with metadata-only sections removed so that heuristic
+/// extractors only see behavioral content.
+fn behavioral_content(spec_content: &str) -> String {
+    let mut result = String::with_capacity(spec_content.len());
+    let mut skip = false;
+    for line in spec_content.lines() {
+        let trimmed = line.trim();
+        if let Some(title) = trimmed.strip_prefix("## ") {
+            let title = title.trim();
+            skip = METADATA_SECTION_TITLES
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(title));
+        }
+        if !skip {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
 fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorContract {
     let title = spec_content
         .lines()
@@ -1594,11 +2141,16 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
         .to_string();
     let sections = parse_markdown_sections(spec_content);
     let kind = infer_kind(spec_path, spec_content, &sections);
-    let collaborators = extract_collaborators(spec_content, &sections);
+    let collaborators = extract_collaborators(kind, spec_content, &sections);
     let env_vars = extract_env_vars(spec_content);
-    let delegation_requirements = extract_delegation_requirements(spec_content);
-    let output_requirements = extract_output_requirements(spec_content);
-    let shared_state_requirements = extract_shared_state_requirements(spec_content);
+    // Strip metadata sections before running heuristic extractors so that prose in
+    // "Blocking Ambiguities" / "Implementation Choices Left Open" / etc. cannot
+    // accidentally produce false delegation requirements or output obligations.
+    let behavioral = behavioral_content(spec_content);
+    let delegation_requirements =
+        extract_delegation_requirements(kind, &behavioral, &collaborators);
+    let output_requirements = extract_output_requirements(&behavioral);
+    let shared_state_requirements = extract_shared_state_requirements(&behavioral);
     let role_method_names = extract_role_method_names(&sections);
     let external_behavior_clues = extract_external_behavior_clues(spec_content);
 
@@ -1615,7 +2167,6 @@ fn extract_behavior_contract(spec_path: &Path, spec_content: &str) -> BehaviorCo
         external_behavior_clues,
     }
 }
-
 
 fn is_markdown_thematic_break(line: &str) -> bool {
     let compact = line
@@ -1732,7 +2283,15 @@ fn has_any_section(sections: &[Section], titles: &[&str]) -> bool {
     titles.iter().any(|title| has_section(sections, title))
 }
 
-fn extract_collaborators(content: &str, sections: &[Section]) -> Vec<String> {
+fn extract_collaborators(
+    kind: SpecificationKind,
+    content: &str,
+    sections: &[Section],
+) -> Vec<String> {
+    if matches!(kind, SpecificationKind::Data) {
+        return Vec::new();
+    }
+
     let mut names = BTreeSet::new();
 
     if let Ok(depends_re) = Regex::new(r"(?i)^depends on:\s*(.+)$") {
@@ -1866,7 +2425,20 @@ fn is_env_var_like(value: &str) -> bool {
     value.contains('_') || value.len() > 6
 }
 
-fn extract_delegation_requirements(content: &str) -> Vec<DelegationRequirement> {
+fn extract_delegation_requirements(
+    kind: SpecificationKind,
+    content: &str,
+    collaborators: &[String],
+) -> Vec<DelegationRequirement> {
+    if matches!(kind, SpecificationKind::Data) {
+        return Vec::new();
+    }
+
+    let collaborator_set: HashSet<String> = collaborators
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+
     let mut requirements = Vec::new();
     let code_re = Regex::new(r"`([^`]+)`").unwrap();
     for line in content.lines() {
@@ -1878,12 +2450,20 @@ fn extract_delegation_requirements(content: &str) -> Vec<DelegationRequirement> 
         let ids = code_re
             .captures_iter(line)
             .filter_map(|capture| capture.get(1).map(|m| normalize_symbol_name(m.as_str())))
-            .filter(|value| !value.is_empty())
+            .filter(|value| delegation_entity_name_is_actionable(value))
             .collect::<Vec<_>>();
         if ids.len() >= 2 {
+            let actor = ids[0].clone();
+            let target = ids[1].clone();
+            if !collaborator_set.is_empty()
+                && (!collaborator_set.contains(&actor.to_ascii_lowercase())
+                    || !collaborator_set.contains(&target.to_ascii_lowercase()))
+            {
+                continue;
+            }
             requirements.push(DelegationRequirement {
-                actor: ids[0].clone(),
-                target: ids[1].clone(),
+                actor,
+                target,
                 source_line: line.trim().to_string(),
             });
         }
@@ -2085,6 +2665,21 @@ fn collaborator_name_is_actionable(name: &str) -> bool {
     !is_documentation_label(name)
 }
 
+fn delegation_entity_name_is_actionable(name: &str) -> bool {
+    collaborator_name_is_actionable(name) && identifier_like_entity_name(name)
+}
+
+fn identifier_like_entity_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 fn is_documentation_label(name: &str) -> bool {
     matches!(
         name,
@@ -2167,10 +2762,113 @@ mod tests {
         determine_spec_path_for_output, extract_external_crate_roots,
         verify_generated_implementation,
     };
+    use serde_json::json;
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_interface_ir(
+        root: &Path,
+        category: &str,
+        type_name: &str,
+        draft_relative_path: &str,
+        methods: &[&str],
+    ) {
+        let path = root
+            .join(".reen")
+            .join("interfaces")
+            .join(category)
+            .join(format!("{type_name}.interface.json"));
+        fs::create_dir_all(path.parent().expect("interface parent")).expect("mkdir interface dir");
+        let exported_methods = methods
+            .iter()
+            .map(|method| {
+                json!({
+                    "semantic_name": method,
+                    "rust_name": method,
+                    "export_name": method,
+                    "receiver": "&self",
+                    "parameters": [],
+                    "return_type": "()",
+                    "failure_shape": "plain",
+                    "signature": format!("pub fn {method}(&self)")
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&json!({
+                "version": "reen.interface-ir/v1",
+                "draft_identity": type_name,
+                "draft_relative_path": draft_relative_path,
+                "specification_kind": category.trim_end_matches('s'),
+                "artifact_kind": format!("{}_module", category.trim_end_matches('s')),
+                "interface_fingerprint": "test-fingerprint",
+                "primary_export_name": type_name,
+                "exported_types": [],
+                "exported_methods": exported_methods,
+                "role_method_exports": [],
+                "name_bindings": [],
+                "dependency_bindings": [],
+                "resolved_types": []
+            }))
+            .expect("serialize interface"),
+        )
+        .expect("write interface");
+    }
+
+    fn write_field_only_interface_ir(
+        root: &Path,
+        category: &str,
+        type_name: &str,
+        draft_relative_path: &str,
+        fields: &[&str],
+    ) {
+        let path = root
+            .join(".reen")
+            .join("interfaces")
+            .join(category)
+            .join(format!("{type_name}.interface.json"));
+        fs::create_dir_all(path.parent().expect("interface parent")).expect("mkdir interface dir");
+        let exported_fields = fields
+            .iter()
+            .map(|field| {
+                json!({
+                    "semantic_name": field,
+                    "rust_name": field,
+                    "export_name": field,
+                    "type_ref": "u32"
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&json!({
+                "version": "reen.interface-ir/v1",
+                "draft_identity": type_name,
+                "draft_relative_path": draft_relative_path,
+                "specification_kind": category.trim_end_matches('s'),
+                "artifact_kind": format!("{}_module", category.trim_end_matches('s')),
+                "interface_fingerprint": "test-fingerprint",
+                "primary_export_name": type_name,
+                "exported_types": [{
+                    "semantic_name": type_name,
+                    "rust_name": type_name,
+                    "export_name": type_name,
+                    "kind": "struct",
+                    "fields": exported_fields
+                }],
+                "exported_methods": [],
+                "role_method_exports": [],
+                "name_bindings": [],
+                "dependency_bindings": [],
+                "resolved_types": []
+            }))
+            .expect("serialize interface"),
+        )
+        .expect("write interface");
+    }
 
     #[test]
     fn spec_lint_flags_env_var_contradictions() {
@@ -2185,6 +2883,137 @@ Unspecified in draft - no environment variables referenced.
         let report = analyze_specification(Path::new("specifications/app.md"), content, None);
         assert_eq!(report.contract.kind, SpecificationKind::App);
         assert!(report.errors.iter().any(|item| item.contains("FOO_MODE")));
+    }
+
+    #[test]
+    fn data_spec_has_no_spurious_delegations_or_collaborators() {
+        let content = r#"# Board
+
+## Description
+
+The board describes the rectangular play area for a round of Snake.
+
+## Fields
+
+| Field | Meaning | Notes |
+|---|---|---|
+| width | Width | Positive whole number |
+| height | Height | Positive whole number |
+
+## Rules
+
+- `width` must be greater than `0`.
+- `height` must be greater than `0`.
+"#;
+        let report =
+            analyze_specification(Path::new("specifications/data/Board.md"), content, None);
+        assert_eq!(report.contract.kind, SpecificationKind::Data);
+        assert!(
+            report.contract.collaborators.is_empty(),
+            "collaborators: {:?}",
+            report.contract.collaborators
+        );
+        assert!(
+            report.contract.delegation_requirements.is_empty(),
+            "delegation_requirements: {:?}",
+            report.contract.delegation_requirements
+        );
+    }
+
+    #[test]
+    fn projection_output_literals_do_not_become_delegation_requirements() {
+        let content = r#"# String Renderer
+
+## Purpose
+
+StringRenderer turns one board picture and its score into plain text.
+
+## Role Players
+
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| Board | Supplies the picture of the current board | Allows the renderer to read what symbol should appear at each visible position |
+
+## Role Methods
+
+### Board
+
+- **width**
+  Returns the number of columns in the picture.
+
+- **height**
+  Returns the number of rows in the picture.
+
+- **symbol_at**
+  Returns the symbol to show at a given coordinate.
+
+## Props
+
+| Prop | Meaning | Notes |
+|---|---|---|
+| score | Score shown below the board | Same score the user sees during play |
+
+## Functionalities
+
+### render
+
+| Started by | Uses | Result |
+|---|---|---|
+| TerminalRenderer or the application | board, score | one text frame is returned |
+
+Rules:
+- Reads the current board picture and the score.
+- Uses score line format `Score: <score>`.
+- The score line also ends with a newline (`\n`).
+"#;
+
+        let report = analyze_specification(
+            Path::new("specifications/projections/string_renderer.md"),
+            content,
+            None,
+        );
+
+        assert_eq!(report.contract.collaborators, vec!["Board".to_string()]);
+        assert!(
+            report.contract.delegation_requirements.is_empty(),
+            "delegation_requirements: {:?}",
+            report.contract.delegation_requirements
+        );
+    }
+
+    #[test]
+    fn delegation_skips_backtick_pairs_when_either_side_is_not_a_collaborator() {
+        let content = r#"# Loop
+
+## Purpose
+
+Test context.
+
+## Role Players
+
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| food_dropper | Chooses food | Chooses |
+
+## Functionalities
+
+### tick
+
+Rules:
+- must record `food_dropper` then `drop` on the same line for extraction.
+"#;
+
+        let report = analyze_specification(
+            Path::new("specifications/contexts/loop_ctx.md"),
+            content,
+            None,
+        );
+        assert_eq!(report.contract.kind, SpecificationKind::Context);
+        assert!(
+            report.contract.delegation_requirements.is_empty(),
+            "expected role/method backtick pairs to be ignored: {:?}",
+            report.contract.delegation_requirements
+        );
     }
 
     #[test]
@@ -2223,6 +3052,129 @@ Unspecified in draft - no environment variables referenced.
         .expect("verify");
         assert!(report.errors.iter().any(|item| item.contains("FOO_MODE")));
         assert!(report.high_risk_findings.is_empty());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_rejects_comment_only_app_implementations() {
+        let root = make_temp_dir("pipeline_quality_comment_only_app");
+        let specs = root.join("specifications");
+        let src = root.join("src");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("app.md");
+        fs::write(
+            &spec_path,
+            r#"# Snake App
+
+## Behavior
+- Read environment variable `SNAKE_RENDERER`
+- Print `REEN_SNAKE_TEST_RESULT game_over score=<score>`
+
+## Collaborators and Wiring
+| Collaborator | Responsibility |
+|---|---|
+| `CommandInputContext` | Captures key presses |
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("main.rs");
+        fs::write(
+            &output,
+            r#"// Read environment variable SNAKE_RENDERER
+// CommandInputContext
+// REEN_SNAKE_TEST_RESULT game_over score=<score>
+"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|item| item.contains("effectively empty")),
+            "errors: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|item| item.contains("top-level `main` function")),
+            "errors: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|item| item.contains("SNAKE_RENDERER")),
+            "errors: {:?}",
+            report.errors
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_does_not_error_on_missing_collaborator_artifact_files() {
+        let root = make_temp_dir("pipeline_quality_missing_artifact_rule_removed");
+        let specs = root.join("specifications");
+        let src = root.join("src");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let spec_path = specs.join("app.md");
+        fs::write(
+            &spec_path,
+            r#"# App
+
+## Collaborators and Wiring
+| Collaborator | Responsibility |
+|---|---|
+| `ImaginaryRenderer` | Renders output |
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("main.rs");
+        fs::write(
+            &output,
+            r#"struct ImaginaryRenderer;
+
+fn main() {
+    let _ = core::mem::size_of::<ImaginaryRenderer>();
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|item| item.contains("Required collaborator artifact")),
+            "errors: {:?}",
+            report.errors
+        );
 
         fs::remove_dir_all(root).ok();
     }
@@ -2351,6 +3303,403 @@ impl GameLoopContext {
                 .high_risk_findings
                 .iter()
                 .any(|item| item.contains("trivial body returning None")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_flags_direct_collaborator_calls_missing_from_interface() {
+        let root = make_temp_dir("pipeline_quality_collaborator_method_leak");
+        let specs = root.join("specifications").join("contexts");
+        let src = root.join("src").join("contexts");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        write_interface_ir(
+            &root,
+            "data",
+            "Snake",
+            "data/Snake.md",
+            &["body", "direction"],
+        );
+        write_interface_ir(
+            &root,
+            "data",
+            "GameState",
+            "data/GameState.md",
+            &["score", "food", "increment_score", "place_food"],
+        );
+
+        let spec_path = specs.join("game_loop.md");
+        fs::write(
+            &spec_path,
+            r#"# GameLoopContext
+
+## Purpose
+Runs the game loop.
+
+## Role Players
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| snake | Tracks the snake | Exposes snake state |
+| game_state | Tracks score and food | Exposes game state |
+
+## Role Methods
+### snake
+- **body**
+  Returns positions.
+
+### game_state
+- **score**
+  Returns the score.
+
+## Functionalities
+### tick
+| Started by | Uses | Result |
+|---|---|---|
+| scheduler | snake, game_state | one game tick is processed |
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("game_loop.rs");
+        fs::write(
+            &output,
+            r#"use crate::data::{GameState, Position, Snake};
+
+impl Position {
+    fn new(x: u32, y: u32) -> Self {
+        let _ = (x, y);
+        Self
+    }
+}
+
+struct GameLoopContext {
+    snake: Snake,
+    game_state: GameState,
+}
+
+impl GameLoopContext {
+    pub fn tick(&mut self) {
+        let _ = self.snake.grow(Position::new(1, 2));
+        let _ = self.game_state.with_score(10);
+    }
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("self.snake.grow") && item.contains("data/Snake.md")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+        assert!(
+            report.high_risk_findings.iter().any(|item| {
+                item.contains("self.game_state.with_score") && item.contains("data/GameState.md")
+            }),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_allows_local_helper_that_uses_declared_collaborator_methods() {
+        let root = make_temp_dir("pipeline_quality_context_helper_allowed");
+        let specs = root.join("specifications").join("contexts");
+        let src = root.join("src").join("contexts");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        write_interface_ir(
+            &root,
+            "data",
+            "Snake",
+            "data/Snake.md",
+            &["body", "direction"],
+        );
+
+        let spec_path = specs.join("game_loop.md");
+        fs::write(
+            &spec_path,
+            r#"# GameLoopContext
+
+## Purpose
+Runs the game loop.
+
+## Role Players
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| snake | Tracks the snake | Exposes snake state |
+
+## Role Methods
+### snake
+- **body**
+  Returns positions.
+
+- **direction**
+  Returns direction.
+
+## Functionalities
+### head
+| Started by | Uses | Result |
+|---|---|---|
+| caller | snake | current head is returned |
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("game_loop.rs");
+        fs::write(
+            &output,
+            r#"struct Snake;
+struct Position;
+struct Direction;
+
+impl GameLoopContext {
+    pub fn head(&self) -> Position {
+        snake_head(&self.snake)
+    }
+}
+
+struct GameLoopContext {
+    snake: Snake,
+}
+
+fn snake_head(snake: &Snake) -> Position {
+    let _ = snake.direction();
+    snake.body()[0]
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            !report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("not declared on interface")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_flags_direct_collaborator_calls_for_spaced_projection_titles() {
+        let root = make_temp_dir("pipeline_quality_projection_spaced_title");
+        let specs = root.join("drafts").join("projections");
+        let src = root.join("src").join("projections");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        write_interface_ir(
+            &root,
+            "data",
+            "Board",
+            "data/board.md",
+            &["width", "height"],
+        );
+
+        let spec_path = specs.join("string_renderer.md");
+        fs::write(
+            &spec_path,
+            r#"# String Renderer
+
+## Purpose
+Formats the board.
+
+## Role Players
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| board | Source picture | Provides board state |
+
+## Role Methods
+### board
+- **width**
+  Returns width.
+- **symbol_at**
+  Returns a symbol.
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| score | Visible score | Stable |
+
+## Functionalities
+### render
+| Started by | Uses | Result |
+|---|---|---|
+| caller | board, score | one frame |
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("string_renderer.rs");
+        fs::write(
+            &output,
+            r#"use crate::data::Board;
+
+pub struct StringRenderer {
+    board: Board,
+    score: u32,
+}
+
+impl StringRenderer {
+    pub fn render(&self) -> char {
+        self.board_symbol_at()
+    }
+
+    fn board_symbol_at(&self) -> char {
+        let _ = self.score;
+        self.board.symbol_at()
+    }
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("self.board.symbol_at") && item.contains("data/board.md")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_allows_field_getter_access_but_flags_other_calls_on_field_only_interfaces() {
+        let root = make_temp_dir("pipeline_quality_projection_field_only_interface");
+        let specs = root.join("drafts").join("projections");
+        let src = root.join("src").join("projections");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        write_field_only_interface_ir(
+            &root,
+            "data",
+            "Board",
+            "data/Board.md",
+            &["width", "height"],
+        );
+
+        let spec_path = specs.join("string_renderer.md");
+        fs::write(
+            &spec_path,
+            r#"# String Renderer
+
+## Purpose
+Formats the board.
+
+## Role Players
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| board | Source picture | Provides board state |
+
+## Role Methods
+### board
+- **width**
+  Returns width.
+- **height**
+  Returns height.
+- **symbol_at**
+  Returns a symbol.
+
+## Props
+| Prop | Meaning | Notes |
+|---|---|---|
+| score | Visible score | Stable |
+
+## Functionalities
+### render
+| Started by | Uses | Result |
+|---|---|---|
+| caller | board, score | one frame |
+"#,
+        )
+        .expect("write spec");
+
+        let output = src.join("string_renderer.rs");
+        fs::write(
+            &output,
+            r#"use crate::data::Board;
+
+struct Position;
+
+impl Position {
+    fn new(x: u32, y: u32) -> Self {
+        let _ = (x, y);
+        Self
+    }
+}
+
+pub struct StringRenderer {
+    board: Board,
+    score: u32,
+}
+
+impl StringRenderer {
+    pub fn render(&self) -> char {
+        let _ = self.board.width();
+        let _ = self.board.height();
+        let _ = self.score;
+        self.board.symbol_at(Position::new(0, 0))
+    }
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("self.board.symbol_at") && item.contains("data/Board.md")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+        assert!(
+            !report
+                .high_risk_findings
+                .iter()
+                .any(|item| item.contains("self.board.width") || item.contains("self.board.height")),
             "findings: {:?}",
             report.high_risk_findings
         );
@@ -2699,6 +4048,81 @@ fn main() -> Result<(), io::Error> {
                 .high_risk_findings
                 .iter()
                 .any(|item| item.contains("resolved dependency plan")),
+            "findings: {:?}",
+            report.high_risk_findings
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn verifier_allows_local_library_crate_imports_from_main() {
+        let root = make_temp_dir("pipeline_quality_local_main_import");
+        let specs = root.join("specifications");
+        let drafts = root.join("drafts");
+        let src = root.join("src");
+        fs::create_dir_all(&specs).expect("mkdir specs");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir drafts");
+        fs::create_dir_all(&src).expect("mkdir src");
+
+        let mut registry = empty_registry();
+        add_capability_mapping_to_registry(
+            &mut registry,
+            "terminal_screen_control",
+            "crossterm",
+            "terminal",
+            "0.27",
+            &[],
+            true,
+        )
+        .expect("map screen control");
+        write_capability_registry(&drafts.join("capability_registry.yml"), &registry)
+            .expect("write registry");
+        fs::write(
+            drafts.join("contexts/terminal_renderer.md"),
+            "# TerminalRenderer\n\nUses terminal rendering.\n",
+        )
+        .expect("write draft");
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "generated-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "generated_project"
+path = "src/lib.rs"
+"#,
+        )
+        .expect("write cargo toml");
+
+        let spec_path = specs.join("app.md");
+        fs::write(&spec_path, "# App\n\n## Behavior\n- Runs.\n").expect("write spec");
+
+        let output = src.join("main.rs");
+        fs::write(
+            &output,
+            r#"use generated_project::contexts::TerminalRenderer;
+
+fn main() {
+    let _ = core::mem::size_of::<TerminalRenderer>();
+}"#,
+        )
+        .expect("write impl");
+
+        let report = verify_generated_implementation(
+            &root,
+            &spec_path,
+            &fs::read_to_string(&spec_path).unwrap(),
+            &output,
+        )
+        .expect("verify");
+        assert!(
+            !report.high_risk_findings.iter().any(|item| {
+                item.contains("external crate 'generated_project'")
+                    || item.contains("not declared in the resolved dependency plan")
+            }),
             "findings: {:?}",
             report.high_risk_findings
         );

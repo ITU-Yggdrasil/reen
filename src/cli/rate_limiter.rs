@@ -46,6 +46,7 @@ impl RateLimiter {
 
     /// Duration to wait before retrying after a 429 rate limit error.
     /// Returns 2 * (1/rate_limit) = double the minimum interval.
+    #[cfg(test)]
     pub fn retry_delay(&self) -> Duration {
         if let Ok(guard) = self.inner.try_lock() {
             guard.min_interval.saturating_mul(2)
@@ -56,6 +57,7 @@ impl RateLimiter {
 
     /// Halves the rate (doubles the interval) after a 429. Use for the rest of the run.
     /// Uses blocking lock to ensure the update always persists.
+    #[cfg(test)]
     pub async fn back_off(&self) {
         let mut inner = self.inner.lock().await;
         inner.min_interval = inner.min_interval.saturating_mul(2);

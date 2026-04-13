@@ -24,13 +24,25 @@ fn is_implementation_agent(agent_name: &str) -> bool {
     )
 }
 
+fn is_interface_resolution_agent(agent_name: &str) -> bool {
+    matches!(
+        agent_name,
+        "resolve_interface_contract_data"
+            | "resolve_interface_contract_projection"
+            | "resolve_interface_contract_context"
+    )
+}
+
 fn implementation_cache_allowed_keys() -> &'static [&'static str] {
     &[
         "context_content",
+        "interface_ir",
+        "level_policy",
         "direct_dependencies",
         "dependency_closure",
         "tooling_symbols",
-        "direct_dependency_contracts",
+        "direct_dependency_interfaces",
+        "implemented_direct_role_capsules",
         "contract_artifact",
         "behavior_contract",
         "resolved_dependency_plan",
@@ -124,10 +136,11 @@ pub fn build_agent_input(
 
     match agent_name {
         "create_specifications"
-        | "create_specifications_context"
-        | "create_specifications_data"
-        | "create_specifications_projection"
-        | "create_specifications_external_api" => AgentInput {
+        | "synthesize_contract_context"
+        | "synthesize_contract_data"
+        | "synthesize_contract_projection"
+        | "synthesize_contract_external_api"
+        | "coordinate_contract_level" => AgentInput {
             draft_content: Some(input.to_string()),
             context_content: None,
             openapi_content,
@@ -138,6 +151,13 @@ pub fn build_agent_input(
         | "create_implementation_projection"
         | "create_implementation_context"
         | "create_test" => AgentInput {
+            draft_content: None,
+            context_content: Some(input.to_string()),
+            openapi_content: None,
+            documentation_urls: None,
+            additional: additional_context,
+        },
+        _ if is_interface_resolution_agent(agent_name) => AgentInput {
             draft_content: None,
             context_content: Some(input.to_string()),
             openapi_content: None,
@@ -202,7 +222,7 @@ mod tests {
     #[test]
     fn specification_variants_use_draft_content() {
         let input = build_agent_input(
-            "create_specifications_projection",
+            "synthesize_contract_projection",
             "draft body",
             HashMap::new(),
         );
@@ -222,6 +242,22 @@ mod tests {
     }
 
     #[test]
+    fn interface_resolution_variants_use_context_content() {
+        let input = build_agent_input(
+            "resolve_interface_contract_context",
+            "resolved contract markdown",
+            HashMap::new(),
+        );
+        let value = serde_json::to_value(&input).expect("serialize agent input");
+
+        assert_eq!(value.get("draft_content"), None);
+        assert_eq!(
+            value.get("context_content"),
+            Some(&json!("resolved contract markdown"))
+        );
+    }
+
+    #[test]
     fn specification_variants_preserve_auxiliary_inputs() {
         let mut additional = HashMap::new();
         additional.insert("openapi_content".to_string(), json!("openapi"));
@@ -231,11 +267,7 @@ mod tests {
         );
         additional.insert("draft_summary".to_string(), json!({"kind": "projection"}));
 
-        let input = build_agent_input(
-            "create_specifications_external_api",
-            "draft body",
-            additional,
-        );
+        let input = build_agent_input("synthesize_contract_external_api", "draft body", additional);
         let value = serde_json::to_value(&input).expect("serialize agent input");
 
         assert_eq!(value.get("draft_content"), Some(&json!("draft body")));
@@ -275,11 +307,23 @@ mod tests {
     }
 
     #[test]
-    fn non_implementation_cache_normalization_keeps_planning_fields() {
+    fn implementation_cache_normalization_keeps_direct_interface_capsules() {
         let normalized = normalize_cache_input_value(
-            "create_plan",
+            "create_implementation_projection",
             json!({
                 "context_content": "spec body",
+                "implemented_direct_role_capsules": [
+                    {
+                        "name": "board",
+                        "public_methods": [
+                            {
+                                "name": "width",
+                                "signature": "pub fn width(&self) -> i32"
+                            }
+                        ]
+                    }
+                ],
+                "implemented_dependencies": [{"path": "src/data/board.rs"}],
                 "implementation_plan": { "tasks": ["build"] },
             }),
         );
@@ -288,6 +332,35 @@ mod tests {
             normalized,
             json!({
                 "context_content": "spec body",
+                "implemented_direct_role_capsules": [
+                    {
+                        "name": "board",
+                        "public_methods": [
+                            {
+                                "name": "width",
+                                "signature": "pub fn width(&self) -> i32"
+                            }
+                        ]
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn non_implementation_cache_normalization_keeps_planning_fields() {
+        let normalized = normalize_cache_input_value(
+            "synthesize_contract_context",
+            json!({
+                "draft_content": "draft body",
+                "implementation_plan": { "tasks": ["build"] },
+            }),
+        );
+
+        assert_eq!(
+            normalized,
+            json!({
+                "draft_content": "draft body",
                 "implementation_plan": { "tasks": ["build"] },
             })
         );

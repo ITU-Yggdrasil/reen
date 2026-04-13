@@ -1,21 +1,18 @@
 # Direction
 
 ## Description
-A value type representing movement direction for the Snake.
+
+The Direction type represents the four cardinal directions of travel for the snake. It is a fieldless enum.
 
 ## Variants
 
 | Variant | Meaning | Notes |
 |---|---|---|
-| Up | Move one cell upward on the board | |
-| Down | Move one cell downward on the board | |
-| Left | Move one cell left on the board | |
-| Right | Move one cell right on the board | |
+| Up | Moving upward | |
+| Down | Moving downward | |
+| Left | Moving leftward | |
+| Right | Moving rightward | |
 
-## Rules
+## Notes
 
-- Opposites: `Up <-> Down`, `Left <-> Right`
-
-## Functionalities
-
-- **is_opposite** Takes another direction and returns true when the two directions are opposites.
+- `Direction` derives `Copy` and `Clone`.

@@ -15,6 +15,8 @@ pub struct ReenConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbose: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dry_run: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub github: Option<String>,
@@ -26,6 +28,19 @@ pub struct ReenConfig {
     pub create: Option<CreateConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<FixCommandConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_policy: Option<TypePolicyConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TypePolicyConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_negative_integer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_millis: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

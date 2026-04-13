@@ -1,6 +1,10 @@
 # Derived from drafts/capability_registry.yml. Do not edit manually.
 schema: reen.dependencies/v1
 packages:
+- name: anyhow
+  version: '1.0'
+  capabilities:
+  - error_handling
 - name: crossterm
   version: '0.27'
   capabilities:

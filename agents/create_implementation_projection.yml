@@ -25,6 +25,15 @@ static_prompt: |
      - They MUST match the exact signatures specified; when signatures are partially or fully
        unspecified, infer them (see **Role Method Signature Inference** below)
      - They MUST be named as `<role>_<method_name>` (both in `snake_case`)
+     - If the specification describes role and method separately (e.g. role=`board`,
+       method=`symbol_at`), the Rust method name MUST be composed as `board_symbol_at`
+     - A role method is owned by the projection, not by the collaborator
+     - A role method may read/call other role players via `self`, or operate on a collaborator
+       passed in as a parameter when that keeps the role behavior local to the projection
+     - Role methods are not expectations on the role player API
+     - Do NOT treat role methods as new public methods that must be added to collaborator types
+     - If a richer collaborator operation is needed, implement it as a private projection role
+       method or local helper that composes the collaborator's declared interface
      - Additional private helper methods/functions are allowed if they do not change
        specified behavior or public API
 
@@ -241,64 +250,20 @@ static_prompt: |
   - Change required business rules or externally observable behavior
   - Introduce `&mut self`, interior mutability, or Context dependencies
 
-  ## Type Inference for Unspecified Types (MANDATORY)
+  ## Exported API vs private helpers (MANDATORY)
 
-  When a specification does not define a concrete type, infer the most natural choice.
-  Unspecified types are **never** a reason to fail.
+  `input.interface_ir`, `resolved_types`, and `name_bindings` define the
+  exported Rust surface for this projection. Do not change public method names, parameter types,
+  return types, or fallibility relative to that interface.
 
-  ### Integer types
+  Private helpers must still respect read-only projection rules. If the interface is insufficient to
+  implement required behavior without guessing collaborator API shape, stop and emit
+  `compile_error!` with a precise explanation.
 
-  - Pick the smallest fitting unsigned type for non-negative values
-  - Default to `usize` or `i32` for counts/indexes when no range is given
+  ### Collaborator APIs
 
-  ### Platform-context types
-
-  | Context clue | Obvious choice |
-  |---|---|
-  | Duration / timestamp | `std::time::Duration` / `std::time::Instant` |
-  | Optional value | `Option<T>` with inferred `T` |
-  | Text identifier | `String` |
-
-  ### Role player types
-
-  - If a role player name matches a Data or Projection type defined in the same specification
-    set, use that type directly
-  - A role player whose type can be narrowed to a single concrete type from context is NOT
-    a blocking ambiguity; choose it and proceed
-
-  ### Role Method Signature Inference (When Unspecified)
-
-  Specifications describe role method **behavior**, not signatures. When a role method
-  entry does not specify a return type, infer the correct signature from context.
-
-  **Query role methods on a Projection:**
-
-  Projections are read-only. All role methods are queries. If the spec describes a role method
-  as returning a specific value (e.g. "returns the current balance"), that return type is
-  specified or clearly inferable. If no return type is stated but the method is clearly a read,
-  infer a value type appropriate to the described result.
-
-  If a public method returns the enclosing projection type itself, write that as `Self` or a
-  wrapper: `Option<Self>`, `Result<Self, _>`, `(Self, T)`.
-
-  ### Collaborator API Resolution From Dependencies (MANDATORY)
-
-  Role methods constrain private methods on the generated projection itself. They do NOT
-  require the specification to restate every public method available on resolved collaborator
-  types from dependency context.
-
-  When a role player or prop resolves to a dependency-defined type:
-  - You MAY and SHOULD use that collaborator's fetched public API inside role methods
-  - Do NOT treat an existing dependency API as "missing" merely because the projection spec
-    does not duplicate it as a role method
-  - Before failing for insufficient API, fetch the relevant dependency artifacts
-
-  Only fail when the required behavior still cannot be implemented after dependency lookup.
-
-  ### When inference is genuinely ambiguous
-
-  Pick the safer/more conventional choice, add a brief inline comment, and proceed.
-  Do NOT fail or emit `compile_error!`.
+  Use `implemented_direct_role_capsules` and `direct_dependency_interfaces` only in ways
+  consistent with resolved upstream interfaces.
 
   ## Tracing Instrumentation (REQUIRED)
 
@@ -447,8 +412,11 @@ variable_prompt: |
   Dependency symbol inventory (optional, authoritative for external crate APIs):
   {{input.tooling_symbols?}}
 
-  Direct dependency contracts (optional, compact):
-  {{input.direct_dependency_contracts?}}
+  Implemented direct role capsules (optional, authoritative for concrete exported dependency APIs):
+  {{input.implemented_direct_role_capsules?}}
+
+  Direct dependency interfaces (optional, compact):
+  {{input.direct_dependency_interfaces?}}
 
   Contract artifact (optional, authoritative):
   {{input.contract_artifact?}}

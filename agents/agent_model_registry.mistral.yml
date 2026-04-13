@@ -3,22 +3,34 @@
 # Maximum API requests per second (optional). Can also be set via --rate-limit or REEN_RATE_LIMIT.
 rate_limit: 2
 
-create_specifications_data:
-  model: mistral/mistral-large-latest
-  parallel: true
-create_specifications_context:
-  model: mistral/mistral-large-latest
-  parallel: true
-create_specifications_projection:
-  model: mistral/mistral-large-latest
-  parallel: true
-create_specifications_external_api:
+coordinate_contract_level:
   model: mistral/mistral-large-latest
   parallel: false
   batch: false
-create_plan:
+synthesize_contract_data:
   model: mistral/mistral-large-latest
   parallel: true
+resolve_interface_contract_data:
+  model: mistral/mistral-large-latest
+  parallel: true
+  batch: false
+synthesize_contract_context:
+  model: mistral/mistral-large-latest
+  parallel: true
+resolve_interface_contract_context:
+  model: mistral/mistral-large-latest
+  parallel: true
+  batch: false
+synthesize_contract_projection:
+  model: mistral/mistral-large-latest
+  parallel: true
+resolve_interface_contract_projection:
+  model: mistral/mistral-large-latest
+  parallel: true
+  batch: false
+synthesize_contract_external_api:
+  model: mistral/mistral-large-latest
+  parallel: false
   batch: false
 bootstrap_capability_registry:
   model: mistral/mistral-large-latest

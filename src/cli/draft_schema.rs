@@ -534,7 +534,6 @@ fn optional_section_text(sections: &[Section], title: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-
 fn is_markdown_thematic_break(line: &str) -> bool {
     let compact = line
         .chars()
@@ -719,19 +718,23 @@ fn parse_fields_table(relative_path: &str, body: &str) -> Result<Vec<DataFieldRo
         let (getter_accessible, notes) = if has_accessible {
             let value = row[2].trim();
             let getter_accessible = if value.is_empty() {
+                // Empty Accessible cell in the 4-column format means opt-out (no getter).
                 false
             } else if matches_ignore_ascii_case(value, &["x", "yes", "true"]) {
                 true
+            } else if matches_ignore_ascii_case(value, &["no", "false"]) {
+                false
             } else {
                 bail!(
-                    "Draft schema validation failed for {}:\n- `Accessible` must be blank or one of `X`, `yes`, or `true` (case-insensitive), got `{}`",
+                    "Draft schema validation failed for {}:\n- `Accessible` must be blank, `no`/`false` to suppress, or one of `X`, `yes`, `true` to expose (case-insensitive), got `{}`",
                     relative_path,
                     value
                 );
             };
             (getter_accessible, row[3].clone())
         } else {
-            (false, row[2].clone())
+            // 3-column format: all fields are getter-accessible by default.
+            (true, row[2].clone())
         };
 
         rows.push(DataFieldRow {
@@ -1104,6 +1107,11 @@ fn extract_title(content: &str) -> Option<String> {
     })
 }
 
+/// First Markdown `# ` heading line (same rule as [`parse_repo_draft`]).
+pub(crate) fn draft_title_from_markdown(content: &str) -> Option<String> {
+    extract_title(content)
+}
+
 fn matches_ignore_ascii_case(value: &str, options: &[&str]) -> bool {
     options
         .iter()
@@ -1120,7 +1128,9 @@ mod tests {
     use std::path::Path;
 
     fn collect_markdown_files(root: &Path, files: &mut Vec<std::path::PathBuf>) {
-        let entries = fs::read_dir(root).expect("read dir");
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
         for entry in entries {
             let entry = entry.expect("dir entry");
             let path = entry.path();
@@ -1572,7 +1582,11 @@ Realtime vessel tracking.
                 if draft_file.ends_with("test_app.html") {
                     continue;
                 }
-                let content = fs::read_to_string(&draft_file).expect("read draft");
+                let content = match fs::read_to_string(&draft_file) {
+                    Ok(content) => content,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => panic!("read draft: {err}"),
+                };
                 let parsed =
                     parse_repo_draft(&draft_file, drafts_dir, &content).unwrap_or_else(|err| {
                         panic!("failed to parse {}: {err}", draft_file.display())

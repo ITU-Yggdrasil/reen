@@ -3,9 +3,10 @@ use anyhow::Result;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::task::block_in_place;
 #[cfg(test)]
 use tokio::task::JoinSet;
+use tokio::task::block_in_place;
+#[cfg(test)]
 use tokio::time::{Duration, sleep};
 
 use reen::execution::{NativeExecutionControl, NativeRequestStep, NativeStepUsage, TokenLimiter};
@@ -14,9 +15,7 @@ use reen::execution::{NativeExecutionControl, NativeRequestStep, NativeStepUsage
 use super::Config;
 use super::agent_executor::AgentExecutor;
 #[cfg(test)]
-use super::progress::{
-    ProgressIndicator, print_timed_status, standard_text, warning_text,
-};
+use super::progress::{ProgressIndicator, print_timed_status, standard_text, warning_text};
 #[cfg(not(test))]
 use super::progress::{print_timed_status, warning_text};
 use super::rate_limiter::RateLimiter;
@@ -43,14 +42,6 @@ impl CliExecutionControl {
             rate_limiter,
             verbose,
         }
-    }
-
-    pub(crate) fn token_limiter(&self) -> Option<&Arc<TokenLimiter>> {
-        self.token_limiter.as_ref()
-    }
-
-    pub(crate) fn rate_limiter(&self) -> Option<&Arc<RateLimiter>> {
-        self.rate_limiter.as_ref()
     }
 
     #[cfg(test)]
@@ -182,6 +173,7 @@ pub(crate) fn estimate_agent_request_tokens(
         .unwrap_or_else(|_| reen::execution::estimate_request_tokens(input, additional_context))
 }
 
+#[cfg(test)]
 pub(crate) fn is_rate_limit_error(error: &anyhow::Error) -> bool {
     let message = error.to_string();
     let lower = message.to_lowercase();
@@ -191,6 +183,7 @@ pub(crate) fn is_rate_limit_error(error: &anyhow::Error) -> bool {
         || lower.contains("ratelimit")
 }
 
+#[cfg(test)]
 fn parse_server_retry_delay(error: &anyhow::Error) -> Option<Duration> {
     let message = error.to_string().to_lowercase();
 
@@ -220,6 +213,7 @@ fn parse_server_retry_delay(error: &anyhow::Error) -> Option<Duration> {
     None
 }
 
+#[cfg(test)]
 fn parse_duration_prefix(input: &str) -> Option<Duration> {
     let trimmed = input
         .trim_start_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'')
@@ -292,6 +286,7 @@ pub(crate) async fn acquire_request_capacity(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn prepare_rate_limit_retry(
     error: &anyhow::Error,
     item_name: &str,
@@ -502,6 +497,7 @@ mod tests {
             .collect::<Vec<_>>();
         let config = Config {
             verbose: false,
+            debug: false,
             dry_run: false,
             github_repo: None,
         };
@@ -582,9 +578,8 @@ where
             let Some(joined) = tasks.join_next().await else {
                 break;
             };
-            results.push(
-                joined.map_err(|error| anyhow::anyhow!("Stage task join error: {}", error))?,
-            );
+            results
+                .push(joined.map_err(|error| anyhow::anyhow!("Stage task join error: {}", error))?);
         }
         Ok(results)
     } else {
@@ -595,7 +590,10 @@ where
             } else {
                 progress.start_item(&item.name, Some(item.estimated));
                 if config.verbose {
-                    println!("{}", standard_text(format!("Processing context: {}", item.name)));
+                    println!(
+                        "{}",
+                        standard_text(format!("Processing context: {}", item.name))
+                    );
                 }
             }
             let name = item.name.clone();

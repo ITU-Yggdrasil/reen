@@ -28,7 +28,12 @@ static_prompt: |
      - They MUST be named as `<role>_<method_name>` (both in `snake_case`) to avoid collisions
      - If the specification describes role and method separately (e.g. role=`source`,
        method=`withdraw`), the Rust method name MUST be composed as `source_withdraw`
-     - A role method is allowed to read/call other role players via `self`
+     - A role method is owned by the context, not by the collaborator
+     - A role method may read/call other role players via `self`, or operate on a collaborator
+       passed in as a parameter when that keeps the role behavior local to the context
+     - Do NOT treat role methods as new public methods that must be added to collaborator types
+     - If a richer collaborator operation is needed, implement it as a private context role method
+       or local helper that composes the collaborator's declared interface
      - Additional private helper methods/functions are allowed if they do not change
        specified behavior or public API
 
@@ -154,6 +159,8 @@ static_prompt: |
   3. **Fail early if requirements are impossible**:
      - If the specification's requirements CANNOT be met with ONLY the specified methods
      - If you would need changes to public API, externally observable behavior, or domain rules
+     - If satisfying context behavior would require expanding a collaborator's public API beyond
+       its declared interface
      - **STOP and explain via `compile_error!`**
      - DO NOT try to work around it
 
@@ -225,6 +232,8 @@ static_prompt: |
   - Cargo package and library naming are scaffold-managed; do not emit Cargo content from
     this agent
   - Create `src/main.rs` with `main()` function
+  - `src/main.rs` must contain real Rust code. Comment-only, note-only, or explanation-only
+    output is invalid
   - Use the scaffold-managed library crate name from `input.library_crate_name` for imports
 
   #### Critical Rules
@@ -307,84 +316,21 @@ static_prompt: |
   - Change required business rules or externally observable behavior
   - Introduce contradictory semantics relative to the specification
 
-  ## Type Inference for Unspecified Types (MANDATORY)
+  ## Exported API vs private helpers (MANDATORY)
 
-  When a specification does not define a concrete type, infer the most natural choice.
-  Unspecified types are **never** a reason to fail.
+  `input.interface_ir`, `resolved_types`, and `name_bindings` define the
+  exported Rust surface. Do not change public method names, parameter types, return types, or
+  fallibility relative to that interface.
 
-  ### Integer types
+  For private helpers and internal wiring, you may choose types and representations that fit the
+  resolved exported boundary. If the interface is insufficient to implement required behavior without
+  guessing collaborator API shape, stop and emit `compile_error!` with a precise explanation.
 
-  - Pick the smallest fitting unsigned type for non-negative values with a given range
-  - Default to `usize` or `i32` for counts/indexes when no range is given
+  ### Collaborator APIs
 
-  ### Platform-context types
-
-  | Context clue | Obvious choice |
-  |---|---|
-  | Terminal app reading raw keys | `crossterm` (or `termion`) for non-blocking stdin |
-  | Desktop app keyboard input | platform event loop (e.g. `winit`) |
-  | FIFO / queue of characters | `std::collections::VecDeque<char>` |
-  | 2D grid of characters | `Vec<Vec<char>>` |
-  | Duration / timestamp | `std::time::Duration` / `std::time::Instant` |
-  | Optional value | `Option<T>` with inferred `T` |
-
-  ### Role player types
-
-  - If a role player name matches another context or data type in the same specification set,
-    use that type directly
-  - A role player whose type can be narrowed to a single concrete type from context is NOT
-    a blocking ambiguity; choose it and proceed
-
-  ### Method parameter types
-
-  - If a parameter name unambiguously matches a named data type in the spec set, use that type
-  - If a parameter is described with "a whole number", "a count", or "true/false", map to the
-    obvious Rust primitive
-
-  ### Role Method Signature Inference (When Unspecified)
-
-  Specifications describe role method **behavior**, not signatures. When a role method
-  entry does not specify a return type, infer the correct signature from context.
-
-  **State-changing role methods:**
-
-  If a role method's described behavior changes state AND the context is immutable by spec
-  (i.e. functionalities return new context instances rather than mutating self), then the
-  role method MUST return the updated role player value so the caller can thread it into
-  the new instance.
-
-  Example:
-  - Spec: "`move(grow)`: Moves to `next()`. If `grow=true`, length increases by 1."
-  - Context is immutable; `tick` returns `Option<GameLoopContext>`.
-  - Infer: `fn snake_move(&self, grow: bool) -> Snake`
-
-  **Query role methods:**
-  - If the spec describes a role method as returning a specific value, that return type is
-    specified or clearly inferable
-  - If no return type is stated but the method is clearly a read, infer `()` only as a last
-    resort after confirming no value is consumed by the caller
-
-  ### Collaborator API Resolution From Dependencies (MANDATORY)
-
-  Role methods constrain the private methods on the generated context. They do NOT require
-  the specification to restate every public method on resolved collaborator types.
-
-  When a role player resolves to a dependency-defined type:
-  - You MAY and SHOULD use that collaborator's fetched public API inside role methods
-  - Do NOT treat an existing dependency API as "missing" merely because the context
-    specification does not duplicate it as a role method
-  - Before failing for insufficient API, fetch the relevant dependency artifacts
-
-  Only fail when the required behavior still cannot be implemented after dependency lookup.
-
-  Before choosing helper parameter/return types for collaborator-derived values:
-  - Prefer `direct_dependency_contracts` for API shape and `dependency_closure` for locating transitive dependencies
-  - Align helper signatures with the actual dependency methods you call
-
-  ### When inference is genuinely ambiguous
-
-  Pick the safer/more conventional choice, add a brief inline comment, and proceed.
-  Do NOT fail or emit `compile_error!`.
+  Use `implemented_direct_role_capsules` and `direct_dependency_interfaces` only in ways
+  consistent with the resolved upstream interfaces. Prefer the typed capsule fields (fingerprints,
+  exported methods, name bindings) over ad-hoc prose inference.
 
   ## Tracing Instrumentation (REQUIRED)
 
@@ -543,8 +489,11 @@ variable_prompt: |
   Dependency symbol inventory (optional, authoritative for external crate APIs):
   {{input.tooling_symbols?}}
 
-  Direct dependency contracts (optional, compact):
-  {{input.direct_dependency_contracts?}}
+  Implemented direct role capsules (optional, authoritative for concrete exported dependency APIs):
+  {{input.implemented_direct_role_capsules?}}
+
+  Direct dependency interfaces (optional, compact):
+  {{input.direct_dependency_interfaces?}}
 
   Contract artifact (optional, authoritative):
   {{input.contract_artifact?}}

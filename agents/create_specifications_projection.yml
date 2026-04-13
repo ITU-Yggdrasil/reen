@@ -125,6 +125,8 @@ static_prompt: |
   ## Public Collaborator Type Resolution (Mandatory)
 
   For projection specifications, role players must be of Data or Projection kind.
+  Role methods describe behavior implemented by the projection over those role players.
+  They do NOT by themselves imply that the role player type already exposes same-named public methods.
   The allowed type/form of every role player MUST be resolvable.
 
   Resolution is acceptable when the draft or dependency context makes one of these clear:
@@ -158,19 +160,23 @@ static_prompt: |
 
   This coverage rule applies to collaborator behaviors that the projection draft explicitly
   delegates or names as part of the interaction. It does NOT require you to duplicate every
-  ordinary accessor already available on a resolved dependency type.
+  ordinary accessor already available on a resolved dependency type, and it does NOT require
+  the collaborator to export a same-named public method as the projection role method.
+  A role method is a projection-side responsibility in the interaction, not an expectation that
+  the role player type exports a matching public API.
 
   If a functionality step implies calling a capability on a role player but no matching
   role method exists:
 
-  1. **Role player type is known (from dependency context) AND exposes the capability:**
-     - ADD the missing role method to the role methods section, describing its behavior.
+  1. ADD the missing role method to the role methods section, describing the projection-owned behavior.
      - Follow the Role Method Signature Scope rule: describe behavior, not signature.
-     - Document it in **Inferred Types or Structures** with the basis being the
-       functionality step that requires it and the dependency type that provides it.
+     - If dependency context reveals ordinary collaborator accessors/helpers that can support
+       the behavior, you MAY cite that as implementation evidence, but do not restate it as a
+       requirement that the collaborator exports a same-named method.
 
-  2. **Role player type is unknown, OR known type does not expose the capability:**
-     - ADD a **Blocking Ambiguities** entry.
+  2. ADD a **Blocking Ambiguities** entry only when the missing role method's externally
+     observable behavior cannot be described without guessing, or when the role player's public
+     type/form itself cannot be resolved from the draft plus dependency context.
 
   This check MUST run before finalising the specification.
 
@@ -181,6 +187,7 @@ static_prompt: |
   - If owned deserialization is required by context, assume `serde::de::DeserializeOwned`.
   - If date/time values are referenced without a different library specified, assume `chrono`.
   - If an integer type is not specified, default to `i32`.
+  - If the draft explicitly says a value is non-negative, never negative, or a positive whole number, prefer the matching unsigned semantic such as `u32`.
   - Unless the draft says otherwise, generated types should derive `Debug` when possible.
 
   These are baseline conventions, not additional requirements.

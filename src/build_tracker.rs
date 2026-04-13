@@ -16,11 +16,11 @@ const TRACKER_FILE: &str = "build_tracker.json";
 /// Represents the stage in the build pipeline
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Stage {
-    /// Draft -> Specification
-    Specification,
-    /// Specification -> Implementation
+    /// Draft -> Internal contract bundle
+    Contract,
+    /// Draft/internal contract -> Implementation
     Implementation,
-    /// Specification -> Tests
+    /// Draft/internal contract -> Tests
     Tests,
     /// Implementation -> Compile
     Compile,
@@ -45,6 +45,16 @@ pub struct FileTrack {
 pub struct BuildTracker {
     /// Maps: stage -> filename -> FileTrack
     tracks: HashMap<String, HashMap<String, FileTrack>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateReason {
+    UpToDate,
+    OutputMissing,
+    MissingStageRecord,
+    MissingFileRecord,
+    InputChanged { expected: String, actual: String },
+    DependencyChanged { expected: String, actual: String },
 }
 
 impl BuildTracker {
@@ -97,58 +107,74 @@ impl BuildTracker {
         output_path: &Path,
         dependency_fingerprint: &str,
     ) -> Result<bool> {
-        // If output doesn't exist, definitely need to regenerate
+        Ok(!matches!(
+            self.update_reason(stage, name, input_path, output_path, dependency_fingerprint)?,
+            UpdateReason::UpToDate
+        ))
+    }
+
+    pub fn update_reason(
+        &self,
+        stage: Stage,
+        name: &str,
+        input_path: &Path,
+        output_path: &Path,
+        dependency_fingerprint: &str,
+    ) -> Result<UpdateReason> {
         if !output_path.exists() {
-            return Ok(true);
+            return Ok(UpdateReason::OutputMissing);
         }
 
         let stage_key = format!("{:?}", stage);
 
-        // Check if we have a track record for this file
         let Some(stage_tracks) = self.tracks.get(&stage_key) else {
-            return Ok(true); // No track record, need to generate
+            return Ok(UpdateReason::MissingStageRecord);
         };
 
         let Some(track) = stage_tracks.get(name) else {
-            return Ok(true); // No track record for this specific file
+            return Ok(UpdateReason::MissingFileRecord);
         };
 
-        // Compute current input hash
         let current_input_hash = Self::hash_file(input_path)?;
-        let input_hash_matches = current_input_hash == track.input_hash;
-        let dependency_matches = dependency_fingerprint == track.dependency_fingerprint;
-        let needs_update = !(input_hash_matches && dependency_matches);
-
-        if !needs_update {
-            return Ok(false);
+        if current_input_hash != track.input_hash {
+            return Ok(UpdateReason::InputChanged {
+                expected: track.input_hash.clone(),
+                actual: current_input_hash,
+            });
         }
 
-        Ok(true)
+        if dependency_fingerprint != track.dependency_fingerprint {
+            return Ok(UpdateReason::DependencyChanged {
+                expected: track.dependency_fingerprint.clone(),
+                actual: dependency_fingerprint.to_string(),
+            });
+        }
+
+        Ok(UpdateReason::UpToDate)
     }
 
     /// Check if any upstream stage has changed that would affect this stage
     ///
     /// For example:
-    /// - Implementation depends on Specification
+    /// - Implementation depends on Contract
     /// - Compile/Run/Test depend on Implementation
     pub fn upstream_changed(&self, stage: Stage, name: &str) -> Result<bool> {
         match stage {
-            Stage::Specification => {
+            Stage::Contract => {
                 // First stage, no upstream
                 Ok(false)
             }
             Stage::Implementation | Stage::Tests => {
-                // Depends on Specification
-                // Check if specification was regenerated recently
-                let spec_stage_key = format!("{:?}", Stage::Specification);
-                if let Some(spec_tracks) = self.tracks.get(&spec_stage_key) {
-                    if let Some(spec_track) = spec_tracks.get(name) {
+                // Depends on Contract
+                let contract_stage_key = format!("{:?}", Stage::Contract);
+                if let Some(contract_tracks) = self.tracks.get(&contract_stage_key) {
+                    if let Some(contract_track) = contract_tracks.get(name) {
                         // Get corresponding input path (draft)
                         let draft_path = PathBuf::from("drafts").join(format!("{}.md", name));
                         if draft_path.exists() {
                             let current_hash = Self::hash_file(&draft_path)?;
-                            if current_hash != spec_track.input_hash {
-                                return Ok(true); // Draft changed, spec needs update
+                            if current_hash != contract_track.input_hash {
+                                return Ok(true); // Draft changed, contract needs update
                             }
                         }
                     }
@@ -161,11 +187,12 @@ impl BuildTracker {
                 let impl_stage_key = format!("{:?}", Stage::Implementation);
                 if let Some(impl_tracks) = self.tracks.get(&impl_stage_key) {
                     for (impl_name, impl_track) in impl_tracks {
-                        let spec_path = PathBuf::from("contexts").join(format!("{}.md", impl_name));
-                        if spec_path.exists() {
-                            let current_hash = Self::hash_file(&spec_path)?;
+                        let contract_path = PathBuf::from(".reen/contracts/contexts")
+                            .join(format!("{impl_name}.contract.json"));
+                        if contract_path.exists() {
+                            let current_hash = Self::hash_file(&contract_path)?;
                             if current_hash != impl_track.input_hash {
-                                return Ok(true); // Spec changed, impl needs update
+                                return Ok(true); // Contract changed, impl needs update
                             }
                         }
                     }
@@ -271,6 +298,13 @@ impl BuildTracker {
         removed
     }
 
+    /// Clear all stages. Returns the total number of tracked file entries removed.
+    pub fn clear_all(&mut self) -> usize {
+        let n: usize = self.tracks.values().map(|m| m.len()).sum();
+        self.tracks.clear();
+        n
+    }
+
     /// Returns true if the tracker has an entry for a given stage/name.
     pub fn has_track(&self, stage: Stage, name: &str) -> bool {
         let stage_key = format!("{:?}", stage);
@@ -318,11 +352,11 @@ mod tests {
         fs::write(&output_file, "output content").unwrap();
 
         tracker
-            .record(Stage::Specification, "test", &input_file, &output_file, "")
+            .record(Stage::Contract, "test", &input_file, &output_file, "")
             .unwrap();
 
         // Check that it was recorded
-        let stage_key = format!("{:?}", Stage::Specification);
+        let stage_key = format!("{:?}", Stage::Contract);
         assert!(tracker.tracks.contains_key(&stage_key));
         assert!(tracker.tracks[&stage_key].contains_key("test"));
 
@@ -342,7 +376,7 @@ mod tests {
 
         tracker
             .record(
-                Stage::Specification,
+                Stage::Contract,
                 "dep_fp_test",
                 &input_file,
                 &output_file,
@@ -352,7 +386,7 @@ mod tests {
 
         let unchanged = tracker
             .needs_update(
-                Stage::Specification,
+                Stage::Contract,
                 "dep_fp_test",
                 &input_file,
                 &output_file,
@@ -363,7 +397,7 @@ mod tests {
 
         let changed = tracker
             .needs_update(
-                Stage::Specification,
+                Stage::Contract,
                 "dep_fp_test",
                 &input_file,
                 &output_file,
@@ -371,6 +405,48 @@ mod tests {
             )
             .unwrap();
         assert!(changed);
+
+        fs::remove_file(&input_file).ok();
+        fs::remove_file(&output_file).ok();
+    }
+
+    #[test]
+    fn update_reason_reports_dependency_change() {
+        let mut tracker = BuildTracker::default();
+        let temp_dir = std::env::temp_dir();
+        let input_file = temp_dir.join("dep_reason_input.txt");
+        let output_file = temp_dir.join("dep_reason_output.txt");
+
+        fs::write(&input_file, "input").unwrap();
+        fs::write(&output_file, "output").unwrap();
+
+        tracker
+            .record(
+                Stage::Implementation,
+                "dep_reason_test",
+                &input_file,
+                &output_file,
+                "deps:v1",
+            )
+            .unwrap();
+
+        let reason = tracker
+            .update_reason(
+                Stage::Implementation,
+                "dep_reason_test",
+                &input_file,
+                &output_file,
+                "deps:v2",
+            )
+            .unwrap();
+
+        assert_eq!(
+            reason,
+            UpdateReason::DependencyChanged {
+                expected: "deps:v1".to_string(),
+                actual: "deps:v2".to_string(),
+            }
+        );
 
         fs::remove_file(&input_file).ok();
         fs::remove_file(&output_file).ok();

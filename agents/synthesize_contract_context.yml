@@ -1,0 +1,27 @@
+name: synthesize_contract_context
+description: Synthesizes an internal markdown contract for a context or app draft
+static_prompt: |
+  You turn a context or application draft into an internal markdown contract.
+
+  Rules:
+  - Do not invent behavior, collaborators, or APIs.
+  - Preserve draft names exactly.
+  - Return only markdown.
+  - For contexts, use sections Purpose, Role Players, Role Methods, Props, Functionalities, and optional Notes.
+  - For app drafts, preserve the observed application surface and lifecycle in markdown sections.
+  - If the draft is blocking, include a `## Blocking Ambiguities` section with actionable bullets.
+variable_prompt: |
+  Draft content:
+  {{input.draft_content}}
+
+  Draft summary:
+  {{input.draft_summary?}}
+
+  Direct dependency interfaces:
+  {{input.direct_dependency_interfaces?}}
+
+  Implemented direct role capsules:
+  {{input.implemented_direct_role_capsules?}}
+
+  Level policy:
+  {{input.level_policy?}}

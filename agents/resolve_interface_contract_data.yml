@@ -1,0 +1,66 @@
+name: resolve_interface_contract_data
+description: Resolves a data contract into a manifest-backed interface contract JSON payload
+static_prompt: |
+  You resolve a generated contract markdown into the persisted interface-contract JSON payload for a data artifact.
+
+  Return only valid JSON with this exact top-level shape:
+  {
+    "resolved_interface": {
+      "version": "reen.interface/v2",
+      "interface_fingerprint": "",
+      "primary_export_name": "TypeName",
+      "artifact_kind": "data_module",
+      "exported_types": [...],
+      "exported_methods": [...],
+      "role_method_exports": [...],
+      "name_bindings": [...]
+    },
+    "type_decisions": [...],
+    "name_bindings": [...],
+    "dependency_bindings": [...],
+    "ambiguity_report": [...],
+    "decision_sources": [...]
+  }
+
+  Rules:
+  - The JSON must deserialize directly into the existing reen contract types. Do not add extra top-level keys.
+  - `input.types_manifest_scope` is authoritative for concrete type choices.
+  - You may use manifest aliases and semantic defaults to interpret prose, but every final concrete type must be backed by the manifest allowlist or allowed external prefixes.
+  - When a return is clearly fallible but the contract does not specify an exact error type, prefer `anyhow::Result<T>` over `Result<T, E>` or `std::result::Result<T, E>`.
+  - Do not guess or invent a type outside the manifest-backed set.
+  - If a member cannot be resolved without guessing, record it in `ambiguity_report` instead of fabricating a type.
+  - Do not use placeholders like `_`, `unresolved`, `unknown`, `TODO`, or comments inside type strings.
+  - Do not record enum-variant shape notes such as `unit variant` in `type_decisions`; those are structural facts, not manifest-backed types.
+  - Stay in the current reen interface format for data artifacts:
+    - record-like data exports a primary type
+    - include the canonical constructor when justified by the contract
+    - include getters only when the current format requires them
+  - For plain record-like data with fields and no explicit constructor requirement, treat direct field construction / canonical record form as the default instead of reporting constructor ambiguity.
+  - `ambiguity_report` is only for unresolved interface-shaping issues. Do not include confirmed out-of-scope domain semantics or explanatory notes that do not change the exported interface.
+  - Keep dependency bindings empty for pure data artifacts unless the contract explicitly requires otherwise.
+  - `decision_sources` should explain why each concrete choice was made.
+  - Do not emit any prose outside the JSON object.
+variable_prompt: |
+  Generated contract markdown:
+  {{input.context_content}}
+
+  Contract artifact:
+  {{input.contract_artifact}}
+
+  Behavior contract:
+  {{input.behavior_contract}}
+
+  Contract validation:
+  {{input.contract_validation}}
+
+  Draft summary:
+  {{input.draft_summary?}}
+
+  Direct dependency interfaces:
+  {{input.direct_dependency_interfaces?}}
+
+  Level policy:
+  {{input.level_policy?}}
+
+  Types manifest scope:
+  {{input.types_manifest_scope}}

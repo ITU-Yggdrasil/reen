@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::capability_registry::resolved_dependency_plan_context;
+use super::contract_store::ContractStore;
 use super::contracts::{ContractArtifact, build_contract_artifact};
 use super::dependency_graph::{
     DependencyArtifact, DependencyGraphCache, ExecutionNode, resolve_dependency_closure_with_cache,
@@ -89,10 +90,7 @@ impl RunContextCache {
         Ok(snapshot)
     }
 
-    pub(crate) fn resolved_dependency_plan(
-        &self,
-        drafts_root: &Path,
-    ) -> Result<Option<Value>> {
+    pub(crate) fn resolved_dependency_plan(&self, drafts_root: &Path) -> Result<Option<Value>> {
         if let Some(value) = self
             .inner
             .lock()
@@ -126,7 +124,8 @@ impl RunContextCache {
             return Ok(value);
         }
 
-        let value = load_symbols_context(primary_root)?.map(|value| compact_tooling_symbols(&value));
+        let value =
+            load_symbols_context(primary_root)?.map(|value| compact_tooling_symbols(&value));
         self.inner
             .lock()
             .expect("run context cache mutex should not be poisoned")
@@ -151,8 +150,8 @@ impl RunContextCache {
             return Ok(cached);
         }
 
-        let content =
-            fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
         let sha256 = file_sha256(&content);
         let cached = CachedFileContent { sha256, content };
         self.inner
@@ -187,8 +186,7 @@ impl RunContextCache {
             return Ok(contract);
         }
 
-        let contract =
-            build_contract_artifact(spec_path, &cached.content, output_path_hint, None);
+        let contract = build_contract_artifact(spec_path, &cached.content, output_path_hint, None);
         self.inner
             .lock()
             .expect("run context cache mutex should not be poisoned")
@@ -227,7 +225,28 @@ impl RunContextCache {
         }
 
         let contract = self.contract_artifact_without_context(spec_path, source_path)?;
-        let capsule = build_interface_capsule(&contract, source_path, source_content);
+        let resolved_export = spec_path_to_contract_draft_rel(spec_path).and_then(|rel| {
+            ContractStore::new(".reen")
+                .read_interface_ir(&rel)
+                .ok()
+                .filter(|b| !b.interface_fingerprint.is_empty())
+                .map(|b| super::contract_store::ResolvedInterface {
+                    version: "reen.interface/v2".to_string(),
+                    interface_fingerprint: b.interface_fingerprint,
+                    primary_export_name: b.primary_export_name,
+                    artifact_kind: b.artifact_kind,
+                    exported_types: b.exported_types,
+                    exported_methods: b.exported_methods,
+                    role_method_exports: b.role_method_exports,
+                    name_bindings: b.name_bindings,
+                })
+        });
+        let capsule = build_interface_capsule(
+            &contract,
+            source_path,
+            source_content,
+            resolved_export.as_ref(),
+        );
         self.inner
             .lock()
             .expect("run context cache mutex should not be poisoned")
@@ -292,7 +311,18 @@ pub(crate) fn compact_resolved_dependency_plan_value(value: &Value) -> Value {
     })
 }
 
-fn dependency_snapshot_key(input_path: &Path, primary_root: &str, fallback_root: Option<&str>) -> String {
+fn spec_path_to_contract_draft_rel(spec_path: &Path) -> Option<PathBuf> {
+    let s = spec_path.to_string_lossy();
+    s.strip_prefix("specifications/")
+        .or_else(|| s.strip_prefix(".reen/specifications/"))
+        .map(PathBuf::from)
+}
+
+fn dependency_snapshot_key(
+    input_path: &Path,
+    primary_root: &str,
+    fallback_root: Option<&str>,
+) -> String {
     format!(
         "{}|{}|{}",
         input_path.display(),

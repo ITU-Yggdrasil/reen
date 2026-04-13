@@ -41,20 +41,33 @@ pub fn analyze_specifications(spec_dir: &Path, draft_dir: Option<&Path>) -> Resu
 }
 
 fn derive_project_package_name(spec_dir: &Path) -> String {
+    let cwd = std::env::current_dir().ok();
+    derive_project_package_name_with_cwd(spec_dir, cwd.as_deref())
+}
+
+fn derive_project_package_name_with_cwd(spec_dir: &Path, cwd: Option<&Path>) -> String {
     let raw_name = if spec_dir
         .file_name()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value == "specifications")
+        .is_some_and(|value| matches!(value, "specifications" | "drafts"))
     {
         spec_dir
             .parent()
             .and_then(|parent| parent.file_name())
             .and_then(|value| value.to_str())
+            .or_else(|| {
+                cwd.and_then(|path| path.file_name())
+                    .and_then(|value| value.to_str())
+            })
             .unwrap_or("generated_project")
     } else {
         spec_dir
             .file_name()
             .and_then(|value| value.to_str())
+            .or_else(|| {
+                cwd.and_then(|path| path.file_name())
+                    .and_then(|value| value.to_str())
+            })
             .unwrap_or("generated_project")
     };
 
@@ -747,6 +760,15 @@ mod tests {
         assert_eq!(project_info.package_name, "money_transfer");
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn derive_project_package_name_uses_cwd_for_relative_specifications_dir() {
+        let derived = super::derive_project_package_name_with_cwd(
+            Path::new("specifications"),
+            Some(Path::new("/tmp/snake")),
+        );
+        assert_eq!(derived, "snake");
     }
 
     #[test]

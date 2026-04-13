@@ -40,9 +40,9 @@ This guide runs the money-transfer fixture from end to end.
 This flow:
 
 1. Builds Reen
-2. Generates specifications from drafts
-3. Generates implementation from specifications
-4. Generates BDD tests from specifications
+2. Synthesizes internal contract bundles from drafts
+3. Generates implementation from those internal contracts
+4. Generates BDD tests from those internal contracts
 5. Compiles the fixture project
 6. Runs the generated and manual verification tests
 
@@ -51,14 +51,16 @@ This flow:
 After a successful run, inspect:
 
 ```bash
-ls -la "tests/money transfer/specifications/"
+ls -la "tests/money transfer/.reen/contracts/"
+ls -la "tests/money transfer/.reen/specifications/"
 ls -la "tests/money transfer/src/contexts/"
 ls -la "tests/money transfer/tests/"
 ```
 
 Key locations:
 
-- `tests/money transfer/specifications/`
+- `tests/money transfer/.reen/contracts/`
+- `tests/money transfer/.reen/specifications/`
 - `tests/money transfer/src/`
 - `tests/money transfer/tests/features/`
 - `tests/money transfer/tests/steps/`
@@ -73,9 +75,9 @@ cargo test e2e_money_transfer --test e2e_test -- --nocapture --ignored
 
 The fixture checks that Reen can:
 
-1. Turn `drafts/` into `specifications/`
-2. Turn `specifications/` into Rust implementation under `src/`
-3. Turn `specifications/` into executable BDD tests under `tests/`
+1. Turn `drafts/` into hidden internal contracts under `.reen/`
+2. Turn those internal contracts into Rust implementation under `src/`
+3. Turn those internal contracts into executable BDD tests under `tests/`
 4. Produce code that compiles and passes the money-transfer scenario
 
 ## Troubleshooting

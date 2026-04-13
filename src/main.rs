@@ -23,6 +23,13 @@ struct Cli {
     #[arg(
         long,
         global = true,
+        help = "Persist debug artifacts under .reen/debug during contract/build flows"
+    )]
+    debug: bool,
+
+    #[arg(
+        long,
+        global = true,
         help = "Perform a dry run without executing actions"
     )]
     dry_run: bool,
@@ -30,22 +37,22 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Use GitHub issues in <owner>/<repo> as the drafts/specifications backend"
+        help = "Use GitHub issues in <owner>/<repo> as the drafts backend"
     )]
     github: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Create specifications, implementations, or tests from drafts/contexts")]
+    #[command(about = "Create contracts, implementations, or tests from drafts")]
     Create(CreateArgs),
 
-    #[command(about = "Create specifications and implementation in one pass")]
+    #[command(about = "Check drafts and create implementation in one pass")]
     Build(BuildArgs),
 
     #[command(
         subcommand,
-        about = "Check generated specifications for existence and blocking ambiguities"
+        about = "Check generated draft contracts and blocking ambiguities"
     )]
     Check(CheckCommands),
 
@@ -93,8 +100,13 @@ enum Commands {
     #[command(subcommand, about = "Manage capability-to-crate planning")]
     Capabilities(CapabilityCommands),
 
-    #[command(subcommand, about = "Clear cache entries or generated artifacts")]
-    Clear(ClearCommands),
+    #[command(
+        about = "Clear caches and/or generated sources (run with no subcommand to clear both)"
+    )]
+    Clear {
+        #[command(subcommand)]
+        cmd: Option<ClearSubcommand>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -125,8 +137,11 @@ enum CapabilityCommands {
         #[arg(long, help = "Capability domain in snake_case")]
         domain: String,
 
-        #[arg(long, help = "Crate version")]
-        version: String,
+        #[arg(
+            long,
+            help = "Crate version; defaults to the latest stable crates.io release"
+        )]
+        version: Option<String>,
 
         #[arg(long = "feature", help = "Cargo feature to enable", action = clap::ArgAction::Append)]
         features: Vec<String>,
@@ -137,78 +152,48 @@ enum CapabilityCommands {
 }
 
 #[derive(Subcommand)]
-enum ClearCommands {
-    #[command(subcommand, about = "Clear cached build-tracker entries for a stage")]
-    Cache(ClearCacheTargets),
+enum ClearSubcommand {
+    #[command(about = "Clear build-tracker and agent response caches")]
+    Cache(ClearFilterArgs),
 
-    #[command(subcommand, about = "Remove generated artifacts", alias = "artifact")]
-    Artefact(ClearArtifactTargets),
+    #[command(about = "Remove generated implementation files from src/")]
+    Implementation(ClearFilterArgs),
 }
 
-#[derive(Subcommand)]
-enum ClearCacheTargets {
-    #[command(about = "Clear specification cache entries", alias = "specifications")]
-    Specification {
-        #[arg(help = "Optional list of names to clear (without .md extension)")]
-        names: Vec<String>,
-    },
+#[derive(Args)]
+struct ClearFilterArgs {
+    #[arg(long, help = "Only clear artifacts from the contexts/ folder")]
+    contexts: bool,
 
-    #[command(
-        about = "Clear implementation cache entries",
-        alias = "implementations"
-    )]
-    Implementation {
-        #[arg(help = "Optional list of names to clear (without .md extension)")]
-        names: Vec<String>,
-    },
+    #[arg(long, help = "Only clear artifacts from the projections/ folder")]
+    projections: bool,
 
-    #[command(about = "Clear test cache entries", alias = "test")]
-    Tests {
-        #[arg(help = "Optional list of names to clear (without .md extension)")]
-        names: Vec<String>,
-    },
-}
+    #[arg(long, help = "Only clear artifacts from the data/ folder")]
+    data: bool,
 
-#[derive(Subcommand)]
-enum ClearArtifactTargets {
-    #[command(about = "Clear specification artifacts", alias = "specifications")]
-    Specification {
-        #[arg(help = "Optional list of names to clear (without .md extension)")]
-        names: Vec<String>,
-    },
-
-    #[command(about = "Clear implementation artifacts", alias = "implementations")]
-    Implementation {
-        #[arg(help = "Optional list of names to clear (without .md extension)")]
-        names: Vec<String>,
-    },
-
-    #[command(about = "Clear test artifacts", alias = "test")]
-    Tests {
-        #[arg(help = "Optional list of names to clear (without .md extension)")]
-        names: Vec<String>,
-    },
+    #[arg(help = "Optional list of artifact names (without .md extension)")]
+    names: Vec<String>,
 }
 
 #[derive(Subcommand)]
 enum CreateCommands {
     #[command(
-        about = "Create specifications from draft files",
-        alias = "specifications"
+        about = "Synthesize internal contract bundles from draft files",
+        alias = "contracts"
     )]
-    Specification {
+    Contract {
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
 
         #[arg(
             long,
-            help = "When blocking ambiguities are detected, invoke agent to fix drafts and retry"
+            help = "Accepted for backward compatibility; drafts are read-only and are never modified automatically"
         )]
         fix: bool,
 
         #[arg(
             long,
-            help = "Max fix attempts per draft when --fix is used (default: 3, or from reen.yml)"
+            help = "Accepted for backward compatibility; drafts are read-only and this setting is ignored"
         )]
         max_fix_attempts: Option<u32>,
     },
@@ -242,33 +227,49 @@ enum CreateCommands {
 struct CreateArgs {
     #[arg(
         long,
+        global = true,
         help = "Clear build-tracker cache for this stage before creating (optionally scoped by provided names)"
     )]
     clear_cache: bool,
 
-    #[arg(long, help = "Only process drafts from the contexts/ folder")]
+    #[arg(
+        long,
+        global = true,
+        help = "Only process drafts from the contexts/ folder"
+    )]
     contexts: bool,
 
-    #[arg(long, help = "Only process drafts from the projections/ folder")]
+    #[arg(
+        long,
+        global = true,
+        help = "Only process drafts from the projections/ folder"
+    )]
     projections: bool,
 
-    #[arg(long, help = "Only process drafts from the data/ folder")]
+    #[arg(
+        long,
+        global = true,
+        help = "Only process drafts from the data/ folder"
+    )]
     data: bool,
 
     #[arg(
         long,
+        global = true,
         help = "Maximum API requests per second (overrides REEN_RATE_LIMIT and registry)"
     )]
     rate_limit: Option<f64>,
 
     #[arg(
         long,
+        global = true,
         help = "Maximum tokens per minute (overrides REEN_TOKEN_LIMIT and registry)"
     )]
     token_limit: Option<f64>,
 
     #[arg(
         long,
+        global = true,
         help = "Maximum items processed concurrently per stage (default: 4, or from reen.yml create.parallel-limit)"
     )]
     parallel_limit: Option<u32>,
@@ -296,13 +297,13 @@ struct BuildArgs {
 
     #[arg(
         long,
-        help = "Accepted for parity with create; build always enables draft and compilation repair"
+        help = "Accepted for backward compatibility; build never mutates drafts"
     )]
     fix: bool,
 
     #[arg(
         long,
-        help = "Max draft-fix attempts per draft during the specification stage (default: 3, or from reen.yml)"
+        help = "Accepted for backward compatibility; build never mutates drafts and this setting is ignored"
     )]
     max_fix_attempts: Option<u32>,
 
@@ -337,10 +338,10 @@ struct BuildArgs {
 #[derive(Subcommand)]
 enum CheckCommands {
     #[command(
-        about = "Check generated specifications for existence and blocking ambiguities",
-        alias = "specifications"
+        about = "Validate drafts and synthesize internal contract bundles",
+        alias = "contracts"
     )]
-    Specification {
+    Drafts {
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
     },
@@ -367,9 +368,11 @@ async fn main() -> Result<()> {
 
     // verbose: CLI flag > reen.yml > false
     let verbose = cli.verbose || reen_config.verbose.unwrap_or(false);
+    let debug = cli.debug || reen_config.debug.unwrap_or(false);
 
     let config = cli::Config {
         verbose,
+        debug,
         dry_run: cli.dry_run,
         github_repo: cli::resolve_github_repo(cli.github.as_deref())?,
     };
@@ -418,7 +421,7 @@ async fn main() -> Result<()> {
             cli::ensure_create_preconditions(&config)?;
 
             match create_args.command {
-                CreateCommands::Specification {
+                CreateCommands::Contract {
                     names,
                     fix,
                     max_fix_attempts,
@@ -560,8 +563,8 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::Check(check_cmd) => match check_cmd {
-            CheckCommands::Specification { names } => {
-                cli::check_specification(names, &config).await?;
+            CheckCommands::Drafts { names } => {
+                cli::check_drafts(names, &config).await?;
             }
         },
         Commands::Fix {
@@ -629,29 +632,24 @@ async fn main() -> Result<()> {
                 .await?;
             }
         },
-        Commands::Clear(clear_cmd) => match clear_cmd {
-            ClearCommands::Cache(target) => match target {
-                ClearCacheTargets::Specification { names } => {
-                    cli::clear_cache("specification", names, &config).await?;
-                }
-                ClearCacheTargets::Implementation { names } => {
-                    cli::clear_cache("implementation", names, &config).await?;
-                }
-                ClearCacheTargets::Tests { names } => {
-                    cli::clear_cache("tests", names, &config).await?;
-                }
-            },
-            ClearCommands::Artefact(target) => match target {
-                ClearArtifactTargets::Specification { names } => {
-                    cli::clear_artifacts("specification", names, &config).await?;
-                }
-                ClearArtifactTargets::Implementation { names } => {
-                    cli::clear_artifacts("implementation", names, &config).await?;
-                }
-                ClearArtifactTargets::Tests { names } => {
-                    cli::clear_artifacts("tests", names, &config).await?;
-                }
-            },
+        Commands::Clear { cmd } => match cmd {
+            None => cli::clear_all_cache_and_src(&config).await?,
+            Some(ClearSubcommand::Cache(args)) => {
+                let filter = cli::CategoryFilter {
+                    contexts: args.contexts,
+                    projections: args.projections,
+                    data: args.data,
+                };
+                cli::clear_entire_cache_filtered(args.names, &filter, &config).await?;
+            }
+            Some(ClearSubcommand::Implementation(args)) => {
+                let filter = cli::CategoryFilter {
+                    contexts: args.contexts,
+                    projections: args.projections,
+                    data: args.data,
+                };
+                cli::clear_implementation_filtered(args.names, &filter, &config).await?;
+            }
         },
     }
 
@@ -660,7 +658,9 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildArgs, CapabilityCommands, Cli, Commands, CreateArgs};
+    use super::{
+        BuildArgs, CapabilityCommands, ClearSubcommand, Cli, Commands, CreateArgs, CreateCommands,
+    };
     use clap::Parser;
 
     #[test]
@@ -694,6 +694,48 @@ mod tests {
             }
             other => panic!(
                 "expected create command, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn parses_create_shared_flags_after_subcommand() {
+        let cli = Cli::parse_from([
+            "reen",
+            "create",
+            "implementation",
+            "--clear-cache",
+            "--contexts",
+            "--projections",
+            "--rate-limit",
+            "1.5",
+            "--parallel-limit",
+            "6",
+            "game_loop",
+        ]);
+
+        match cli.command {
+            Commands::Create(CreateArgs {
+                clear_cache,
+                projections,
+                contexts,
+                data,
+                rate_limit,
+                parallel_limit,
+                command: CreateCommands::Implementation { names, .. },
+                ..
+            }) => {
+                assert!(clear_cache);
+                assert!(projections);
+                assert!(contexts);
+                assert!(!data);
+                assert_eq!(rate_limit, Some(1.5));
+                assert_eq!(parallel_limit, Some(6));
+                assert_eq!(names, vec!["game_loop".to_string()]);
+            }
+            other => panic!(
+                "expected create implementation command, got {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -807,9 +849,108 @@ mod tests {
                 assert_eq!(capability, "terminal_raw_input");
                 assert_eq!(krate, "crossterm");
                 assert_eq!(domain, "terminal");
-                assert_eq!(version, "0.27");
+                assert_eq!(version.as_deref(), Some("0.27"));
                 assert_eq!(features, vec!["events"]);
                 assert!(no_default_features);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parses_capabilities_add_without_version() {
+        let cli = Cli::parse_from([
+            "reen",
+            "capabilities",
+            "add",
+            "error_handling",
+            "anyhow",
+            "--domain",
+            "errors",
+        ]);
+        match cli.command {
+            Commands::Capabilities(CapabilityCommands::Add {
+                capability,
+                krate,
+                domain,
+                version,
+                ..
+            }) => {
+                assert_eq!(capability, "error_handling");
+                assert_eq!(krate, "anyhow");
+                assert_eq!(domain, "errors");
+                assert_eq!(version, None);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parses_clear_with_no_subcommand() {
+        let cli = Cli::parse_from(["reen", "clear"]);
+        match cli.command {
+            Commands::Clear { cmd } => assert!(cmd.is_none()),
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parses_clear_cache_subcommand() {
+        let cli = Cli::parse_from(["reen", "clear", "cache"]);
+        match cli.command {
+            Commands::Clear { cmd } => assert!(matches!(cmd, Some(ClearSubcommand::Cache(_)))),
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parses_clear_cache_with_filter() {
+        let cli = Cli::parse_from(["reen", "clear", "cache", "--data", "--contexts", "Board"]);
+        match cli.command {
+            Commands::Clear {
+                cmd: Some(ClearSubcommand::Cache(args)),
+            } => {
+                assert!(args.data);
+                assert!(args.contexts);
+                assert!(!args.projections);
+                assert_eq!(args.names, vec!["Board".to_string()]);
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parses_clear_implementation_subcommand() {
+        let cli = Cli::parse_from(["reen", "clear", "implementation"]);
+        match cli.command {
+            Commands::Clear { cmd } => {
+                assert!(matches!(cmd, Some(ClearSubcommand::Implementation(_))));
+            }
+            other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+        }
+    }
+
+    #[test]
+    fn parses_clear_implementation_with_filter() {
+        let cli = Cli::parse_from([
+            "reen",
+            "clear",
+            "implementation",
+            "--contexts",
+            "game_loop",
+            "terminal_renderer",
+        ]);
+        match cli.command {
+            Commands::Clear {
+                cmd: Some(ClearSubcommand::Implementation(args)),
+            } => {
+                assert!(!args.data);
+                assert!(args.contexts);
+                assert!(!args.projections);
+                assert_eq!(
+                    args.names,
+                    vec!["game_loop".to_string(), "terminal_renderer".to_string()]
+                );
             }
             other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
         }

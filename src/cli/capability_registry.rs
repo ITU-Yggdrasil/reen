@@ -415,15 +415,18 @@ fn scan_draft_capabilities_recursive(
         if path.extension().and_then(|value| value.to_str()) != Some("md") {
             continue;
         }
-
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        let content_lower = content.to_ascii_lowercase();
         let relative = path
             .strip_prefix(drafts_root)
             .unwrap_or(&path)
             .to_string_lossy()
             .replace('\\', "/");
+        if is_generated_draft_markdown(&relative) {
+            continue;
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let content_lower = content.to_ascii_lowercase();
         for rule in capability_rules() {
             if !rule
                 .patterns
@@ -456,6 +459,10 @@ fn scan_draft_capabilities_recursive(
     }
 
     Ok(())
+}
+
+fn is_generated_draft_markdown(relative_path: &str) -> bool {
+    matches!(relative_path, "types-manifest.md")
 }
 
 fn collect_evidence_snippets(content: &str, patterns: &[&str]) -> Vec<String> {
@@ -1066,6 +1073,35 @@ mod tests {
         );
         let manifest = fs::read_to_string(drafts.join("dependencies.yml")).expect("read manifest");
         assert!(manifest.contains("crossterm"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn scan_ignores_generated_types_manifest_markdown() {
+        let root = temp_dir("ignore_manifest_md");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir");
+        fs::write(
+            drafts.join("data/board.md"),
+            "# Board\n\nA plain board draft.\n",
+        )
+        .expect("write draft");
+        fs::write(
+            drafts.join("types-manifest.md"),
+            "# Allowed types manifest\n\n- `anyhow::`\n",
+        )
+        .expect("write manifest");
+
+        let scan = scan_draft_capabilities(&drafts).expect("scan");
+        assert!(
+            !scan
+                .detected
+                .iter()
+                .any(|item| item.capability == "error_handling"),
+            "detected capabilities: {:?}",
+            scan.detected
+        );
 
         fs::remove_dir_all(root).ok();
     }

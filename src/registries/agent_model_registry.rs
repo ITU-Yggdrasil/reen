@@ -319,25 +319,37 @@ mod tests {
 
     fn complete_registry_yaml() -> String {
         [
-            "create_specifications_data:
-  model: qwen2.5:7b
-  parallel: true
-  batch: false",
-            "create_specifications_projection:
-  model: qwen2.5:7b
-  parallel: true
-  batch: false",
-            "create_specifications_context:
-  model: qwen2.5:7b
-  parallel: true
-  batch: false",
-            "create_specifications_external_api:
+            "coordinate_contract_level:
   model: qwen2.5:7b
   parallel: false
   batch: false",
-            "create_plan:
+            "synthesize_contract_data:
   model: qwen2.5:7b
   parallel: true
+  batch: false",
+            "resolve_interface_contract_data:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
+            "synthesize_contract_projection:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
+            "resolve_interface_contract_projection:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
+            "synthesize_contract_context:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
+            "resolve_interface_contract_context:
+  model: qwen2.5:7b
+  parallel: true
+  batch: false",
+            "synthesize_contract_external_api:
+  model: qwen2.5:7b
+  parallel: false
   batch: false",
             "create_implementation_data:
   model: qwen2.5:7b
@@ -374,11 +386,16 @@ mod tests {
     fn test_parse_registry_rejects_old_format() {
         let yaml = r#"
 create_specifications_data: gpt-4
+coordinate_contract_level: gpt-4
 create_implementation_data: claude-3-opus
 create_test: gpt-4
-create_specifications_context: gpt-4
-create_specifications_external_api: gpt-4
-create_plan: gpt-4
+synthesize_contract_data: gpt-4
+resolve_interface_contract_data: gpt-4
+synthesize_contract_context: gpt-4
+resolve_interface_contract_context: gpt-4
+synthesize_contract_projection: gpt-4
+resolve_interface_contract_projection: gpt-4
+synthesize_contract_external_api: gpt-4
 resolve_compilation_errors: gpt-4
 fix_draft_blockers: gpt-4
 "#;
@@ -390,11 +407,20 @@ fix_draft_blockers: gpt-4
     #[test]
     fn test_parse_registry_new_format() {
         let yaml = r#"
-create_specifications_data:
+coordinate_contract_level:
+  model: gpt-4
+  parallel: false
+synthesize_contract_data:
   model: gpt-4
   parallel: true
   batch: true
-create_specifications_projection:
+resolve_interface_contract_data:
+  model: gpt-4
+  parallel: true
+synthesize_contract_projection:
+  model: gpt-4
+  parallel: true
+resolve_interface_contract_projection:
   model: gpt-4
   parallel: true
 create_implementation_data:
@@ -409,15 +435,15 @@ create_implementation_context:
 create_test:
   model: gpt-4
   parallel: false
-create_specifications_context:
+synthesize_contract_context:
   model: gpt-4
   parallel: true
-create_specifications_external_api:
+resolve_interface_contract_context:
   model: gpt-4
   parallel: true
-create_plan:
+synthesize_contract_external_api:
   model: gpt-4
-  parallel: false
+  parallel: true
 resolve_compilation_errors:
   model: gpt-4
   parallel: false
@@ -430,7 +456,7 @@ fix_draft_blockers:
         assert!(result.is_ok());
 
         let registry = result.unwrap();
-        let spec_config = registry.get("create_specifications_data").unwrap();
+        let spec_config = registry.get("synthesize_contract_data").unwrap();
         assert_eq!(spec_config.model, "gpt-4");
         assert_eq!(spec_config.parallel, true);
         assert_eq!(spec_config.batch, true);

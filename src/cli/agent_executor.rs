@@ -213,7 +213,10 @@ impl AgentExecutor {
 
                     // Prompt user for answers
                     println!("\n{}", header_text("=".repeat(60)));
-                    println!("{}", header_text("The agent has questions that need answers."));
+                    println!(
+                        "{}",
+                        header_text("The agent has questions that need answers.")
+                    );
                     println!(
                         "{}",
                         standard_text(format!(
@@ -228,7 +231,9 @@ impl AgentExecutor {
                     println!("{}", header_text("=".repeat(60)));
                     println!(
                         "\n{}",
-                        standard_text("Press Enter when you're ready to continue (or type 'ready'):")
+                        standard_text(
+                            "Press Enter when you're ready to continue (or type 'ready'):"
+                        )
                     );
 
                     // Wait for user input

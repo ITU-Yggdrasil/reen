@@ -63,6 +63,8 @@ static_prompt: |
   - Prefer the smallest possible, targeted fix.
   - Modify only the files required to resolve compilation.
   - Preserve existing interfaces unless the error forces a correction.
+  - Treat `input.semantic_verifier_json` as authoritative when present. If it reports an undeclared collaborator method or interface leak, do NOT fix that by adding a new public method to the collaborator module unless that collaborator's own spec declares it.
+  - For Contexts and Projections, when a collaborator capability is needed, keep that behavior in a private role method or local helper in the current module. If the current module already has such a role method/helper and it still calls an undeclared collaborator API, repair the role method/helper body or leave the mismatch for escalation; do not widen the collaborator's public surface as a compile fix.
   - When repairing immutable data APIs, preserve constructor/getter/transform patterns; never replace them with public `set_*` methods.
   - When repairing a context marked `Message Receiver = no`, do NOT introduce interior mutability (`RefCell`, `Cell`, `Mutex`, `RwLock`, atomics-as-state), background lifecycle work (`thread::spawn`, task spawn), or new `*ReceiverContext` coupling.
   - Treat generated leaf source modules as private implementation details. Prefer direct re-export paths such as `crate::TypeName`, `crate::data::TypeName`, `crate::contexts::TypeName`, or `input.library_crate_name::TypeName` in `src/main.rs`.
@@ -110,6 +112,9 @@ variable_prompt: |
 
   ### Contract artifacts (JSON map: spec_path -> compact contract)
   {{input.contract_artifacts_json?}}
+
+  ### Semantic verifier findings (JSON map: path -> verifier report)
+  {{input.semantic_verifier_json?}}
 
   ### Resolved dependency plan
   {{input.resolved_dependency_plan?}}

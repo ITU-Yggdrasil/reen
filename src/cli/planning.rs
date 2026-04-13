@@ -1,5 +1,3 @@
-use anyhow::{Context, Result};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -185,13 +183,6 @@ pub(crate) fn build_default_plan(
     }
 }
 
-pub(crate) fn parse_plan_output(output: &str) -> Result<ExecutionPlan> {
-    let candidate = extract_json_object(output)
-        .ok_or_else(|| anyhow::anyhow!("Planning agent did not return a JSON object"))?;
-    serde_json::from_str::<ExecutionPlan>(&candidate)
-        .context("Planning agent output was not valid plan JSON")
-}
-
 pub(crate) fn validate_plan(
     plan: &ExecutionPlan,
     contract: &BehaviorContract,
@@ -213,12 +204,14 @@ pub(crate) fn validate_plan(
         warnings.push("Plan does not declare any verification targets".to_string());
     }
 
-    for collaborator in &contract.collaborators {
-        if !plan.required_collaborators.contains(collaborator) {
-            warnings.push(format!(
-                "Plan does not explicitly include collaborator '{}'",
-                collaborator
-            ));
+    if !matches!(contract.kind, SpecificationKind::Data) {
+        for collaborator in &contract.collaborators {
+            if !plan.required_collaborators.contains(collaborator) {
+                warnings.push(format!(
+                    "Plan does not explicitly include collaborator '{}'",
+                    collaborator
+                ));
+            }
         }
     }
 
@@ -442,19 +435,11 @@ fn summarize_diagnostics(text: &str) -> String {
 
 fn build_risks(
     contract: &BehaviorContract,
-    required_artifacts: &[RequiredArtifact],
+    _required_artifacts: &[RequiredArtifact],
     plan_kind: PlanKind,
     diagnostic_text: Option<&str>,
 ) -> Vec<String> {
     let mut risks = Vec::new();
-    for artifact in required_artifacts {
-        if !artifact.exists {
-            risks.push(format!(
-                "Collaborator artifact '{}' is not currently present in the generated source tree.",
-                artifact.collaborator
-            ));
-        }
-    }
     if !contract.shared_state_requirements.is_empty() {
         risks.push(
             "Shared identity semantics are required; careless cloning may change behavior."
@@ -525,45 +510,11 @@ fn dedupe_preserve(values: &mut Vec<String>) {
     values.retain(|value| seen.insert(value.clone(), ()).is_none());
 }
 
-fn extract_json_object(output: &str) -> Option<String> {
-    let fenced = Regex::new(r"(?s)```json\s*(\{.*\})\s*```").ok();
-    if let Some(re) = fenced {
-        if let Some(captures) = re.captures(output) {
-            if let Some(matched) = captures.get(1) {
-                return Some(matched.as_str().trim().to_string());
-            }
-        }
-    }
-
-    let trimmed = output.trim();
-    if trimmed.starts_with('{') && trimmed.ends_with('}') {
-        return Some(trimmed.to_string());
-    }
-
-    let start = output.find('{')?;
-    let end = output.rfind('}')?;
-    if start < end {
-        Some(output[start..=end].trim().to_string())
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{PlanKind, build_default_plan, parse_plan_output, validate_plan};
+    use super::{PlanKind, build_default_plan, validate_plan};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-
-    #[test]
-    fn parses_plan_output_from_json_fence() {
-        let output = r#"```json
-{"plan_kind":"implementation","target_spec_path":"specifications/app.md","target_output_paths":["src/main.rs"],"title":"App","required_behaviors":["do thing"],"required_collaborators":["Renderer"],"cross_component_integrations":["TerminalRenderer -> StringRenderer"],"identity_and_sharing_constraints":[{"subject":"Renderer","identity_semantics":"owned","mutation_semantics":"infer_from_behavior","rust_guidance":"Prefer owned."}],"ordered_tasks":[{"order":1,"title":"Task","detail":"Do it","target_paths":["src/main.rs"],"verification_targets":["collaborator: Renderer"]}],"verification_targets":["collaborator: Renderer"],"risks":["risk"],"forbidden_regressions":["no stub"]}
-```"#;
-        let plan = parse_plan_output(output).expect("parse plan");
-        assert_eq!(plan.plan_kind, PlanKind::Implementation);
-        assert_eq!(plan.target_output_paths, vec!["src/main.rs".to_string()]);
-    }
 
     #[test]
     fn default_plan_captures_shared_constraints() {
@@ -661,6 +612,35 @@ Rules:
                 .any(|item| item.mutation_semantics == "immutable"),
             "expected immutable mutation semantics for projection, got: {:?}",
             plan.identity_and_sharing_constraints
+        );
+    }
+
+    #[test]
+    fn default_plan_omits_missing_collaborator_artifact_risks() {
+        let content = r#"# App
+
+## Collaborators and Wiring
+| Collaborator | Responsibility |
+|---|---|
+| `ImaginaryRenderer` | Renders output |
+"#;
+
+        let plan = build_default_plan(
+            PlanKind::Implementation,
+            Path::new("specifications/app.md"),
+            content,
+            &[PathBuf::from("src/main.rs")],
+            &HashMap::new(),
+            None,
+        );
+
+        assert!(
+            !plan
+                .risks
+                .iter()
+                .any(|risk| risk.contains("Collaborator artifact")),
+            "risks: {:?}",
+            plan.risks
         );
     }
 }

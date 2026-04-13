@@ -1,4 +1,5 @@
 use std::io::{self, IsTerminal};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use chrono::Local;
@@ -25,6 +26,7 @@ pub struct ProgressIndicator {
     total: usize,
     completed: usize,
     failed: usize,
+    cache_hits: AtomicUsize,
     start_time: Instant,
 }
 
@@ -84,6 +86,7 @@ impl ProgressIndicator {
             total,
             completed: 0,
             failed: 0,
+            cache_hits: AtomicUsize::new(0),
             start_time: Instant::now(),
         }
     }
@@ -94,6 +97,7 @@ impl ProgressIndicator {
     }
 
     pub fn start_item_cached(&self, name: &str) {
+        self.cache_hits.fetch_add(1, Ordering::Relaxed);
         self.start_item_with_label("Agent-cache", name, None);
     }
 
@@ -126,26 +130,39 @@ impl ProgressIndicator {
     }
 
     pub fn finish(&self) {
+        for line in self.summary_lines() {
+            println!("{line}");
+        }
+    }
+
+    fn summary_lines(&self) -> Vec<String> {
         let elapsed = self.start_time.elapsed();
-        println!("\n{}", paint_stdout("=".repeat(60), OutputTone::Muted));
-        println!("{}", header_text("Summary:"));
-        println!("  {} {}", muted_text("Total:    "), self.total);
-        println!(
-            "  {} {}",
-            paint_stdout("Succeeded:", OutputTone::Success),
-            self.completed
-        );
-        println!(
-            "  {} {}",
-            paint_stdout("Failed:   ", OutputTone::Error),
-            self.failed
-        );
-        println!(
-            "  {} {:.2}s",
-            muted_text("Duration: "),
-            elapsed.as_secs_f64()
-        );
-        println!("{}", paint_stdout("=".repeat(60), OutputTone::Muted));
+        vec![
+            format!("\n{}", paint_stdout("=".repeat(60), OutputTone::Muted)),
+            header_text("Summary:"),
+            format!("  {} {}", muted_text("Total:    "), self.total),
+            format!(
+                "  {} {}",
+                paint_stdout("Succeeded:", OutputTone::Success),
+                self.completed
+            ),
+            format!(
+                "  {} {}",
+                paint_stdout("Cache hits:", OutputTone::CacheHit),
+                self.cache_hits.load(Ordering::Relaxed)
+            ),
+            format!(
+                "  {} {}",
+                paint_stdout("Failed:   ", OutputTone::Error),
+                self.failed
+            ),
+            format!(
+                "  {} {:.2}s",
+                muted_text("Duration: "),
+                elapsed.as_secs_f64()
+            ),
+            paint_stdout("=".repeat(60), OutputTone::Muted),
+        ]
     }
 }
 
@@ -189,5 +206,42 @@ fn tone_for_label(label: &str) -> OutputTone {
         | "Planning repair" | "Regenerating patch" => OutputTone::Progress,
         "Agent-cache" | "Tracker-skip" => OutputTone::CacheHit,
         _ => OutputTone::Standard,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProgressIndicator;
+
+    #[test]
+    fn summary_includes_agent_cache_hits_only() {
+        let mut progress = ProgressIndicator::new(3);
+
+        progress.start_item_cached("board");
+        progress.complete_item("board", true);
+
+        progress.start_item_up_to_date("snake");
+        progress.complete_item("snake", true);
+
+        progress.start_item("food", None);
+        progress.complete_item("food", false);
+
+        let summary = progress.summary_lines();
+        let succeeded = summary
+            .iter()
+            .find(|line| line.contains("Succeeded:"))
+            .expect("succeeded line");
+        let cache_hits = summary
+            .iter()
+            .find(|line| line.contains("Cache hits:"))
+            .expect("cache hits line");
+        let failed = summary
+            .iter()
+            .find(|line| line.contains("Failed:"))
+            .expect("failed line");
+
+        assert_eq!(succeeded.split_whitespace().last(), Some("2"));
+        assert_eq!(cache_hits.split_whitespace().last(), Some("1"));
+        assert_eq!(failed.split_whitespace().last(), Some("1"));
     }
 }

@@ -97,8 +97,8 @@ variable_prompt: |
   Target output paths:
   {{input.target_output_paths}}
 
-  Direct dependency contracts (optional, compact):
-  {{input.direct_dependency_contracts?}}
+  Direct dependency interfaces (optional, compact):
+  {{input.direct_dependency_interfaces?}}
 
   Implemented direct role capsules (optional, compact):
   {{input.implemented_direct_role_capsules?}}

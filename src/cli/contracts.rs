@@ -230,18 +230,6 @@ pub(crate) fn contract_validation_to_context_value(
     json!(report)
 }
 
-pub(crate) fn compact_contract_artifacts(
-    artifacts: &[ContractArtifact],
-    max_entries: usize,
-) -> serde_json::Value {
-    let compacted = artifacts
-        .iter()
-        .take(max_entries)
-        .map(compact_contract_artifact_value)
-        .collect::<Vec<_>>();
-    json!(compacted)
-}
-
 pub(crate) fn compact_contract_artifact_value(contract: &ContractArtifact) -> serde_json::Value {
     json!({
         "source_spec_path": contract.source_spec_path,
@@ -522,7 +510,11 @@ fn extract_functionalities(sections: &[Section]) -> Vec<ContractFunctionality> {
     };
 
     let mut items = Vec::new();
-    let table_row_re = Regex::new(r"^\|\s*\*\*?([^*|`]+)\*{0,2}\s*\|\s*(.+?)\s*\|$").unwrap();
+    // Matches bold-wrapped names in table rows: | **name** | ... |
+    let table_row_bold_re = Regex::new(r"^\|\s*\*\*?([^*|`]+)\*{0,2}\s*\|\s*(.+?)\s*\|$").unwrap();
+    // Matches backtick-wrapped names in table rows: | `name` | col2 | col3 |
+    // (spec-generated tables use backtick names rather than bold)
+    let table_row_backtick_re = Regex::new(r"^\|\s*`([^`|]+)`\s*\|(.*)").unwrap();
     let mut current_name: Option<String> = None;
     let mut current_body = Vec::new();
 
@@ -536,14 +528,31 @@ fn extract_functionalities(sections: &[Section]) -> Vec<ContractFunctionality> {
             rest.find("**")
                 .map(|end| normalize_symbol_name(&rest[..end]))
         });
-        let table_name = if trimmed.starts_with('|') && !trimmed.contains("---") {
-            table_row_re.captures(trimmed).and_then(|captures| {
-                captures
+        // For table rows, try bold format first, then backtick format.
+        // Backtick rows also capture the remaining columns as inline body, since
+        // spec-generated tables put all content on one row with no subsequent lines.
+        let (table_name, inline_body) = if trimmed.starts_with('|') && !trimmed.contains("---") {
+            if let Some(captures) = table_row_bold_re.captures(trimmed) {
+                let name = captures
                     .get(1)
-                    .map(|matched| normalize_symbol_name(matched.as_str()))
-            })
+                    .map(|m| normalize_symbol_name(m.as_str()))
+                    .filter(|n| !n.is_empty());
+                (name, None)
+            } else if let Some(captures) = table_row_backtick_re.captures(trimmed) {
+                let name = captures
+                    .get(1)
+                    .map(|m| normalize_symbol_name(m.as_str()))
+                    .filter(|n| !n.is_empty());
+                let body = captures
+                    .get(2)
+                    .map(|m| strip_markdown(m.as_str().trim()))
+                    .filter(|s| !s.is_empty());
+                (name, body)
+            } else {
+                (None, None)
+            }
         } else {
-            None
+            (None, None)
         };
         let next_name = heading_name.or(bullet_name).or(table_name);
 
@@ -553,6 +562,9 @@ fn extract_functionalities(sections: &[Section]) -> Vec<ContractFunctionality> {
                 current_body.clear();
             }
             current_name = Some(name);
+            if let Some(body) = inline_body {
+                current_body.push(body);
+            }
         } else if current_name.is_some() && !trimmed.is_empty() {
             current_body.push(strip_markdown(trimmed));
         }
@@ -847,9 +859,7 @@ fn find_projection_context_dependency_violations(
 
         if contract.required_call_edges.iter().any(|edge| {
             edge.callee_role.eq_ignore_ascii_case(&name_normalized)
-                || edge
-                    .caller_surface
-                    .eq_ignore_ascii_case(&name_normalized)
+                || edge.caller_surface.eq_ignore_ascii_case(&name_normalized)
         }) {
             violations.push(format!(
                 "Projection must not delegate directly to Context kind '{}'",
@@ -867,7 +877,7 @@ fn dependency_context_kind_names(
     dependency_context: &HashMap<String, serde_json::Value>,
 ) -> Vec<String> {
     let mut names = Vec::new();
-    for key in ["direct_dependency_contracts", "dependency_contracts"] {
+    for key in ["direct_dependency_interfaces", "dependency_interfaces"] {
         let Some(entries) = dependency_context
             .get(key)
             .and_then(|value| value.as_array())
@@ -883,8 +893,12 @@ fn dependency_context_kind_names(
             if !is_context {
                 continue;
             }
-            if let Some(title) = entry.get("title").and_then(|value| value.as_str()) {
-                names.push(title.to_string());
+            if let Some(name) = entry
+                .get("primary_export_name")
+                .and_then(|value| value.as_str())
+                .or_else(|| entry.get("draft_identity").and_then(|value| value.as_str()))
+            {
+                names.push(name.to_string());
             }
         }
         if !names.is_empty() {
@@ -1240,27 +1254,22 @@ Reads from a data source.
             None,
         );
         let dependency_context = HashMap::from([(
-            "direct_dependency_contracts".to_string(),
+            "direct_dependency_interfaces".to_string(),
             json!([
                 {
-                    "contract_version": "reen.contract/v2",
-                    "source_spec_path": "specifications/contexts/wiki_edit_receiver_context.md",
-                    "title": "WikiEditReceiverContext",
+                    "version": "reen.interface/v2",
+                    "draft_identity": "WikiEditReceiverContext",
+                    "draft_relative_path": "contexts/wiki_edit_receiver_context.md",
                     "specification_kind": "context",
-                    "target_artifact_kind": "context_module",
-                    "primary_output_path_hint": "src/contexts/wiki_edit_receiver_context.rs",
-                    "public_functionalities": [],
-                    "props": [],
-                    "roles": [],
-                    "role_methods": [],
-                    "required_call_edges": [],
-                    "shared_identity_constraints": [],
-                    "mutation_constraints": [],
-                    "output_obligations": [],
-                    "env_config_obligations": [],
-                    "lifecycle_obligations": [],
-                    "allowed_freedoms": [],
-                    "verification_targets": []
+                    "artifact_kind": "context_module",
+                    "interface_fingerprint": "receiver-fp",
+                    "primary_export_name": "WikiEditReceiverContext",
+                    "exported_types": [],
+                    "exported_methods": [],
+                    "role_method_exports": [],
+                    "name_bindings": [],
+                    "dependency_bindings": [],
+                    "resolved_types": []
                 }
             ]),
         )]);
@@ -1316,27 +1325,22 @@ Receives and forwards events.
             None,
         );
         let dependency_context = HashMap::from([(
-            "direct_dependency_contracts".to_string(),
+            "direct_dependency_interfaces".to_string(),
             json!([
                 {
-                    "contract_version": "reen.contract/v2",
-                    "source_spec_path": "specifications/contexts/wiki_edit_context.md",
-                    "title": "WikiEditContext",
+                    "version": "reen.interface/v2",
+                    "draft_identity": "WikiEditContext",
+                    "draft_relative_path": "contexts/wiki_edit_context.md",
                     "specification_kind": "context",
-                    "target_artifact_kind": "context_module",
-                    "primary_output_path_hint": "src/contexts/wiki_edit_context.rs",
-                    "public_functionalities": [],
-                    "props": [],
-                    "roles": [],
-                    "role_methods": [],
-                    "required_call_edges": [],
-                    "shared_identity_constraints": [],
-                    "mutation_constraints": [],
-                    "output_obligations": [],
-                    "env_config_obligations": [],
-                    "lifecycle_obligations": [],
-                    "allowed_freedoms": [],
-                    "verification_targets": []
+                    "artifact_kind": "context_module",
+                    "interface_fingerprint": "context-fp",
+                    "primary_export_name": "WikiEditContext",
+                    "exported_types": [],
+                    "exported_methods": [],
+                    "role_method_exports": [],
+                    "name_bindings": [],
+                    "dependency_bindings": [],
+                    "resolved_types": []
                 }
             ]),
         )]);
@@ -1348,5 +1352,81 @@ Receives and forwards events.
             Some(&dependency_context),
         );
         assert!(report.ok, "errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn projection_contract_ignores_output_format_literals_as_call_edges() {
+        let content = r#"# String Renderer
+
+## Purpose
+
+StringRenderer turns one board picture and its score into plain text.
+
+## Role Players
+
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| Board | Supplies the picture of the current board | Allows the renderer to read what symbol should appear at each visible position |
+
+## Role Methods
+
+### Board
+
+- **width**
+  Returns the number of columns in the picture.
+
+- **height**
+  Returns the number of rows in the picture.
+
+- **symbol_at**
+  Returns the symbol to show at a given coordinate.
+
+## Props
+
+| Prop | Meaning | Notes |
+|---|---|---|
+| score | Score shown below the board | Same score the user sees during play |
+
+## Functionalities
+
+### render
+
+| Started by | Uses | Result |
+|---|---|---|
+| TerminalRenderer or the application | board, score | one text frame is returned |
+
+Rules:
+- Reads the current board picture and the score.
+- Uses score line format `Score: <score>`.
+- The score line also ends with a newline (`\n`).
+"#;
+
+        let contract = build_contract_artifact(
+            Path::new("specifications/projections/string_renderer.md"),
+            content,
+            Some(Path::new("src/projections/string_renderer.rs")),
+            None,
+        );
+
+        assert!(
+            contract.required_call_edges.is_empty(),
+            "required_call_edges: {:?}",
+            contract.required_call_edges
+        );
+
+        let report = validate_contract_artifact(
+            &contract,
+            Path::new("specifications/projections/string_renderer.md"),
+            content,
+            None,
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|item| item.contains("Required call edge")),
+            "warnings: {:?}",
+            report.warnings
+        );
     }
 }

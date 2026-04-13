@@ -174,7 +174,10 @@ impl UsageReporter {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".into()))?;
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".into()),
+        )?;
         if !summary.events.is_empty() || self.inner.verbose {
             print_summary(&summary, &path);
         }
@@ -188,7 +191,10 @@ impl Drop for UsageReporter {
             return;
         }
         if let Err(error) = self.emit_summary_if_needed() {
-            eprintln!("{} failed to write usage summary: {error}", warning_tag("usage"));
+            eprintln!(
+                "{} failed to write usage summary: {error}",
+                warning_tag("usage")
+            );
         }
     }
 }
@@ -198,7 +204,13 @@ fn fold_usage(
     usage: Option<&NativeExecutionMetadata>,
 ) -> (usize, Option<u64>, Option<u64>, Option<u64>, usize) {
     let Some(usage) = usage else {
-        return (fallback_estimated_input_tokens.unwrap_or(0), None, None, None, 0);
+        return (
+            fallback_estimated_input_tokens.unwrap_or(0),
+            None,
+            None,
+            None,
+            0,
+        );
     };
 
     let estimated_input_tokens = usage
@@ -274,11 +286,15 @@ fn build_summary(command_name: &str, events: &[AgentUsageEvent]) -> UsageSummary
         entry.estimated_input_tokens = entry
             .estimated_input_tokens
             .saturating_add(event.estimated_input_tokens);
-        entry.input_tokens = entry.input_tokens.saturating_add(event.input_tokens.unwrap_or(0));
+        entry.input_tokens = entry
+            .input_tokens
+            .saturating_add(event.input_tokens.unwrap_or(0));
         entry.output_tokens = entry
             .output_tokens
             .saturating_add(event.output_tokens.unwrap_or(0));
-        entry.total_tokens = entry.total_tokens.saturating_add(event.total_tokens.unwrap_or(0));
+        entry.total_tokens = entry
+            .total_tokens
+            .saturating_add(event.total_tokens.unwrap_or(0));
     }
 
     let mut slowest_calls = events.to_vec();
@@ -288,9 +304,11 @@ fn build_summary(command_name: &str, events: &[AgentUsageEvent]) -> UsageSummary
     let mut highest_token_calls = events.to_vec();
     highest_token_calls.sort_by_key(|event| {
         Reverse(
-            event
-                .total_tokens
-                .unwrap_or(event.input_tokens.unwrap_or(event.estimated_input_tokens as u64)),
+            event.total_tokens.unwrap_or(
+                event
+                    .input_tokens
+                    .unwrap_or(event.estimated_input_tokens as u64),
+            ),
         )
     });
     highest_token_calls.truncate(5);
@@ -334,11 +352,17 @@ fn print_summary(summary: &UsageSummaryDocument, report_path: &Path) {
         muted_text("Duration:"),
         summary.elapsed_ms as f64 / 1000.0
     );
-    println!("  {} {}", muted_text("Est input:"), summary.estimated_input_tokens);
+    println!(
+        "  {} {}",
+        muted_text("Est input:"),
+        summary.estimated_input_tokens
+    );
     println!(
         "  {} input {} / output {} / total {}",
         muted_text("Tokens:"),
-        summary.input_tokens, summary.output_tokens, summary.total_tokens
+        summary.input_tokens,
+        summary.output_tokens,
+        summary.total_tokens
     );
 
     for entry in summary.stage_agent_summaries.iter().take(8) {

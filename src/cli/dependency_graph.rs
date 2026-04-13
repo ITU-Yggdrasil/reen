@@ -704,10 +704,7 @@ pub fn expand_with_transitive_dependencies(
     Ok(result)
 }
 
-fn build_dag_with_cycles(
-    nodes: Vec<ExecutionNode>,
-    edges: Vec<Vec<usize>>,
-) -> ExecutionDag {
+fn build_dag_with_cycles(nodes: Vec<ExecutionNode>, edges: Vec<Vec<usize>>) -> ExecutionDag {
     let components = strongly_connected_components(edges.as_slice());
     let component_count = components.len();
     let mut node_component = vec![0usize; nodes.len()];

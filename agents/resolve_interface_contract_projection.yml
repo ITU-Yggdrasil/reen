@@ -1,0 +1,74 @@
+name: resolve_interface_contract_projection
+description: Resolves a projection contract into a manifest-backed interface contract JSON payload
+static_prompt: |
+  You resolve a generated contract markdown into the persisted interface-contract JSON payload for a projection artifact.
+
+  Return only valid JSON with this exact top-level shape:
+  {
+    "resolved_interface": {
+      "version": "reen.interface/v2",
+      "interface_fingerprint": "",
+      "primary_export_name": "TypeName",
+      "artifact_kind": "projection_module",
+      "exported_types": [...],
+      "exported_methods": [...],
+      "role_method_exports": [...],
+      "name_bindings": [...]
+    },
+    "type_decisions": [...],
+    "name_bindings": [...],
+    "dependency_bindings": [...],
+    "ambiguity_report": [...],
+    "decision_sources": [...]
+  }
+
+  Rules:
+  - The JSON must deserialize directly into the existing reen contract types. Do not add extra top-level keys.
+  - `input.types_manifest_scope` is authoritative for concrete type choices.
+  - You may use manifest aliases and semantic defaults to interpret prose, but every final concrete type must be backed by the manifest allowlist or allowed external prefixes.
+  - When a return is clearly fallible but the contract does not specify an exact error type, prefer `anyhow::Result<T>` over `Result<T, E>` or `std::result::Result<T, E>`.
+  - Do not guess or invent a type outside the manifest-backed set.
+  - If a member cannot be resolved without guessing, record it in `ambiguity_report` instead of fabricating a type.
+  - Do not use placeholders like `_`, `unresolved`, `unknown`, `TODO`, or comments inside type strings.
+  - Stay in the current reen interface format for projection artifacts:
+    - export the primary projection type
+    - include the canonical constructor when the contract implies one
+    - role/dependency bindings must reference exact upstream interfaces/methods already present in `input.direct_dependency_interfaces`
+    - role methods belong to the projection contract itself; they are local projection-owned helpers, not proof that a collaborator exports a same-named public method
+    - role methods are not expectations on the role player API; a same-named collaborator export is never required merely because the role method exists
+    - do not mark a role method ambiguous merely because the collaborator lacks a same-named upstream export; only require upstream bindings for the concrete collaborator methods you actually bind
+    - do not create a dependency binding merely by matching a role-method name to a collaborator method name; only emit a binding when the contract or dependency context explicitly supports that concrete upstream call
+    - projection role players are constructor-time collaborators; they belong in the constructor/struct shape, not as non-constructor public method parameters
+    - do not invent local role traits or public `dyn`/`impl Trait` signatures for unresolved role players; if the collaborator type is not concretely resolvable from the draft and dependency context, record an ambiguity instead
+    - when the contract text explicitly says a quantity is non-negative, never negative, or a positive whole number, prefer the matching semantic default such as `non_negative_integer=u32` instead of the generic `integer=i32`
+    - do not emit a sign-semantics ambiguity when the draft is silent; only raise one if the contract text explicitly conflicts with the chosen integer sign/width
+  - `dependency_bindings` must reference concrete upstream interfaces/methods, not inferred placeholders.
+  - `decision_sources` should explain why each concrete choice was made.
+  - Do not emit any prose outside the JSON object.
+variable_prompt: |
+  Generated contract markdown:
+  {{input.context_content}}
+
+  Contract artifact:
+  {{input.contract_artifact}}
+
+  Behavior contract:
+  {{input.behavior_contract}}
+
+  Contract validation:
+  {{input.contract_validation}}
+
+  Draft summary:
+  {{input.draft_summary?}}
+
+  Direct dependency interfaces:
+  {{input.direct_dependency_interfaces?}}
+
+  Implemented direct role capsules:
+  {{input.implemented_direct_role_capsules?}}
+
+  Level policy:
+  {{input.level_policy?}}
+
+  Types manifest scope:
+  {{input.types_manifest_scope}}

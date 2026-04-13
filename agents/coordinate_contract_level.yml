@@ -1,0 +1,31 @@
+name: coordinate_contract_level
+description: Produces a machine-readable coordination policy for a dependency level before contract synthesis
+static_prompt: |
+  You coordinate a single dependency level for contract synthesis.
+
+  Return only one JSON object with these fields:
+  - stage
+  - level_hash
+  - artifact_paths
+  - canonical_names
+  - import_roots
+  - feature_names
+  - shared_type_choices
+  - collaborator_abstractions
+  - conflict_resolutions
+
+  Rules:
+  - Do not invent new artifacts.
+  - Keep decisions conservative and brief.
+  - Prefer empty arrays over speculation.
+  - Return valid JSON only.
+variable_prompt: |
+  Stage: contract
+  Level hash: {{input.level_hash}}
+  Artifact paths:
+  {{input.artifact_paths}}
+
+  Optional draft summaries:
+  {{input.draft_summaries?}}
+
+  Return only the JSON object.

@@ -835,7 +835,8 @@ mod tests {
             implementation_plan: serde_json::json!({"tasks": ["first"]}),
             plan_validation: serde_json::json!({"ok": true}),
         };
-        let cached_runner = AgentRunner::new(agent_name.clone(), cached_input, registry, model_registry);
+        let cached_runner =
+            AgentRunner::new(agent_name.clone(), cached_input, registry, model_registry);
         let cache_key = cached_runner.generate_cache_key(&canonical);
         let instructions_model_hash =
             cached_runner.generate_instructions_model_hash(&canonical, "test-model");

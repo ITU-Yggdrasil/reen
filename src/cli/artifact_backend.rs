@@ -1,4 +1,4 @@
-//! File and GitHub artifact backends for drafts and specifications.
+//! File and GitHub artifact backends for drafts and hidden internal contracts/specs.
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -114,8 +114,6 @@ pub trait ArtifactStore: Send + Sync {
         filter: &CategoryFilter,
     ) -> Result<Vec<ArtifactRef>>;
     fn artifact_for_path(&self, path: &Path) -> Option<ArtifactRef>;
-    fn read_content(&self, artifact: &ArtifactRef) -> Result<String>;
-    fn find_specification_for_draft(&self, draft: &ArtifactRef) -> Result<Option<ArtifactRef>>;
     fn write_specification(
         &self,
         draft: &ArtifactRef,
@@ -145,7 +143,7 @@ impl FileArtifactStore {
     pub fn new() -> Self {
         Self::with_roots_and_namespace(
             PathBuf::from("drafts"),
-            PathBuf::from("specifications"),
+            PathBuf::from(".reen/specifications"),
             "file".to_string(),
         )
     }
@@ -239,30 +237,6 @@ impl ArtifactStore for FileArtifactStore {
             &self.id_namespace,
         )
         .ok()
-    }
-
-    fn read_content(&self, artifact: &ArtifactRef) -> Result<String> {
-        fs::read_to_string(&artifact.path)
-            .with_context(|| format!("failed reading artifact: {}", artifact.path.display()))
-    }
-
-    fn find_specification_for_draft(&self, draft: &ArtifactRef) -> Result<Option<ArtifactRef>> {
-        let output_path = determine_file_specification_path(
-            draft,
-            &draft.name,
-            draft.category,
-            self.drafts_root(),
-            self.specifications_root(),
-        )?;
-        if output_path.exists() {
-            return Ok(Some(file_artifact_from_path(
-                &output_path,
-                self.drafts_root(),
-                self.specifications_root(),
-                &self.id_namespace,
-            )?));
-        }
-        Ok(None)
     }
 
     fn write_specification(
@@ -491,29 +465,6 @@ impl ArtifactStore for GitHubArtifactStore {
         state.by_id.get(id).map(|record| record.artifact.clone())
     }
 
-    fn read_content(&self, artifact: &ArtifactRef) -> Result<String> {
-        self.refresh_projection()?;
-        let state = self.state.lock().expect("github state");
-        state
-            .by_id
-            .get(&artifact.id)
-            .map(|record| record.body.clone())
-            .with_context(|| format!("missing projected GitHub artifact {}", artifact.id))
-    }
-
-    fn find_specification_for_draft(&self, draft: &ArtifactRef) -> Result<Option<ArtifactRef>> {
-        self.refresh_projection()?;
-        let state = self.state.lock().expect("github state");
-        let Some(ids) = state.draft_to_specs.get(&draft.id) else {
-            return Ok(None);
-        };
-        Ok(ids
-            .iter()
-            .filter_map(|id| state.by_id.get(id))
-            .map(|record| record.artifact.clone())
-            .min_by(|a, b| a.path.cmp(&b.path)))
-    }
-
     fn write_specification(
         &self,
         draft: &ArtifactRef,
@@ -701,9 +652,10 @@ fn determine_file_specification_path(
         let file_name = format!("{display_name}.md");
         return Ok(match category {
             ArtifactCategory::Data => specs_root.join("data").join("external").join(file_name),
-            ArtifactCategory::Projection => {
-                specs_root.join("projections").join("external").join(file_name)
-            }
+            ArtifactCategory::Projection => specs_root
+                .join("projections")
+                .join("external")
+                .join(file_name),
             ArtifactCategory::Context | ArtifactCategory::Api | ArtifactCategory::Root => {
                 specs_root.join("contexts").join("external").join(file_name)
             }

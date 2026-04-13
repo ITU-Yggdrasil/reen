@@ -1,0 +1,255 @@
+meta:
+  version: 2
+  drafts_tree_fingerprint: 77621fab03191f1a58d693dce2524c002c583c830524a304d0e0581776b3bb42
+  rules:
+    projection_includes_data: true
+    context_includes_projections: true
+primitives:
+- ()
+- bool
+- char
+- f32
+- f64
+- i128
+- i16
+- i32
+- i64
+- i8
+- isize
+- str
+- String
+- u128
+- u16
+- u32
+- u64
+- u8
+- usize
+semantic_defaults:
+  integer: i32
+  non_negative_integer: u32
+  positive_whole_number: u32
+  timestamp_millis: u64
+drafts:
+  context:
+  - relative_path: contexts/command_input.md
+    title: CommandInputContext
+    export_type: CommandInputContext
+    aliases:
+    - Command Input Context
+    - CommandInputContext
+    - command input context
+    - commandinputcontext
+  - relative_path: contexts/game_loop.md
+    title: GameLoopContext
+    export_type: GameLoopContext
+    aliases:
+    - Game Loop Context
+    - GameLoopContext
+    - game loop context
+    - gameloopcontext
+  - relative_path: contexts/terminal_renderer.md
+    title: Terminal Renderer
+    export_type: TerminalRenderer
+    aliases:
+    - Terminal Renderer
+    - terminal renderer
+  data:
+  - relative_path: data/Board.md
+    title: Board
+    export_type: Board
+    aliases:
+    - Board
+    - board
+  - relative_path: data/CollisionType.md
+    title: CollisionType
+    export_type: CollisionType
+    aliases:
+    - Collision Type
+    - CollisionType
+    - collision type
+    - collisiontype
+  - relative_path: data/Direction.md
+    title: Direction
+    export_type: Direction
+    aliases:
+    - Direction
+    - direction
+  - relative_path: data/Food.md
+    title: Food
+    export_type: Food
+    aliases:
+    - Food
+    - food
+  - relative_path: data/GameState.md
+    title: GameState
+    export_type: GameState
+    aliases:
+    - Game State
+    - GameState
+    - game state
+    - gamestate
+  - relative_path: data/PlayerState.md
+    title: PlayerState
+    export_type: PlayerState
+    aliases:
+    - Player State
+    - PlayerState
+    - player state
+    - playerstate
+  - relative_path: data/Position.md
+    title: Position
+    export_type: Position
+    aliases:
+    - Position
+    - position
+  - relative_path: data/Snake.md
+    title: Snake
+    export_type: Snake
+    aliases:
+    - Snake
+    - snake
+  - relative_path: data/UserAction.md
+    title: UserAction
+    export_type: UserAction
+    aliases:
+    - User Action
+    - UserAction
+    - user action
+    - useraction
+  projection:
+  - relative_path: projections/string_renderer.md
+    title: String Renderer
+    export_type: StringRenderer
+    aliases:
+    - String Renderer
+    - string renderer
+external_path_prefixes:
+- 'alloc::'
+- 'anyhow::'
+- 'chrono::'
+- 'core::'
+- 'crossterm::'
+- 'cucumber::'
+- 'std::'
+- 'tokio::'
+- 'tracing::'
+allowlists:
+  data:
+  - ()
+  - Board
+  - CollisionType
+  - Direction
+  - Food
+  - GameState
+  - PlayerState
+  - Position
+  - Snake
+  - String
+  - UserAction
+  - 'alloc::'
+  - 'anyhow::'
+  - bool
+  - char
+  - 'chrono::'
+  - 'core::'
+  - 'crossterm::'
+  - 'cucumber::'
+  - f32
+  - f64
+  - i128
+  - i16
+  - i32
+  - i64
+  - i8
+  - isize
+  - 'std::'
+  - str
+  - 'tokio::'
+  - 'tracing::'
+  - u128
+  - u16
+  - u32
+  - u64
+  - u8
+  - usize
+  projection:
+  - ()
+  - Board
+  - CollisionType
+  - Direction
+  - Food
+  - GameState
+  - PlayerState
+  - Position
+  - Snake
+  - String
+  - StringRenderer
+  - UserAction
+  - 'alloc::'
+  - 'anyhow::'
+  - bool
+  - char
+  - 'chrono::'
+  - 'core::'
+  - 'crossterm::'
+  - 'cucumber::'
+  - f32
+  - f64
+  - i128
+  - i16
+  - i32
+  - i64
+  - i8
+  - isize
+  - 'std::'
+  - str
+  - 'tokio::'
+  - 'tracing::'
+  - u128
+  - u16
+  - u32
+  - u64
+  - u8
+  - usize
+  context:
+  - ()
+  - Board
+  - CollisionType
+  - CommandInputContext
+  - Direction
+  - Food
+  - GameLoopContext
+  - GameState
+  - PlayerState
+  - Position
+  - Snake
+  - String
+  - StringRenderer
+  - TerminalRenderer
+  - UserAction
+  - 'alloc::'
+  - 'anyhow::'
+  - bool
+  - char
+  - 'chrono::'
+  - 'core::'
+  - 'crossterm::'
+  - 'cucumber::'
+  - f32
+  - f64
+  - i128
+  - i16
+  - i32
+  - i64
+  - i8
+  - isize
+  - 'std::'
+  - str
+  - 'tokio::'
+  - 'tracing::'
+  - u128
+  - u16
+  - u32
+  - u64
+  - u8
+  - usize

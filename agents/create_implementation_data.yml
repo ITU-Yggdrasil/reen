@@ -8,16 +8,32 @@ static_prompt: |
   and no side effects. They are fully defined by their fields or variants plus optional
   pure-computation functionalities.
 
-  ### RUst feature toggles
+  **Domain behavior does not belong on Data kinds.** Business rules, orchestration,
+  validation that encodes world state transitions, steering, scoring logic, and similar
+  belong in **Context** (or **Projection** for immutable read-side behavior)—not in
+  `src/data/`. If a specification asks for behavior that sounds like a context, stop
+  and treat it as a specification error: the draft should live under `drafts/contexts/`
+  or `drafts/projections/`. See `docs/AGENT_TYPES.md` (Data, Context, and Projection).
+
+  ## CRITICAL: Strict Specification Compliance
+
+  **You MUST follow the specification EXACTLY. No deviations are allowed.**
+  **Interpret this as strict compliance of externally observable behavior and public API,
+  not rigid low-level implementation details.**
+
+  ### Rust feature toggles
 
   Data types are not guarded by feature flags unless the specification explicitly requires it.
 
   ### Public API Rules (STRICTLY ENFORCED):
 
-  1. **ONLY functions listed in "Functionalities" section can be public**
-     - These are the ONLY public methods allowed on the type
-     - All other methods MUST be private
-     - Private helper functions are allowed when needed to keep code clear and maintainable
+  1. **Public API = baseline + explicit Functionalities**
+     - For field-based types, the **baseline** public API is always: `new` constructor +
+       one getter per field. This baseline does not need to appear in `Functionalities`.
+     - Any methods listed in `Functionalities` are additional public methods on top of
+       the baseline.
+     - All other methods MUST be private.
+     - Private helper functions are allowed when needed to keep code clear and maintainable.
 
   2. **Fields and Variants MUST match exactly**
      - Create private struct fields for each field in the `Fields` section
@@ -113,18 +129,24 @@ static_prompt: |
      **For Data Types (has `Fields` or `Variants`)**:
      - Read `Fields` — these become private struct fields for record-like types
      - Read `Variants` — these become enum variants for enum-like types
-     - Read `Functionalities` — these become public methods
-     - Read `Rules`, `Construction Rules`, and `Access Rules` — these constrain construction
-       and behavior
-     - Treat statements that properties are "readable" or "writable" as accessor requirements:
-       - "readable" => getter required
-       - "writable" on immutable types => public non-destructive update API required, not `set_*`
-     - If the type uses `Variants`, do not invent record fields
-     - If `Functionalities` is empty/absent for a field-based type, implement:
-       - A `new` constructor taking all fields as arguments
-       - Public getter methods for each field
+     - Read `Functionalities` — these become **additional** public methods on top of the baseline
+     - Read `Rules` and `Construction Rules` — these constrain construction and behavior
+     - If the type uses `Variants`, do not invent record fields; no baseline constructor or
+       getters are implied for enum types
+     - **For field-based types, ALWAYS implement the following baseline regardless of whether
+       `Functionalities` is present:**
+       - A `new` constructor taking all fields as arguments (in declaration order);
+         apply any `Construction Rules` validation — override this only if `Functionalities`
+         explicitly defines a different `new` signature
+       - A public getter method for each field listed in `Fields` (unless the field's spec entry
+         explicitly marks it non-accessible); getters return a reference or copy as appropriate
        - NO setters (immutable)
-     - If `Functionalities` is present, implement ONLY those methods
+     - Treat statements that properties are "readable" or "writable" as accessor requirements:
+       - "readable" => getter required (already implied for all fields)
+       - "writable" on immutable types => public non-destructive update API required, not `set_*`
+     - Any methods listed in `Functionalities` are implemented **in addition** to the baseline
+       `new` + getters; if `Functionalities` redefines `new` explicitly, use that definition
+       instead of the implied one
      - For immutable data methods that "return a new X", prefer borrowed receivers (`&self`)
        and rebuild the new value without mutating the original instance
 
@@ -239,32 +261,15 @@ static_prompt: |
   - Change required business rules or externally observable behavior
   - Introduce contradictory semantics relative to the specification
 
-  ## Type Inference for Unspecified Types (MANDATORY)
+  ## Types and signatures (MANDATORY)
 
-  When a specification does not define a concrete type, you MUST infer the most natural
-  choice rather than rejecting the specification. Unspecified types are **never** a reason
-  to fail.
+  `input.interface_ir` plus `resolved_types` and `name_bindings` are
+  authoritative for exported Rust types, method signatures, return/failure shapes, and keyword
+  escapes. `input.implemented_direct_role_capsules` is supplemental verification context only.
 
-  ### Integer types
-
-  - If a range is given, pick the smallest fitting unsigned type unless the spec implies signed
-  - If no range is given and the type is a plain count or index, default to `usize` or `i32`
-  - Do not ask for clarification; pick the obvious fit and proceed
-
-  ### Platform-context types
-
-  | Context clue | Obvious choice |
-  |---|---|
-  | Duration / timestamp | `std::time::Duration` / `std::time::Instant` |
-  | Optional value | `Option<T>` with inferred `T` |
-  | 2D position | tuple `(i32, i32)` or a named struct |
-  | Text identifier | `String` |
-
-  ### When inference is genuinely ambiguous
-
-  If there are truly two equally plausible choices with materially different semantics,
-  pick the safer/more conventional one, add a brief inline comment noting the choice,
-  and proceed. Do NOT fail or emit `compile_error!`.
+  If the resolved contract is missing a required field or contradicts the specification in a way
+  you cannot reconcile without guessing API shape, stop and emit `compile_error!` with a clear
+  message rather than inventing a different type, name, or signature.
 
   ## Tracing Instrumentation (REQUIRED)
 
@@ -359,7 +364,7 @@ static_prompt: |
   - ✓ Cross-module imports use re-exported public paths only (no private leaf-module imports)
   - ✓ **Tracing instrumented**: All public methods have proper tracing calls
   - ✓ **Tracing dependency**: `tracing` added to `Cargo.toml`
-  - ✓ **ONLY methods from "Functionalities" are public**
+  - ✓ **Public API = baseline (`new` + field getters) + methods from "Functionalities"**
   - ✓ **ALL fields from spec are struct fields** (or enum variants for enum types)
   - ✓ No unauthorized additions to public API or specified behavior
   - ✓ Method signatures EXACTLY match specification
@@ -378,8 +383,9 @@ static_prompt: |
 
   2. **Public API Audit**:
      - List all public methods in your implementation
-     - Compare with `Functionalities` section in spec
-     - They MUST match exactly (same names, same signatures)
+     - Verify the baseline is present: `new` constructor + one getter per field
+     - Verify all explicit `Functionalities` items are also present
+     - No public methods beyond these two sources are allowed
 
   3. **Fields Audit**:
      - List all struct fields in your implementation
@@ -392,23 +398,64 @@ static_prompt: |
      - If you added a public method NOT in the spec, remove it
      - Private helper functions are explicitly allowed and encouraged
 
+  ## CRITICAL: Output Format
+
+  **Your output must be ONLY the Rust code for the single .rs file being generated.**
+
+  ### What to Output:
+
+  - **ONLY Rust code** for the specific module/type being implemented
+  - Start directly with `use` statements, doc comments, or the struct/enum definition
+  - NO preamble like "I will implement..."
+  - NO file listings or project structure
+  - NO Cargo.toml content
+  - NO markdown formatting around the code
+  - NO explanations before or after the code
+
+  ### What Gets Written Where:
+
+  The system automatically determines the output file based on the specification location:
+  - `specifications/data/X.md` → `src/data/X.rs` (your output goes here)
+  - `specifications/data/group/X.md` → `src/data/group/X.rs` (your output goes here)
+
+  The Cargo.toml and src/lib.rs are managed separately. You ONLY generate the code for the
+  specific .rs file.
+
+  ## Direct Dependency Context (Authoritative)
+
+  If `input.direct_dependencies` is present, it is authoritative project context.
+
+  You MUST:
+  - Treat `input.resolved_dependency_plan` as the authoritative external-crate plan when present
+  - Treat `input.scaffold_dependencies` as the authoritative list of scaffold-selected external
+    crates when present
+  - Treat `input.direct_dependencies` as an authoritative dependency manifest
+  - Treat `input.contract_artifact` as the authoritative machine-readable contract when present
+  - Prefer provided dependency artifacts over inference
+  - Reuse existing definitions from dependency context instead of creating duplicates
+  - If `input.tooling_symbols` is present, treat it as the authoritative crate/type inventory
+  - Do NOT introduce new external crates outside `input.resolved_dependency_plan` /
+    `input.scaffold_dependencies` when those are present
 variable_prompt: |
   ## Input
 
   Specification content:
   {{input.context_content}}
 
-  Dependency manifest (optional, authoritative — direct specs only):
+  Dependency manifest (optional, authoritative):
   {{input.direct_dependencies?}}
-
-  Full dependency closure (optional, metadata paths for transitive specs):
-  {{input.dependency_closure?}}
 
   Dependency symbol inventory (optional, authoritative for external crate APIs):
   {{input.tooling_symbols?}}
 
-  Direct dependency contracts (optional, compact):
-  {{input.direct_dependency_contracts?}}
+  Implemented dependency source manifest (optional, authoritative for existing APIs):
+  {{input.implemented_dependencies?}}
+
+  Direct dependency interfaces (optional, compact):
+  {{input.direct_dependency_interfaces?}}
+
+  Implemented direct role capsules (optional, compact):
+  {{input.implemented_direct_role_capsules?}}
 
   Contract artifact (optional, authoritative):
   {{input.contract_artifact?}}
@@ -421,12 +468,6 @@ variable_prompt: |
 
   Scaffold-selected dependencies (optional, authoritative crate list):
   {{input.scaffold_dependencies?}}
-
-  Previous generated output to revise (optional):
-  {{input.previous_output?}}
-
-  Verifier feedback for the previous attempt (optional, authoritative when present):
-  {{input.verifier_feedback?}}
 
   Library crate name for `src/main.rs` imports (optional, authoritative):
   {{input.library_crate_name?}}

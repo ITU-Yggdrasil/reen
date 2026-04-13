@@ -2,24 +2,29 @@
 
 ## Purpose
 
-TerminalRenderer draws the current game frame as text (ASCII) in the terminal.
+TerminalRenderer shows the current game frame in the terminal.
 
-It must use StringRenderer as the canonical formatter for each frame.
+It uses StringRenderer as the formatter for each frame before writing that frame
+to the screen.
 
 ## Role Players
 
 | Role player | Why involved | Expected behaviour |
 |---|---|---|
-| string_renderer | Produces the canonical plain-text frame | Returns the full frame string for a board and score |
+| string_renderer | Produces the text for the current frame | Returns one complete text frame for the supplied board picture and score |
 
 ## Role Methods
 
 ### string_renderer
 
-- **render(board, score)**
-  Formats the current game frame as plain text and returns the full frame string.
+- **render**
+  Formats the current board picture and score as one text frame.
 
 ## Props
+
+| Prop | Meaning | Notes |
+|---|---|---|
+| screen | Visible terminal area where the frame is shown | The same screen is updated from one frame to the next |
 
 ## Functionalities
 
@@ -27,18 +32,15 @@ It must use StringRenderer as the canonical formatter for each frame.
 
 | Started by | Uses | Result |
 |---|---|---|
-| game loop or caller | string_renderer, board, score | current frame is shown in the terminal |
+| game loop or caller | string_renderer, screen | terminal shows the new frame |
 
 Rules:
-- Uses coordinate system `(0,0)` bottom-left and `(width-1, height-1)` top-right.
-- Calls `string_renderer.render(board, score)` to obtain the frame string.
-- Replaces the previously shown frame with the new one.
-- Normal rendering must not rely on visible blank-screen flashes or noticeable flicker.
-- Displays the returned frame string exactly as produced by StringRenderer.
-- Before writing to the terminal, interprets each `\n` in the returned frame as a terminal line break that restarts at column 0 (for example by emitting `\r\n`).
-- In terminal mode, rendering restarts at column 0 before the frame is written.
-- If the terminal update mechanism moves the cursor upward between frames, it also returns the cursor to column 0 before rewriting.
-- Multi-line output preserves left alignment line by line.
+- Receives the current board picture and score.
+- Asks StringRenderer to format them as one text frame.
+- Replaces the previously shown frame without visible flicker where possible.
+- Displays the returned frame text exactly.
+- Each line begins at the left edge of the terminal.
+- Multi-line output stays left-aligned line by line.
 
 | Given | When | Then |
 |---|---|---|

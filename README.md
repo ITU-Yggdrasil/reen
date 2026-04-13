@@ -1,14 +1,14 @@
 # Reen
 
-Reen is a compiler-like CLI for turning markdown drafts into structured specifications, Rust implementation, and executable BDD tests.
+Reen is a compiler-like CLI for turning markdown drafts into internal contract bundles, Rust implementation, and executable BDD tests.
 
 ## Pipeline
 
 The normal flow is:
 
-1. `drafts/` -> `specifications/`
-2. `specifications/` -> `src/`
-3. `specifications/` -> `tests/`
+1. `drafts/` -> `.reen/contracts/` + `.reen/specifications/`
+2. `.reen/contracts/` + `.reen/specifications/` -> `src/`
+3. `.reen/contracts/` + `.reen/specifications/` -> `tests/`
 
 Reen keeps build-tracker state so unchanged work can be skipped on later runs.
 
@@ -18,7 +18,7 @@ Reen keeps build-tracker state so unchanged work can be skipped on later runs.
 reen/
 ├── agents/          # Agent specs and model registry files
 ├── drafts/          # Human-authored input markdown
-├── specifications/  # Generated specification markdown
+├── .reen/           # Generated internal contracts, hidden specs, plans, and caches
 ├── src/             # Generated Rust implementation
 └── tests/           # Generated BDD features, step files, and test runners
 ```
@@ -48,9 +48,9 @@ These flags work with every command:
 
 | Flag | Description | Example |
 | --- | --- | --- |
-| `--profile <name>` | Use `agents/agent_model_registry.<name>.yml` instead of the default registry. | `reen --profile sonnet create specification` |
+| `--profile <name>` | Use `agents/agent_model_registry.<name>.yml` instead of the default registry. | `reen --profile sonnet check drafts` |
 | `--verbose` | Print extra progress and debug output. | `reen --verbose create implementation app` |
-| `--dry-run` | Show what would happen without changing files. | `reen --dry-run clear artefact specification app` |
+| `--dry-run` | Show what would happen without changing files. | `reen --dry-run clear` |
 | `-h, --help` | Show help for the current command. | `reen create --help` |
 
 ### Command Tree
@@ -63,7 +63,7 @@ reen fix
 reen compile
 reen run [-- <args...>]
 reen test
-reen clear <subcommand>
+reen clear [cache|implementation]
 reen help <command>
 ```
 
@@ -95,10 +95,10 @@ create:
 
 | Flag | Description | Example |
 | --- | --- | --- |
-| `--clear-cache` | Ignore build-tracker state for this create run and refresh the stage cache first. | `reen create --clear-cache specification` |
-| `--contexts` | Only include `drafts/contexts/`, `drafts/apis/`, and `drafts/external_apis/`. | `reen create --contexts specification` |
-| `--projections` | Only include `drafts/projections/`. | `reen create --projections specification` |
-| `--data` | Only include `drafts/data/`. | `reen create --data specification` |
+| `--clear-cache` | Ignore build-tracker state for this create run and refresh the stage cache first. | `reen create --clear-cache contract` |
+| `--contexts` | Only include `drafts/contexts/`, `drafts/apis/`, and `drafts/external_apis/`. | `reen create --contexts contract` |
+| `--projections` | Only include `drafts/projections/`. | `reen create --projections contract` |
+| `--data` | Only include `drafts/data/`. | `reen create --data contract` |
 | `--rate-limit <n>` | Maximum API requests per second. Overrides `REEN_RATE_LIMIT` and registry config. | `reen create --rate-limit 2 specification` |
 | `--token-limit <n>` | Maximum tokens per minute. Overrides `REEN_TOKEN_LIMIT` and registry config. | `reen create --token-limit 60000 implementation` |
 | `--parallel-limit <n>` | Maximum in-flight items per stage. `0` is clamped to `1`. Overrides `create.parallel-limit` in `reen.yml`. | `reen create --parallel-limit 8 implementation` |
@@ -106,21 +106,21 @@ create:
 Examples:
 
 ```bash
-reen create --clear-cache specification
-reen create --contexts specification
-reen create --projections specification
-reen create --data specification
+reen create --clear-cache contract
+reen create --contexts contract
+reen create --projections contract
+reen create --data contract
 reen create --rate-limit 2 --token-limit 60000 --parallel-limit 8 implementation
 ```
 
-#### `create specification`
+#### `create contract`
 
-Create specifications from draft files. Alias: `specifications`.
+Create internal contract bundles from draft files. Alias: `contracts`.
 
 Usage:
 
 ```text
-reen create specification [OPTIONS] [NAMES]...
+reen create contract [OPTIONS] [NAMES]...
 ```
 
 Arguments and options:
@@ -132,20 +132,20 @@ Arguments and options:
 Examples:
 
 ```bash
-reen create specification
-reen create specification app agent_runner
-reen create specification --fix
-reen create specification --fix --max-fix-attempts 5 app
+reen create contract
+reen create contract app agent_runner
+reen create contract --fix
+reen create contract --fix --max-fix-attempts 5 app
 ```
 
 Notes:
 
-- Drafts under `drafts/apis/` and `drafts/external_apis/` are written under `specifications/contexts/external/`.
+- Drafts under `drafts/apis/` and `drafts/external_apis/` are expanded into hidden internal contracts under `.reen/`.
 - Names are resolved by file stem, so pass `aisstream`, not `aisstream.md`.
 
 #### `create implementation`
 
-Create Rust implementation from specification files.
+Create Rust implementation from drafts using synthesized internal contract bundles.
 
 Usage:
 
@@ -155,7 +155,7 @@ reen create implementation [OPTIONS] [NAMES]...
 
 Arguments and options:
 
-- `[NAMES]...`: Optional specification names without the `.md` extension.
+- `[NAMES]...`: Optional draft names without the `.md` extension.
 - `--fix`: If compilation fails after generation, run the automatic compile-fix loop.
 - `--max-compile-fix-attempts <n>`: Limit automatic compile-fix retries. Default: `3`.
 
@@ -171,11 +171,11 @@ reen create implementation --fix --max-compile-fix-attempts 5 app
 Notes:
 
 - Reen generates project structure files such as `Cargo.toml`, `src/lib.rs`, and `mod.rs` files before generating implementation files.
-- If upstream specifications changed, Reen warns that you should rerun `reen create specification` first.
+- If upstream contracts changed, Reen warns that you should rerun `reen check drafts` first.
 
 #### `create tests`
 
-Create executable BDD tests from specification files. Alias: `test`.
+Create executable BDD tests from drafts via synthesized internal contract bundles. Alias: `test`.
 
 Usage:
 
@@ -185,7 +185,7 @@ reen create tests [OPTIONS] [NAMES]...
 
 Arguments:
 
-- `[NAMES]...`: Optional specification names without the `.md` extension.
+- `[NAMES]...`: Optional draft names without the `.md` extension.
 
 Examples:
 
@@ -203,16 +203,16 @@ Generated test output goes under:
 
 ### `build`
 
-Run specification generation and then implementation generation in one command.
+Run draft checking/contract synthesis and then implementation generation in one command.
 
 Under the hood this behaves like:
 
 ```bash
-reen create specification --fix ...
+reen check drafts
 reen create implementation --fix ...
 ```
 
-If specification creation fails, implementation generation does not run.
+If draft checking or contract synthesis fails, implementation generation does not run.
 
 Usage:
 
@@ -222,13 +222,13 @@ reen build [OPTIONS] [NAMES]...
 
 Arguments and options:
 
-- `[NAMES]...`: Optional draft/specification names without the `.md` extension.
+- `[NAMES]...`: Optional draft names without the `.md` extension.
 - `--clear-cache`: Ignore build-tracker state for both stages and refresh the stage cache first.
 - `--contexts`: Only include `drafts/contexts/`, `drafts/apis/`, and `drafts/external_apis/`.
 - `--projections`: Only include `drafts/projections/`.
 - `--data`: Only include `drafts/data/`.
 - `--fix`: Accepted for parity with `create`; build always enables draft and compilation repair.
-- `--max-fix-attempts <n>`: Limit automatic draft-fix retries during specification creation. Default: `3`.
+- `--max-fix-attempts <n>`: Limit automatic draft-fix retries during contract synthesis. Default: `3`.
 - `--max-compile-fix-attempts <n>`: Limit automatic compilation-fix retries during implementation creation. Default: `3`.
 - `--rate-limit <n>`: Maximum API requests per second. Overrides `REEN_RATE_LIMIT` and registry config.
 - `--token-limit <n>`: Maximum tokens per minute. Overrides `REEN_TOKEN_LIMIT` and registry config.
@@ -248,21 +248,21 @@ reen build --clear-cache --parallel-limit 8 --max-fix-attempts 5 --max-compile-f
 
 `check` currently has one subcommand:
 
-#### `check specification`
+#### `check drafts`
 
-Check whether each requested draft has a generated specification and whether the specification still contains blocking ambiguities. Alias: `specifications`.
+Validate drafts, run internal contract synthesis, and fail on blocking ambiguities. Alias: `contracts`.
 
 Usage:
 
 ```text
-reen check specification [NAMES]...
+reen check drafts [NAMES]...
 ```
 
 Examples:
 
 ```bash
-reen check specification
-reen check specification app agent_runner
+reen check drafts
+reen check drafts app agent_runner
 ```
 
 ### `fix`
@@ -320,58 +320,22 @@ reen test
 
 ### `clear`
 
-`clear` removes either cache entries or generated artifacts.
+Run `reen` from your generated project root. Paths are relative to the current working directory.
 
-#### `clear cache`
-
-Clear build-tracker entries and agent response cache entries for a stage.
-
-Specification clears also remove cached `fix_draft_blockers` responses. Implementation clears also remove cached `create_plan` and `resolve_compilation_errors` responses.
-
-Targets:
-
-- `reen clear cache specification [NAMES]...`
-- `reen clear cache implementation [NAMES]...`
-- `reen clear cache tests [NAMES]...`
-
-Target aliases:
-
-- `specification` -> `specifications`
-- `implementation` -> `implementations`
-- `tests` -> `test`
+| Command | Effect |
+| --- | --- |
+| `reen clear` | Clears **all** build-tracker entries and **all** agent response caches (contract, implementation, and tests stages), **and** deletes the entire `./src` directory if it exists. |
+| `reen clear cache` | Full cache wipe only: build tracker plus agent response caches for every stage. Does not touch `./src`. |
+| `reen clear implementation` | Deletes the `./src` directory tree only. Does not clear caches. |
 
 Examples:
 
 ```bash
-reen clear cache specification
-reen clear cache specification app
-reen clear cache implementation app file_cache
-reen clear cache tests account
+reen clear
+reen --dry-run clear
+reen clear cache
+reen clear implementation
 ```
-
-#### `clear artefact`
-
-Remove generated files for a stage. The command name is spelled `artefact`, and it also accepts the alias `artifact`.
-
-Targets:
-
-- `reen clear artefact specification [NAMES]...`
-- `reen clear artefact implementation [NAMES]...`
-- `reen clear artefact tests [NAMES]...`
-
-Examples:
-
-```bash
-reen clear artefact specification
-reen clear artefact specification app
-reen clear artefact implementation app
-reen clear artifact tests account
-```
-
-Behavior:
-
-- Omitting names removes all artifacts for that target.
-- Supplying names removes only the matching generated files for that target.
 
 ## Model Registry And Limits
 

@@ -74,6 +74,14 @@ static_prompt: |
     immutable value type. If in doubt, document it as an **Implementation Choice Left Open**.
   - Check every named type against the dependency context before concluding.
 
+  ## Domain behavior (out of scope)
+
+  Data specifications must not describe **domain behavior**—rules that belong in a
+  **Context** or **Projection** specification. If the draft describes orchestration,
+  steering, scoring, collisions, or other world rules as methods on the data type,
+  document a **Blocking Ambiguity** or require moving that content to the appropriate
+  context draft. See `docs/AGENT_TYPES.md` (Data, Context, and Projection).
+
   ## Data Immutability (Unconditional)
 
   Data types are always immutable structs or enums after construction.
@@ -145,8 +153,13 @@ static_prompt: |
   ## Accessible Getter Rule (Mandatory)
 
   - If `input.draft_summary.fields` is present, treat it as the authoritative parsed field list.
-  - A field whose `getter_accessible` value is `true` MUST receive a generated getter in Functionalities.
-  - A field whose `getter_accessible` value is `false` MUST NOT receive a generated getter unless the draft explicitly names that getter as a functionality.
+  - **Getters are generated for all fields by default.**
+    A field whose `getter_accessible` value is `true` (the default for the standard 3-column
+    `Field | Meaning | Notes` table) MUST receive a generated getter in Functionalities.
+  - A field whose `getter_accessible` value is `false` (opt-out via the 4-column
+    `Field | Meaning | Accessible | Notes` table with a blank or `no`/`false` cell)
+    MUST NOT receive a generated getter unless the draft explicitly names that getter
+    as a functionality.
   - If the draft uses `Variants` instead of `Fields`, do not generate getters from variants.
 
   ## Output Structure
@@ -163,12 +176,15 @@ static_prompt: |
   6. optional `## Functionalities`
   7. optional `## Rules`
   8. optional `## Construction Rules`
-  9. optional `## Access Rules`
-  10. optional `## Notes`
+  9. optional `## Notes`
 
   Core structure rules:
   - Never emit a top-level `Properties` section for strict data drafts.
   - Never emit a top-level `Constraints & Rules` section for strict data drafts.
+  - **Do NOT emit `## Access Rules`** — getter accessibility is now implied for all fields
+    and communicated through generated `## Functionalities` entries. The `## Access Rules`
+    section is deprecated; if the draft contains one, extract any still-relevant content
+    into `## Construction Rules` or `## Notes`, then discard it.
   - If emitting `## Fields`, use a markdown table that represents the field surface of the type.
   - A specification `## Fields` table may enrich the draft with resolved type information, but it must still remain a `Fields` section.
   - If emitting `## Variants`, use a markdown table that represents the variant surface of the type.
@@ -218,7 +234,8 @@ static_prompt: |
   Before submitting, verify:
   - [ ] All fields, variants, and functionalities originate in the draft
   - [ ] Constructor policy applied correctly (Struct/NewType gets `new` when missing; Enum does not unless explicit)
-  - [ ] Accessible fields from `input.draft_summary` receive generated getters; inaccessible fields do not
+  - [ ] All fields with `getter_accessible: true` (the default for standard 3-column tables) receive generated getters; fields with `getter_accessible: false` (explicit opt-out) do not
+  - [ ] `## Access Rules` section is NOT emitted in the output
   - [ ] No new fields, variants, or rules were added
   - [ ] Names exactly match the draft
   - [ ] Referenced items in dependency context were resolved before marking unspecified/blocking

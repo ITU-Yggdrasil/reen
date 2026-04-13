@@ -50,7 +50,8 @@ impl AgentRegistry for FileAgentRegistry {
         };
 
         // Extract the specification from the YAML.
-        extract_specification(agent_content).map(|template| compose_agent_specification(agent_name, template))
+        extract_specification(agent_content)
+            .map(|template| compose_agent_specification(agent_name, template))
     }
 }
 
@@ -104,11 +105,11 @@ fn shared_implementation_static_suffix(agent_name: &str) -> Option<String> {
         ),
         "create_implementation_projection" => (
             "- `specifications/projections/X.md` → `src/projections/X.rs` (your output goes here)\n- `specifications/projections/group/X.md` → `src/projections/group/X.rs`",
-            "- Prefer `input.direct_dependency_contracts` over broad file scraping when resolving role APIs\n",
+            "- Prefer `input.implemented_direct_role_capsules` for concrete exported dependency signatures and `input.direct_dependency_interfaces` for persisted upstream API obligations\n",
         ),
         "create_implementation_context" => (
             "- `specifications/contexts/X.md` → `src/contexts/X.rs` (your output goes here)\n- `specifications/contexts/group/X.md` → `src/contexts/group/X.rs`\n- `specifications/app.md` → `src/main.rs`",
-            "- Prefer `input.direct_dependency_contracts` over broad file scraping when resolving role APIs\n- Treat transitive dependency entries in the manifest as equally eligible lookup targets\n",
+            "- Prefer `input.implemented_direct_role_capsules` for concrete exported dependency signatures and `input.direct_dependency_interfaces` for persisted upstream API obligations\n- Treat transitive dependency entries in the manifest as equally eligible lookup targets\n",
         ),
         _ => return None,
     };

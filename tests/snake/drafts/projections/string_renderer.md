@@ -2,15 +2,34 @@
 
 ## Purpose
 
-StringRenderer formats the current game frame as plain text (ASCII) and returns it as a string.
+StringRenderer turns one board picture and its score into plain text.
 
-It is the canonical frame formatter for the Snake application.
+It is the canonical formatter for the visible game frame.
 
 ## Role Players
 
+| Role player | Why involved | Expected behaviour |
+|---|---|---|
+| Board | Supplies the picture of the current board as a two-dimensionel array where the indices match (x,y) | Allows the renderer to read what symbol should appear at each visible position |
+
 ## Role Methods
 
+### Board
+
+- **width**
+  Returns the number of columns in the picture.
+
+- **height**
+  Returns the number of rows in the picture.
+
+- **symbol_at**
+  Returns the symbol to show at a given coordinate.
+
 ## Props
+
+| Prop | Meaning | Notes |
+|---|---|---|
+| score | Score shown below the board | Same score the user sees during play |
 
 ## Functionalities
 
@@ -18,18 +37,19 @@ It is the canonical frame formatter for the Snake application.
 
 | Started by | Uses | Result |
 |---|---|---|
-| terminal renderer or caller | board, score | plain-text frame string is returned |
+| TerminalRenderer or the application | board, score | one text frame is returned |
 
 Rules:
-- Uses coordinate system `(0,0)` bottom-left and `(width-1, height-1)` top-right.
-- Returns a single string containing the full rendered frame.
-- Formats rows from top (`y = height - 1`) to bottom (`y = 0`).
+- Reads the current board picture and the score.
+- Formats rows from top to bottom.
 - Formats columns within each row from left to right.
-- Ends each board row with a newline.
-- Appends exactly one score line after the final board row.
+- Each board row ends with a newline.
+- After the last board row, append exactly one score line.
 - Uses score line format `Score: <score>`.
-- Ends the score line with a newline.
+- The score line also ends with a newline.
+- The renderer works from the supplied board picture and score. It does not
+  decide what belongs in a cell.
 
 | Given | When | Then |
 |---|---|---|
-| a board and score of 12 | render is called | the returned frame ends with `Score: 12` followed by a newline |
+| a board picture and score 12 | render is called | the returned text ends with `Score: 12` followed by a newline |

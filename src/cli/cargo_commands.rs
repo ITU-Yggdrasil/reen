@@ -51,7 +51,10 @@ pub async fn fix(
     );
 
     if config.dry_run {
-        println!("{}", standard_text("[DRY RUN] Would run compilation-fix loop"));
+        println!(
+            "{}",
+            standard_text("[DRY RUN] Would run compilation-fix loop")
+        );
         return Ok(());
     }
 
@@ -59,13 +62,12 @@ pub async fn fix(
     let workspace = WorkspaceContext::resolve(config)?;
     let artifact_root = workspace.store.artifact_workspace_root();
 
-    let project_info =
-        if workspace.specifications_root.exists() && workspace.specifications_root.is_dir() {
-            analyze_specifications(&workspace.specifications_root, Some(&workspace.drafts_root))
-                .context("Failed to analyze specifications for fix loop")?
-        } else {
-            ProjectInfo::default()
-        };
+    let project_info = if workspace.drafts_root.exists() && workspace.drafts_root.is_dir() {
+        analyze_specifications(&workspace.drafts_root, Some(&workspace.drafts_root))
+            .context("Failed to analyze drafts for fix loop")?
+    } else {
+        ProjectInfo::default()
+    };
 
     let mut recent_files: Vec<PathBuf> = Vec::new();
     for path in [
@@ -106,7 +108,10 @@ pub async fn fix(
 }
 
 pub async fn run(args: Vec<String>, config: &Config) -> Result<()> {
-    println!("{}", header_text("Building and running project with cargo run..."));
+    println!(
+        "{}",
+        header_text("Building and running project with cargo run...")
+    );
 
     if config.dry_run {
         let args_str = if args.is_empty() {
