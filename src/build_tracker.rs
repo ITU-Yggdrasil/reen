@@ -1,454 +1,75 @@
-//! Build tracking system for incremental builds
-//!
-//! Stores hashes of input and output files in .reen/ directory to track
-//! when files need to be regenerated based on changes.
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-const TRACKER_DIR: &str = ".reen";
-const TRACKER_FILE: &str = "build_tracker.json";
-
-/// Represents the stage in the build pipeline
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Stage {
-    /// Draft -> Internal contract bundle
-    Contract,
-    /// Draft/internal contract -> Implementation
-    Implementation,
-    /// Draft/internal contract -> Tests
-    Tests,
-    /// Implementation -> Compile
-    Compile,
-}
-
-/// Tracks a single file transformation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileTrack {
-    /// Hash of the input file
-    pub input_hash: String,
-    /// Hash of the output file(s)
-    pub output_hash: String,
-    /// Timestamp of last update
-    pub timestamp: String,
-    /// Aggregate fingerprint of dependencies used to produce this output
-    #[serde(default)]
-    pub dependency_fingerprint: String,
-}
-
-/// Main build tracker
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuildTracker {
-    /// Maps: stage -> filename -> FileTrack
-    tracks: HashMap<String, HashMap<String, FileTrack>>,
+    entries: BTreeMap<String, TrackEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateReason {
-    UpToDate,
-    OutputMissing,
-    MissingStageRecord,
-    MissingFileRecord,
-    InputChanged { expected: String, actual: String },
-    DependencyChanged { expected: String, actual: String },
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TrackEntry {
+    stage: String,
+    input_hash: String,
 }
 
 impl BuildTracker {
-    /// Load the build tracker from disk, or create a new one
-    pub fn load() -> Result<Self> {
-        let tracker_path = Self::tracker_path();
-
-        if tracker_path.exists() {
-            let content =
-                fs::read_to_string(&tracker_path).context("Failed to read build tracker")?;
-            let tracker: BuildTracker =
-                serde_json::from_str(&content).context("Failed to parse build tracker")?;
-            Ok(tracker)
-        } else {
-            Ok(BuildTracker::default())
+    pub fn load(workspace_root: &Path) -> Result<Self> {
+        let path = tracker_path(workspace_root);
+        if !path.exists() {
+            return Ok(Self::default());
         }
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
     }
 
-    /// Save the build tracker to disk
-    pub fn save(&self) -> Result<()> {
-        let tracker_dir = PathBuf::from(TRACKER_DIR);
-        fs::create_dir_all(&tracker_dir).context("Failed to create .reen directory")?;
-
-        let tracker_path = Self::tracker_path();
-        let content =
-            serde_json::to_string_pretty(self).context("Failed to serialize build tracker")?;
-
-        fs::write(&tracker_path, content).context("Failed to write build tracker")?;
-
-        Ok(())
-    }
-
-    /// Get the path to the tracker file
-    fn tracker_path() -> PathBuf {
-        PathBuf::from(TRACKER_DIR).join(TRACKER_FILE)
-    }
-
-    /// Check if a file needs to be regenerated for a given stage
-    ///
-    /// Returns true if:
-    /// - The input file has changed
-    /// - The output file doesn't exist
-    /// - There's no previous track record
-    /// - Any upstream dependency has changed
-    pub fn needs_update(
-        &self,
-        stage: Stage,
-        name: &str,
-        input_path: &Path,
-        output_path: &Path,
-        dependency_fingerprint: &str,
-    ) -> Result<bool> {
-        Ok(!matches!(
-            self.update_reason(stage, name, input_path, output_path, dependency_fingerprint)?,
-            UpdateReason::UpToDate
-        ))
-    }
-
-    pub fn update_reason(
-        &self,
-        stage: Stage,
-        name: &str,
-        input_path: &Path,
-        output_path: &Path,
-        dependency_fingerprint: &str,
-    ) -> Result<UpdateReason> {
-        if !output_path.exists() {
-            return Ok(UpdateReason::OutputMissing);
+    pub fn save(&self, workspace_root: &Path) -> Result<()> {
+        let path = tracker_path(workspace_root);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
-
-        let stage_key = format!("{:?}", stage);
-
-        let Some(stage_tracks) = self.tracks.get(&stage_key) else {
-            return Ok(UpdateReason::MissingStageRecord);
-        };
-
-        let Some(track) = stage_tracks.get(name) else {
-            return Ok(UpdateReason::MissingFileRecord);
-        };
-
-        let current_input_hash = Self::hash_file(input_path)?;
-        if current_input_hash != track.input_hash {
-            return Ok(UpdateReason::InputChanged {
-                expected: track.input_hash.clone(),
-                actual: current_input_hash,
-            });
-        }
-
-        if dependency_fingerprint != track.dependency_fingerprint {
-            return Ok(UpdateReason::DependencyChanged {
-                expected: track.dependency_fingerprint.clone(),
-                actual: dependency_fingerprint.to_string(),
-            });
-        }
-
-        Ok(UpdateReason::UpToDate)
+        let content = serde_json::to_string_pretty(self)?;
+        fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
     }
 
-    /// Check if any upstream stage has changed that would affect this stage
-    ///
-    /// For example:
-    /// - Implementation depends on Contract
-    /// - Compile/Run/Test depend on Implementation
-    pub fn upstream_changed(&self, stage: Stage, name: &str) -> Result<bool> {
-        match stage {
-            Stage::Contract => {
-                // First stage, no upstream
-                Ok(false)
-            }
-            Stage::Implementation | Stage::Tests => {
-                // Depends on Contract
-                let contract_stage_key = format!("{:?}", Stage::Contract);
-                if let Some(contract_tracks) = self.tracks.get(&contract_stage_key) {
-                    if let Some(contract_track) = contract_tracks.get(name) {
-                        // Get corresponding input path (draft)
-                        let draft_path = PathBuf::from("drafts").join(format!("{}.md", name));
-                        if draft_path.exists() {
-                            let current_hash = Self::hash_file(&draft_path)?;
-                            if current_hash != contract_track.input_hash {
-                                return Ok(true); // Draft changed, contract needs update
-                            }
-                        }
-                    }
-                }
-                Ok(false)
-            }
-            Stage::Compile => {
-                // Depends on Implementation
-                // Check if any implementation files changed
-                let impl_stage_key = format!("{:?}", Stage::Implementation);
-                if let Some(impl_tracks) = self.tracks.get(&impl_stage_key) {
-                    for (impl_name, impl_track) in impl_tracks {
-                        let contract_path = PathBuf::from(".reen/contracts/contexts")
-                            .join(format!("{impl_name}.contract.json"));
-                        if contract_path.exists() {
-                            let current_hash = Self::hash_file(&contract_path)?;
-                            if current_hash != impl_track.input_hash {
-                                return Ok(true); // Contract changed, impl needs update
-                            }
-                        }
-                    }
-                }
-                Ok(false)
-            }
-        }
+    pub fn is_current(&self, stage: &str, key: &str, input_hash: &str) -> bool {
+        self.entries
+            .get(key)
+            .is_some_and(|entry| entry.stage == stage && entry.input_hash == input_hash)
     }
 
-    /// Record a successful file transformation
-    pub fn record(
-        &mut self,
-        stage: Stage,
-        name: &str,
-        input_path: &Path,
-        output_path: &Path,
-        dependency_fingerprint: &str,
-    ) -> Result<()> {
-        let input_hash = Self::hash_file(input_path)?;
-        // Output file may not exist yet if the agent hasn't written it
-        // Use empty hash if file doesn't exist (will trigger regeneration next time)
-        let output_hash = if output_path.exists() {
-            Self::hash_file(output_path)?
-        } else {
-            String::new()
-        };
-        let timestamp = chrono::Utc::now().to_rfc3339();
-
-        let stage_key = format!("{:?}", stage);
-
-        let stage_tracks = self.tracks.entry(stage_key).or_insert_with(HashMap::new);
-
-        stage_tracks.insert(
-            name.to_string(),
-            FileTrack {
-                input_hash,
-                output_hash,
-                timestamp,
-                dependency_fingerprint: dependency_fingerprint.to_string(),
+    pub fn update(&mut self, stage: &str, key: impl Into<String>, input_hash: impl Into<String>) {
+        self.entries.insert(
+            key.into(),
+            TrackEntry {
+                stage: stage.to_string(),
+                input_hash: input_hash.into(),
             },
         );
-
-        Ok(())
     }
 
-    /// Compute SHA256 hash of a file
-    fn hash_file(path: &Path) -> Result<String> {
-        let content =
-            fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
-
-        let mut hasher = Sha256::new();
-        hasher.update(&content);
-        let result = hasher.finalize();
-
-        Ok(hex::encode(result))
-    }
-
-    /// Get a summary of tracked files
-    pub fn summary(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push("Build Tracker Summary:".to_string());
-
-        for (stage, tracks) in &self.tracks {
-            lines.push(format!("\n{}:", stage));
-            for (name, track) in tracks {
-                lines.push(format!("  {} (updated: {})", name, track.timestamp));
-            }
-        }
-
-        if self.tracks.is_empty() {
-            lines.push("  No tracked files".to_string());
-        }
-
-        lines.join("\n")
-    }
-
-    /// Clear all cache entries for a specific stage.
-    /// Returns number of entries removed.
-    pub fn clear_stage(&mut self, stage: Stage) -> usize {
-        let stage_key = format!("{:?}", stage);
-        self.tracks.remove(&stage_key).map(|m| m.len()).unwrap_or(0)
-    }
-
-    /// Clear cache entries for specific names within a stage.
-    /// Returns number of entries removed.
-    pub fn clear_stage_names(&mut self, stage: Stage, names: &[String]) -> usize {
-        let stage_key = format!("{:?}", stage);
-        let Some(stage_tracks) = self.tracks.get_mut(&stage_key) else {
-            return 0;
-        };
-
-        let mut removed = 0usize;
-        for name in names {
-            if stage_tracks.remove(name).is_some() {
-                removed += 1;
-            }
-        }
-
-        if stage_tracks.is_empty() {
-            self.tracks.remove(&stage_key);
-        }
-
-        removed
-    }
-
-    /// Clear all stages. Returns the total number of tracked file entries removed.
-    pub fn clear_all(&mut self) -> usize {
-        let n: usize = self.tracks.values().map(|m| m.len()).sum();
-        self.tracks.clear();
-        n
-    }
-
-    /// Returns true if the tracker has an entry for a given stage/name.
-    pub fn has_track(&self, stage: Stage, name: &str) -> bool {
-        let stage_key = format!("{:?}", stage);
-        self.tracks
-            .get(&stage_key)
-            .and_then(|m| m.get(name))
-            .is_some()
+    pub fn clear_stage(&mut self, stage: &str) {
+        self.entries.retain(|_, entry| entry.stage != stage);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
+pub fn hash_string(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
-    #[test]
-    fn test_hash_file() {
-        let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join("test_hash.txt");
+pub fn hash_file(path: &Path) -> Result<String> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    Ok(hash_string(&content))
+}
 
-        fs::write(&test_file, "hello world").unwrap();
-
-        let hash1 = BuildTracker::hash_file(&test_file).unwrap();
-        let hash2 = BuildTracker::hash_file(&test_file).unwrap();
-
-        assert_eq!(hash1, hash2); // Same content should give same hash
-
-        fs::write(&test_file, "different").unwrap();
-        let hash3 = BuildTracker::hash_file(&test_file).unwrap();
-
-        assert_ne!(hash1, hash3); // Different content should give different hash
-
-        fs::remove_file(&test_file).ok();
-    }
-
-    #[test]
-    fn test_tracker_record_and_load() {
-        let mut tracker = BuildTracker::default();
-
-        let temp_dir = std::env::temp_dir();
-        let input_file = temp_dir.join("input.txt");
-        let output_file = temp_dir.join("output.txt");
-
-        fs::write(&input_file, "input content").unwrap();
-        fs::write(&output_file, "output content").unwrap();
-
-        tracker
-            .record(Stage::Contract, "test", &input_file, &output_file, "")
-            .unwrap();
-
-        // Check that it was recorded
-        let stage_key = format!("{:?}", Stage::Contract);
-        assert!(tracker.tracks.contains_key(&stage_key));
-        assert!(tracker.tracks[&stage_key].contains_key("test"));
-
-        fs::remove_file(&input_file).ok();
-        fs::remove_file(&output_file).ok();
-    }
-
-    #[test]
-    fn dependency_fingerprint_change_triggers_update() {
-        let mut tracker = BuildTracker::default();
-        let temp_dir = std::env::temp_dir();
-        let input_file = temp_dir.join("dep_fp_input.txt");
-        let output_file = temp_dir.join("dep_fp_output.txt");
-
-        fs::write(&input_file, "input").unwrap();
-        fs::write(&output_file, "output").unwrap();
-
-        tracker
-            .record(
-                Stage::Contract,
-                "dep_fp_test",
-                &input_file,
-                &output_file,
-                "deps:v1",
-            )
-            .unwrap();
-
-        let unchanged = tracker
-            .needs_update(
-                Stage::Contract,
-                "dep_fp_test",
-                &input_file,
-                &output_file,
-                "deps:v1",
-            )
-            .unwrap();
-        assert!(!unchanged);
-
-        let changed = tracker
-            .needs_update(
-                Stage::Contract,
-                "dep_fp_test",
-                &input_file,
-                &output_file,
-                "deps:v2",
-            )
-            .unwrap();
-        assert!(changed);
-
-        fs::remove_file(&input_file).ok();
-        fs::remove_file(&output_file).ok();
-    }
-
-    #[test]
-    fn update_reason_reports_dependency_change() {
-        let mut tracker = BuildTracker::default();
-        let temp_dir = std::env::temp_dir();
-        let input_file = temp_dir.join("dep_reason_input.txt");
-        let output_file = temp_dir.join("dep_reason_output.txt");
-
-        fs::write(&input_file, "input").unwrap();
-        fs::write(&output_file, "output").unwrap();
-
-        tracker
-            .record(
-                Stage::Implementation,
-                "dep_reason_test",
-                &input_file,
-                &output_file,
-                "deps:v1",
-            )
-            .unwrap();
-
-        let reason = tracker
-            .update_reason(
-                Stage::Implementation,
-                "dep_reason_test",
-                &input_file,
-                &output_file,
-                "deps:v2",
-            )
-            .unwrap();
-
-        assert_eq!(
-            reason,
-            UpdateReason::DependencyChanged {
-                expected: "deps:v1".to_string(),
-                actual: "deps:v2".to_string(),
-            }
-        );
-
-        fs::remove_file(&input_file).ok();
-        fs::remove_file(&output_file).ok();
-    }
+fn tracker_path(workspace_root: &Path) -> std::path::PathBuf {
+    workspace_root.join(".reen").join("build_tracker.json")
 }

@@ -13,4 +13,4 @@ Describes whether the player is alive or dead
 
 ## Notes
 
-- `PlayeState` derives `Copy` and `Clone`.
+- `PlayeState` derives `Copy` and `Clone`.  

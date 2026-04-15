@@ -34,13 +34,14 @@ to the screen.
 |---|---|---|
 | game loop or caller | string_renderer, screen | terminal shows the new frame |
 
-Rules:
-- Receives the current board picture and score.
-- Asks StringRenderer to format them as one text frame.
-- Replaces the previously shown frame without visible flicker where possible.
-- Displays the returned frame text exactly.
-- Each line begins at the left edge of the terminal.
-- Multi-line output stays left-aligned line by line.
+**Flow:**
+1. Ask `string_renderer` to format the current board picture and score as one text frame.
+2. Move the terminal cursor to the home position (top-left) on `screen`.
+3. Write the returned frame text to `screen`, left-aligned line by line.
+4. Flush `screen` so the frame appears immediately.
+
+**Extensions:**
+- 2a. The terminal supports the home escape sequence → the previously shown frame is overwritten in place without visible flicker.
 
 | Given | When | Then |
 |---|---|---|

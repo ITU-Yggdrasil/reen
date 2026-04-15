@@ -71,11 +71,10 @@ replacement, and pacing from one tick to the next.
 |---|---|---|
 | application startup | board, snake, command, food_dropper, game_state | game loop context is created |
 
-Rules:
-- Uses the provided board, snake, shared command stream, food dropper, and game
-  state.
-- Input must come from the provided shared command stream.
-- Must not create a separate input stream.
+**Flow:**
+1. Store the provided board, snake, command stream, food dropper, and game state as collaborators.
+
+**Guarantee:** Input comes exclusively from the shared command stream; no separate stream is created.
 
 | Given | When | Then |
 |---|---|---|
@@ -87,15 +86,13 @@ Rules:
 |---|---|---|
 | renderer or caller | board, snake, game_state | a picture of the current board is returned |
 
-Rules:
-- Returns a board picture arranged by coordinate, where each location holds one
-  display symbol, represented as `std::collections::HashMap<Position, char>`.
-- Uses `w` for wall cells on the boundary.
-- Uses a space for unoccupied interior cells.
-- Uses `s` for cells occupied by the snake.
-- Uses `f` for the food position when food exists.
-- Builds the picture from the board, the snake body, and the current food
-  placement.
+**Flow:**
+1. Create an empty map from `Position` to `char` (`std::collections::HashMap<Position, char>`).
+2. For each boundary cell of `board`, set the symbol to `w`.
+3. For each unoccupied interior cell, set the symbol to a space.
+4. For each cell in the snake body, set the symbol to `s`.
+5. If food exists in `game_state`, set the food cell's symbol to `f`.
+6. Return the completed map.
 
 | Given | When | Then |
 |---|---|---|
@@ -107,9 +104,8 @@ Rules:
 |---|---|---|
 | renderer or caller | game_state | current score is returned |
 
-Rules:
-- Returns the current score from the game state.
-- The returned score is the same score shown to the user.
+**Flow:**
+1. Return the score from `game_state`.
 
 | Given | When | Then |
 |---|---|---|
@@ -121,32 +117,27 @@ Rules:
 |---|---|---|
 | game loop scheduler | command, snake, board, food_dropper, game_state | Returns PlayerState::Alive if no obstacles were hit or PlayerState::Dead if an obstacle was hit |
 
-Rules:
-- Base delay is `100 ms` (10 ticks per second).
-- Speed increases over time using a logarithmic curve. Let `now_ms` be the
-  current UTC millisecond count and `game_started_ms` from game state. Let
-  `elapsed_ms = now_ms.saturating_sub(game_started_ms)` and
-  `elapsed_s = elapsed_ms / 1000` (integer whole seconds). The pacing wait in
-  milliseconds before the rest of the tick runs is
-  `max(10_u64, (100.0_f64 / (1.0_f64 + (1.0_f64 + elapsed_s as f64).ln())) as u64)`,
-  giving a floor of 10 ms and slowing from 100 ms as the round ages.
-- Uses the current UTC millisecond count and the recorded round start time to
-  determine how long the round has been running.
-- Waits for the computed pacing delay before continuing the rest of the tick.
-- Calls `capture` on the shared command input.
-- Reads the next gameplay action.
-- A movement action may change direction, but repeating the current direction or
-  reversing directly into the opposite direction is ignored.
-- A fire action has no effect on this game.
-- Computes the next head position from the current head and current direction.
-- If the next head lands on a wall or on the snake body, the round ends.
-- If food exists and the next head lands on the food position, the snake grows
-  by one segment, the score increases by 10, and the food dropper is asked for
-  a replacement food position using the updated snake.
-- If the next head lands on an empty interior cell, the snake moves forward
-  without growing and the score and food placement stay unchanged.
-- The result indicates whether the player hit an obstacle and died or the game continues because the player is still alive
-- Input consumed in one tick is not replayed automatically in the next.
+**Flow:**
+1. Read the current UTC millisecond count into `now_ms`.
+2. Let `elapsed_ms` be `now_ms.saturating_sub(game_state.game_started_ms())`.
+3. Let `elapsed_s` be `elapsed_ms / 1000` (integer whole seconds).
+4. Let `wait_ms` be `max(10_u64, (100.0_f64 / (1.0_f64 + (1.0_f64 + elapsed_s as f64).ln())) as u64)`.
+5. Sleep `wait_ms` milliseconds.
+6. Call `command.capture()` to collect pending input.
+7. Read the next gameplay action via `command.next_action()`.
+8. If a movement action was received and it neither repeats nor directly reverses the current direction, update the snake's direction.
+9. Compute the next head position from the current head and the current direction.
+10. If the next head lands on a wall cell or a snake body cell, return `PlayerState::Dead`.
+11. If food exists and the next head matches the food position, grow the snake by one segment, increase the score by 10, and call `food_dropper.drop()` for a replacement food position using the updated snake.
+12. Otherwise, advance the snake without growing; leave score and food placement unchanged.
+13. Return `PlayerState::Alive`.
+
+**Extensions:**
+- 7a. No action is available → skip direction update; continue from step 9.
+- 7b. A fire action is received → ignore it; continue from step 9 with the current direction.
+- 11a. `food_dropper.drop()` returns no position → clear food from `game_state`.
+
+**Guarantee:** Input consumed in one tick is not replayed in the next.
 
 | Given | When | Then |
 |---|---|---|

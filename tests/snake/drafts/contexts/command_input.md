@@ -13,7 +13,7 @@ resetting or replacing it.
 
 | Role player | Why involved | Expected behaviour |
 |---|---|---|
-| stdin_source | Supplies keyboard input | Supports non-blocking reads from standard input |
+| stdin_source | Supplies keyboard input from stdin | Supports non-blocking reads from standard input |
 
 ## Role Methods
 
@@ -36,9 +36,11 @@ resetting or replacing it.
 |---|---|---|
 | application startup | stdin_source, buffer | empty buffer, ready to capture |
 
-Rules:
-- Starts with an empty input buffer.
-- One shared input stream is used for menus and gameplay.
+**Flow:**
+1. Initialise `buffer` as an empty queue.
+2. Store `stdin_source` and `buffer` as collaborators.
+
+**Guarantee:** One shared buffer is used for the whole application session; menus and gameplay read from the same queue.
 
 | Given | When | Then |
 |---|---|---|
@@ -50,10 +52,14 @@ Rules:
 |---|---|---|
 | game loop or menu | stdin_source, buffer | available keys appended |
 
-Rules:
-- Reads currently available key presses without waiting.
-- Appends captured keys to the end of the buffer in arrival order.
-- Does not remove keys that were already buffered.
+**Flow:**
+1. Ask `stdin_source` for all currently available key presses without waiting.
+2. Append each returned key press to the end of `buffer` in arrival order.
+
+**Extensions:**
+- 1a. No key presses are available → flow ends; `buffer` is unchanged.
+
+**Guarantee:** Keys already in `buffer` before this call remain in place; new keys follow them.
 
 | Given | When | Then |
 |---|---|---|
@@ -65,9 +71,9 @@ Rules:
 |---|---|---|
 | caller that needs raw keys | buffer | oldest key removed and returned, or no key |
 
-Rules:
-- Returns and removes the oldest buffered key event when the buffer is non-empty.
-- Returns no key when the buffer is empty.
+**Flow:**
+1. If `buffer` is non-empty, remove and return the oldest key event.
+2. If `buffer` is empty, return no key.
 
 | Given | When | Then |
 |---|---|---|
@@ -79,18 +85,12 @@ Rules:
 |---|---|---|
 | gameplay logic | buffer | next gameplay action, or no action |
 
-Rules:
-- Reads from the same first-in-first-out stream as `next_key`.
-- Mapping is case-insensitive for letter keys.
-- `w` means move up.
-- `a` means move left.
-- `s` means move down.
-- `d` means move right.
-- Space means fire.
-- Keys with no gameplay meaning are skipped and consumed while scanning for the
-  next action.
-- Returns the first valid gameplay action found, or no action if none is
-  available.
+**Flow:**
+1. Remove the oldest key from `buffer` via the same queue as `next_key`.
+2. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire.
+3. If the key maps to an action, return it.
+4. If the key has no gameplay meaning, discard it and repeat from step 1.
+5. If `buffer` is exhausted with no valid action found, return no action.
 
 | Given | When | Then |
 |---|---|---|

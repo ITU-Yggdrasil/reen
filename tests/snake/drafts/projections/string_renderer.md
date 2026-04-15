@@ -39,16 +39,14 @@ It is the canonical formatter for the visible game frame.
 |---|---|---|
 | TerminalRenderer or the application | board, score | one text frame is returned |
 
-Rules:
-- Reads the current board picture and the score.
-- Formats rows from top to bottom.
-- Formats columns within each row from left to right.
-- Each board row ends with a newline.
-- After the last board row, append exactly one score line.
-- Uses score line format `Score: <score>`.
-- The score line also ends with a newline.
-- The renderer works from the supplied board picture and score. It does not
-  decide what belongs in a cell.
+**Flow:**
+1. Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`).
+2. Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`.
+3. Append a newline character after each row.
+4. After the last row, append the score line `Score: <score>` followed by a newline.
+5. Return the complete string.
+
+**Guarantee:** The renderer reads symbols from `board` and `score`; it does not decide what belongs in any cell.
 
 | Given | When | Then |
 |---|---|---|
