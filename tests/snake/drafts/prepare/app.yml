@@ -1,0 +1,56 @@
+schema: reen.prepare/v2
+source:
+  path: app.md
+  kind: app
+  title: The primary application
+export:
+  name: ThePrimaryApplication
+collaborators:
+- name: commandinputcontext
+  responsibility: Captures key presses into one shared FIFO stream for the whole session. Provides raw keys for menus and gameplay actions for the game loop.
+  type:
+    status: resolved
+    rust: CommandInputContext
+    source: name_match
+- name: gameloopcontext
+  responsibility: Holds the game rules and advances gameplay one tick at a time. Provides the current board picture and score.
+  type:
+    status: resolved
+    rust: GameLoopContext
+    source: name_match
+- name: stringrenderer
+  responsibility: Formats a board picture and score into one plain-text frame.
+  type:
+    status: resolved
+    rust: StringRenderer
+    source: name_match
+- name: terminalrenderer
+  responsibility: Uses `StringRenderer` and shows the latest frame in the terminal.
+  type:
+    status: resolved
+    rust: StringRenderer
+    source: draft_hint
+- name: food_dropper
+  responsibility: Chooses the next food placement on a free interior non-wall, non-snake cell.
+  type:
+    status: fixed
+    rust: Food
+    source: fix.agent
+    reason: no concrete Rust type could be inferred for `food_dropper`
+    evidence:
+    - section: food_dropper
+      text: Chooses the next food placement on a free interior non-wall, non-snake cell.
+functionalities:
+- name: main
+  signature:
+    status: resolved
+    rust: main() -> ()
+    source: prepare.auto
+  returns:
+    status: resolved
+    rust: ()
+    source: prepare.auto
+ambiguities:
+- path: functionalities[0].body
+  severity: info
+  message: method `main` body is missing

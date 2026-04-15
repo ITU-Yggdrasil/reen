@@ -1,0 +1,24 @@
+schema: reen.prepare/v2
+source:
+  path: data/Food.md
+  kind: data
+  title: Food
+export:
+  name: Food
+fields:
+- name: position
+  meaning: Position of the food on the board
+  type:
+    status: resolved
+    rust: Position
+    source: name_match
+  getter_accessible: true
+getters:
+- name: position
+  field: position
+  mode: ref
+constructor:
+  kind: all_fields
+derives:
+- Clone
+- Debug

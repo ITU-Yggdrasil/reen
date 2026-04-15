@@ -1,0 +1,16 @@
+schema: reen.prepare/v2
+source:
+  path: data/PlayerState.md
+  kind: data
+  title: PlayerState
+export:
+  name: PlayerState
+variants:
+- name: Alive
+  meaning: Game continues
+- name: Dead
+  meaning: GameOver
+derives:
+- Clone
+- Copy
+- Debug

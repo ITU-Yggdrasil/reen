@@ -1,0 +1,1272 @@
+use crate::build_tracker::{BuildTracker, hash_string};
+use crate::prepared::{
+    Ambiguity, Body, CollectionEntry, Expression, GetterSpec, MethodSpec, PreparedArtifact,
+    Statement,
+};
+use crate::workspace::{GENERATED_MANIFEST, Workspace};
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(Debug, Clone)]
+pub struct ScaffoldOptions {
+    pub selection: crate::workspace::Selection,
+    pub fix: bool,
+    pub verbose: bool,
+    pub debug: bool,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct GeneratedFilesManifest {
+    files: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LoadedArtifact {
+    prepared_path: PathBuf,
+    artifact: PreparedArtifact,
+    output_path: PathBuf,
+}
+
+pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> Result<()> {
+    let prepared_paths = workspace.prepared_paths(&options.selection)?;
+    let mut tracker = BuildTracker::load(&workspace.root)?;
+    let loaded = load_prepared_artifacts(workspace, &prepared_paths)?;
+    validate_loaded_artifacts(&loaded)?;
+    let aggregate_hash = combined_hash(&loaded)?;
+    if tracker.is_current("scaffold", "scaffold:workspace", &aggregate_hash)
+        && workspace.root.join(GENERATED_MANIFEST).exists()
+    {
+        if options.verbose {
+            println!("Scaffold outputs are up to date");
+        }
+        return Ok(());
+    }
+
+    let order = topo_sort(&loaded)?;
+    let package_name = package_name(&workspace.root);
+    let library_crate = package_name.replace('-', "_");
+    let generated = generate_workspace_files(&loaded, &order, &package_name, &library_crate)?;
+
+    if options.dry_run {
+        if options.verbose {
+            println!("[dry-run] would generate {} file(s)", generated.len());
+        }
+        return Ok(());
+    }
+
+    clear_generated_outputs(workspace, false)?;
+    for (path, content) in &generated {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
+        fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    write_generated_manifest(workspace, generated.keys())?;
+    if options.debug {
+        write_debug_dump(workspace, &loaded)?;
+    }
+
+    let result = run_cargo_build(workspace)?;
+    if result.success {
+        tracker.update("scaffold", "scaffold:workspace", aggregate_hash);
+        tracker.save(&workspace.root)?;
+        return Ok(());
+    }
+
+    if !options.fix {
+        eprint!("{}", result.stderr);
+        bail!("Generated project failed to compile; re-run with --fix to attempt auto-repair");
+    }
+
+    let max_rounds = 5;
+    let mut last_stderr = result.stderr;
+    for round in 1..=max_rounds {
+        let fixes = parse_compile_errors(&last_stderr);
+        if fixes.is_empty() {
+            eprint!("{}", last_stderr);
+            bail!("Generated project failed to compile but no auto-fixable errors were found");
+        }
+        if options.verbose {
+            eprintln!("scaffold --fix round {round}: applying {} fix(es)", fixes.len());
+        }
+        for fix in &fixes {
+            apply_compile_fix(workspace, fix)?;
+            if options.verbose {
+                eprintln!("  {}", fix.description());
+            }
+        }
+        let result = run_cargo_build(workspace)?;
+        if result.success {
+            tracker.update("scaffold", "scaffold:workspace", aggregate_hash);
+            tracker.save(&workspace.root)?;
+            return Ok(());
+        }
+        last_stderr = result.stderr;
+    }
+    eprint!("{}", last_stderr);
+    bail!("Generated project still fails to compile after {max_rounds} fix rounds");
+}
+
+pub fn clear_generated_outputs(workspace: &Workspace, dry_run: bool) -> Result<()> {
+    let manifest_path = workspace.root.join(GENERATED_MANIFEST);
+    if !manifest_path.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
+    let manifest: GeneratedFilesManifest =
+        serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+    for file in &manifest.files {
+        let path = workspace.root.join(file);
+        if dry_run {
+            println!("[dry-run] would remove {}", path.display());
+            continue;
+        }
+        if path.is_file() {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
+        }
+    }
+    if !dry_run {
+        if let Some(src) = workspace.root.join("src").canonicalize().ok().filter(|path| path.is_dir()) {
+            let _ = prune_empty_dirs(&src, &workspace.root);
+        }
+        fs::remove_file(&manifest_path)
+            .with_context(|| format!("Failed to remove {}", manifest_path.display()))?;
+        let mut tracker = BuildTracker::load(&workspace.root)?;
+        tracker.clear_stage("scaffold");
+        tracker.save(&workspace.root)?;
+    }
+    Ok(())
+}
+
+fn write_debug_dump(workspace: &Workspace, loaded: &[LoadedArtifact]) -> Result<()> {
+    let path = workspace.state_dir.join("debug").join("build").join("loaded.yml");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let yaml = serde_yaml::to_string(
+        &loaded
+            .iter()
+            .map(|item| &item.artifact)
+            .collect::<Vec<_>>(),
+    )?;
+    fs::write(&path, yaml).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+fn load_prepared_artifacts(workspace: &Workspace, prepared_paths: &[PathBuf]) -> Result<Vec<LoadedArtifact>> {
+    let mut loaded = Vec::new();
+    for path in prepared_paths {
+        let content =
+            fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let mut artifact: PreparedArtifact = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse prepared artifact {}", path.display()))?;
+        artifact.refresh_ambiguity_index();
+        artifact.validate()?;
+        if artifact.blocking_ambiguities().next().is_some() {
+            let messages = artifact
+                .blocking_ambiguities()
+                .map(|ambiguity| format!("{}: {}", ambiguity.path, ambiguity.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Prepared artifact {} contains blocking ambiguities:\n{}",
+                path.display(),
+                messages
+            );
+        }
+        let output_path = output_path_for_artifact(workspace, &artifact)?;
+        loaded.push(LoadedArtifact {
+            prepared_path: path.clone(),
+            artifact,
+            output_path,
+        });
+    }
+    Ok(loaded)
+}
+
+fn validate_loaded_artifacts(loaded: &[LoadedArtifact]) -> Result<()> {
+    let exports = loaded
+        .iter()
+        .map(|item| item.artifact.export.name.clone())
+        .collect::<BTreeSet<_>>();
+    for item in loaded {
+        for name in item.artifact.referenced_type_names() {
+            if exports.contains(&name) || is_builtin_type(&name) {
+                continue;
+            }
+            bail!(
+                "Prepared artifact {} references unknown type `{}`",
+                item.prepared_path.display(),
+                name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn combined_hash(loaded: &[LoadedArtifact]) -> Result<String> {
+    let mut contents = String::new();
+    for item in loaded {
+        let yaml = serde_yaml::to_string(&item.artifact)?;
+        contents.push_str(&item.artifact.source.path);
+        contents.push('\n');
+        contents.push_str(&yaml);
+        contents.push('\n');
+    }
+    Ok(hash_string(&contents))
+}
+
+fn topo_sort(loaded: &[LoadedArtifact]) -> Result<Vec<usize>> {
+    let mut export_to_index = BTreeMap::new();
+    for (idx, item) in loaded.iter().enumerate() {
+        export_to_index.insert(item.artifact.export.name.clone(), idx);
+    }
+
+    let mut indegree = vec![0usize; loaded.len()];
+    let mut edges = vec![Vec::<usize>::new(); loaded.len()];
+
+    for (idx, item) in loaded.iter().enumerate() {
+        for dep in item.artifact.referenced_type_names() {
+            if dep == item.artifact.export.name {
+                continue;
+            }
+            if let Some(dep_idx) = export_to_index.get(&dep).copied() {
+                indegree[idx] += 1;
+                edges[dep_idx].push(idx);
+            }
+        }
+    }
+
+    let mut queue = VecDeque::new();
+    for (idx, count) in indegree.iter().enumerate() {
+        if *count == 0 {
+            queue.push_back(idx);
+        }
+    }
+    let mut ordered = Vec::new();
+    while let Some(idx) = queue.pop_front() {
+        ordered.push(idx);
+        for next in &edges[idx] {
+            indegree[*next] -= 1;
+            if indegree[*next] == 0 {
+                queue.push_back(*next);
+            }
+        }
+    }
+    if ordered.len() != loaded.len() {
+        bail!("Prepared artifacts contain a cyclic type dependency");
+    }
+    Ok(ordered)
+}
+
+fn output_path_for_artifact(_workspace: &Workspace, artifact: &PreparedArtifact) -> Result<PathBuf> {
+    let relative = artifact
+        .source
+        .path
+        .strip_prefix("drafts/")
+        .unwrap_or(&artifact.source.path);
+    let mut parts = relative.split('/').map(|part| part.to_string()).collect::<Vec<_>>();
+    match artifact.source.kind.as_str() {
+        "data" => {
+            parts.remove(0);
+            Ok(normalized_output_path("src/data", &parts))
+        }
+        "projection" => {
+            parts.remove(0);
+            Ok(normalized_output_path("src/projections", &parts))
+        }
+        "context" => {
+            parts.remove(0);
+            Ok(normalized_output_path("src/contexts", &parts))
+        }
+        "app" => Ok(PathBuf::from("src/main.rs")),
+        other => bail!("Unsupported prepared artifact kind `{other}`"),
+    }
+}
+
+fn normalized_output_path(prefix: &str, parts: &[String]) -> PathBuf {
+    let mut path = PathBuf::from(prefix);
+    for (idx, part) in parts.iter().enumerate() {
+        if idx + 1 == parts.len() {
+            let stem = part.trim_end_matches(".md");
+            path.push(format!("{}.rs", sanitize_module_name(stem)));
+        } else {
+            path.push(sanitize_module_name(part));
+        }
+    }
+    path
+}
+
+fn generate_workspace_files(
+    loaded: &[LoadedArtifact],
+    order: &[usize],
+    package_name: &str,
+    library_crate: &str,
+) -> Result<BTreeMap<PathBuf, String>> {
+    let mut files = BTreeMap::new();
+    let export_kinds = loaded
+        .iter()
+        .map(|item| (item.artifact.export.name.clone(), item.artifact.source.kind.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    for idx in order {
+        let item = &loaded[*idx];
+        let content = match item.artifact.source.kind.as_str() {
+            "data" => generate_data_file(&item.artifact, &export_kinds),
+            "projection" | "context" => generate_composite_file(&item.artifact, &export_kinds),
+            "app" => generate_app_file(&item.artifact, &export_kinds, library_crate),
+            other => bail!("Unsupported prepared artifact kind `{other}`"),
+        }?;
+        files.insert(item.output_path.clone(), content);
+    }
+
+    let library_artifacts = loaded
+        .iter()
+        .filter(|item| item.artifact.source.kind != "app")
+        .collect::<Vec<_>>();
+    files.insert(
+        PathBuf::from("Cargo.toml"),
+        render_cargo_toml(package_name, library_artifacts.iter().map(|item| &item.artifact)),
+    );
+    if !library_artifacts.is_empty() {
+        files.insert(
+            PathBuf::from("src/lib.rs"),
+            render_lib_rs(
+                library_artifacts
+                    .iter()
+                    .map(|item| item.output_path.as_path())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            ),
+        );
+        extend_module_files(&mut files, &library_artifacts)?;
+    } else {
+        files.insert(PathBuf::from("src/lib.rs"), String::new());
+    }
+    Ok(files)
+}
+
+fn extend_module_files(files: &mut BTreeMap<PathBuf, String>, library_artifacts: &[&LoadedArtifact]) -> Result<()> {
+    let mut module_tree: BTreeMap<PathBuf, ModuleNode> = BTreeMap::new();
+    for artifact in library_artifacts {
+        let output = &artifact.output_path;
+        let relative = output
+            .strip_prefix("src")
+            .unwrap_or(output)
+            .to_path_buf();
+        let parent = relative.parent().unwrap_or(Path::new(""));
+        let stem = output
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let entry = module_tree.entry(parent.to_path_buf()).or_default();
+        entry.files.push((stem, artifact.artifact.export.name.clone()));
+        let mut current = parent.to_path_buf();
+        while let Some(parent_dir) = current.parent() {
+            if current.as_os_str().is_empty() {
+                break;
+            }
+            let dir_name = current
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            module_tree
+                .entry(parent_dir.to_path_buf())
+                .or_default()
+                .dirs
+                .insert(dir_name);
+            current = parent_dir.to_path_buf();
+        }
+    }
+
+    for (dir, node) in module_tree {
+        let content = render_mod_rs(&node);
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        files.insert(PathBuf::from("src").join(dir).join("mod.rs"), content);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct ModuleNode {
+    files: Vec<(String, String)>,
+    dirs: BTreeSet<String>,
+}
+
+fn render_mod_rs(node: &ModuleNode) -> String {
+    let mut out = String::new();
+    for dir in &node.dirs {
+        out.push_str(&format!("mod {};\n", dir));
+        out.push_str(&format!("pub use {}::*;\n", dir));
+    }
+    for (stem, export) in &node.files {
+        out.push_str(&format!("mod {};\n", stem));
+        out.push_str(&format!("pub use {}::{};\n", stem, export));
+    }
+    out
+}
+
+fn render_lib_rs(paths: &[&Path]) -> String {
+    let mut sections = BTreeSet::new();
+    for path in paths {
+        if let Some(component) = path
+            .strip_prefix("src")
+            .ok()
+            .and_then(|value| value.components().next())
+            .and_then(|component| component.as_os_str().to_str())
+        {
+            sections.insert(component.to_string());
+        }
+    }
+    let mut out = String::new();
+    for section in &sections {
+        out.push_str(&format!("pub mod {};\n", section));
+    }
+    if !sections.is_empty() {
+        out.push('\n');
+    }
+    for section in &sections {
+        out.push_str(&format!("pub use {}::*;\n", section));
+    }
+    out
+}
+
+fn render_cargo_toml<'a>(
+    package_name: &str,
+    artifacts: impl Iterator<Item = &'a PreparedArtifact>,
+) -> String {
+    let needs_anyhow = artifacts.flat_map(|artifact| artifact.referenced_type_names()).any(|name| name == "Anyhow");
+    let mut out = format!(
+        "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\n",
+        package_name
+    );
+    if needs_anyhow {
+        out.push_str("anyhow = \"1\"\n");
+    }
+    out
+}
+
+fn generate_data_file(
+    artifact: &PreparedArtifact,
+    export_kinds: &BTreeMap<String, String>,
+) -> Result<String> {
+    let imports = render_imports(artifact, export_kinds, "crate");
+    let mut out = String::new();
+    if !imports.is_empty() {
+        out.push_str(&imports);
+        out.push('\n');
+    }
+    let derives = if artifact.derives.is_empty() {
+        "#[derive(Debug, Clone)]\n".to_string()
+    } else {
+        format!("#[derive({})]\n", artifact.derives.join(", "))
+    };
+    out.push_str(&derives);
+    if !artifact.variants.is_empty() {
+        out.push_str(&format!("pub enum {} {{\n", artifact.export.name));
+        for variant in &artifact.variants {
+            out.push_str(&format!("    {},\n", variant.name));
+        }
+        out.push_str("}\n");
+        return Ok(out);
+    }
+
+    out.push_str(&format!("pub struct {} {{\n", artifact.export.name));
+    for (idx, field) in artifact.fields.iter().enumerate() {
+        let ty = field
+            .type_status
+            .rust()
+            .ok_or_else(|| anyhow::anyhow!("missing field type for `{}`", field.name))?;
+        out.push_str(&fixme_comment(&artifact.ambiguities, &format!("fields[{idx}].type"), 1));
+        out.push_str(&format!("    {}: {},\n", field.name, ty));
+    }
+    out.push_str("}\n\n");
+    out.push_str(&format!("impl {} {{\n", artifact.export.name));
+    if artifact.constructor.is_some() {
+        out.push_str(&render_constructor(artifact, 1)?);
+    }
+    for getter in &artifact.getters {
+        out.push_str(&render_getter(artifact, getter, 1)?);
+    }
+    for (idx, method) in artifact.functionalities.iter().enumerate() {
+        if method.name == "new" {
+            continue;
+        }
+        out.push_str(&render_method_with_fixme(method, None, 1, &artifact.ambiguities, &format!("functionalities[{idx}]"))?);
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+fn generate_composite_file(
+    artifact: &PreparedArtifact,
+    export_kinds: &BTreeMap<String, String>,
+) -> Result<String> {
+    let imports = render_imports(artifact, export_kinds, "crate");
+    let mut out = String::new();
+    if !imports.is_empty() {
+        out.push_str(&imports);
+        out.push('\n');
+    }
+    out.push_str(&format!("pub struct {} {{\n", artifact.export.name));
+    for (idx, role) in artifact.roles.iter().enumerate() {
+        let ty = role
+            .type_status
+            .rust()
+            .ok_or_else(|| anyhow::anyhow!("missing role type for `{}`", role.name))?;
+        out.push_str(&fixme_comment(&artifact.ambiguities, &format!("roles[{idx}].type"), 1));
+        out.push_str(&format!("    {}: {},\n", role.name, ty));
+    }
+    for (idx, prop) in artifact.props.iter().enumerate() {
+        let ty = prop
+            .type_status
+            .rust()
+            .ok_or_else(|| anyhow::anyhow!("missing prop type for `{}`", prop.name))?;
+        out.push_str(&fixme_comment(&artifact.ambiguities, &format!("props[{idx}].type"), 1));
+        out.push_str(&format!("    {}: {},\n", prop.name, ty));
+    }
+    out.push_str("}\n\n");
+    out.push_str(&format!("impl {} {{\n", artifact.export.name));
+    for (idx, method) in artifact.functionalities.iter().enumerate() {
+        out.push_str(&render_method_with_fixme(method, None, 1, &artifact.ambiguities, &format!("functionalities[{idx}]"))?);
+    }
+    for (ridx, role) in artifact.roles.iter().enumerate() {
+        for (midx, method) in role.methods.iter().enumerate() {
+            out.push_str(&render_method_with_fixme(method, Some(&role.name), 1, &artifact.ambiguities, &format!("roles[{ridx}].methods[{midx}]"))?);
+        }
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+fn generate_app_file(
+    artifact: &PreparedArtifact,
+    export_kinds: &BTreeMap<String, String>,
+    library_crate: &str,
+) -> Result<String> {
+    let imports = render_imports(artifact, export_kinds, library_crate);
+    let mut out = String::new();
+    if !imports.is_empty() {
+        out.push_str(&imports);
+        out.push('\n');
+    }
+    let main = artifact
+        .functionalities
+        .iter()
+        .find(|method| method.name == "main")
+        .ok_or_else(|| anyhow::anyhow!("app artifact is missing main functionality"))?;
+    out.push_str("fn main() {\n");
+    match main.body.as_ref() {
+        Some(body) => out.push_str(&render_body(body, 1)?),
+        None => out.push_str("    todo!(\"main\")\n"),
+    }
+    out.push_str("}\n");
+    Ok(out)
+}
+
+fn render_constructor(artifact: &PreparedArtifact, indent: usize) -> Result<String> {
+    let mut out = String::new();
+    let params = artifact
+        .fields
+        .iter()
+        .map(|field| {
+            let ty = field
+                .type_status
+                .rust()
+                .ok_or_else(|| anyhow::anyhow!("missing field type for `{}`", field.name))?;
+            Ok(format!("{}: {}", field.name, ty))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    out.push_str(&format!(
+        "{}pub fn new({}) -> Self {{\n",
+        indent_str(indent),
+        params.join(", ")
+    ));
+    out.push_str(&format!("{}Self {{\n", indent_str(indent + 1)));
+    for field in &artifact.fields {
+        out.push_str(&format!("{}{},\n", indent_str(indent + 2), field.name));
+    }
+    out.push_str(&format!("{}}}\n", indent_str(indent + 1)));
+    out.push_str(&format!("{}}}\n", indent_str(indent)));
+    Ok(out)
+}
+
+fn render_getter(artifact: &PreparedArtifact, getter: &GetterSpec, indent: usize) -> Result<String> {
+    let field = artifact
+        .fields
+        .iter()
+        .find(|field| field.name == getter.field)
+        .ok_or_else(|| anyhow::anyhow!("unknown getter field `{}`", getter.field))?;
+    let field_type = field
+        .type_status
+        .rust()
+        .ok_or_else(|| anyhow::anyhow!("missing field type for `{}`", field.name))?;
+    let return_type = match getter.mode.as_str() {
+        "copy" => field_type.to_string(),
+        _ => format!("&{}", field_type),
+    };
+    let body = match getter.mode.as_str() {
+        "copy" => format!("self.{}", field.name),
+        _ => format!("&self.{}", field.name),
+    };
+    Ok(format!(
+        "{}pub fn {}(&self) -> {} {{\n{}{}\n{}}}\n",
+        indent_str(indent),
+        getter.name,
+        return_type,
+        indent_str(indent + 1),
+        body,
+        indent_str(indent)
+    ))
+}
+
+fn render_method_with_fixme(
+    method: &MethodSpec,
+    role_name: Option<&str>,
+    indent: usize,
+    ambiguities: &[Ambiguity],
+    base_path: &str,
+) -> Result<String> {
+    let mut out = String::new();
+    out.push_str(&fixme_comment(ambiguities, &format!("{base_path}.signature"), indent));
+    out.push_str(&fixme_comment(ambiguities, &format!("{base_path}.returns"), indent));
+    let visibility = if role_name.is_some() { "" } else { "pub " };
+    let rust_name = role_name
+        .map(|role| format!("{}_{}", role, method.name))
+        .unwrap_or_else(|| method.name.clone());
+    let receiver = method.receiver.clone().unwrap_or_default();
+    let mut params = Vec::new();
+    if !receiver.is_empty() {
+        params.push(receiver);
+    }
+    for (pidx, parameter) in method.parameters.iter().enumerate() {
+        let param_path = format!("{base_path}.parameters[{pidx}].type");
+        if ambiguities.iter().any(|a| a.path == param_path && a.severity == "fixed") {
+            out.push_str(&fixme_comment(ambiguities, &param_path, indent));
+        }
+        let ty = parameter
+            .type_status
+            .rust()
+            .ok_or_else(|| anyhow::anyhow!("missing type for parameter `{}`", parameter.name))?;
+        params.push(format!("{}: {}", parameter.name, ty));
+    }
+    let return_type = method
+        .return_status
+        .rust()
+        .ok_or_else(|| anyhow::anyhow!("missing return type for method `{}`", method.name))?;
+    out.push_str(&format!(
+        "{}{}fn {}({}) -> {} {{\n",
+        indent_str(indent),
+        visibility,
+        rust_name,
+        params.join(", "),
+        return_type
+    ));
+    match method.body.as_ref() {
+        Some(body) => out.push_str(&render_body(body, indent + 1)?),
+        None => out.push_str(&format!(
+            "{}todo!(\"{}\")\n",
+            indent_str(indent + 1),
+            rust_name
+        )),
+    }
+    out.push_str(&format!("{}}}\n", indent_str(indent)));
+    Ok(out)
+}
+
+fn render_body(body: &Body, indent: usize) -> Result<String> {
+    let mut out = String::new();
+    for step in &body.steps {
+        out.push_str(&render_statement(step, indent)?);
+    }
+    Ok(out)
+}
+
+fn render_statement(step: &Statement, indent: usize) -> Result<String> {
+    Ok(match step {
+        Statement::Let { name, expr } => {
+            format!(
+                "{}let {} = {};\n",
+                indent_str(indent),
+                name,
+                render_expression(expr)?
+            )
+        }
+        Statement::AssignLocal { name, expr } => {
+            format!(
+                "{}{} = {};\n",
+                indent_str(indent),
+                name,
+                render_expression(expr)?
+            )
+        }
+        Statement::Call { expr } => {
+            format!("{}{};\n", indent_str(indent), render_expression(expr)?)
+        }
+        Statement::If {
+            condition,
+            then_steps,
+            else_steps,
+        } => {
+            let mut out = format!(
+                "{}if {} {{\n",
+                indent_str(indent),
+                render_expression(condition)?
+            );
+            for step in then_steps {
+                out.push_str(&render_statement(step, indent + 1)?);
+            }
+            if else_steps.is_empty() {
+                out.push_str(&format!("{}}}\n", indent_str(indent)));
+            } else {
+                out.push_str(&format!("{}}} else {{\n", indent_str(indent)));
+                for step in else_steps {
+                    out.push_str(&render_statement(step, indent + 1)?);
+                }
+                out.push_str(&format!("{}}}\n", indent_str(indent)));
+            }
+            out
+        }
+        Statement::Match { expr, arms } => {
+            let mut out = format!(
+                "{}match {} {{\n",
+                indent_str(indent),
+                render_expression(expr)?
+            );
+            for arm in arms {
+                out.push_str(&format!("{}{} => {{\n", indent_str(indent + 1), arm.pattern));
+                for step in &arm.steps {
+                    out.push_str(&render_statement(step, indent + 2)?);
+                }
+                out.push_str(&format!("{}}},\n", indent_str(indent + 1)));
+            }
+            out.push_str(&format!("{}}}\n", indent_str(indent)));
+            out
+        }
+        Statement::ForEach {
+            binding,
+            collection,
+            body,
+        } => {
+            let mut out = format!(
+                "{}for {} in {} {{\n",
+                indent_str(indent),
+                binding,
+                render_expression(collection)?
+            );
+            for step in body {
+                out.push_str(&render_statement(step, indent + 1)?);
+            }
+            out.push_str(&format!("{}}}\n", indent_str(indent)));
+            out
+        }
+        Statement::Return { expr } => match expr {
+            Some(expr) => format!(
+                "{}return {};\n",
+                indent_str(indent),
+                render_expression(expr)?
+            ),
+            None => format!("{}return;\n", indent_str(indent)),
+        },
+        Statement::SleepMs { expr } => format!(
+            "{}std::thread::sleep(std::time::Duration::from_millis(({}) as u64));\n",
+            indent_str(indent),
+            render_expression(expr)?
+        ),
+        Statement::ReadUtcNowMs { name } => format!(
+            "{}let {} = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;\n",
+            indent_str(indent),
+            name
+        ),
+    })
+}
+
+fn render_expression(expr: &Expression) -> Result<String> {
+    Ok(match expr {
+        Expression::Literal { kind, value } => match kind.as_str() {
+            "string" => format!("{value:?}.to_string()"),
+            "integer" | "bool" | "path" => value.clone(),
+            "char" => format!("'{}'", value),
+            other => bail!("Unsupported literal kind `{other}`"),
+        },
+        Expression::Var { name } => name.clone(),
+        Expression::Field { base, name } => {
+            if base == "self" {
+                format!("self.{name}")
+            } else {
+                format!("{base}.{name}")
+            }
+        }
+        Expression::ConstructStruct { type_name, fields } => {
+            let rendered = fields
+                .iter()
+                .map(|field| Ok(format!("{}: {}", field.name, render_expression(&field.expr)?)))
+                .collect::<Result<Vec<_>>>()?
+                .join(", ");
+            format!("{type_name} {{ {rendered} }}")
+        }
+        Expression::ConstructEnum { type_name, variant } => format!("{type_name}::{variant}"),
+        Expression::CallRoleMethod { role, method, args } => {
+            // Role methods take `&self.<role>` as their first argument (the role player).
+            // Remaining args follow separated by commas.
+            let domain_args = render_call_args(args)?;
+            let all_args = if domain_args.is_empty() {
+                format!("&self.{role}")
+            } else {
+                format!("&self.{role}, {domain_args}")
+            };
+            format!("self.{role}_{method}({all_args})")
+        }
+        Expression::CallLocalMethod { name, args } => {
+            if name.ends_with('!') {
+                format!("{name}({})", render_macro_args(args)?)
+            } else {
+                format!("{name}({})", render_call_args(args)?)
+            }
+        }
+        Expression::CallInstanceMethod {
+            receiver,
+            method,
+            args,
+        } => format!(
+            "{}.{}({})",
+            render_expression(receiver)?,
+            method,
+            render_call_args(args)?
+        ),
+        Expression::BinaryOp {
+            operator,
+            left,
+            right,
+        } => format!(
+            "({} {} {})",
+            render_expression(left)?,
+            operator,
+            render_expression(right)?
+        ),
+        Expression::UnaryOp { operator, expr } => {
+            format!("({}{})", operator, render_expression(expr)?)
+        }
+        Expression::CollectionLiteral { kind, items, entries } => match kind.as_str() {
+            "vec" => format!(
+                "vec![{}]",
+                items
+                    .iter()
+                    .map(render_expression)
+                    .collect::<Result<Vec<_>>>()?
+                    .join(", ")
+            ),
+            "hash_map" => {
+                let rendered = render_entries(entries)?;
+                format!("std::collections::HashMap::from([{rendered}])")
+            }
+            other => bail!("Unsupported collection literal kind `{other}`"),
+        },
+    })
+}
+
+fn render_call_args(args: &[Expression]) -> Result<String> {
+    args.iter()
+        .map(render_expression)
+        .collect::<Result<Vec<_>>>()
+        .map(|items| items.join(", "))
+}
+
+fn render_macro_args(args: &[Expression]) -> Result<String> {
+    args.iter()
+        .map(|expr| match expr {
+            Expression::Literal { kind, value } if kind == "string" => Ok(format!("{value:?}")),
+            _ => render_expression(expr),
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|items| items.join(", "))
+}
+
+fn render_entries(entries: &[CollectionEntry]) -> Result<String> {
+    entries
+        .iter()
+        .map(|entry| {
+            Ok(format!(
+                "({}, {})",
+                render_expression(&entry.key)?,
+                render_expression(&entry.value)?
+            ))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|items| items.join(", "))
+}
+
+fn render_imports(
+    artifact: &PreparedArtifact,
+    export_kinds: &BTreeMap<String, String>,
+    root: &str,
+) -> String {
+    let mut imports = artifact
+        .referenced_type_names()
+        .into_iter()
+        .filter(|name| export_kinds.contains_key(name) && *name != artifact.export.name)
+        .collect::<Vec<_>>();
+    imports.sort();
+    if imports.is_empty() {
+        return String::new();
+    }
+    format!("use {}::{{{}}};\n", root, imports.join(", "))
+}
+
+fn package_name(root: &Path) -> String {
+    let base = root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("generated-app");
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in base.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+        if normalized == '-' {
+            if !prev_dash && !out.is_empty() {
+                out.push('-');
+            }
+            prev_dash = true;
+            continue;
+        }
+        prev_dash = false;
+        out.push(normalized);
+    }
+    if out.is_empty() {
+        "generated-app".to_string()
+    } else {
+        out.trim_matches('-').to_string()
+    }
+}
+
+fn sanitize_module_name(value: &str) -> String {
+    let mut out = String::new();
+    let mut prev_underscore = false;
+    for ch in value.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '_'
+        };
+        if normalized == '_' {
+            if !prev_underscore && !out.is_empty() {
+                out.push('_');
+            }
+            prev_underscore = true;
+            continue;
+        }
+        prev_underscore = false;
+        out.push(normalized);
+    }
+    out.trim_matches('_').to_string()
+}
+
+fn write_generated_manifest<'a>(
+    workspace: &Workspace,
+    files: impl Iterator<Item = &'a PathBuf>,
+) -> Result<()> {
+    let manifest = GeneratedFilesManifest {
+        files: files
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect(),
+    };
+    let path = workspace.root.join(GENERATED_MANIFEST);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(&manifest)?;
+    fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+struct CompileResult {
+    success: bool,
+    stderr: String,
+}
+
+fn run_cargo_build(workspace: &Workspace) -> Result<CompileResult> {
+    let output = Command::new("cargo")
+        .args(["build", "--message-format=short"])
+        .env("RUSTFLAGS", "-Awarnings")
+        .current_dir(&workspace.root)
+        .output()
+        .context("Failed to invoke cargo build")?;
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    Ok(CompileResult {
+        success: output.status.success(),
+        stderr,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Scaffold --fix: deterministic compile-error repair
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum CompileFix {
+    RemoveDerive {
+        file: PathBuf,
+        line: usize,
+        trait_name: String,
+    },
+    AddLifetimeToMethod {
+        file: PathBuf,
+        line: usize,
+    },
+}
+
+impl CompileFix {
+    fn description(&self) -> String {
+        match self {
+            CompileFix::RemoveDerive { file, trait_name, .. } => {
+                format!("remove `{trait_name}` derive from {}", file.display())
+            }
+            CompileFix::AddLifetimeToMethod { file, line } => {
+                format!("add lifetime parameter to method at {}:{line}", file.display())
+            }
+        }
+    }
+}
+
+fn parse_compile_errors(stderr: &str) -> Vec<CompileFix> {
+    let mut fixes = Vec::new();
+    let mut seen = BTreeSet::new();
+    for line in stderr.lines() {
+        // E0204: the trait `Copy` cannot be implemented for this type
+        // E0277: the trait bound `X: Debug` is not satisfied (derive(Debug) on a type with non-Debug fields)
+        if let Some(fix) = parse_derive_error(line, "E0204", "Copy") {
+            let key = format!("{}:{}", fix.description(), "");
+            if seen.insert(key) {
+                fixes.push(fix);
+            }
+        }
+        if let Some(fix) = parse_derive_error(line, "E0277", "Debug") {
+            let key = format!("{}:{}", fix.description(), "");
+            if seen.insert(key) {
+                fixes.push(fix);
+            }
+        }
+        // lifetime may not live long enough
+        if line.contains("error: lifetime may not live long enough") {
+            if let Some(fix) = parse_lifetime_error(line) {
+                let key = format!("{}:{}", fix.description(), "");
+                if seen.insert(key) {
+                    fixes.push(fix);
+                }
+            }
+        }
+    }
+    fixes
+}
+
+/// Parse `src/data/snake.rs:3:17: error[E0204]: ...` style lines
+fn parse_derive_error(line: &str, error_code: &str, trait_name: &str) -> Option<CompileFix> {
+    let marker = format!("error[{error_code}]:");
+    if !line.contains(&marker) {
+        return None;
+    }
+    let (location, _) = line.split_once(": error")?;
+    let parts: Vec<&str> = location.split(':').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let file = PathBuf::from(parts[0]);
+    let line_no: usize = parts[1].parse().ok()?;
+    Some(CompileFix::RemoveDerive {
+        file,
+        line: line_no,
+        trait_name: trait_name.to_string(),
+    })
+}
+
+/// Parse `src/contexts/game_loop.rs:28:16: error: lifetime may not live long enough`
+fn parse_lifetime_error(line: &str) -> Option<CompileFix> {
+    let (location, _) = line.split_once(": error:")?;
+    let parts: Vec<&str> = location.split(':').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let file = PathBuf::from(parts[0]);
+    let line_no: usize = parts[1].parse().ok()?;
+    Some(CompileFix::AddLifetimeToMethod {
+        file,
+        line: line_no,
+    })
+}
+
+fn apply_compile_fix(workspace: &Workspace, fix: &CompileFix) -> Result<()> {
+    match fix {
+        CompileFix::RemoveDerive { file, line, trait_name } => {
+            let path = workspace.root.join(file);
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let mut lines: Vec<String> = content.lines().map(String::from).collect();
+            let idx = line.checked_sub(1).context("invalid line number")?;
+            if idx < lines.len() {
+                lines[idx] = remove_derive_trait(&lines[idx], trait_name);
+            }
+            let result = lines.join("\n") + "\n";
+            fs::write(&path, result)
+                .with_context(|| format!("Failed to write {}", path.display()))
+        }
+        CompileFix::AddLifetimeToMethod { file, line } => {
+            let path = workspace.root.join(file);
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let mut lines: Vec<String> = content.lines().map(String::from).collect();
+            // The error points at the body line; the fn signature is one line above.
+            let sig_idx = line.checked_sub(2).unwrap_or(0);
+            if sig_idx < lines.len() && lines[sig_idx].contains("fn ") {
+                lines[sig_idx] = add_lifetime_to_signature(&lines[sig_idx]);
+            }
+            let result = lines.join("\n") + "\n";
+            fs::write(&path, result)
+                .with_context(|| format!("Failed to write {}", path.display()))
+        }
+    }
+}
+
+/// Remove a single trait from a `#[derive(...)]` attribute.
+/// If it's the last trait, remove the entire line.
+fn remove_derive_trait(line: &str, trait_name: &str) -> String {
+    // Match #[derive(Trait1, Trait2, ...)]
+    let Some(start) = line.find("#[derive(") else {
+        return line.to_string();
+    };
+    let prefix = &line[..start];
+    let inner_start = start + "#[derive(".len();
+    let Some(end) = line[inner_start..].find(")]") else {
+        return line.to_string();
+    };
+    let inner = &line[inner_start..inner_start + end];
+    let traits: Vec<&str> = inner.split(',').map(|t| t.trim()).collect();
+    let filtered: Vec<&str> = traits.into_iter().filter(|t| *t != trait_name).collect();
+    if filtered.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}#[derive({})]", filtered.join(", "))
+    }
+}
+
+/// Add `<'a>` lifetime to a method signature so borrowed role parameters
+/// share their lifetime with the return type.
+///
+/// Transforms:  `fn foo(&self, bar: &Type) -> &ReturnType {`
+/// Into:        `fn foo<'a>(&self, bar: &'a Type) -> &'a ReturnType {`
+fn add_lifetime_to_signature(line: &str) -> String {
+    if line.contains("<'a>") {
+        return line.to_string();
+    }
+    let Some(fn_pos) = line.find("fn ") else {
+        return line.to_string();
+    };
+    let after_fn = &line[fn_pos + 3..];
+    let paren_pos = match after_fn.find('(') {
+        Some(p) => fn_pos + 3 + p,
+        None => return line.to_string(),
+    };
+    let fn_name_end = paren_pos;
+
+    // Insert <'a> before the opening paren
+    let mut result = String::with_capacity(line.len() + 20);
+    result.push_str(&line[..fn_name_end]);
+    result.push_str("<'a>");
+    let rest = &line[fn_name_end..];
+
+    // Replace `&self` stays as is, then replace `&Type` with `&'a Type`
+    // in parameters and return type, but skip &self and &mut self.
+    let rest = annotate_borrows_with_lifetime(rest);
+    result.push_str(&rest);
+    result
+}
+
+/// In a signature fragment like `(&self, param: &Foo) -> &Bar {`,
+/// add `'a` to every `&` borrow except `&self` / `&mut self`.
+fn annotate_borrows_with_lifetime(sig: &str) -> String {
+    let mut out = String::with_capacity(sig.len() + 10);
+    let chars: Vec<char> = sig.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '&' {
+            // Check if this is &self or &mut self
+            let rest: String = chars[i..].iter().collect();
+            if rest.starts_with("&self") || rest.starts_with("&mut self") {
+                out.push('&');
+                i += 1;
+                continue;
+            }
+            // Already has lifetime annotation
+            if rest.starts_with("&'") {
+                out.push('&');
+                i += 1;
+                continue;
+            }
+            out.push_str("&'a ");
+            i += 1;
+            // Skip any whitespace after & that was already there
+            while i < len && chars[i] == ' ' {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+fn indent_str(depth: usize) -> String {
+    "    ".repeat(depth)
+}
+
+fn is_builtin_type(name: &str) -> bool {
+    matches!(
+        name,
+        "String" | "Vec" | "Option" | "Result"
+            | "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet" | "VecDeque"
+            | "Box" | "Rc" | "Arc" | "Cow" | "Pin"
+    )
+}
+
+fn fixme_comment(ambiguities: &[Ambiguity], path: &str, indent: usize) -> String {
+    for amb in ambiguities {
+        if amb.path == path && amb.severity == "fixed" {
+            return format!(
+                "{}// FIXME(agent): {}\n",
+                indent_str(indent),
+                amb.message
+            );
+        }
+    }
+    String::new()
+}
+
+fn prune_empty_dirs(path: &Path, root: &Path) -> Result<()> {
+    if path == root {
+        return Ok(());
+    }
+    if path.read_dir()?.next().is_none() {
+        fs::remove_dir(path).with_context(|| format!("Failed to remove {}", path.display()))?;
+        if let Some(parent) = path.parent() {
+            prune_empty_dirs(parent, root)?;
+        }
+    }
+    Ok(())
+}

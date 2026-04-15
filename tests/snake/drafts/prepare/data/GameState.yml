@@ -1,0 +1,65 @@
+schema: reen.prepare/v2
+source:
+  path: data/GameState.md
+  kind: data
+  title: GameState
+export:
+  name: GameState
+fields:
+- name: score
+  meaning: Current score as a whole number
+  type:
+    status: defaulted
+    rust: u32
+    source: scalar_default
+  getter_accessible: true
+  notes:
+  - Starts at `0`
+- name: food_placement
+  meaning: Current `Food` item on the board, if any
+  type:
+    status: fixed
+    rust: Option<Food>
+    source: fix.agent
+    candidates:
+    - Food
+    - None
+    - Option<Food>
+    reason: multiple type candidates were found for `food_placement`
+    evidence:
+    - section: food_placement
+      text: Current `Food` item on the board, if any
+    - section: food_placement
+      text: '`None` means no food is available; type is `Option<Food>`'
+  getter_accessible: true
+  notes:
+  - '`None` means no food is available; type is `Option<Food>`'
+- name: game_started
+  meaning: Game start time expressed as `utc.now_ms`
+  type:
+    status: resolved
+    rust: u64
+    source: draft_hint
+  getter_accessible: true
+  notes:
+  - Used to calculate elapsed game time; type is `u64`
+getters:
+- name: score
+  field: score
+  mode: copy
+- name: food_placement
+  field: food_placement
+  mode: ref
+- name: game_started
+  field: game_started
+  mode: copy
+constructor:
+  kind: all_fields
+invariants:
+- '`score` is never negative.'
+- '`score` only increases.'
+- During normal play, `score` does not exceed `2,000,000,000`.
+- '`score` is stored as `u32`. The saturation cap of `2,000,000,000` is enforced by logic in `increment_score` (saturating addition), not at the type level. `u32::MAX` (~4,294,967,295) exceeds the cap, so the cap is a domain invariant maintained by the method.'
+derives:
+- Clone
+- Debug

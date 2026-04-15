@@ -1,0 +1,42 @@
+schema: reen.prepare/v2
+source:
+  path: data/Board.md
+  kind: data
+  title: Board
+export:
+  name: Board
+fields:
+- name: width
+  meaning: Width of the rectangular board
+  type:
+    status: defaulted
+    rust: u32
+    source: scalar_default
+  getter_accessible: true
+  notes:
+  - Positive whole number
+- name: height
+  meaning: Height of the rectangular board
+  type:
+    status: defaulted
+    rust: u32
+    source: scalar_default
+  getter_accessible: true
+  notes:
+  - Positive whole number
+getters:
+- name: width
+  field: width
+  mode: copy
+- name: height
+  field: height
+  mode: copy
+constructor:
+  kind: all_fields
+invariants:
+- '`width` must be greater than `0`.'
+- '`height` must be greater than `0`.'
+- Cells where `x == 0`, `y == 0`, `x == width - 1`, or `y == height - 1` are wall cells.
+derives:
+- Clone
+- Debug

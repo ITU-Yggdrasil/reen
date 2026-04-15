@@ -1,0 +1,38 @@
+schema: reen.prepare/v2
+source:
+  path: data/Position.md
+  kind: data
+  title: Position
+export:
+  name: Position
+fields:
+- name: x
+  meaning: Horizontal coordinate
+  type:
+    status: resolved
+    rust: u32
+    source: draft_hint
+  getter_accessible: true
+  notes:
+  - Type `u32`
+- name: y
+  meaning: Vertical coordinate
+  type:
+    status: resolved
+    rust: u32
+    source: draft_hint
+  getter_accessible: true
+  notes:
+  - Type `u32`
+getters:
+- name: x
+  field: x
+  mode: copy
+- name: y
+  field: y
+  mode: copy
+constructor:
+  kind: all_fields
+derives:
+- Clone
+- Debug

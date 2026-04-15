@@ -1,0 +1,20 @@
+schema: reen.prepare/v2
+source:
+  path: data/Direction.md
+  kind: data
+  title: Direction
+export:
+  name: Direction
+variants:
+- name: Up
+  meaning: Moving upward
+- name: Down
+  meaning: Moving downward
+- name: Left
+  meaning: Moving leftward
+- name: Right
+  meaning: Moving rightward
+derives:
+- Clone
+- Copy
+- Debug

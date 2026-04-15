@@ -1,0 +1,23 @@
+schema: reen.prepare/v2
+source:
+  path: data/CollisionType.md
+  kind: data
+  title: CollisionType
+export:
+  name: CollisionType
+variants:
+- name: Obstacle
+  meaning: The predicted move hits a wall or the snake body
+  notes:
+  - Ends the round
+- name: Food
+  meaning: The predicted move reaches the current food cell
+  notes:
+  - Triggers growth and a score increase
+- name: Clear
+  meaning: No obstacle and no food is on that cell
+  notes:
+  - Move without eating
+derives:
+- Clone
+- Debug

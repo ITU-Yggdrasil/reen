@@ -1,0 +1,196 @@
+schema: reen.prepare/v2
+source:
+  path: contexts/command_input.md
+  kind: context
+  title: CommandInputContext
+export:
+  name: CommandInputContext
+roles:
+- name: stdin_source
+  purpose: Supplies keyboard input from stdin
+  expected_behavior: Supports non-blocking reads from standard input
+  type:
+    status: fixed
+    rust: Box<dyn std::io::Read>
+    source: fix.agent
+    reason: no concrete Rust type could be inferred for `stdin_source`
+    evidence:
+    - section: stdin_source
+      text: Supplies keyboard input from stdin
+    - section: stdin_source
+      text: Supports non-blocking reads from standard input
+  methods:
+  - name: read_available
+    signature:
+      status: fixed
+      rust: 'read_available(&self, stdin_source_: &Box<dyn std::io::Read>) -> Vec<char>'
+      source: fix.agent
+      reason: role method `read_available` on role `stdin_source` is missing a parseable signature
+      evidence:
+      - section: Role Methods / stdin_source
+        text: Returns all currently available key presses in arrival order without waiting.
+    receiver: '&self'
+    parameters:
+    - name: stdin_source_
+      type:
+        status: resolved
+        rust: '&Box<dyn std::io::Read>'
+        source: prepare.role_player
+    returns:
+      status: fixed
+      rust: Vec<char>
+      source: fix.agent
+      reason: role method `read_available` return type is unknown
+      evidence:
+      - section: Role Methods / stdin_source
+        text: Returns all currently available key presses in arrival order without waiting.
+props:
+- name: buffer
+  meaning: Queue of captured key presses
+  type:
+    status: fixed
+    rust: std::collections::VecDeque<char>
+    source: fix.agent
+    reason: no concrete Rust type could be inferred for `buffer`
+    evidence:
+    - section: buffer
+      text: Queue of captured key presses
+    - section: buffer
+      text: Shared for the whole application session
+  notes:
+  - Shared for the whole application session
+functionalities:
+- name: new
+  signature:
+    status: resolved
+    rust: 'new(stdin_source: Box<dyn std::io::Read>, buffer: std::collections::VecDeque<char>) -> Self'
+    source: prepare.auto
+  parameters:
+  - name: stdin_source
+    type:
+      status: fixed
+      rust: Box<dyn std::io::Read>
+      source: fix.agent
+      reason: no concrete Rust type could be inferred for `stdin_source`
+      evidence:
+      - section: stdin_source
+        text: Supplies keyboard input from stdin
+      - section: stdin_source
+        text: Supports non-blocking reads from standard input
+  - name: buffer
+    type:
+      status: fixed
+      rust: std::collections::VecDeque<char>
+      source: fix.agent
+      reason: no concrete Rust type could be inferred for `buffer`
+      evidence:
+      - section: buffer
+        text: Queue of captured key presses
+      - section: buffer
+        text: Shared for the whole application session
+  returns:
+    status: resolved
+    rust: Self
+    source: prepare.auto
+  body:
+    steps:
+    - op: return
+      expr:
+        op: construct_struct
+        type_name: Self
+        fields:
+        - name: stdin_source
+          expr:
+            op: var
+            name: stdin_source
+        - name: buffer
+          expr:
+            op: var
+            name: buffer
+- name: capture
+  signature:
+    status: fixed
+    rust: capture(&mut self)
+    source: fix.agent
+    reason: functionality `capture` is missing a parseable signature
+    evidence:
+    - section: Functionalities / capture
+      text: Ask `stdin_source` for all currently available key presses without waiting. Append each returned key press to the end of `buffer` in arrival order.
+  receiver: '&self'
+  returns:
+    status: fixed
+    rust: ()
+    source: fix.agent
+    reason: functionality `capture` return type is unknown
+    evidence:
+    - section: Functionalities / capture
+      text: Ask `stdin_source` for all currently available key presses without waiting. Append each returned key press to the end of `buffer` in arrival order.
+  flow:
+  - Ask `stdin_source` for all currently available key presses without waiting.
+  - Append each returned key press to the end of `buffer` in arrival order.
+  extensions:
+  - 1a. No key presses are available → flow ends; `buffer` is unchanged.
+  guarantee:
+  - Keys already in `buffer` before this call remain in place; new keys follow them.
+  references:
+    roles:
+    - stdin_source
+    props:
+    - buffer
+- name: next_key
+  signature:
+    status: fixed
+    rust: next_key(&mut self) -> Option<char>
+    source: fix.agent
+    reason: functionality `next_key` is missing a parseable signature
+    evidence:
+    - section: Functionalities / next_key
+      text: If `buffer` is non-empty, remove and return the oldest key event. If `buffer` is empty, return no key.
+  receiver: '&self'
+  returns:
+    status: fixed
+    rust: Option<char>
+    source: fix.agent
+    reason: functionality `next_key` return type is unknown
+    evidence:
+    - section: Functionalities / next_key
+      text: If `buffer` is non-empty, remove and return the oldest key event. If `buffer` is empty, return no key.
+  flow:
+  - If `buffer` is non-empty, remove and return the oldest key event.
+  - If `buffer` is empty, return no key.
+  references:
+    props:
+    - buffer
+- name: next_action
+  signature:
+    status: fixed
+    rust: next_action(&mut self) -> Option<UserAction>
+    source: fix.agent
+    reason: functionality `next_action` is missing a parseable signature
+    evidence:
+    - section: Functionalities / next_action
+      text: 'Remove the oldest key from `buffer` via the same queue as `next_key`. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire. If the key maps to an action, return it. If the key has no gameplay meaning, discard it and repeat from step 1. If `buffer` is exhausted with no valid action found, return no action.'
+  receiver: '&self'
+  returns:
+    status: fixed
+    rust: Option<UserAction>
+    source: fix.agent
+    reason: functionality `next_action` return type is unknown
+    evidence:
+    - section: Functionalities / next_action
+      text: 'Remove the oldest key from `buffer` via the same queue as `next_key`. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire. If the key maps to an action, return it. If the key has no gameplay meaning, discard it and repeat from step 1. If `buffer` is exhausted with no valid action found, return no action.'
+  flow:
+  - Remove the oldest key from `buffer` via the same queue as `next_key`.
+  - 'Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire.'
+  - If the key maps to an action, return it.
+  - If the key has no gameplay meaning, discard it and repeat from step 1.
+  - If `buffer` is exhausted with no valid action found, return no action.
+  references:
+    props:
+    - buffer
+invariants:
+- '`next_action` returns user actions. The game loop decides how a movement'
+ambiguities:
+- path: roles[0].methods[0].body
+  severity: info
+  message: method `read_available` body is missing

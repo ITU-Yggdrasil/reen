@@ -1,0 +1,90 @@
+schema: reen.prepare/v2
+source:
+  path: contexts/terminal_renderer.md
+  kind: context
+  title: Terminal Renderer
+export:
+  name: TerminalRenderer
+roles:
+- name: string_renderer
+  purpose: Produces the text for the current frame
+  expected_behavior: Returns one complete text frame for the supplied board picture and score
+  type:
+    status: resolved
+    rust: StringRenderer
+    source: name_match
+  methods:
+  - name: render
+    signature:
+      status: fixed
+      rust: 'render(&self, string_renderer_: &StringRenderer, board: &Board, score: u32) -> String'
+      source: fix.agent
+      reason: role method `render` on role `string_renderer` is missing a parseable signature
+      evidence:
+      - section: Role Methods / string_renderer
+        text: Formats the current board picture and score as one text frame.
+    receiver: '&self'
+    parameters:
+    - name: string_renderer_
+      type:
+        status: resolved
+        rust: '&StringRenderer'
+        source: prepare.role_player
+    returns:
+      status: fixed
+      rust: String
+      source: fix.agent
+      reason: role method `render` return type is unknown
+      evidence:
+      - section: Role Methods / string_renderer
+        text: Formats the current board picture and score as one text frame.
+props:
+- name: screen
+  meaning: Visible terminal area where the frame is shown
+  type:
+    status: fixed
+    rust: std::io::Stdout
+    source: fix.agent
+    reason: no concrete Rust type could be inferred for `screen`
+    evidence:
+    - section: screen
+      text: Visible terminal area where the frame is shown
+    - section: screen
+      text: The same screen is updated from one frame to the next
+  notes:
+  - The same screen is updated from one frame to the next
+functionalities:
+- name: render
+  signature:
+    status: fixed
+    rust: render(&self)
+    source: fix.agent
+    reason: functionality `render` is missing a parseable signature
+    evidence:
+    - section: Functionalities / render
+      text: Ask `string_renderer` to format the current board picture and score as one text frame. Move the terminal cursor to the home position (top-left) on `screen`. Write the returned frame text to `screen`, left-aligned line by line. Flush `screen` so the frame appears immediately.
+  receiver: '&self'
+  returns:
+    status: fixed
+    rust: ()
+    source: fix.agent
+    reason: functionality `render` return type is unknown
+    evidence:
+    - section: Functionalities / render
+      text: Ask `string_renderer` to format the current board picture and score as one text frame. Move the terminal cursor to the home position (top-left) on `screen`. Write the returned frame text to `screen`, left-aligned line by line. Flush `screen` so the frame appears immediately.
+  flow:
+  - Ask `string_renderer` to format the current board picture and score as one text frame.
+  - Move the terminal cursor to the home position (top-left) on `screen`.
+  - Write the returned frame text to `screen`, left-aligned line by line.
+  - Flush `screen` so the frame appears immediately.
+  extensions:
+  - 2a. The terminal supports the home escape sequence → the previously shown frame is overwritten in place without visible flicker.
+  references:
+    roles:
+    - string_renderer
+    props:
+    - screen
+ambiguities:
+- path: roles[0].methods[0].body
+  severity: info
+  message: method `render` body is missing

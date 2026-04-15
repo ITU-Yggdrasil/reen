@@ -1,0 +1,60 @@
+schema: reen.prepare/v2
+source:
+  path: data/Snake.md
+  kind: data
+  title: Snake
+export:
+  name: Snake
+fields:
+- name: body
+  meaning: Ordered list of `Position` values occupied by the snake
+  type:
+    status: fixed
+    rust: Vec<Position>
+    source: fix.agent
+    candidates:
+    - '&[Position]'
+    - Position
+    - Vec<Position>
+    reason: multiple type candidates were found for `body`
+    evidence:
+    - section: body
+      text: Ordered list of `Position` values occupied by the snake
+    - section: body
+      text: Stored as `Vec<Position>` internally; the head is the first element; `Position` is defined in the Position data type; field is private, exposed only via getter returning `&[Position]`
+  getter_accessible: true
+  notes:
+  - Stored as `Vec<Position>` internally; the head is the first element; `Position` is defined in the Position data type; field is private, exposed only via getter returning `&[Position]`
+- name: direction
+  meaning: Current direction of travel
+  type:
+    status: resolved
+    rust: Direction
+    source: name_match
+  getter_accessible: true
+  notes:
+  - Uses the Direction data type
+getters:
+- name: body
+  field: body
+  mode: ref
+- name: direction
+  field: direction
+  mode: ref
+constructor:
+  kind: all_fields
+invariants:
+- '`body` length is greater than `0`.'
+- All positions in `body` must be unique.
+- The first position in `body` is the head.
+- Every pair of consecutive positions in `body` must be orthogonally adjacent (differ by exactly 1 in `x` or `y`, not both).
+- A single-element `body` is valid; the adjacency rule is vacuously satisfied when there are no consecutive pairs.
+- The `direction` field does not need to be consistent with the head-to-neck orientation; it records the current intended direction of travel independently.
+- Both `body` and `direction` are private fields; they are not publicly accessible directly.
+- The `body` getter returns `&[Position]` (a slice reference into the internal `Vec<Position>`).
+- The `direction` getter returns `Direction` by copy (assuming `Direction` derives `Copy`).
+- Construction failures return an opaque `anyhow::Result` error; no distinct error variants are required.
+derives:
+- Clone
+- Copy
+- Debug

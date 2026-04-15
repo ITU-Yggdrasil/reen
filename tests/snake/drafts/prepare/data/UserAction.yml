@@ -1,0 +1,19 @@
+schema: reen.prepare/v2
+source:
+  path: data/UserAction.md
+  kind: data
+  title: UserAction
+export:
+  name: UserAction
+variants:
+- name: MovementDirection
+  meaning: A movement command
+  notes:
+  - Carries one movement direction
+- name: Fire
+  meaning: A separate action
+  notes:
+  - Triggered by the space key
+derives:
+- Clone
+- Debug
