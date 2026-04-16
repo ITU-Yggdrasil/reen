@@ -8,6 +8,7 @@ use crate::prepared::{
 };
 use crate::workspace::{GENERATED_MANIFEST, Workspace};
 use anyhow::{Context, Result, bail};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -33,11 +34,24 @@ struct LoadedArtifact {
     output_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct DependencyManifest {
+    #[serde(default)]
+    packages: Vec<DependencyPackage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DependencyPackage {
+    name: String,
+    version: String,
+}
+
 pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> Result<()> {
     let prepared_paths = workspace.prepared_paths(&options.selection)?;
     let mut tracker = BuildTracker::load(&workspace.root)?;
     let loaded = load_prepared_artifacts(workspace, &prepared_paths)?;
     validate_loaded_artifacts(&loaded)?;
+    let dependency_manifest = load_dependency_manifest(workspace)?;
     let aggregate_hash = combined_hash(&loaded)?;
     if tracker.is_current("scaffold", "scaffold:workspace", &aggregate_hash)
         && workspace.root.join(GENERATED_MANIFEST).exists()
@@ -51,7 +65,13 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
     let order = topo_sort(&loaded)?;
     let package_name = package_name(&workspace.root);
     let library_crate = package_name.replace('-', "_");
-    let generated = generate_workspace_files(&loaded, &order, &package_name, &library_crate)?;
+    let generated = generate_workspace_files(
+        &loaded,
+        &order,
+        &package_name,
+        &library_crate,
+        &dependency_manifest,
+    )?;
 
     if options.dry_run {
         if options.verbose {
@@ -237,6 +257,23 @@ fn combined_hash(loaded: &[LoadedArtifact]) -> Result<String> {
     Ok(hash_string(&contents))
 }
 
+fn load_dependency_manifest(workspace: &Workspace) -> Result<BTreeMap<String, String>> {
+    let path = workspace.drafts_dir.join("dependencies.yml");
+    if !path.is_file() {
+        return Ok(BTreeMap::new());
+    }
+
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let manifest: DependencyManifest = serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(manifest
+        .packages
+        .into_iter()
+        .map(|package| (package.name, package.version))
+        .collect())
+}
+
 fn topo_sort(loaded: &[LoadedArtifact]) -> Result<Vec<usize>> {
     let mut export_to_index = BTreeMap::new();
     for (idx, item) in loaded.iter().enumerate() {
@@ -329,6 +366,7 @@ fn generate_workspace_files(
     order: &[usize],
     package_name: &str,
     library_crate: &str,
+    dependency_manifest: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<PathBuf, String>> {
     let mut files = BTreeMap::new();
     let export_kinds = loaded
@@ -356,13 +394,6 @@ fn generate_workspace_files(
         .iter()
         .filter(|item| item.artifact.source.kind != "app")
         .collect::<Vec<_>>();
-    files.insert(
-        PathBuf::from("Cargo.toml"),
-        render_cargo_toml(
-            package_name,
-            library_artifacts.iter().map(|item| &item.artifact),
-        ),
-    );
     if !library_artifacts.is_empty() {
         files.insert(
             PathBuf::from("src/lib.rs"),
@@ -378,6 +409,17 @@ fn generate_workspace_files(
     } else {
         files.insert(PathBuf::from("src/lib.rs"), String::new());
     }
+
+    let local_exports = loaded
+        .iter()
+        .map(|item| item.artifact.export.name.clone())
+        .collect::<BTreeSet<_>>();
+    let dependencies =
+        collect_required_dependencies(&files, dependency_manifest, &local_exports, library_crate)?;
+    files.insert(
+        PathBuf::from("Cargo.toml"),
+        render_cargo_toml(package_name, &dependencies),
+    );
     Ok(files)
 }
 
@@ -472,21 +514,97 @@ fn render_lib_rs(paths: &[&Path]) -> String {
     out
 }
 
-fn render_cargo_toml<'a>(
-    package_name: &str,
-    artifacts: impl Iterator<Item = &'a PreparedArtifact>,
-) -> String {
-    let needs_anyhow = artifacts
-        .flat_map(|artifact| artifact.referenced_type_names())
-        .any(|name| name == "Anyhow");
+fn render_cargo_toml(package_name: &str, dependencies: &BTreeMap<String, String>) -> String {
     let mut out = format!(
         "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\n",
         package_name
     );
-    if needs_anyhow {
-        out.push_str("anyhow = \"1\"\n");
+    for (name, version) in dependencies {
+        out.push_str(&format!(
+            "{name} = {}\n",
+            render_dependency_version(version)
+        ));
     }
     out
+}
+
+fn collect_required_dependencies(
+    files: &BTreeMap<PathBuf, String>,
+    dependency_manifest: &BTreeMap<String, String>,
+    local_exports: &BTreeSet<String>,
+    library_crate: &str,
+) -> Result<BTreeMap<String, String>> {
+    let qualified_path_re = Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)")
+        .expect("qualified path regex");
+    let ignored_roots = ["crate", "self", "super", "std", "core", "alloc"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let local_module_roots = collect_local_module_roots(files);
+
+    let mut required = BTreeMap::new();
+    let mut unknown = BTreeSet::new();
+
+    for (path, content) in files {
+        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+            continue;
+        }
+        for captures in qualified_path_re.captures_iter(content) {
+            let Some(path_match) = captures.get(1) else {
+                continue;
+            };
+            let root = path_match.as_str().split("::").next().unwrap_or_default();
+            if ignored_roots.contains(root)
+                || root == library_crate
+                || local_exports.contains(root)
+                || local_module_roots.contains(root)
+            {
+                continue;
+            }
+            if let Some(version) = dependency_manifest.get(root) {
+                required.insert(root.to_string(), version.clone());
+            } else {
+                unknown.insert(root.to_string());
+            }
+        }
+    }
+
+    if !unknown.is_empty() {
+        bail!(
+            "Generated sources reference external crate(s) not declared in drafts/dependencies.yml: {}",
+            unknown.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    Ok(required)
+}
+
+fn collect_local_module_roots(files: &BTreeMap<PathBuf, String>) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+
+    for path in files.keys() {
+        let Some(stripped) = path.strip_prefix("src").ok() else {
+            continue;
+        };
+        for component in stripped.components() {
+            let value = component.as_os_str().to_string_lossy();
+            let stem = value.trim_end_matches(".rs");
+            if stem.is_empty() || matches!(stem, "lib" | "main" | "mod") {
+                continue;
+            }
+            roots.insert(stem.to_string());
+        }
+    }
+
+    roots
+}
+
+fn render_dependency_version(version: &str) -> String {
+    let trimmed = version.trim();
+    if trimmed.starts_with('{') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed:?}")
+    }
 }
 
 fn generate_data_file(
@@ -1129,4 +1247,84 @@ fn prune_empty_dirs(path: &Path, root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_required_dependencies_uses_manifest_and_ignores_local_roots() {
+        let mut files = BTreeMap::new();
+        files.insert(
+            PathBuf::from("src/main.rs"),
+            r#"
+use demo_app::{Board, CommandInputContext};
+
+fn main() {
+    let _: Option<crossterm::event::KeyEvent> = None;
+    let _ = chrono::Utc::now();
+    let _ = Board::new();
+}
+"#
+            .to_string(),
+        );
+
+        let manifest = BTreeMap::from([
+            (
+                "chrono".to_string(),
+                r#"{ version = "0.4", features = ["serde"] }"#.to_string(),
+            ),
+            ("crossterm".to_string(), "0.27".to_string()),
+        ]);
+        let local_exports =
+            BTreeSet::from(["Board".to_string(), "CommandInputContext".to_string()]);
+
+        let dependencies =
+            collect_required_dependencies(&files, &manifest, &local_exports, "demo_app").unwrap();
+
+        assert_eq!(
+            dependencies.get("crossterm").map(String::as_str),
+            Some("0.27")
+        );
+        assert_eq!(
+            dependencies.get("chrono").map(String::as_str),
+            Some(r#"{ version = "0.4", features = ["serde"] }"#)
+        );
+        assert_eq!(dependencies.len(), 2);
+    }
+
+    #[test]
+    fn collect_required_dependencies_errors_for_unknown_external_crate() {
+        let files = BTreeMap::from([(
+            PathBuf::from("src/lib.rs"),
+            "pub fn now() -> foo::Bar { todo!() }\n".to_string(),
+        )]);
+
+        let error =
+            collect_required_dependencies(&files, &BTreeMap::new(), &BTreeSet::new(), "demo_app")
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("external crate(s) not declared in drafts/dependencies.yml: foo")
+        );
+    }
+
+    #[test]
+    fn render_cargo_toml_formats_string_and_inline_table_versions() {
+        let dependencies = BTreeMap::from([
+            (
+                "chrono".to_string(),
+                r#"{ version = "0.4", features = ["serde"] }"#.to_string(),
+            ),
+            ("crossterm".to_string(), "0.27".to_string()),
+        ]);
+
+        let rendered = render_cargo_toml("demo-app", &dependencies);
+
+        assert!(rendered.contains(r#"chrono = { version = "0.4", features = ["serde"] }"#));
+        assert!(rendered.contains(r#"crossterm = "0.27""#));
+    }
 }
