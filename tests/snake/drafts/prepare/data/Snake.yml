@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: data/Snake.md
   kind: data
   title: Snake
 export:
   name: Snake
+mutable: false
 fields:
 - name: body
   meaning: Ordered list of `Position` values occupied by the snake

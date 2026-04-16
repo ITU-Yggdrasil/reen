@@ -1,4 +1,7 @@
 use crate::build_tracker::{BuildTracker, hash_string};
+use crate::compile_repair::{
+    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, parse_compile_errors, run_cargo_build,
+};
 use crate::prepared::{
     Ambiguity, Body, CollectionEntry, Expression, GetterSpec, MethodSpec, PreparedArtifact,
     Statement,
@@ -9,8 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
 #[derive(Debug, Clone)]
 pub struct ScaffoldOptions {
     pub selection: crate::workspace::Selection,
@@ -84,7 +85,7 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
         bail!("Generated project failed to compile; re-run with --fix to attempt auto-repair");
     }
 
-    let max_rounds = 5;
+    let max_rounds = COMPILE_FIX_MAX_ROUNDS;
     let mut last_stderr = result.stderr;
     for round in 1..=max_rounds {
         let fixes = parse_compile_errors(&last_stderr);
@@ -93,7 +94,10 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
             bail!("Generated project failed to compile but no auto-fixable errors were found");
         }
         if options.verbose {
-            eprintln!("scaffold --fix round {round}: applying {} fix(es)", fixes.len());
+            eprintln!(
+                "scaffold --fix round {round}: applying {} fix(es)",
+                fixes.len()
+            );
         }
         for fix in &fixes {
             apply_compile_fix(workspace, fix)?;
@@ -120,8 +124,8 @@ pub fn clear_generated_outputs(workspace: &Workspace, dry_run: bool) -> Result<(
     }
     let content = fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest: GeneratedFilesManifest =
-        serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+    let manifest: GeneratedFilesManifest = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
     for file in &manifest.files {
         let path = workspace.root.join(file);
         if dry_run {
@@ -134,7 +138,13 @@ pub fn clear_generated_outputs(workspace: &Workspace, dry_run: bool) -> Result<(
         }
     }
     if !dry_run {
-        if let Some(src) = workspace.root.join("src").canonicalize().ok().filter(|path| path.is_dir()) {
+        if let Some(src) = workspace
+            .root
+            .join("src")
+            .canonicalize()
+            .ok()
+            .filter(|path| path.is_dir())
+        {
             let _ = prune_empty_dirs(&src, &workspace.root);
         }
         fs::remove_file(&manifest_path)
@@ -147,25 +157,28 @@ pub fn clear_generated_outputs(workspace: &Workspace, dry_run: bool) -> Result<(
 }
 
 fn write_debug_dump(workspace: &Workspace, loaded: &[LoadedArtifact]) -> Result<()> {
-    let path = workspace.state_dir.join("debug").join("build").join("loaded.yml");
+    let path = workspace
+        .state_dir
+        .join("debug")
+        .join("build")
+        .join("loaded.yml");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
-    let yaml = serde_yaml::to_string(
-        &loaded
-            .iter()
-            .map(|item| &item.artifact)
-            .collect::<Vec<_>>(),
-    )?;
+    let yaml =
+        serde_yaml::to_string(&loaded.iter().map(|item| &item.artifact).collect::<Vec<_>>())?;
     fs::write(&path, yaml).with_context(|| format!("Failed to write {}", path.display()))
 }
 
-fn load_prepared_artifacts(workspace: &Workspace, prepared_paths: &[PathBuf]) -> Result<Vec<LoadedArtifact>> {
+fn load_prepared_artifacts(
+    workspace: &Workspace,
+    prepared_paths: &[PathBuf],
+) -> Result<Vec<LoadedArtifact>> {
     let mut loaded = Vec::new();
     for path in prepared_paths {
-        let content =
-            fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
         let mut artifact: PreparedArtifact = serde_yaml::from_str(&content)
             .with_context(|| format!("Failed to parse prepared artifact {}", path.display()))?;
         artifact.refresh_ambiguity_index();
@@ -267,13 +280,19 @@ fn topo_sort(loaded: &[LoadedArtifact]) -> Result<Vec<usize>> {
     Ok(ordered)
 }
 
-fn output_path_for_artifact(_workspace: &Workspace, artifact: &PreparedArtifact) -> Result<PathBuf> {
+fn output_path_for_artifact(
+    _workspace: &Workspace,
+    artifact: &PreparedArtifact,
+) -> Result<PathBuf> {
     let relative = artifact
         .source
         .path
         .strip_prefix("drafts/")
         .unwrap_or(&artifact.source.path);
-    let mut parts = relative.split('/').map(|part| part.to_string()).collect::<Vec<_>>();
+    let mut parts = relative
+        .split('/')
+        .map(|part| part.to_string())
+        .collect::<Vec<_>>();
     match artifact.source.kind.as_str() {
         "data" => {
             parts.remove(0);
@@ -314,7 +333,12 @@ fn generate_workspace_files(
     let mut files = BTreeMap::new();
     let export_kinds = loaded
         .iter()
-        .map(|item| (item.artifact.export.name.clone(), item.artifact.source.kind.clone()))
+        .map(|item| {
+            (
+                item.artifact.export.name.clone(),
+                item.artifact.source.kind.clone(),
+            )
+        })
         .collect::<BTreeMap<_, _>>();
 
     for idx in order {
@@ -334,7 +358,10 @@ fn generate_workspace_files(
         .collect::<Vec<_>>();
     files.insert(
         PathBuf::from("Cargo.toml"),
-        render_cargo_toml(package_name, library_artifacts.iter().map(|item| &item.artifact)),
+        render_cargo_toml(
+            package_name,
+            library_artifacts.iter().map(|item| &item.artifact),
+        ),
     );
     if !library_artifacts.is_empty() {
         files.insert(
@@ -354,14 +381,14 @@ fn generate_workspace_files(
     Ok(files)
 }
 
-fn extend_module_files(files: &mut BTreeMap<PathBuf, String>, library_artifacts: &[&LoadedArtifact]) -> Result<()> {
+fn extend_module_files(
+    files: &mut BTreeMap<PathBuf, String>,
+    library_artifacts: &[&LoadedArtifact],
+) -> Result<()> {
     let mut module_tree: BTreeMap<PathBuf, ModuleNode> = BTreeMap::new();
     for artifact in library_artifacts {
         let output = &artifact.output_path;
-        let relative = output
-            .strip_prefix("src")
-            .unwrap_or(output)
-            .to_path_buf();
+        let relative = output.strip_prefix("src").unwrap_or(output).to_path_buf();
         let parent = relative.parent().unwrap_or(Path::new(""));
         let stem = output
             .file_stem()
@@ -369,7 +396,9 @@ fn extend_module_files(files: &mut BTreeMap<PathBuf, String>, library_artifacts:
             .unwrap_or_default()
             .to_string();
         let entry = module_tree.entry(parent.to_path_buf()).or_default();
-        entry.files.push((stem, artifact.artifact.export.name.clone()));
+        entry
+            .files
+            .push((stem, artifact.artifact.export.name.clone()));
         let mut current = parent.to_path_buf();
         while let Some(parent_dir) = current.parent() {
             if current.as_os_str().is_empty() {
@@ -447,7 +476,9 @@ fn render_cargo_toml<'a>(
     package_name: &str,
     artifacts: impl Iterator<Item = &'a PreparedArtifact>,
 ) -> String {
-    let needs_anyhow = artifacts.flat_map(|artifact| artifact.referenced_type_names()).any(|name| name == "Anyhow");
+    let needs_anyhow = artifacts
+        .flat_map(|artifact| artifact.referenced_type_names())
+        .any(|name| name == "Anyhow");
     let mut out = format!(
         "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\n",
         package_name
@@ -489,7 +520,11 @@ fn generate_data_file(
             .type_status
             .rust()
             .ok_or_else(|| anyhow::anyhow!("missing field type for `{}`", field.name))?;
-        out.push_str(&fixme_comment(&artifact.ambiguities, &format!("fields[{idx}].type"), 1));
+        out.push_str(&fixme_comment(
+            &artifact.ambiguities,
+            &format!("fields[{idx}].type"),
+            1,
+        ));
         out.push_str(&format!("    {}: {},\n", field.name, ty));
     }
     out.push_str("}\n\n");
@@ -504,7 +539,13 @@ fn generate_data_file(
         if method.name == "new" {
             continue;
         }
-        out.push_str(&render_method_with_fixme(method, None, 1, &artifact.ambiguities, &format!("functionalities[{idx}]"))?);
+        out.push_str(&render_method_with_fixme(
+            method,
+            None,
+            1,
+            &artifact.ambiguities,
+            &format!("functionalities[{idx}]"),
+        )?);
     }
     out.push_str("}\n");
     Ok(out)
@@ -526,7 +567,11 @@ fn generate_composite_file(
             .type_status
             .rust()
             .ok_or_else(|| anyhow::anyhow!("missing role type for `{}`", role.name))?;
-        out.push_str(&fixme_comment(&artifact.ambiguities, &format!("roles[{idx}].type"), 1));
+        out.push_str(&fixme_comment(
+            &artifact.ambiguities,
+            &format!("roles[{idx}].type"),
+            1,
+        ));
         out.push_str(&format!("    {}: {},\n", role.name, ty));
     }
     for (idx, prop) in artifact.props.iter().enumerate() {
@@ -534,17 +579,33 @@ fn generate_composite_file(
             .type_status
             .rust()
             .ok_or_else(|| anyhow::anyhow!("missing prop type for `{}`", prop.name))?;
-        out.push_str(&fixme_comment(&artifact.ambiguities, &format!("props[{idx}].type"), 1));
+        out.push_str(&fixme_comment(
+            &artifact.ambiguities,
+            &format!("props[{idx}].type"),
+            1,
+        ));
         out.push_str(&format!("    {}: {},\n", prop.name, ty));
     }
     out.push_str("}\n\n");
     out.push_str(&format!("impl {} {{\n", artifact.export.name));
     for (idx, method) in artifact.functionalities.iter().enumerate() {
-        out.push_str(&render_method_with_fixme(method, None, 1, &artifact.ambiguities, &format!("functionalities[{idx}]"))?);
+        out.push_str(&render_method_with_fixme(
+            method,
+            None,
+            1,
+            &artifact.ambiguities,
+            &format!("functionalities[{idx}]"),
+        )?);
     }
     for (ridx, role) in artifact.roles.iter().enumerate() {
         for (midx, method) in role.methods.iter().enumerate() {
-            out.push_str(&render_method_with_fixme(method, Some(&role.name), 1, &artifact.ambiguities, &format!("roles[{ridx}].methods[{midx}]"))?);
+            out.push_str(&render_method_with_fixme(
+                method,
+                Some(&role.name),
+                1,
+                &artifact.ambiguities,
+                &format!("roles[{ridx}].methods[{midx}]"),
+            )?);
         }
     }
     out.push_str("}\n");
@@ -603,7 +664,11 @@ fn render_constructor(artifact: &PreparedArtifact, indent: usize) -> Result<Stri
     Ok(out)
 }
 
-fn render_getter(artifact: &PreparedArtifact, getter: &GetterSpec, indent: usize) -> Result<String> {
+fn render_getter(
+    artifact: &PreparedArtifact,
+    getter: &GetterSpec,
+    indent: usize,
+) -> Result<String> {
     let field = artifact
         .fields
         .iter()
@@ -640,8 +705,16 @@ fn render_method_with_fixme(
     base_path: &str,
 ) -> Result<String> {
     let mut out = String::new();
-    out.push_str(&fixme_comment(ambiguities, &format!("{base_path}.signature"), indent));
-    out.push_str(&fixme_comment(ambiguities, &format!("{base_path}.returns"), indent));
+    out.push_str(&fixme_comment(
+        ambiguities,
+        &format!("{base_path}.signature"),
+        indent,
+    ));
+    out.push_str(&fixme_comment(
+        ambiguities,
+        &format!("{base_path}.returns"),
+        indent,
+    ));
     let visibility = if role_name.is_some() { "" } else { "pub " };
     let rust_name = role_name
         .map(|role| format!("{}_{}", role, method.name))
@@ -653,7 +726,10 @@ fn render_method_with_fixme(
     }
     for (pidx, parameter) in method.parameters.iter().enumerate() {
         let param_path = format!("{base_path}.parameters[{pidx}].type");
-        if ambiguities.iter().any(|a| a.path == param_path && a.severity == "fixed") {
+        if ambiguities
+            .iter()
+            .any(|a| a.path == param_path && a.severity == "fixed")
+        {
             out.push_str(&fixme_comment(ambiguities, &param_path, indent));
         }
         let ty = parameter
@@ -746,7 +822,11 @@ fn render_statement(step: &Statement, indent: usize) -> Result<String> {
                 render_expression(expr)?
             );
             for arm in arms {
-                out.push_str(&format!("{}{} => {{\n", indent_str(indent + 1), arm.pattern));
+                out.push_str(&format!(
+                    "{}{} => {{\n",
+                    indent_str(indent + 1),
+                    arm.pattern
+                ));
                 for step in &arm.steps {
                     out.push_str(&render_statement(step, indent + 2)?);
                 }
@@ -812,7 +892,13 @@ fn render_expression(expr: &Expression) -> Result<String> {
         Expression::ConstructStruct { type_name, fields } => {
             let rendered = fields
                 .iter()
-                .map(|field| Ok(format!("{}: {}", field.name, render_expression(&field.expr)?)))
+                .map(|field| {
+                    Ok(format!(
+                        "{}: {}",
+                        field.name,
+                        render_expression(&field.expr)?
+                    ))
+                })
                 .collect::<Result<Vec<_>>>()?
                 .join(", ");
             format!("{type_name} {{ {rendered} }}")
@@ -859,7 +945,11 @@ fn render_expression(expr: &Expression) -> Result<String> {
         Expression::UnaryOp { operator, expr } => {
             format!("({}{})", operator, render_expression(expr)?)
         }
-        Expression::CollectionLiteral { kind, items, entries } => match kind.as_str() {
+        Expression::CollectionLiteral {
+            kind,
+            items,
+            entries,
+        } => match kind.as_str() {
             "vec" => format!(
                 "vec![{}]",
                 items
@@ -995,243 +1085,6 @@ fn write_generated_manifest<'a>(
     fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
 }
 
-struct CompileResult {
-    success: bool,
-    stderr: String,
-}
-
-fn run_cargo_build(workspace: &Workspace) -> Result<CompileResult> {
-    let output = Command::new("cargo")
-        .args(["build", "--message-format=short"])
-        .env("RUSTFLAGS", "-Awarnings")
-        .current_dir(&workspace.root)
-        .output()
-        .context("Failed to invoke cargo build")?;
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Ok(CompileResult {
-        success: output.status.success(),
-        stderr,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Scaffold --fix: deterministic compile-error repair
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-enum CompileFix {
-    RemoveDerive {
-        file: PathBuf,
-        line: usize,
-        trait_name: String,
-    },
-    AddLifetimeToMethod {
-        file: PathBuf,
-        line: usize,
-    },
-}
-
-impl CompileFix {
-    fn description(&self) -> String {
-        match self {
-            CompileFix::RemoveDerive { file, trait_name, .. } => {
-                format!("remove `{trait_name}` derive from {}", file.display())
-            }
-            CompileFix::AddLifetimeToMethod { file, line } => {
-                format!("add lifetime parameter to method at {}:{line}", file.display())
-            }
-        }
-    }
-}
-
-fn parse_compile_errors(stderr: &str) -> Vec<CompileFix> {
-    let mut fixes = Vec::new();
-    let mut seen = BTreeSet::new();
-    for line in stderr.lines() {
-        // E0204: the trait `Copy` cannot be implemented for this type
-        // E0277: the trait bound `X: Debug` is not satisfied (derive(Debug) on a type with non-Debug fields)
-        if let Some(fix) = parse_derive_error(line, "E0204", "Copy") {
-            let key = format!("{}:{}", fix.description(), "");
-            if seen.insert(key) {
-                fixes.push(fix);
-            }
-        }
-        if let Some(fix) = parse_derive_error(line, "E0277", "Debug") {
-            let key = format!("{}:{}", fix.description(), "");
-            if seen.insert(key) {
-                fixes.push(fix);
-            }
-        }
-        // lifetime may not live long enough
-        if line.contains("error: lifetime may not live long enough") {
-            if let Some(fix) = parse_lifetime_error(line) {
-                let key = format!("{}:{}", fix.description(), "");
-                if seen.insert(key) {
-                    fixes.push(fix);
-                }
-            }
-        }
-    }
-    fixes
-}
-
-/// Parse `src/data/snake.rs:3:17: error[E0204]: ...` style lines
-fn parse_derive_error(line: &str, error_code: &str, trait_name: &str) -> Option<CompileFix> {
-    let marker = format!("error[{error_code}]:");
-    if !line.contains(&marker) {
-        return None;
-    }
-    let (location, _) = line.split_once(": error")?;
-    let parts: Vec<&str> = location.split(':').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let file = PathBuf::from(parts[0]);
-    let line_no: usize = parts[1].parse().ok()?;
-    Some(CompileFix::RemoveDerive {
-        file,
-        line: line_no,
-        trait_name: trait_name.to_string(),
-    })
-}
-
-/// Parse `src/contexts/game_loop.rs:28:16: error: lifetime may not live long enough`
-fn parse_lifetime_error(line: &str) -> Option<CompileFix> {
-    let (location, _) = line.split_once(": error:")?;
-    let parts: Vec<&str> = location.split(':').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let file = PathBuf::from(parts[0]);
-    let line_no: usize = parts[1].parse().ok()?;
-    Some(CompileFix::AddLifetimeToMethod {
-        file,
-        line: line_no,
-    })
-}
-
-fn apply_compile_fix(workspace: &Workspace, fix: &CompileFix) -> Result<()> {
-    match fix {
-        CompileFix::RemoveDerive { file, line, trait_name } => {
-            let path = workspace.root.join(file);
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            let mut lines: Vec<String> = content.lines().map(String::from).collect();
-            let idx = line.checked_sub(1).context("invalid line number")?;
-            if idx < lines.len() {
-                lines[idx] = remove_derive_trait(&lines[idx], trait_name);
-            }
-            let result = lines.join("\n") + "\n";
-            fs::write(&path, result)
-                .with_context(|| format!("Failed to write {}", path.display()))
-        }
-        CompileFix::AddLifetimeToMethod { file, line } => {
-            let path = workspace.root.join(file);
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("Failed to read {}", path.display()))?;
-            let mut lines: Vec<String> = content.lines().map(String::from).collect();
-            // The error points at the body line; the fn signature is one line above.
-            let sig_idx = line.checked_sub(2).unwrap_or(0);
-            if sig_idx < lines.len() && lines[sig_idx].contains("fn ") {
-                lines[sig_idx] = add_lifetime_to_signature(&lines[sig_idx]);
-            }
-            let result = lines.join("\n") + "\n";
-            fs::write(&path, result)
-                .with_context(|| format!("Failed to write {}", path.display()))
-        }
-    }
-}
-
-/// Remove a single trait from a `#[derive(...)]` attribute.
-/// If it's the last trait, remove the entire line.
-fn remove_derive_trait(line: &str, trait_name: &str) -> String {
-    // Match #[derive(Trait1, Trait2, ...)]
-    let Some(start) = line.find("#[derive(") else {
-        return line.to_string();
-    };
-    let prefix = &line[..start];
-    let inner_start = start + "#[derive(".len();
-    let Some(end) = line[inner_start..].find(")]") else {
-        return line.to_string();
-    };
-    let inner = &line[inner_start..inner_start + end];
-    let traits: Vec<&str> = inner.split(',').map(|t| t.trim()).collect();
-    let filtered: Vec<&str> = traits.into_iter().filter(|t| *t != trait_name).collect();
-    if filtered.is_empty() {
-        String::new()
-    } else {
-        format!("{prefix}#[derive({})]", filtered.join(", "))
-    }
-}
-
-/// Add `<'a>` lifetime to a method signature so borrowed role parameters
-/// share their lifetime with the return type.
-///
-/// Transforms:  `fn foo(&self, bar: &Type) -> &ReturnType {`
-/// Into:        `fn foo<'a>(&self, bar: &'a Type) -> &'a ReturnType {`
-fn add_lifetime_to_signature(line: &str) -> String {
-    if line.contains("<'a>") {
-        return line.to_string();
-    }
-    let Some(fn_pos) = line.find("fn ") else {
-        return line.to_string();
-    };
-    let after_fn = &line[fn_pos + 3..];
-    let paren_pos = match after_fn.find('(') {
-        Some(p) => fn_pos + 3 + p,
-        None => return line.to_string(),
-    };
-    let fn_name_end = paren_pos;
-
-    // Insert <'a> before the opening paren
-    let mut result = String::with_capacity(line.len() + 20);
-    result.push_str(&line[..fn_name_end]);
-    result.push_str("<'a>");
-    let rest = &line[fn_name_end..];
-
-    // Replace `&self` stays as is, then replace `&Type` with `&'a Type`
-    // in parameters and return type, but skip &self and &mut self.
-    let rest = annotate_borrows_with_lifetime(rest);
-    result.push_str(&rest);
-    result
-}
-
-/// In a signature fragment like `(&self, param: &Foo) -> &Bar {`,
-/// add `'a` to every `&` borrow except `&self` / `&mut self`.
-fn annotate_borrows_with_lifetime(sig: &str) -> String {
-    let mut out = String::with_capacity(sig.len() + 10);
-    let chars: Vec<char> = sig.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    while i < len {
-        if chars[i] == '&' {
-            // Check if this is &self or &mut self
-            let rest: String = chars[i..].iter().collect();
-            if rest.starts_with("&self") || rest.starts_with("&mut self") {
-                out.push('&');
-                i += 1;
-                continue;
-            }
-            // Already has lifetime annotation
-            if rest.starts_with("&'") {
-                out.push('&');
-                i += 1;
-                continue;
-            }
-            out.push_str("&'a ");
-            i += 1;
-            // Skip any whitespace after & that was already there
-            while i < len && chars[i] == ' ' {
-                i += 1;
-            }
-            continue;
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
-}
-
 fn indent_str(depth: usize) -> String {
     "    ".repeat(depth)
 }
@@ -1239,20 +1092,27 @@ fn indent_str(depth: usize) -> String {
 fn is_builtin_type(name: &str) -> bool {
     matches!(
         name,
-        "String" | "Vec" | "Option" | "Result"
-            | "HashMap" | "BTreeMap" | "HashSet" | "BTreeSet" | "VecDeque"
-            | "Box" | "Rc" | "Arc" | "Cow" | "Pin"
+        "String"
+            | "Vec"
+            | "Option"
+            | "Result"
+            | "HashMap"
+            | "BTreeMap"
+            | "HashSet"
+            | "BTreeSet"
+            | "VecDeque"
+            | "Box"
+            | "Rc"
+            | "Arc"
+            | "Cow"
+            | "Pin"
     )
 }
 
 fn fixme_comment(ambiguities: &[Ambiguity], path: &str, indent: usize) -> String {
     for amb in ambiguities {
         if amb.path == path && amb.severity == "fixed" {
-            return format!(
-                "{}// FIXME(agent): {}\n",
-                indent_str(indent),
-                amb.message
-            );
+            return format!("{}// FIXME(agent): {}\n", indent_str(indent), amb.message);
         }
     }
     String::new()

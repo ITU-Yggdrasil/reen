@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use reen::codegen::{ScaffoldOptions, scaffold_workspace, clear_generated_outputs};
+use reen::build_tracker::BuildTracker;
+use reen::codegen::{ScaffoldOptions, clear_generated_outputs, scaffold_workspace};
 use reen::prepare::{PrepareOptions, clear_prepared_outputs, prepare_workspace};
 use reen::workspace::{Selection, Workspace};
 use std::path::PathBuf;
@@ -16,7 +17,11 @@ struct Cli {
     #[arg(long, global = true, help = "Enable verbose progress output")]
     verbose: bool,
 
-    #[arg(long, global = true, help = "Write optional debug artifacts under .reen/debug")]
+    #[arg(
+        long,
+        global = true,
+        help = "Write optional debug artifacts under .reen/debug"
+    )]
     debug: bool,
 
     #[arg(long, global = true, help = "Show actions without writing files")]
@@ -39,14 +44,20 @@ enum Commands {
 
     #[command(about = "Run cargo run in the current workspace")]
     Run {
-        #[arg(help = "Arguments passed to the generated binary", trailing_var_arg = true)]
+        #[arg(
+            help = "Arguments passed to the generated binary",
+            trailing_var_arg = true
+        )]
         args: Vec<String>,
     },
 
     #[command(about = "Run cargo test in the current workspace")]
     Test,
 
-    #[command(subcommand, about = "Clear prepared artifacts, generated outputs, or both")]
+    #[command(
+        subcommand,
+        about = "Clear prepared artifacts, generated outputs, or both"
+    )]
     Clear(ClearCommand),
 }
 
@@ -67,7 +78,10 @@ struct PrepareArgs {
     #[arg(long, help = "Reserved for future prepare-agent profiles")]
     profile: Option<String>,
 
-    #[arg(long, help = "Call an LLM to resolve blocking ambiguities in prepared artifacts")]
+    #[arg(
+        long,
+        help = "Call an LLM to resolve blocking ambiguities in prepared artifacts"
+    )]
     fix: bool,
 
     #[arg(help = "Optional list of draft names without file extension")]
@@ -109,6 +123,12 @@ struct BuildArgs {
     #[arg(long, help = "Only process the prepared app artifact")]
     app: bool,
 
+    #[arg(
+        long,
+        help = "After implementation, fix compilation errors (deterministic repair, then LLM)"
+    )]
+    fix: bool,
+
     #[arg(help = "Optional list of prepared artifact names without file extension")]
     names: Vec<String>,
 }
@@ -121,7 +141,12 @@ enum ClearCommand {
     #[command(about = "Remove generated Rust outputs tracked under .reen/generated_files.json")]
     Generated,
 
-    #[command(about = "Remove both prepared and generated outputs")]
+    #[command(
+        about = "Clear build-stage tracker state so methods are re-implemented on next build"
+    )]
+    Built,
+
+    #[command(about = "Remove prepared, generated, and build-stage outputs")]
     All,
 }
 
@@ -177,6 +202,7 @@ fn main() -> Result<()> {
             );
             let options = reen::build_agent::BuildOptions {
                 selection,
+                fix: args.fix,
                 verbose: cli.verbose,
                 debug: cli.debug,
                 dry_run: cli.dry_run,
@@ -197,9 +223,11 @@ fn main() -> Result<()> {
             match cmd {
                 ClearCommand::Prepared => clear_prepared_outputs(&workspace, cli.dry_run)?,
                 ClearCommand::Generated => clear_generated_outputs(&workspace, cli.dry_run)?,
+                ClearCommand::Built => clear_build_tracker(&workspace, cli.dry_run)?,
                 ClearCommand::All => {
                     clear_prepared_outputs(&workspace, cli.dry_run)?;
                     clear_generated_outputs(&workspace, cli.dry_run)?;
+                    clear_build_tracker(&workspace, cli.dry_run)?;
                 }
             }
         }
@@ -216,6 +244,16 @@ fn selection_from_flags(
     names: Vec<String>,
 ) -> Selection {
     Selection::new(contexts, projections, data, app, names)
+}
+
+fn clear_build_tracker(workspace: &Workspace, dry_run: bool) -> Result<()> {
+    let mut tracker = BuildTracker::load(&workspace.root)?;
+    if dry_run {
+        println!("[dry-run] would clear build-stage tracker entries");
+        return Ok(());
+    }
+    tracker.clear_stage("build");
+    tracker.save(&workspace.root)
 }
 
 fn run_cargo_command(command: &str, args: &[String]) -> Result<()> {

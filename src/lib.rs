@@ -1,9 +1,11 @@
 pub mod agent_runner;
 pub mod build_agent;
+pub mod build_compile_agent;
 pub mod build_tracker;
 pub mod codegen;
+pub mod compile_repair;
 pub mod draft_parser;
 pub mod fix_agent;
-pub mod prepared;
 pub mod prepare;
+pub mod prepared;
 pub mod workspace;

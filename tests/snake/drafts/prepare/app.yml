@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: app.md
   kind: app
   title: The primary application
 export:
   name: ThePrimaryApplication
+mutable: true
 collaborators:
 - name: commandinputcontext
   responsibility: Captures key presses into one shared FIFO stream for the whole session. Provides raw keys for menus and gameplay actions for the game loop.
@@ -28,13 +29,13 @@ collaborators:
   responsibility: Uses `StringRenderer` and shows the latest frame in the terminal.
   type:
     status: resolved
-    rust: StringRenderer
-    source: draft_hint
+    rust: TerminalRenderer
+    source: name_match
 - name: food_dropper
   responsibility: Chooses the next food placement on a free interior non-wall, non-snake cell.
   type:
     status: fixed
-    rust: Food
+    rust: fn(&Board, &Snake) -> Option<Position>
     source: fix.agent
     reason: no concrete Rust type could be inferred for `food_dropper`
     evidence:

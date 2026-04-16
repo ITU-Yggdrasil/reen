@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: data/Food.md
   kind: data
   title: Food
 export:
   name: Food
+mutable: false
 fields:
 - name: position
   meaning: Position of the food on the board

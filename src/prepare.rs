@@ -3,15 +3,16 @@ use crate::draft_parser::{
     AppDraft, CompositeDraft, DataDraft, DraftDocument, FunctionalityDraft, RoleMethodGroup,
     parse_draft_file,
 };
+use crate::fix_agent;
 use crate::prepared::{
     Ambiguity, Body, CollaboratorSpec, ConstructorPolicy, Evidence, ExportInfo, Expression,
-    FieldSpec, GetterSpec, MethodReferences, MethodSpec, ParameterSpec, PreparedArtifact,
-    PropSpec, RoleSpec, SourceInfo, Statement, StructFieldValue, ValueStatus, VariantSpec,
+    FieldSpec, GetterSpec, MethodReferences, MethodSpec, ParameterSpec, PreparedArtifact, PropSpec,
+    RoleSpec, SourceInfo, Statement, StructFieldValue, ValueStatus, VariantSpec,
 };
-use crate::fix_agent;
 use crate::workspace::Workspace;
 use anyhow::{Context, Result};
 use regex::Regex;
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,10 +45,31 @@ struct BodyParseContext {
     prop_names: BTreeSet<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct TypesManifest {
+    #[serde(default)]
+    primitives: Vec<String>,
+    #[serde(default)]
+    external_path_prefixes: Vec<String>,
+    #[serde(default)]
+    allowlists: ManifestAllowlists,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ManifestAllowlists {
+    #[serde(default)]
+    data: Vec<String>,
+    #[serde(default)]
+    projection: Vec<String>,
+    #[serde(default)]
+    context: Vec<String>,
+}
+
 pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Result<()> {
     let selected_paths = workspace.raw_draft_paths(&options.selection)?;
     let all_docs = load_supported_documents(workspace)?;
     let catalog = build_catalog(&all_docs);
+    let types_manifest = load_types_manifest(workspace)?;
     let mut tracker = BuildTracker::load(&workspace.root)?;
     let mut wrote = 0usize;
     let mut blocking_total = 0usize;
@@ -62,8 +84,8 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     }
 
     for path in &selected_paths {
-        let content =
-            fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
         let draft = parse_draft_file(path, &workspace.drafts_dir, &content)?;
         let output_path = workspace.prepared_output_path(path)?;
         let input_hash = hash_file(path)?;
@@ -81,9 +103,14 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
         let has_blockers = prepared.blocking_ambiguities().next().is_some();
 
         if has_blockers && options.fix {
-            let exports: Vec<String> = catalog.exports.iter().cloned().collect();
-            let fixed_count =
-                fix_agent::fix_ambiguities(&content, &exports, &mut prepared, options.verbose)?;
+            let available_types =
+                available_types_for_draft(types_manifest.as_ref(), draft.info().kind, &catalog);
+            let fixed_count = fix_agent::fix_ambiguities(
+                &content,
+                &available_types,
+                &mut prepared,
+                options.verbose,
+            )?;
             if fixed_count > 0 {
                 prepared.propagate_resolved_types();
                 prepared.refresh_ambiguity_index();
@@ -100,9 +127,7 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
         let blockers: Vec<_> = prepared.blocking_ambiguities().collect();
         if !blockers.is_empty() {
             blocking_total += blockers.len();
-            let draft_path = path
-                .strip_prefix(&workspace.root)
-                .unwrap_or(path);
+            let draft_path = path.strip_prefix(&workspace.root).unwrap_or(path);
             for ambiguity in blockers {
                 let location = match ambiguity.source_line {
                     Some(line) => format!("{}:{}", draft_path.display(), line),
@@ -149,6 +174,54 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     Ok(())
 }
 
+fn load_types_manifest(workspace: &Workspace) -> Result<Option<TypesManifest>> {
+    let path = workspace.drafts_dir.join("types-manifest.yml");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let manifest = serde_yaml::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(Some(manifest))
+}
+
+fn available_types_for_draft(
+    manifest: Option<&TypesManifest>,
+    kind: crate::draft_parser::ArtifactKind,
+    catalog: &DraftCatalog,
+) -> Vec<String> {
+    let mut types = BTreeSet::new();
+    types.extend(catalog.exports.iter().cloned());
+
+    let Some(manifest) = manifest else {
+        return types.into_iter().collect();
+    };
+
+    types.extend(manifest.primitives.iter().cloned());
+    types.extend(manifest.external_path_prefixes.iter().cloned());
+
+    match kind {
+        crate::draft_parser::ArtifactKind::Data => {
+            types.extend(manifest.allowlists.data.iter().cloned());
+        }
+        crate::draft_parser::ArtifactKind::Projection => {
+            types.extend(manifest.allowlists.projection.iter().cloned());
+        }
+        crate::draft_parser::ArtifactKind::Context => {
+            types.extend(manifest.allowlists.context.iter().cloned());
+        }
+        crate::draft_parser::ArtifactKind::App => {
+            types.extend(manifest.allowlists.data.iter().cloned());
+            types.extend(manifest.allowlists.projection.iter().cloned());
+            types.extend(manifest.allowlists.context.iter().cloned());
+        }
+        crate::draft_parser::ArtifactKind::UnsupportedApi => {}
+    }
+
+    types.into_iter().collect()
+}
+
 fn enrich_ambiguity_lines(prepared: &mut PreparedArtifact, source: &str) {
     let lines: Vec<&str> = source.lines().collect();
     for ambiguity in &mut prepared.ambiguities {
@@ -184,7 +257,10 @@ fn extract_ambiguity_subject(path: &str, message: &str) -> Option<String> {
 
 pub fn clear_prepared_outputs(workspace: &Workspace, dry_run: bool) -> Result<()> {
     if dry_run {
-        println!("[dry-run] would remove {}", workspace.prepared_dir.display());
+        println!(
+            "[dry-run] would remove {}",
+            workspace.prepared_dir.display()
+        );
     } else if workspace.prepared_dir.exists() {
         fs::remove_dir_all(&workspace.prepared_dir)
             .with_context(|| format!("Failed to remove {}", workspace.prepared_dir.display()))?;
@@ -228,8 +304,8 @@ fn load_supported_documents(workspace: &Workspace) -> Result<Vec<DraftDocument>>
 
     let mut docs = Vec::new();
     for path in paths {
-        let content =
-            fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
         docs.push(parse_draft_file(&path, &workspace.drafts_dir, &content)?);
     }
     Ok(docs)
@@ -295,11 +371,13 @@ fn prepare_document(draft: &DraftDocument, catalog: &DraftCatalog) -> Result<Pre
 
 fn prepare_data(draft: &DataDraft, catalog: &DraftCatalog) -> Result<PreparedArtifact> {
     let export = export_name(draft.info.title());
+    // Data types are immutable value objects.
     let mut prepared = PreparedArtifact::empty(
         draft.info.kind.as_str(),
         draft.info.relative_path.clone(),
         draft.info.title.clone(),
         export,
+        false,
     );
     prepared.source = SourceInfo {
         path: draft.info.relative_path.clone(),
@@ -317,7 +395,11 @@ fn prepare_data(draft: &DataDraft, catalog: &DraftCatalog) -> Result<PreparedArt
             kind: "all_fields".to_string(),
         });
         for field in &draft.fields {
-            let type_status = resolve_data_field_type(field.name.as_str(), &[&field.meaning, &field.notes], catalog);
+            let type_status = resolve_data_field_type(
+                field.name.as_str(),
+                &[&field.meaning, &field.notes],
+                catalog,
+            );
             prepared.fields.push(FieldSpec {
                 name: sanitize_identifier(&field.name),
                 meaning: field.meaning.clone(),
@@ -354,11 +436,15 @@ fn prepare_data(draft: &DataDraft, catalog: &DraftCatalog) -> Result<PreparedArt
 
 fn prepare_composite(draft: &CompositeDraft, catalog: &DraftCatalog) -> Result<PreparedArtifact> {
     let export = export_name(draft.info.title());
+    // Contexts are mutable (they orchestrate a use case and may update their own state).
+    // Projections are immutable (pure read-only views).
+    let is_context = draft.info.kind == crate::draft_parser::ArtifactKind::Context;
     let mut prepared = PreparedArtifact::empty(
         draft.info.kind.as_str(),
         draft.info.relative_path.clone(),
         draft.info.title.clone(),
         export.clone(),
+        is_context,
     );
     prepared.invariants.extend(draft.notes.clone());
     let mut role_method_lookup = BTreeMap::<String, BTreeSet<String>>::new();
@@ -367,7 +453,11 @@ fn prepare_composite(draft: &CompositeDraft, catalog: &DraftCatalog) -> Result<P
         let role_type = if let Some(explicit) = &role.explicit_type {
             ValueStatus::resolved(explicit.clone(), "draft.role_player_type")
         } else {
-            resolve_named_type(&role.name, &[&role.why_involved, &role.expected_behavior], catalog)
+            resolve_named_type(
+                &role.name,
+                &[&role.why_involved, &role.expected_behavior],
+                catalog,
+            )
         };
         prepared.roles.push(RoleSpec {
             name: sanitize_identifier(&role.name),
@@ -393,7 +483,10 @@ fn prepare_composite(draft: &CompositeDraft, catalog: &DraftCatalog) -> Result<P
             prepared.ambiguities.push(Ambiguity {
                 path: format!("roles.{role_key}"),
                 severity: "blocking".to_string(),
-                message: format!("role method group `{}` does not map to a declared role", group.role),
+                message: format!(
+                    "role method group `{}` does not map to a declared role",
+                    group.role
+                ),
                 source_line: None,
             });
             continue;
@@ -425,9 +518,12 @@ fn prepare_composite(draft: &CompositeDraft, catalog: &DraftCatalog) -> Result<P
         prop_names,
     };
     for functionality in &draft.functionalities {
-        prepared
-            .functionalities
-            .push(prepare_functionality(functionality, draft, &body_context, catalog)?);
+        prepared.functionalities.push(prepare_functionality(
+            functionality,
+            draft,
+            &body_context,
+            catalog,
+        )?);
     }
     Ok(prepared)
 }
@@ -449,61 +545,62 @@ fn prepare_role_methods(
             let parsed_signature = extract_signature_marker(&[method.detail.clone()])
                 .and_then(|signature| parse_signature(&signature, &method.name).ok())
                 .or_else(|| infer_getter_signature(role_type, &method.name, catalog));
-            // The role player parameter: `<role>_: &<RolePlayerType>`.
-            // Immutable borrow by default; the compile-fix agent upgrades to `&mut` if needed.
-            let role_player_param_name = format!("{role_key}_");
-            let role_player_type_status = if let Some(ty) = role_type.rust() {
-                ValueStatus::resolved(format!("&{ty}"), "prepare.role_player")
+            // The role player parameter `<role>_: &<RolePlayerType>` is only injected here when
+            // the role type is already resolved. If it is unresolved, `propagate_resolved_types`
+            // will inject it later (after the fix-agent or a manual edit supplies the type).
+            // This avoids creating new blocking ambiguities that did not exist before this feature.
+            let role_player_param: Option<ParameterSpec> =
+                role_type.rust().map(|ty| ParameterSpec {
+                    name: format!("{role_key}_"),
+                    type_status: ValueStatus::resolved(format!("&{ty}"), "prepare.role_player"),
+                });
+
+            let (signature, receiver, mut parameters, return_status) = if let Some(parsed) =
+                parsed_signature.clone()
+            {
+                let signature = ValueStatus::resolved(parsed.original.clone(), "prepare.signature");
+                // Receiver is always `&self`; the context is never mutated by a role method call.
+                let receiver = Some("&self".to_string());
+                let parameters = parsed
+                    .parameters
+                    .iter()
+                    .map(|parameter| ParameterSpec {
+                        name: parameter.0.clone(),
+                        type_status: ValueStatus::resolved(
+                            parameter.1.clone(),
+                            "prepare.signature",
+                        ),
+                    })
+                    .collect::<Vec<_>>();
+                let return_status =
+                    ValueStatus::resolved(parsed.return_type.clone(), "prepare.signature");
+                (signature, receiver, parameters, return_status)
             } else {
-                ValueStatus::missing(
-                    format!("role player type for `{role_key}` is unresolved; cannot type role player parameter"),
-                    evidence.clone(),
+                (
+                    ValueStatus::missing(
+                        format!(
+                            "role method `{}` on role `{}` is missing a parseable signature",
+                            method.name, group.role
+                        ),
+                        evidence.clone(),
+                    ),
+                    Some("&self".to_string()),
+                    Vec::new(),
+                    ValueStatus::missing(
+                        format!("role method `{}` return type is unknown", method.name),
+                        evidence.clone(),
+                    ),
                 )
             };
-            let role_player_param = ParameterSpec {
-                name: role_player_param_name.clone(),
-                type_status: role_player_type_status,
-            };
 
-            let (signature, receiver, mut parameters, return_status) =
-                if let Some(parsed) = parsed_signature.clone() {
-                    let signature = ValueStatus::resolved(parsed.original.clone(), "prepare.signature");
-                    // Receiver is always `&self`; the context is never mutated by a role method call.
-                    let receiver = Some("&self".to_string());
-                    let parameters = parsed
-                        .parameters
-                        .iter()
-                        .map(|parameter| ParameterSpec {
-                            name: parameter.0.clone(),
-                            type_status: ValueStatus::resolved(parameter.1.clone(), "prepare.signature"),
-                        })
-                        .collect::<Vec<_>>();
-                    let return_status =
-                        ValueStatus::resolved(parsed.return_type.clone(), "prepare.signature");
-                    (signature, receiver, parameters, return_status)
-                } else {
-                    (
-                        ValueStatus::missing(
-                            format!(
-                                "role method `{}` on role `{}` is missing a parseable signature",
-                                method.name, group.role
-                            ),
-                            evidence.clone(),
-                        ),
-                        Some("&self".to_string()),
-                        Vec::new(),
-                        ValueStatus::missing(
-                            format!("role method `{}` return type is unknown", method.name),
-                            evidence.clone(),
-                        ),
-                    )
-                };
+            // Prepend the role player as the first explicit parameter when the type is resolved.
+            if let Some(param) = role_player_param {
+                parameters.insert(0, param);
+            }
 
-            // Prepend the role player as the first explicit parameter, before any domain params
-            // from the signature. This is the DCI-inspired convention for this codebase.
-            parameters.insert(0, role_player_param);
-
-            let body = parsed_signature.map(|parsed| delegated_role_method_body(role_key, &method.name, &parsed.parameters));
+            let body = parsed_signature.map(|parsed| {
+                delegated_role_method_body(role_key, &method.name, &parsed.parameters)
+            });
 
             // Role methods in this implementation are instance methods on the context where
             // the first argument is the role player (named `<role>_` by convention).
@@ -536,6 +633,8 @@ fn prepare_functionality(
         return Ok(auto_constructor_method(draft, _catalog));
     }
 
+    let default_receiver = "&self";
+
     let signature_text = extract_signature_marker(&functionality.flow);
     let signature = if let Some(text) = signature_text.clone() {
         parse_signature(&text, &functionality.name).ok()
@@ -549,7 +648,11 @@ fn prepare_functionality(
     let (signature_status, receiver, parameters, return_status) = if let Some(parsed) = &signature {
         (
             ValueStatus::resolved(parsed.original.clone(), "prepare.signature"),
-            parsed.receiver.clone(),
+            // Honour any receiver the BA put in the Signature marker; fall back to the type default.
+            parsed
+                .receiver
+                .clone()
+                .or_else(|| Some(default_receiver.to_string())),
             parsed
                 .parameters
                 .iter()
@@ -563,13 +666,19 @@ fn prepare_functionality(
     } else {
         (
             ValueStatus::missing(
-                format!("functionality `{}` is missing a parseable signature", functionality.name),
+                format!(
+                    "functionality `{}` is missing a parseable signature",
+                    functionality.name
+                ),
                 evidence.clone(),
             ),
-            Some("&self".to_string()),
+            Some(default_receiver.to_string()),
             Vec::new(),
             ValueStatus::missing(
-                format!("functionality `{}` return type is unknown", functionality.name),
+                format!(
+                    "functionality `{}` return type is unknown",
+                    functionality.name
+                ),
                 evidence.clone(),
             ),
         )
@@ -616,7 +725,11 @@ fn auto_constructor_method(draft: &CompositeDraft, catalog: &DraftCatalog) -> Me
         let ty = if let Some(explicit) = &role.explicit_type {
             ValueStatus::resolved(explicit.clone(), "draft.role_player_type")
         } else {
-            resolve_named_type(&role.name, &[&role.why_involved, &role.expected_behavior], catalog)
+            resolve_named_type(
+                &role.name,
+                &[&role.why_involved, &role.expected_behavior],
+                catalog,
+            )
         };
         params.push(ParameterSpec {
             name: sanitize_identifier(&role.name),
@@ -683,18 +796,24 @@ fn auto_constructor_method(draft: &CompositeDraft, catalog: &DraftCatalog) -> Me
 
 fn prepare_app(app: &AppDraft, catalog: &DraftCatalog) -> Result<PreparedArtifact> {
     let export = export_name(app.info.title());
+    // App entry points drive mutable state (main loop, startup sequence).
     let mut prepared = PreparedArtifact::empty(
         app.info.kind.as_str(),
         app.info.relative_path.clone(),
         app.info.title.clone(),
         export,
+        true,
     );
 
     for collaborator in &app.collaborators {
         prepared.collaborators.push(CollaboratorSpec {
             name: sanitize_identifier(&collaborator.name),
             responsibility: collaborator.responsibility.clone(),
-            type_status: resolve_named_type(&collaborator.name, &[&collaborator.responsibility], catalog),
+            type_status: resolve_named_type(
+                &collaborator.name,
+                &[&collaborator.responsibility],
+                catalog,
+            ),
         });
     }
 
@@ -735,8 +854,7 @@ fn prepare_app(app: &AppDraft, catalog: &DraftCatalog) -> Result<PreparedArtifac
             severity: "info".to_string(),
             message: format!(
                 "app main flow could not be normalized into deterministic steps: {}",
-                body_error
-                    .unwrap_or_else(|| "missing body".to_string())
+                body_error.unwrap_or_else(|| "missing body".to_string())
             ),
             source_line: None,
         });
@@ -808,7 +926,11 @@ fn extract_references(
             }
 
             // 4. PascalCase → treat as a type reference.
-            if sanitized.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+            if sanitized
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+            {
                 if !refs.types.contains(&sanitized) {
                     refs.types.push(sanitized.clone());
                 }
@@ -896,7 +1018,10 @@ fn parse_step(rule: &str, context: &BodyParseContext) -> Result<Statement> {
         .captures(rule.trim())
     {
         return Ok(Statement::Return {
-            expr: Some(parse_expression(captures.get(1).unwrap().as_str(), context)?),
+            expr: Some(parse_expression(
+                captures.get(1).unwrap().as_str(),
+                context,
+            )?),
         });
     }
     if let Some(captures) = Regex::new(r#"^Read current UTC millisecond time into `([^`]+)`\.?$"#)
@@ -956,10 +1081,11 @@ fn parse_expression(code: &str, context: &BodyParseContext) -> Result<Expression
     }
     if trimmed.contains("::")
         && !trimmed.contains('(')
-        && trimmed
-            .rsplit("::")
-            .next()
-            .is_some_and(|part| part.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()))
+        && trimmed.rsplit("::").next().is_some_and(|part| {
+            part.chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        })
     {
         let type_name = trimmed.split("::").next().unwrap_or_default().to_string();
         let variant = trimmed.rsplit("::").next().unwrap_or_default().to_string();
@@ -1023,7 +1149,10 @@ fn parse_call_args(args: &str, context: &BodyParseContext) -> Result<Vec<Express
         .collect()
 }
 
-fn parse_struct_literal(code: &str, context: &BodyParseContext) -> Result<Option<(String, Vec<StructFieldValue>)>> {
+fn parse_struct_literal(
+    code: &str,
+    context: &BodyParseContext,
+) -> Result<Option<(String, Vec<StructFieldValue>)>> {
     let Some(open) = code.find('{') else {
         return Ok(None);
     };
@@ -1161,9 +1290,7 @@ fn parse_signature(signature: &str, expected_name: &str) -> Result<ParsedSignatu
     };
     let name = left[..open].trim();
     if sanitize_identifier(name) != sanitize_identifier(expected_name) {
-        anyhow::bail!(
-            "signature `{trimmed}` describes `{name}` but expected `{expected_name}`"
-        );
+        anyhow::bail!("signature `{trimmed}` describes `{name}` but expected `{expected_name}`");
     }
     let inner = left[open + 1..close].trim();
     let mut receiver = None;
@@ -1212,14 +1339,22 @@ fn infer_getter_signature(
         .fields
         .iter()
         .find(|field| sanitize_identifier(&field.name) == sanitize_identifier(method_name))?;
-    let field_type = resolve_data_field_type(field.name.as_str(), &[&field.meaning, &field.notes], catalog);
+    let field_type = resolve_data_field_type(
+        field.name.as_str(),
+        &[&field.meaning, &field.notes],
+        catalog,
+    );
     let return_type = if copy_like_type(field_type.rust()) {
         field_type.rust()?.to_string()
     } else {
         format!("&{}", field_type.rust()?)
     };
     Some(ParsedSignature {
-        original: format!("{}(&self) -> {}", sanitize_identifier(method_name), return_type),
+        original: format!(
+            "{}(&self) -> {}",
+            sanitize_identifier(method_name),
+            return_type
+        ),
         receiver: Some("&self".to_string()),
         parameters: Vec::new(),
         return_type,
@@ -1227,11 +1362,11 @@ fn infer_getter_signature(
 }
 
 fn resolve_data_field_type(name: &str, texts: &[&str], catalog: &DraftCatalog) -> ValueStatus {
-    resolve_type_with_defaults(name, texts, catalog, true)
+    resolve_type_with_defaults(name, texts, catalog, true, false)
 }
 
 fn resolve_named_type(name: &str, texts: &[&str], catalog: &DraftCatalog) -> ValueStatus {
-    resolve_type_with_defaults(name, texts, catalog, false)
+    resolve_type_with_defaults(name, texts, catalog, false, true)
 }
 
 fn resolve_type_with_defaults(
@@ -1239,6 +1374,7 @@ fn resolve_type_with_defaults(
     texts: &[&str],
     catalog: &DraftCatalog,
     allow_scalar_defaults: bool,
+    prefer_exact_name_match: bool,
 ) -> ValueStatus {
     let evidence = texts
         .iter()
@@ -1248,6 +1384,20 @@ fn resolve_type_with_defaults(
             text: text.trim().to_string(),
         })
         .collect::<Vec<_>>();
+
+    if prefer_exact_name_match {
+        let normalized_name = normalize_symbol(name);
+        if let Some(candidates) = catalog.normalized.get(&normalized_name) {
+            if candidates.len() == 1 {
+                return ValueStatus::resolved(candidates[0].clone(), "name_match");
+            }
+            return ValueStatus::ambiguous(
+                candidates.clone(),
+                format!("multiple exports match `{name}`"),
+                evidence,
+            );
+        }
+    }
 
     let explicit = extract_type_candidates(texts, catalog);
     if explicit.len() == 1 {
@@ -1261,16 +1411,18 @@ fn resolve_type_with_defaults(
         );
     }
 
-    let normalized_name = normalize_symbol(name);
-    if let Some(candidates) = catalog.normalized.get(&normalized_name) {
-        if candidates.len() == 1 {
-            return ValueStatus::resolved(candidates[0].clone(), "name_match");
+    if !prefer_exact_name_match {
+        let normalized_name = normalize_symbol(name);
+        if let Some(candidates) = catalog.normalized.get(&normalized_name) {
+            if candidates.len() == 1 {
+                return ValueStatus::resolved(candidates[0].clone(), "name_match");
+            }
+            return ValueStatus::ambiguous(
+                candidates.clone(),
+                format!("multiple exports match `{name}`"),
+                evidence,
+            );
         }
-        return ValueStatus::ambiguous(
-            candidates.clone(),
-            format!("multiple exports match `{name}`"),
-            evidence,
-        );
     }
 
     if allow_scalar_defaults {
@@ -1289,7 +1441,10 @@ fn resolve_type_with_defaults(
         }
     }
 
-    ValueStatus::missing(format!("no concrete Rust type could be inferred for `{name}`"), evidence)
+    ValueStatus::missing(
+        format!("no concrete Rust type could be inferred for `{name}`"),
+        evidence,
+    )
 }
 
 fn extract_type_candidates(texts: &[&str], catalog: &DraftCatalog) -> Vec<String> {
@@ -1331,7 +1486,10 @@ fn looks_like_type(value: &str, catalog: &DraftCatalog) -> bool {
     if trimmed.contains("::") || trimmed.contains('<') || trimmed.contains('[') {
         return true;
     }
-    trimmed.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+    trimmed
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
         || matches!(
             trimmed.as_str(),
             "String"
@@ -1364,11 +1522,7 @@ fn infer_derives(notes: &[String]) -> Vec<String> {
 }
 
 fn getter_mode(rust: Option<&str>) -> &'static str {
-    if copy_like_type(rust) {
-        "copy"
-    } else {
-        "ref"
-    }
+    if copy_like_type(rust) { "copy" } else { "ref" }
 }
 
 fn copy_like_type(rust: Option<&str>) -> bool {
@@ -1414,7 +1568,11 @@ fn sanitize_identifier(value: &str) -> String {
     let mut out = String::new();
     let mut prev_underscore = false;
     for ch in value.chars() {
-        let normalized = if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '_' };
+        let normalized = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '_'
+        };
         if normalized == '_' {
             if !prev_underscore && !out.is_empty() {
                 out.push('_');
@@ -1437,7 +1595,8 @@ fn normalize_symbol(value: &str) -> String {
 }
 
 fn non_empty_lines(value: &str) -> Vec<String> {
-    value.lines()
+    value
+        .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
@@ -1484,5 +1643,64 @@ impl DraftDocumentInfoExt for DraftDocument {
             DraftDocument::Context(context) => &context.info,
             DraftDocument::App(app) => &app.info,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_catalog(exports: &[&str]) -> DraftCatalog {
+        let mut export_set = BTreeSet::new();
+        let mut normalized = BTreeMap::new();
+        for export in exports {
+            let export = export.to_string();
+            export_set.insert(export.clone());
+            normalized.insert(normalize_symbol(&export), vec![export]);
+        }
+        DraftCatalog {
+            exports: export_set,
+            normalized,
+            data_drafts: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_named_type_prefers_exact_name_match_over_incidental_hint() {
+        let catalog = test_catalog(&["TerminalRenderer", "StringRenderer"]);
+        let status = resolve_named_type(
+            "TerminalRenderer",
+            &["Uses `StringRenderer` and shows the latest frame in the terminal."],
+            &catalog,
+        );
+        assert_eq!(status.rust.as_deref(), Some("TerminalRenderer"));
+        assert_eq!(status.source.as_deref(), Some("name_match"));
+    }
+
+    #[test]
+    fn available_types_for_app_uses_manifest_allowlists_and_prefixes() {
+        let catalog = test_catalog(&["GameLoopContext"]);
+        let manifest = TypesManifest {
+            primitives: vec!["u32".to_string()],
+            external_path_prefixes: vec!["std::".to_string()],
+            allowlists: ManifestAllowlists {
+                data: vec!["Board".to_string()],
+                projection: vec!["StringRenderer".to_string()],
+                context: vec!["TerminalRenderer".to_string()],
+            },
+        };
+
+        let available = available_types_for_draft(
+            Some(&manifest),
+            crate::draft_parser::ArtifactKind::App,
+            &catalog,
+        );
+
+        assert!(available.contains(&"GameLoopContext".to_string()));
+        assert!(available.contains(&"Board".to_string()));
+        assert!(available.contains(&"StringRenderer".to_string()));
+        assert!(available.contains(&"TerminalRenderer".to_string()));
+        assert!(available.contains(&"u32".to_string()));
+        assert!(available.contains(&"std::".to_string()));
     }
 }

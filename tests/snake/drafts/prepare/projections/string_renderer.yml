@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: projections/string_renderer.md
   kind: projection
   title: String Renderer
 export:
   name: StringRenderer
+mutable: false
 roles:
 - name: board
   purpose: Supplies the picture of the current board as a two-dimensionel array where the indices match (x,y)
@@ -109,7 +110,7 @@ functionalities:
 - name: render
   signature:
     status: fixed
-    rust: render(&self) -> String
+    rust: 'render(&self, board: &Board, score: u32) -> String'
     source: fix.agent
     reason: functionality `render` is missing a parseable signature
     evidence:

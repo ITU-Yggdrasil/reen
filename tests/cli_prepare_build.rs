@@ -66,9 +66,7 @@ fn prepare_success_writes_yaml() {
     let output = run_reen(&project, ["prepare"]);
     assert!(output.status.success(), "{}", output_text(&output));
     assert!(
-        project
-            .join("drafts/prepare/data/Message.yml")
-            .is_file(),
+        project.join("drafts/prepare/data/Message.yml").is_file(),
         "prepared data YAML missing"
     );
     assert!(
@@ -146,11 +144,31 @@ fn help_lists_scaffold_and_build() {
         .expect("run help");
     assert!(output.status.success(), "{}", output_text(&output));
     let rendered = output_text(&output);
-    assert!(rendered.contains("scaffold"), "help should list scaffold: {rendered}");
-    assert!(rendered.contains("build"), "help should list build: {rendered}");
+    assert!(
+        rendered.contains("scaffold"),
+        "help should list scaffold: {rendered}"
+    );
+    assert!(
+        rendered.contains("build"),
+        "help should list build: {rendered}"
+    );
     assert!(!rendered.contains("create"));
     assert!(!rendered.contains("check"));
     assert!(!rendered.contains("capabilities"));
+}
+
+#[test]
+fn build_help_lists_fix_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .args(["build", "--help"])
+        .output()
+        .expect("run build help");
+    assert!(output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        rendered.contains("--fix"),
+        "build --help should list --fix: {rendered}"
+    );
 }
 
 #[test]
@@ -191,7 +209,9 @@ fn prepare_resolves_explicit_role_player_types() {
     );
     // Role method parameters should have the role player type resolved.
     assert!(
-        yaml.contains("rust: '&std::io::Stdin'") || yaml.contains("rust: \"&std::io::Stdin\"") || yaml.contains("rust: \'&std::io::Stdin\'"),
+        yaml.contains("rust: '&std::io::Stdin'")
+            || yaml.contains("rust: \"&std::io::Stdin\"")
+            || yaml.contains("rust: \'&std::io::Stdin\'"),
         "role player parameter should carry the resolved type:\n{yaml}"
     );
 }
@@ -275,9 +295,17 @@ fn build_implements_todo_bodies() {
     }
 
     let prepare = run_reen(&project, ["prepare", "--fix", "--verbose"]);
-    assert!(prepare.status.success(), "prepare failed: {}", output_text(&prepare));
+    assert!(
+        prepare.status.success(),
+        "prepare failed: {}",
+        output_text(&prepare)
+    );
     let scaffold = run_reen(&project, ["scaffold", "--verbose"]);
-    assert!(scaffold.status.success(), "scaffold failed: {}", output_text(&scaffold));
+    assert!(
+        scaffold.status.success(),
+        "scaffold failed: {}",
+        output_text(&scaffold)
+    );
     let build = run_reen(&project, ["build", "--verbose"]);
     let rendered = output_text(&build);
     eprintln!("{}", rendered);
@@ -305,8 +333,7 @@ fn prepare_fix_resolves_ambiguities_with_llm() {
     let rendered = output_text(&output);
     eprintln!("{}", rendered);
 
-    let command_input = project
-        .join("drafts/prepare/contexts/command_input.yml");
+    let command_input = project.join("drafts/prepare/contexts/command_input.yml");
     assert!(
         command_input.is_file(),
         "prepared YAML for command_input missing after --fix"

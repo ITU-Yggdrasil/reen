@@ -1,17 +1,18 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: contexts/command_input.md
   kind: context
   title: CommandInputContext
 export:
   name: CommandInputContext
+mutable: true
 roles:
 - name: stdin_source
   purpose: Supplies keyboard input from stdin
   expected_behavior: Supports non-blocking reads from standard input
   type:
     status: fixed
-    rust: Box<dyn std::io::Read>
+    rust: std::io::Stdin
     source: fix.agent
     reason: no concrete Rust type could be inferred for `stdin_source`
     evidence:
@@ -23,22 +24,16 @@ roles:
   - name: read_available
     signature:
       status: fixed
-      rust: 'read_available(&self, stdin_source_: &Box<dyn std::io::Read>) -> Vec<char>'
+      rust: 'read_available(&self, stdin_source_: &std::io::Stdin) -> Vec<crossterm::event::KeyEvent>'
       source: fix.agent
       reason: role method `read_available` on role `stdin_source` is missing a parseable signature
       evidence:
       - section: Role Methods / stdin_source
         text: Returns all currently available key presses in arrival order without waiting.
     receiver: '&self'
-    parameters:
-    - name: stdin_source_
-      type:
-        status: resolved
-        rust: '&Box<dyn std::io::Read>'
-        source: prepare.role_player
     returns:
       status: fixed
-      rust: Vec<char>
+      rust: Vec<crossterm::event::KeyEvent>
       source: fix.agent
       reason: role method `read_available` return type is unknown
       evidence:
@@ -49,7 +44,7 @@ props:
   meaning: Queue of captured key presses
   type:
     status: fixed
-    rust: std::collections::VecDeque<char>
+    rust: std::collections::VecDeque<crossterm::event::KeyEvent>
     source: fix.agent
     reason: no concrete Rust type could be inferred for `buffer`
     evidence:
@@ -63,13 +58,13 @@ functionalities:
 - name: new
   signature:
     status: resolved
-    rust: 'new(stdin_source: Box<dyn std::io::Read>, buffer: std::collections::VecDeque<char>) -> Self'
+    rust: 'new(stdin_source: std::io::Stdin, buffer: std::collections::VecDeque<crossterm::event::KeyEvent>) -> Self'
     source: prepare.auto
   parameters:
   - name: stdin_source
     type:
       status: fixed
-      rust: Box<dyn std::io::Read>
+      rust: std::io::Stdin
       source: fix.agent
       reason: no concrete Rust type could be inferred for `stdin_source`
       evidence:
@@ -80,7 +75,7 @@ functionalities:
   - name: buffer
     type:
       status: fixed
-      rust: std::collections::VecDeque<char>
+      rust: std::collections::VecDeque<crossterm::event::KeyEvent>
       source: fix.agent
       reason: no concrete Rust type could be inferred for `buffer`
       evidence:
@@ -110,7 +105,7 @@ functionalities:
 - name: capture
   signature:
     status: fixed
-    rust: capture(&mut self)
+    rust: capture(&mut self) -> ()
     source: fix.agent
     reason: functionality `capture` is missing a parseable signature
     evidence:
@@ -140,7 +135,7 @@ functionalities:
 - name: next_key
   signature:
     status: fixed
-    rust: next_key(&mut self) -> Option<char>
+    rust: next_key(&mut self) -> Option<crossterm::event::KeyEvent>
     source: fix.agent
     reason: functionality `next_key` is missing a parseable signature
     evidence:
@@ -149,7 +144,7 @@ functionalities:
   receiver: '&self'
   returns:
     status: fixed
-    rust: Option<char>
+    rust: Option<crossterm::event::KeyEvent>
     source: fix.agent
     reason: functionality `next_key` return type is unknown
     evidence:

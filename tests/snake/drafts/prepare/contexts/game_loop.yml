@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: contexts/game_loop.md
   kind: context
   title: GameLoopContext
 export:
   name: GameLoopContext
+mutable: true
 roles:
 - name: snake
   purpose: Current snake positions and travel direction
@@ -17,7 +18,7 @@ roles:
   - name: body
     signature:
       status: fixed
-      rust: 'body(&self, snake_: &Snake) -> Vec<Position>'
+      rust: 'body(&self, snake_: &Snake) -> std::collections::VecDeque<Position>'
       source: fix.agent
       reason: role method `body` on role `snake` is missing a parseable signature
       evidence:
@@ -32,7 +33,7 @@ roles:
         source: prepare.role_player
     returns:
       status: fixed
-      rust: Vec<Position>
+      rust: std::collections::VecDeque<Position>
       source: fix.agent
       reason: role method `body` return type is unknown
       evidence:
@@ -81,23 +82,13 @@ roles:
   - name: capture
     signature:
       status: fixed
-      rust: 'capture(&mut self, command_: &CommandInputContext)'
+      rust: 'capture(command_: &CommandInputContext, &mut self) -> ()'
       source: fix.agent
       reason: role method `capture` on role `command` is missing a parseable signature
       evidence:
       - section: Role Methods / command
         text: Adds newly available key presses to the shared queue without waiting.
     receiver: '&self'
-    parameters:
-    - name: command_
-      type:
-        status: fixed
-        rust: CommandInputContext
-        source: fix.agent
-        reason: role player type for `command` is unresolved; cannot type role player parameter
-        evidence:
-        - section: Role Methods / command
-          text: Adds newly available key presses to the shared queue without waiting.
     returns:
       status: fixed
       rust: ()
@@ -116,16 +107,6 @@ roles:
       - section: Role Methods / command
         text: Returns the next gameplay action from the shared queue, if one is available.
     receiver: '&self'
-    parameters:
-    - name: command_
-      type:
-        status: fixed
-        rust: CommandInputContext
-        source: fix.agent
-        reason: role player type for `command` is unresolved; cannot type role player parameter
-        evidence:
-        - section: Role Methods / command
-          text: Returns the next gameplay action from the shared queue, if one is available.
     returns:
       status: fixed
       rust: Option<UserAction>
@@ -139,7 +120,7 @@ roles:
   expected_behavior: Chooses a free interior food position, or no position if none is available
   type:
     status: fixed
-    rust: Food
+    rust: fn(&Board, &Snake) -> Option<Position>
     source: fix.agent
     reason: no concrete Rust type could be inferred for `food_dropper`
     evidence:
@@ -151,23 +132,13 @@ roles:
   - name: drop
     signature:
       status: fixed
-      rust: 'drop(&self, food_dropper_: &Food) -> Option<Position>'
+      rust: 'drop(&self, food_dropper_: &fn(&Board, &Snake) -> Option<Position>, board: &Board, snake: &Snake) -> Option<Position>'
       source: fix.agent
       reason: role method `drop` on role `food_dropper` is missing a parseable signature
       evidence:
       - section: Role Methods / food_dropper
         text: Chooses a food placement using the current board and the current snake. Returns a placement on a free interior cell, or no placement when none is available.
     receiver: '&self'
-    parameters:
-    - name: food_dropper_
-      type:
-        status: fixed
-        rust: Food
-        source: fix.agent
-        reason: role player type for `food_dropper` is unresolved; cannot type role player parameter
-        evidence:
-        - section: Role Methods / food_dropper
-          text: Chooses a food placement using the current board and the current snake. Returns a placement on a free interior cell, or no placement when none is available.
     returns:
       status: fixed
       rust: Option<Position>
@@ -319,7 +290,7 @@ functionalities:
 - name: new
   signature:
     status: resolved
-    rust: 'new(snake: Snake, command: CommandInputContext, food_dropper: Food, game_state: GameState, board: Board) -> Self'
+    rust: 'new(snake: Snake, command: CommandInputContext, food_dropper: fn(&Board, &Snake) -> Option<Position>, game_state: GameState, board: Board) -> Self'
     source: prepare.auto
   parameters:
   - name: snake
@@ -341,7 +312,7 @@ functionalities:
   - name: food_dropper
     type:
       status: fixed
-      rust: Food
+      rust: fn(&Board, &Snake) -> Option<Position>
       source: fix.agent
       reason: no concrete Rust type could be inferred for `food_dropper`
       evidence:

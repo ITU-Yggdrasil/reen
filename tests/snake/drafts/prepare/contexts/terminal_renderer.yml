@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: contexts/terminal_renderer.md
   kind: context
   title: Terminal Renderer
 export:
   name: TerminalRenderer
+mutable: true
 roles:
 - name: string_renderer
   purpose: Produces the text for the current frame
@@ -57,7 +58,7 @@ functionalities:
 - name: render
   signature:
     status: fixed
-    rust: render(&self)
+    rust: 'render(&mut self, board: &Board, score: u32)'
     source: fix.agent
     reason: functionality `render` is missing a parseable signature
     evidence:

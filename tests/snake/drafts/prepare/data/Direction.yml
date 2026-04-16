@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: data/Direction.md
   kind: data
   title: Direction
 export:
   name: Direction
+mutable: false
 variants:
 - name: Up
   meaning: Moving upward

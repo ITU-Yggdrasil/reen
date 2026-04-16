@@ -292,8 +292,12 @@ fn parse_composite_draft(info: DraftInfo, content: &str) -> Result<CompositeDraf
         );
     }
     let roles = parse_role_players_section(&info.relative_path, &sections)?;
-    let props_table =
-        parse_single_table_section(&info.relative_path, &sections, "Props", &["Prop", "Meaning", "Notes"])?;
+    let props_table = parse_single_table_section(
+        &info.relative_path,
+        &sections,
+        "Props",
+        &["Prop", "Meaning", "Notes"],
+    )?;
     let role_methods = parse_role_methods(
         &info.relative_path,
         &section_body(&sections, "Role Methods"),
@@ -468,8 +472,8 @@ fn parse_fields_table(relative_path: &str, body: &str) -> Result<Vec<DataField>>
     for row in &table.rows {
         let (getter_accessible, notes) = if has_accessible {
             let value = row[2].trim();
-            let getter_accessible = value.is_empty()
-                || matches_ignore_ascii_case(value, &["x", "yes", "true"]);
+            let getter_accessible =
+                value.is_empty() || matches_ignore_ascii_case(value, &["x", "yes", "true"]);
             (getter_accessible, row[3].clone())
         } else {
             (true, row[2].clone())
@@ -535,7 +539,10 @@ fn parse_collaborators_table(relative_path: &str, body: &str) -> Result<Vec<Coll
         .collect())
 }
 
-fn parse_role_players_section(relative_path: &str, sections: &[Section]) -> Result<Vec<RolePlayer>> {
+fn parse_role_players_section(
+    relative_path: &str,
+    sections: &[Section],
+) -> Result<Vec<RolePlayer>> {
     let section = require_section(relative_path, sections, "Role Players")?;
     if section.body.trim().is_empty() {
         return Ok(Vec::new());
@@ -612,17 +619,31 @@ pub fn normalize_type_notation(raw: &str) -> String {
     // --- Composite English patterns (recursive) ---
 
     // "list of X" → Vec<X>
-    if let Some(inner) = lower.strip_prefix("list of ").or_else(|| lower.strip_prefix("array of ").or_else(|| lower.strip_prefix("sequence of ").or_else(|| lower.strip_prefix("vec of ")))) {
+    if let Some(inner) = lower.strip_prefix("list of ").or_else(|| {
+        lower.strip_prefix("array of ").or_else(|| {
+            lower
+                .strip_prefix("sequence of ")
+                .or_else(|| lower.strip_prefix("vec of "))
+        })
+    }) {
         let inner_ty = normalize_type_notation(inner);
         return format!("Vec<{inner_ty}>");
     }
     // "optional X" / "option of X" / "maybe X"
-    if let Some(inner) = lower.strip_prefix("optional ").or_else(|| lower.strip_prefix("option of ").or_else(|| lower.strip_prefix("maybe "))) {
+    if let Some(inner) = lower.strip_prefix("optional ").or_else(|| {
+        lower
+            .strip_prefix("option of ")
+            .or_else(|| lower.strip_prefix("maybe "))
+    }) {
         let inner_ty = normalize_type_notation(inner);
         return format!("Option<{inner_ty}>");
     }
     // "map from X to Y" / "map of X to Y" / "mapping from X to Y"
-    if let Some(rest) = lower.strip_prefix("map from ").or_else(|| lower.strip_prefix("map of ").or_else(|| lower.strip_prefix("mapping from "))) {
+    if let Some(rest) = lower.strip_prefix("map from ").or_else(|| {
+        lower
+            .strip_prefix("map of ")
+            .or_else(|| lower.strip_prefix("mapping from "))
+    }) {
         if let Some(idx) = rest.find(" to ") {
             let key_ty = normalize_type_notation(&rest[..idx]);
             let val_ty = normalize_type_notation(&rest[idx + 4..]);
@@ -637,7 +658,9 @@ pub fn normalize_type_notation(raw: &str) -> String {
         "small integer" | "i32" => "i32".to_string(),
         "small unsigned integer" | "u32" => "u32".to_string(),
         "byte" | "u8" => "u8".to_string(),
-        "float" | "floating point" | "rational number" | "decimal" | "real number" | "f64" => "f64".to_string(),
+        "float" | "floating point" | "rational number" | "decimal" | "real number" | "f64" => {
+            "f64".to_string()
+        }
         "single precision float" | "f32" => "f32".to_string(),
         "string" | "text" | "str" => "String".to_string(),
         "boolean" | "bool" | "flag" => "bool".to_string(),
@@ -658,8 +681,7 @@ pub fn normalize_type_notation(raw: &str) -> String {
 fn is_rust_type_syntax(s: &str) -> bool {
     // Known Rust primitive type names.
     let primitives = [
-        "i8", "i16", "i32", "i64", "i128", "isize",
-        "u8", "u16", "u32", "u64", "u128", "usize",
+        "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
         "f32", "f64", "bool", "char", "str",
     ];
     if primitives.contains(&s) {
@@ -680,7 +702,9 @@ fn is_rust_type_syntax(s: &str) -> bool {
         }
     }
     // PascalCase or known standard types.
-    s.chars().next().is_some_and(|ch| ch.is_ascii_uppercase() || ch == '&' || ch == '(' || ch == '[')
+    s.chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase() || ch == '&' || ch == '(' || ch == '[')
 }
 
 fn parse_single_table_section(
@@ -723,7 +747,11 @@ fn parse_single_table_section(
     Ok(table)
 }
 
-fn require_section<'a>(relative_path: &str, sections: &'a [Section], title: &str) -> Result<&'a Section> {
+fn require_section<'a>(
+    relative_path: &str,
+    sections: &'a [Section],
+    title: &str,
+) -> Result<&'a Section> {
     find_section(sections, title).ok_or_else(|| {
         anyhow::anyhow!(
             "Draft schema validation failed for {}:\n- Missing required `## {}` section",
@@ -816,7 +844,10 @@ fn parse_flow_block(body: &str) -> Vec<String> {
             continue;
         }
         if in_flow {
-            if is_bold_label_line(trimmed) || trimmed.starts_with('|') || trimmed.starts_with("### ") {
+            if is_bold_label_line(trimmed)
+                || trimmed.starts_with('|')
+                || trimmed.starts_with("### ")
+            {
                 break;
             }
             if trimmed.is_empty() {
@@ -859,13 +890,19 @@ fn parse_labeled_items_block(body: &str, label: &str) -> Vec<String> {
             continue;
         }
         if in_section {
-            if is_bold_label_line(trimmed) || trimmed.starts_with('|') || trimmed.starts_with("### ") {
+            if is_bold_label_line(trimmed)
+                || trimmed.starts_with('|')
+                || trimmed.starts_with("### ")
+            {
                 break;
             }
             if trimmed.is_empty() {
                 continue;
             }
-            if let Some(item) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            if let Some(item) = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+            {
                 let item = item.trim().to_string();
                 if item != "—" {
                     items.push(item);

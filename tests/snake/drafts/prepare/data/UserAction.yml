@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: data/UserAction.md
   kind: data
   title: UserAction
 export:
   name: UserAction
+mutable: false
 variants:
 - name: MovementDirection
   meaning: A movement command

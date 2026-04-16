@@ -2,13 +2,22 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v2";
+pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedArtifact {
     pub schema: String,
     pub source: SourceInfo,
     pub export: ExportInfo,
+    /// Whether the enclosing Rust type is mutable (`true` for contexts, `false` for data/projections).
+    ///
+    /// Mutable types expose their public methods with `&mut self`; immutable types use `&self`.
+    /// Role methods always use `&self` on the context regardless of this flag (the role player
+    /// argument carries any needed mutability instead).
+    ///
+    /// Defaults to `false` when absent (legacy prepared files pre-date this field).
+    #[serde(default)]
+    pub mutable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<FieldSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -306,11 +315,22 @@ pub struct Ambiguity {
 }
 
 impl PreparedArtifact {
-    pub fn empty(kind: &str, path: String, title: String, export_name: String) -> Self {
+    pub fn empty(
+        kind: &str,
+        path: String,
+        title: String,
+        export_name: String,
+        mutable: bool,
+    ) -> Self {
         Self {
             schema: PREPARED_SCHEMA_VERSION.to_string(),
-            source: SourceInfo { path, kind: kind.to_string(), title },
+            source: SourceInfo {
+                path,
+                kind: kind.to_string(),
+                title,
+            },
             export: ExportInfo { name: export_name },
+            mutable,
             fields: Vec::new(),
             variants: Vec::new(),
             roles: Vec::new(),
@@ -372,7 +392,11 @@ impl PreparedArtifact {
             );
         }
         for (idx, method) in self.functionalities.iter().enumerate() {
-            method.collect_ambiguities(&mut ambiguities, &mut scanned_paths, format!("functionalities[{idx}]"));
+            method.collect_ambiguities(
+                &mut ambiguities,
+                &mut scanned_paths,
+                format!("functionalities[{idx}]"),
+            );
         }
         // Preserve manually-added blocking ambiguities (structural issues from prepare_document)
         // but NOT stale entries for paths the value scan already covers.
@@ -386,9 +410,11 @@ impl PreparedArtifact {
                 .cloned(),
         );
         ambiguities.sort_by(|left, right| {
-            (left.path.as_str(), left.message.as_str()).cmp(&(right.path.as_str(), right.message.as_str()))
+            (left.path.as_str(), left.message.as_str())
+                .cmp(&(right.path.as_str(), right.message.as_str()))
         });
-        ambiguities.dedup_by(|left, right| left.path == right.path && left.message == right.message);
+        ambiguities
+            .dedup_by(|left, right| left.path == right.path && left.message == right.message);
         self.ambiguities = ambiguities;
     }
 
@@ -400,28 +426,41 @@ impl PreparedArtifact {
     /// Idempotent — safe to call after initial prepare and again after fix-agent patches.
     pub fn propagate_resolved_types(&mut self) {
         for role in &mut self.roles {
-            let Some(ty) = role.type_status.rust().map(|s| s.to_string()) else { continue };
+            let Some(ty) = role.type_status.rust().map(|s| s.to_string()) else {
+                continue;
+            };
             let role_param_name = format!("{}_", role.name);
             let ref_ty = format!("&{ty}");
 
             for method in &mut role.methods {
-                if let Some(param) = method.parameters.iter_mut().find(|p| p.name == role_param_name) {
+                if let Some(param) = method
+                    .parameters
+                    .iter_mut()
+                    .find(|p| p.name == role_param_name)
+                {
                     if !param.type_status.is_resolved() {
-                        param.type_status = ValueStatus::resolved(ref_ty.clone(), "prepare.role_player");
+                        param.type_status =
+                            ValueStatus::resolved(ref_ty.clone(), "prepare.role_player");
                     }
                 }
 
                 if let Some(sig) = method.signature.rust().map(|s| s.to_string()) {
                     if !sig.contains(&format!("{role_param_name}:")) {
-                        method.signature.rust = Some(
-                            insert_role_player_in_signature(&sig, &role_param_name, &ref_ty),
-                        );
+                        method.signature.rust = Some(insert_role_player_in_signature(
+                            &sig,
+                            &role_param_name,
+                            &ref_ty,
+                        ));
                     }
                 }
             }
         }
 
-        if let Some(ctor) = self.functionalities.iter_mut().find(|m| m.name == "new" && m.receiver.is_none()) {
+        if let Some(ctor) = self
+            .functionalities
+            .iter_mut()
+            .find(|m| m.name == "new" && m.receiver.is_none())
+        {
             let params_text = ctor
                 .parameters
                 .iter()
@@ -491,7 +530,9 @@ impl PreparedArtifact {
                         return Some(&mut role.type_status);
                     }
                     if let Some(sub) = field.strip_prefix("methods") {
-                        if let Some((sub_coll, sub_rest)) = parse_indexed_path(sub.trim_start_matches('.')) {
+                        if let Some((sub_coll, sub_rest)) =
+                            parse_indexed_path(sub.trim_start_matches('.'))
+                        {
                             let _ = sub_coll;
                             if let Some((midx, mfield)) = sub_rest {
                                 let method = role.methods.get_mut(midx)?;
@@ -562,7 +603,12 @@ impl PreparedArtifact {
 }
 
 impl MethodSpec {
-    fn collect_ambiguities(&self, out: &mut Vec<Ambiguity>, scanned: &mut BTreeSet<String>, base_path: String) {
+    fn collect_ambiguities(
+        &self,
+        out: &mut Vec<Ambiguity>,
+        scanned: &mut BTreeSet<String>,
+        base_path: String,
+    ) {
         collect_value_ambiguity(
             out,
             scanned,
@@ -644,7 +690,9 @@ impl Statement {
                     }
                 }
             }
-            Statement::ForEach { collection, body, .. } => {
+            Statement::ForEach {
+                collection, body, ..
+            } => {
                 collection.collect_type_names(types);
                 for step in body {
                     step.collect_type_names(types);
@@ -845,7 +893,9 @@ fn validate_statement(step: &Statement) -> Result<()> {
             }
             Ok(())
         }
-        Statement::ForEach { collection, body, .. } => {
+        Statement::ForEach {
+            collection, body, ..
+        } => {
             validate_expression(collection)?;
             for step in body {
                 validate_statement(step)?;
@@ -868,7 +918,9 @@ fn validate_expression(expr: &Expression) -> Result<()> {
             "string" | "integer" | "bool" | "char" | "path" => Ok(()),
             other => bail!("Unsupported literal kind `{other}`"),
         },
-        Expression::Var { .. } | Expression::Field { .. } | Expression::ConstructEnum { .. } => Ok(()),
+        Expression::Var { .. } | Expression::Field { .. } | Expression::ConstructEnum { .. } => {
+            Ok(())
+        }
         Expression::ConstructStruct { fields, .. } => {
             for field in fields {
                 validate_expression(&field.expr)?;
@@ -936,11 +988,14 @@ fn push_type_name(names: &mut BTreeSet<String>, current: &mut String) {
     if current.is_empty() {
         return;
     }
-    if current.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
+    if current
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_uppercase())
+    {
         let excluded = [
-            "String", "Vec", "Option", "Result", "HashMap", "BTreeMap",
-            "HashSet", "BTreeSet", "VecDeque", "Box", "Rc", "Arc", "Cow",
-            "Pin", "Self", "None", "Some", "Ok", "Err",
+            "String", "Vec", "Option", "Result", "HashMap", "BTreeMap", "HashSet", "BTreeSet",
+            "VecDeque", "Box", "Rc", "Arc", "Cow", "Pin", "Self", "None", "Some", "Ok", "Err",
         ];
         if !excluded.contains(&current.as_str()) {
             names.insert(current.clone());
@@ -949,7 +1004,10 @@ fn push_type_name(names: &mut BTreeSet<String>, current: &mut String) {
     current.clear();
 }
 
-fn resolve_method_field<'a>(method: &'a mut MethodSpec, field: &str) -> Option<&'a mut ValueStatus> {
+fn resolve_method_field<'a>(
+    method: &'a mut MethodSpec,
+    field: &str,
+) -> Option<&'a mut ValueStatus> {
     match field {
         "signature" => Some(&mut method.signature),
         "returns" => Some(&mut method.return_status),
@@ -970,8 +1028,12 @@ fn resolve_method_field<'a>(method: &'a mut MethodSpec, field: &str) -> Option<&
 }
 
 fn insert_role_player_in_signature(sig: &str, param_name: &str, param_type: &str) -> String {
-    let Some(open) = sig.find('(') else { return sig.to_string() };
-    let Some(close) = sig.rfind(')') else { return sig.to_string() };
+    let Some(open) = sig.find('(') else {
+        return sig.to_string();
+    };
+    let Some(close) = sig.rfind(')') else {
+        return sig.to_string();
+    };
     let prefix = &sig[..open + 1];
     let inner = sig[open + 1..close].trim();
     let suffix = &sig[close..];

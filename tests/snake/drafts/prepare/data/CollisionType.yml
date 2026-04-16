@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: data/CollisionType.md
   kind: data
   title: CollisionType
 export:
   name: CollisionType
+mutable: false
 variants:
 - name: Obstacle
   meaning: The predicted move hits a wall or the snake body

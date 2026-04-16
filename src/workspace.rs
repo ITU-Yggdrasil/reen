@@ -94,10 +94,7 @@ impl Workspace {
         if self.drafts_dir.is_dir() {
             return Ok(());
         }
-        bail!(
-            "No drafts directory found at {}",
-            self.drafts_dir.display()
-        );
+        bail!("No drafts directory found at {}", self.drafts_dir.display());
     }
 
     pub fn raw_draft_paths(&self, selection: &Selection) -> Result<Vec<PathBuf>> {
@@ -120,7 +117,12 @@ impl Workspace {
         }
 
         let mut paths = Vec::new();
-        collect_prepared_artifacts(&self.prepared_dir, &self.prepared_dir, selection, &mut paths)?;
+        collect_prepared_artifacts(
+            &self.prepared_dir,
+            &self.prepared_dir,
+            selection,
+            &mut paths,
+        )?;
         paths.sort();
         if selection.has_name_filter() && paths.is_empty() {
             bail!("No prepared artifacts matched the requested names");
@@ -153,7 +155,10 @@ fn collect_raw_drafts(
         let relative = path.strip_prefix(root).unwrap_or(&path);
 
         if path.is_dir() {
-            let first = relative.components().next().and_then(|component| component.as_os_str().to_str());
+            let first = relative
+                .components()
+                .next()
+                .and_then(|component| component.as_os_str().to_str());
             if matches!(first, Some("prepare")) {
                 continue;
             }
@@ -180,7 +185,10 @@ fn collect_raw_drafts(
         if !selection.includes(kind) {
             continue;
         }
-        let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
         if !selection.matches_name(stem) {
             continue;
         }
@@ -216,7 +224,10 @@ fn collect_prepared_artifacts(
         if !selection.includes(kind) {
             continue;
         }
-        let stem = path.file_stem().and_then(|value| value.to_str()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
         if !selection.matches_name(stem) {
             continue;
         }

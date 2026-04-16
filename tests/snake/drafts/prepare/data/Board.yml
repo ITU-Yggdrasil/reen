@@ -1,10 +1,11 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v1
 source:
   path: data/Board.md
   kind: data
   title: Board
 export:
   name: Board
+mutable: false
 fields:
 - name: width
   meaning: Width of the rectangular board
