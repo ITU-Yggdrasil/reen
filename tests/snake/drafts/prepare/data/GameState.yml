@@ -25,7 +25,6 @@ fields:
     candidates:
     - Food
     - None
-    - Option<Food>
     reason: multiple type candidates were found for `food_placement`
     evidence:
     - section: food_placement
@@ -44,6 +43,69 @@ fields:
   getter_accessible: true
   notes:
   - Used to calculate elapsed game time; type is `u64`
+functionalities:
+- name: place_food
+  signature:
+    status: resolved
+    rust: 'place_food(&self, food: Option<Food>) -> GameState'
+    source: draft.functionality
+  receiver: '&self'
+  parameters:
+  - name: food
+    type:
+      status: resolved
+      rust: Option<Food>
+      source: draft.functionality
+  returns:
+    status: resolved
+    rust: GameState
+    source: draft.functionality
+- name: game_time
+  signature:
+    status: resolved
+    rust: game_time(&self) -> u64
+    source: draft.functionality
+  receiver: '&self'
+  returns:
+    status: resolved
+    rust: u64
+    source: draft.functionality
+- name: increment_score
+  signature:
+    status: resolved
+    rust: 'increment_score(&self, amount: u32) -> GameState'
+    source: draft.functionality
+  receiver: '&self'
+  parameters:
+  - name: amount
+    type:
+      status: resolved
+      rust: u32
+      source: draft.functionality
+  returns:
+    status: resolved
+    rust: GameState
+    source: draft.functionality
+- name: food
+  signature:
+    status: resolved
+    rust: food(&self) -> Option<Food>
+    source: draft.functionality
+  receiver: '&self'
+  returns:
+    status: resolved
+    rust: Option<Food>
+    source: draft.functionality
+- name: game_started
+  signature:
+    status: resolved
+    rust: game_started(&self) -> u64
+    source: draft.functionality
+  receiver: '&self'
+  returns:
+    status: resolved
+    rust: u64
+    source: draft.functionality
 getters:
 - name: score
   field: score
@@ -64,3 +126,19 @@ invariants:
 derives:
 - Clone
 - Debug
+ambiguities:
+- path: functionalities[0].body
+  severity: info
+  message: method `place_food` body is missing
+- path: functionalities[1].body
+  severity: info
+  message: method `game_time` body is missing
+- path: functionalities[2].body
+  severity: info
+  message: method `increment_score` body is missing
+- path: functionalities[3].body
+  severity: info
+  message: method `food` body is missing
+- path: functionalities[4].body
+  severity: info
+  message: method `game_started` body is missing

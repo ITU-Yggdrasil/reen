@@ -1,10 +1,1 @@
-profile: sonnet
-max-attempts: 5
-create:
-  token-limit: 30000.0
-  specification:
-    fix:
-      max-compile-fix-attempts: 3
-  implementation:
-    fix:
-      max-compile-fix-attempts: 3
+fix: true

@@ -15,3 +15,7 @@ packages:
   version: '{ version = "0.4", features = ["serde"] }'
   capabilities:
   - datetime_utc
+- name: rand
+  version: '*'
+  capabilities:
+  - randomness

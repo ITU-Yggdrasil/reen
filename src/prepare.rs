@@ -31,7 +31,14 @@ pub struct PrepareOptions {
 struct DraftCatalog {
     exports: BTreeSet<String>,
     normalized: BTreeMap<String, Vec<String>>,
-    data_drafts: BTreeMap<String, DataDraft>,
+    role_hints: BTreeMap<String, Vec<String>>,
+    /// Resolved Rust types for roles and props, loaded from previously-prepared YAML artifacts.
+    ///
+    /// Keyed by the sanitized role/prop *name* (not the owning artifact). Used as a first-class
+    /// source when resolving a role or collaborator with the same name in another draft, so that
+    /// a fixed type in `game_loop.md` propagates to `app.md` without requiring a second prepare
+    /// pass.
+    resolved_role_types: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,7 +75,8 @@ struct ManifestAllowlists {
 pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Result<()> {
     let selected_paths = workspace.raw_draft_paths(&options.selection)?;
     let all_docs = load_supported_documents(workspace)?;
-    let catalog = build_catalog(&all_docs);
+    let resolved_role_types = load_resolved_role_types(workspace);
+    let catalog = build_catalog(&all_docs, resolved_role_types);
     let types_manifest = load_types_manifest(workspace)?;
     let mut tracker = BuildTracker::load(&workspace.root)?;
     let mut wrote = 0usize;
@@ -105,21 +113,30 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
         if has_blockers && options.fix {
             let available_types =
                 available_types_for_draft(types_manifest.as_ref(), draft.info().kind, &catalog);
-            let fixed_count = fix_agent::fix_ambiguities(
+            let dependency_notes = crate::build_agent::render_dependency_context(workspace)
+                .unwrap_or_default();
+            let fixed_count = fix_agent::fix_ambiguities_with_dependency_notes(
                 &content,
                 &available_types,
+                &dependency_notes,
                 &mut prepared,
                 options.verbose,
             )?;
             if fixed_count > 0 {
                 prepared.propagate_resolved_types();
                 prepared.refresh_ambiguity_index();
+                let added = ensure_external_dependencies_from_prepared(workspace, &prepared)?;
                 if options.verbose {
                     eprintln!(
                         "fix-agent: applied {} fix(es) for {}",
                         fixed_count,
                         draft.info().relative_path()
                     );
+                    if added > 0 {
+                        eprintln!(
+                            "fix-agent: auto-registered {added} external crate(s) in drafts manifests"
+                        );
+                    }
                 }
             }
         }
@@ -161,6 +178,18 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     if !options.dry_run {
         tracker.save(&workspace.root)?;
     }
+
+    if !options.dry_run && blocking_total == 0 {
+        let patched = apply_cross_artifact_derive_inference(workspace)?;
+        if patched > 0 && options.verbose {
+            println!("Updated derives on {patched} prepared artifact(s)");
+        }
+        let synced = apply_cross_artifact_role_method_sync(workspace)?;
+        if synced > 0 && options.verbose {
+            println!("Synced role-method mutability on {synced} prepared artifact(s)");
+        }
+    }
+
     if options.verbose {
         println!("Prepared {} artifact(s)", wrote);
     }
@@ -200,6 +229,9 @@ fn available_types_for_draft(
 
     types.extend(manifest.primitives.iter().cloned());
     types.extend(manifest.external_path_prefixes.iter().cloned());
+    for prefix in &manifest.external_path_prefixes {
+        types.extend(builtin_external_type_candidates(prefix).iter().map(|value| value.to_string()));
+    }
 
     match kind {
         crate::draft_parser::ArtifactKind::Data => {
@@ -220,6 +252,17 @@ fn available_types_for_draft(
     }
 
     types.into_iter().collect()
+}
+
+fn builtin_external_type_candidates(prefix: &str) -> &'static [&'static str] {
+    match prefix {
+        "rand::" => &[
+            "rand::rngs::ThreadRng",
+            "rand::rngs::StdRng",
+            "rand::rngs::SmallRng",
+        ],
+        _ => &[],
+    }
 }
 
 fn enrich_ambiguity_lines(prepared: &mut PreparedArtifact, source: &str) {
@@ -326,10 +369,13 @@ fn collect_markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn build_catalog(docs: &[DraftDocument]) -> DraftCatalog {
+fn build_catalog(
+    docs: &[DraftDocument],
+    resolved_role_types: BTreeMap<String, String>,
+) -> DraftCatalog {
     let mut exports = BTreeSet::new();
     let mut normalized = BTreeMap::<String, Vec<String>>::new();
-    let mut data_drafts = BTreeMap::new();
+    let mut role_hints = BTreeMap::<String, Vec<String>>::new();
     for doc in docs {
         let export = export_name(doc.info().title());
         exports.insert(export.clone());
@@ -345,19 +391,73 @@ fn build_catalog(docs: &[DraftDocument]) -> DraftCatalog {
             .entry(normalize_symbol(doc.info().stem()))
             .or_default()
             .push(export.clone());
-        if let DraftDocument::Data(data) = doc {
-            data_drafts.insert(export.clone(), data.clone());
+        if let DraftDocument::Projection(draft) | DraftDocument::Context(draft) = doc {
+            for role in &draft.roles {
+                let entry = role_hints.entry(sanitize_identifier(&role.name)).or_default();
+                if !role.why_involved.trim().is_empty() {
+                    entry.push(role.why_involved.trim().to_string());
+                }
+                if !role.expected_behavior.trim().is_empty() {
+                    entry.push(role.expected_behavior.trim().to_string());
+                }
+            }
         }
     }
     for values in normalized.values_mut() {
         values.sort();
         values.dedup();
     }
+    for values in role_hints.values_mut() {
+        values.sort();
+        values.dedup();
+    }
     DraftCatalog {
         exports,
         normalized,
-        data_drafts,
+        role_hints,
+        resolved_role_types,
     }
+}
+
+/// Load previously-prepared YAML artifacts under `workspace/drafts/prepare/` and build a map of
+/// resolved Rust types for each role and prop, keyed by sanitized name.
+///
+/// When the same role/prop name appears in multiple prepared artifacts with different resolved
+/// types, the first one encountered wins; a subsequent same-name entry is skipped (because we
+/// would not know which one to prefer without more context).
+fn load_resolved_role_types(workspace: &Workspace) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::<String, String>::new();
+    if !workspace.prepared_dir.is_dir() {
+        return out;
+    }
+    let mut paths = Vec::new();
+    if walk_yaml(&workspace.prepared_dir, &mut paths).is_err() {
+        return out;
+    }
+    for path in paths {
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(artifact) = serde_yaml::from_str::<PreparedArtifact>(&raw) else {
+            continue;
+        };
+        for role in &artifact.roles {
+            if let Some(rust) = role.type_status.rust() {
+                out.entry(role.name.clone()).or_insert_with(|| rust.to_string());
+            }
+        }
+        for prop in &artifact.props {
+            if let Some(rust) = prop.type_status.rust() {
+                out.entry(prop.name.clone()).or_insert_with(|| rust.to_string());
+            }
+        }
+        for collab in &artifact.collaborators {
+            if let Some(rust) = collab.type_status.rust() {
+                out.entry(collab.name.clone()).or_insert_with(|| rust.to_string());
+            }
+        }
+    }
+    out
 }
 
 fn prepare_document(draft: &DraftDocument, catalog: &DraftCatalog) -> Result<PreparedArtifact> {
@@ -419,17 +519,19 @@ fn prepare_data(draft: &DataDraft, catalog: &DraftCatalog) -> Result<PreparedArt
     for variant in &draft.variants {
         prepared.variants.push(VariantSpec {
             name: export_name(&variant.name),
+            payload_types: variant
+                .payload_types
+                .iter()
+                .map(|value| crate::draft_parser::normalize_type_notation(value))
+                .collect(),
             meaning: variant.meaning.clone(),
             notes: non_empty_lines(&variant.notes),
         });
     }
-    if !draft.functionality_sections.is_empty() {
-        prepared.ambiguities.push(Ambiguity {
-            path: "functionalities".to_string(),
-            severity: "blocking".to_string(),
-            message: "data functionalities require richer prepare support in v1".to_string(),
-            source_line: None,
-        });
+    for functionality in &draft.functionalities {
+        prepared
+            .functionalities
+            .push(prepare_data_functionality(functionality)?);
     }
     Ok(prepared)
 }
@@ -451,9 +553,14 @@ fn prepare_composite(draft: &CompositeDraft, catalog: &DraftCatalog) -> Result<P
 
     for role in &draft.roles {
         let role_type = if let Some(explicit) = &role.explicit_type {
-            ValueStatus::resolved(explicit.clone(), "draft.role_player_type")
+            resolve_nominal_role_type(
+                &role.name,
+                explicit,
+                &[&role.why_involved, &role.expected_behavior],
+                catalog,
+            )
         } else {
-            resolve_named_type(
+            resolve_nominal_role_type_from_texts(
                 &role.name,
                 &[&role.why_involved, &role.expected_behavior],
                 catalog,
@@ -492,7 +599,7 @@ fn prepare_composite(draft: &CompositeDraft, catalog: &DraftCatalog) -> Result<P
             continue;
         };
         let inferred_role_type = prepared.roles[role_index].type_status.clone();
-        let methods = prepare_role_methods(group, &role_key, &inferred_role_type, catalog);
+        let methods = prepare_role_methods(group, &role_key, &inferred_role_type);
         for method in &methods {
             role_method_lookup
                 .entry(role_key.clone())
@@ -532,7 +639,6 @@ fn prepare_role_methods(
     group: &RoleMethodGroup,
     role_key: &str,
     role_type: &ValueStatus,
-    catalog: &DraftCatalog,
 ) -> Vec<MethodSpec> {
     group
         .methods
@@ -543,26 +649,30 @@ fn prepare_role_methods(
                 text: method.detail.clone(),
             }];
             let parsed_signature = extract_signature_marker(&[method.detail.clone()])
-                .and_then(|signature| parse_signature(&signature, &method.name).ok())
-                .or_else(|| infer_getter_signature(role_type, &method.name, catalog));
-            // The role player parameter `<role>_: &<RolePlayerType>` is only injected here when
-            // the role type is already resolved. If it is unresolved, `propagate_resolved_types`
-            // will inject it later (after the fix-agent or a manual edit supplies the type).
-            // This avoids creating new blocking ambiguities that did not exist before this feature.
-            let role_player_param: Option<ParameterSpec> =
-                role_type.rust().map(|ty| ParameterSpec {
-                    name: format!("{role_key}_"),
-                    type_status: ValueStatus::resolved(format!("&{ty}"), "prepare.role_player"),
-                });
+                .and_then(|signature| parse_signature(&signature, &method.name).ok());
+            let role_player_param = ParameterSpec {
+                name: format!("{role_key}_"),
+                type_status: role_type
+                    .rust()
+                    .map(|ty| ValueStatus::resolved(format!("&{ty}"), "prepare.role_player"))
+                    .unwrap_or_else(|| {
+                        ValueStatus::missing(
+                            format!(
+                                "role method `{}` is waiting for role `{}` to resolve",
+                                method.name, group.role
+                            ),
+                            evidence.clone(),
+                        )
+                    }),
+            };
 
-            let (signature, receiver, mut parameters, return_status) = if let Some(parsed) =
+            let (signature, receiver, parameters, return_status) = if let Some(parsed) =
                 parsed_signature.clone()
             {
-                let signature = ValueStatus::resolved(parsed.original.clone(), "prepare.signature");
                 // Receiver is always `&self`; the context is never mutated by a role method call.
                 let receiver = Some("&self".to_string());
-                let parameters = parsed
-                    .parameters
+                let mut parameters = vec![role_player_param.clone()];
+                parameters.extend(parsed.parameters
                     .iter()
                     .map(|parameter| ParameterSpec {
                         name: parameter.0.clone(),
@@ -571,32 +681,46 @@ fn prepare_role_methods(
                             "prepare.signature",
                         ),
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Vec<_>>());
                 let return_status =
                     ValueStatus::resolved(parsed.return_type.clone(), "prepare.signature");
+                let signature = if role_player_param.type_status.is_resolved() {
+                    ValueStatus::resolved(
+                        render_signature(
+                            &sanitize_identifier(&method.name),
+                            receiver.as_deref(),
+                            &parameters,
+                            parsed.return_type.as_str(),
+                        ),
+                        "prepare.signature",
+                    )
+                } else {
+                    ValueStatus::missing(
+                        format!(
+                            "role method `{}` on role `{}` is waiting for the role type before its wrapper signature can be finalized",
+                            method.name, group.role
+                        ),
+                        evidence.clone(),
+                    )
+                };
                 (signature, receiver, parameters, return_status)
             } else {
                 (
                     ValueStatus::missing(
                         format!(
-                            "role method `{}` on role `{}` is missing a parseable signature",
+                            "role method `{}` on role `{}` has no explicit signature",
                             method.name, group.role
                         ),
                         evidence.clone(),
                     ),
                     Some("&self".to_string()),
-                    Vec::new(),
+                    vec![role_player_param.clone()],
                     ValueStatus::missing(
                         format!("role method `{}` return type is unknown", method.name),
                         evidence.clone(),
                     ),
                 )
             };
-
-            // Prepend the role player as the first explicit parameter when the type is resolved.
-            if let Some(param) = role_player_param {
-                parameters.insert(0, param);
-            }
 
             let body = parsed_signature.map(|parsed| {
                 delegated_role_method_body(role_key, &method.name, &parsed.parameters)
@@ -633,7 +757,17 @@ fn prepare_functionality(
         return Ok(auto_constructor_method(draft, _catalog));
     }
 
-    let default_receiver = "&self";
+    let is_context = draft.info.kind == crate::draft_parser::ArtifactKind::Context;
+    // Functionalities on contexts default to `&self` but are upgraded to `&mut self` when the
+    // behavioral description implies mutation (verb-based detection + `self.X = …` patterns).
+    // Projections stay `&self` by definition.
+    let mutates = is_context
+        && flow_implies_mutation(
+            &functionality.flow,
+            &functionality.extensions,
+            &functionality.guarantee,
+        );
+    let default_receiver = if mutates { "&mut self" } else { "&self" };
 
     let signature_text = extract_signature_marker(&functionality.flow);
     let signature = if let Some(text) = signature_text.clone() {
@@ -718,14 +852,62 @@ fn prepare_functionality(
     })
 }
 
+fn prepare_data_functionality(
+    functionality: &crate::draft_parser::DataFunctionalityDraft,
+) -> Result<MethodSpec> {
+    let parsed = parse_signature(&functionality.signature, &functionality.name)?;
+    Ok(MethodSpec {
+        name: sanitize_identifier(&functionality.name),
+        signature: ValueStatus::resolved(
+            render_signature(
+                &sanitize_identifier(&functionality.name),
+                parsed.receiver.as_deref(),
+                &parsed
+                    .parameters
+                    .iter()
+                    .map(|parameter| ParameterSpec {
+                        name: parameter.0.clone(),
+                        type_status: ValueStatus::resolved(
+                            parameter.1.clone(),
+                            "draft.functionality",
+                        ),
+                    })
+                    .collect::<Vec<_>>(),
+                &parsed.return_type,
+            ),
+            "draft.functionality",
+        ),
+        receiver: parsed.receiver,
+        parameters: parsed
+            .parameters
+            .iter()
+            .map(|parameter| ParameterSpec {
+                name: parameter.0.clone(),
+                type_status: ValueStatus::resolved(parameter.1.clone(), "draft.functionality"),
+            })
+            .collect(),
+        return_status: ValueStatus::resolved(parsed.return_type, "draft.functionality"),
+        flow: Vec::new(),
+        extensions: Vec::new(),
+        guarantee: Vec::new(),
+        references: None,
+        body: None,
+    })
+}
+
 fn auto_constructor_method(draft: &CompositeDraft, catalog: &DraftCatalog) -> MethodSpec {
     let mut params = Vec::new();
     let mut fields = Vec::new();
     for role in &draft.roles {
         let ty = if let Some(explicit) = &role.explicit_type {
-            ValueStatus::resolved(explicit.clone(), "draft.role_player_type")
+            resolve_nominal_role_type(
+                &role.name,
+                explicit,
+                &[&role.why_involved, &role.expected_behavior],
+                catalog,
+            )
         } else {
-            resolve_named_type(
+            resolve_nominal_role_type_from_texts(
                 &role.name,
                 &[&role.why_involved, &role.expected_behavior],
                 catalog,
@@ -809,7 +991,7 @@ fn prepare_app(app: &AppDraft, catalog: &DraftCatalog) -> Result<PreparedArtifac
         prepared.collaborators.push(CollaboratorSpec {
             name: sanitize_identifier(&collaborator.name),
             responsibility: collaborator.responsibility.clone(),
-            type_status: resolve_named_type(
+            type_status: resolve_nominal_collaborator_type_from_texts(
                 &collaborator.name,
                 &[&collaborator.responsibility],
                 catalog,
@@ -1328,37 +1510,107 @@ fn extract_signature_marker(lines: &[String]) -> Option<String> {
     matches.into_iter().next()
 }
 
-fn infer_getter_signature(
-    role_type: &ValueStatus,
-    method_name: &str,
-    catalog: &DraftCatalog,
-) -> Option<ParsedSignature> {
-    let export = role_type.rust()?;
-    let data = catalog.data_drafts.get(export)?;
-    let field = data
-        .fields
+/// Heuristic mutation detector for a functionality's behavioral description.
+///
+/// Returns `true` when the flow/extensions/guarantee text implies the functionality mutates
+/// the owning context. Used to infer `&mut self` receivers before scaffold.
+///
+/// Signals (case-insensitive, word-boundary aware):
+/// 1. Mutation verbs (`push`, `pop`, `insert`, `remove`, `update`, `set`, `reset`, `append`,
+///    `replace`, `clear`, `advance`, `increment`, `decrement`, `record`, `consume`, `capture`,
+///    `drain`, `fill`, `swap`, `take`, `assign`, `write`) appearing as natural-language verbs.
+/// 2. Explicit re-assignment in the description: `self.<ident> = …` (excluding `==`).
+///
+/// Deliberately avoids false positives from read-verbs like `match`, `check`, `return`.
+fn flow_implies_mutation(flow: &[String], extensions: &[String], guarantee: &[String]) -> bool {
+    const MUTATION_VERBS: &[&str] = &[
+        "push", "pop", "insert", "remove", "delete", "update", "set", "reset", "append",
+        "prepend", "replace", "clear", "advance", "increment", "decrement", "record",
+        "consume", "capture", "drain", "fill", "swap", "take", "assign", "write", "emit",
+        "extend", "flush", "rotate", "shift", "drop", "move", "mutate", "accumulate",
+        "store",
+    ];
+    let combined: String = flow
         .iter()
-        .find(|field| sanitize_identifier(&field.name) == sanitize_identifier(method_name))?;
-    let field_type = resolve_data_field_type(
-        field.name.as_str(),
-        &[&field.meaning, &field.notes],
-        catalog,
-    );
-    let return_type = if copy_like_type(field_type.rust()) {
-        field_type.rust()?.to_string()
-    } else {
-        format!("&{}", field_type.rust()?)
-    };
-    Some(ParsedSignature {
-        original: format!(
-            "{}(&self) -> {}",
-            sanitize_identifier(method_name),
-            return_type
-        ),
-        receiver: Some("&self".to_string()),
-        parameters: Vec::new(),
-        return_type,
-    })
+        .chain(extensions)
+        .chain(guarantee)
+        .map(|line| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lowered = combined.to_ascii_lowercase();
+
+    for verb in MUTATION_VERBS {
+        if contains_word(&lowered, verb) {
+            return true;
+        }
+        // English inflections: `-s`, `-es`, `-ed`, `-ing`.
+        for suffix in &["s", "es", "ed", "ing"] {
+            let inflected = format!("{verb}{suffix}");
+            if contains_word(&lowered, &inflected) {
+                return true;
+            }
+        }
+    }
+
+    // Direct field re-assignment: `self.foo = …` (but not `==`).
+    if let Some(mut idx) = combined.find("self.") {
+        loop {
+            let tail = &combined[idx..];
+            if let Some(eq_pos) = tail.find('=') {
+                let after = &tail[eq_pos + 1..];
+                if !after.starts_with('=') && !tail[..eq_pos].contains('\n') {
+                    return true;
+                }
+            }
+            match combined[idx + "self.".len()..].find("self.") {
+                Some(next) => idx += "self.".len() + next,
+                None => break,
+            }
+        }
+    }
+
+    false
+}
+
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    let mut start = 0usize;
+    let needle_bytes = needle.as_bytes();
+    let bytes = haystack.as_bytes();
+    while let Some(pos) = haystack[start..].find(needle) {
+        let absolute = start + pos;
+        let before_ok = absolute == 0 || !is_word_char(bytes[absolute - 1] as char);
+        let after_end = absolute + needle_bytes.len();
+        let after_ok = after_end >= bytes.len() || !is_word_char(bytes[after_end] as char);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = absolute + 1;
+    }
+    false
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn render_signature(
+    name: &str,
+    receiver: Option<&str>,
+    parameters: &[ParameterSpec],
+    return_type: &str,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(receiver) = receiver {
+        parts.push(receiver.to_string());
+    }
+    parts.extend(parameters.iter().map(|parameter| {
+        format!(
+            "{}: {}",
+            parameter.name,
+            parameter.type_status.rust().unwrap_or("Unknown")
+        )
+    }));
+    format!("{name}({}) -> {return_type}", parts.join(", "))
 }
 
 fn resolve_data_field_type(name: &str, texts: &[&str], catalog: &DraftCatalog) -> ValueStatus {
@@ -1367,6 +1619,81 @@ fn resolve_data_field_type(name: &str, texts: &[&str], catalog: &DraftCatalog) -
 
 fn resolve_named_type(name: &str, texts: &[&str], catalog: &DraftCatalog) -> ValueStatus {
     resolve_type_with_defaults(name, texts, catalog, false, true)
+}
+
+fn resolve_nominal_role_type(
+    name: &str,
+    explicit: &str,
+    texts: &[&str],
+    catalog: &DraftCatalog,
+) -> ValueStatus {
+    let normalized = crate::draft_parser::normalize_type_notation(explicit);
+    if looks_like_nominal_role_type(&normalized, catalog) {
+        return ValueStatus::resolved(normalized, "draft.role_player_type");
+    }
+    let mut evidence = texts
+        .iter()
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| Evidence {
+            section: name.to_string(),
+            text: text.trim().to_string(),
+        })
+        .collect::<Vec<_>>();
+    evidence.push(Evidence {
+        section: name.to_string(),
+        text: format!("Explicit type: {explicit}"),
+    });
+    ValueStatus::missing(
+        format!("role player `{name}` must resolve to a nominal concrete type"),
+        evidence,
+    )
+}
+
+fn resolve_nominal_role_type_from_texts(
+    name: &str,
+    texts: &[&str],
+    catalog: &DraftCatalog,
+) -> ValueStatus {
+    // First, consult resolved types from previously-prepared artifacts — if a sibling draft has
+    // already pinned this role's type, reuse it deterministically.
+    let sanitized = sanitize_identifier(name);
+    if let Some(rust) = catalog.resolved_role_types.get(&sanitized) {
+        return ValueStatus::resolved(rust.clone(), "prepare.cross_artifact");
+    }
+
+    let status = resolve_named_type(name, texts, catalog);
+    match status.rust.as_deref() {
+        Some(rust) if looks_like_nominal_role_type(rust, catalog) => status,
+        _ => ValueStatus::missing(
+            format!("no nominal concrete Rust type could be inferred for `{name}`"),
+            texts
+                .iter()
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| Evidence {
+                    section: name.to_string(),
+                    text: text.trim().to_string(),
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn resolve_nominal_collaborator_type_from_texts(
+    name: &str,
+    texts: &[&str],
+    catalog: &DraftCatalog,
+) -> ValueStatus {
+    let mut combined = texts
+        .iter()
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .map(|text| text.to_string())
+        .collect::<Vec<_>>();
+    if let Some(hints) = catalog.role_hints.get(&sanitize_identifier(name)) {
+        combined.extend(hints.iter().cloned());
+    }
+    let refs = combined.iter().map(|text| text.as_str()).collect::<Vec<_>>();
+    resolve_nominal_role_type_from_texts(name, &refs, catalog)
 }
 
 fn resolve_type_with_defaults(
@@ -1467,6 +1794,47 @@ fn extract_type_candidates(texts: &[&str], catalog: &DraftCatalog) -> Vec<String
         }
     }
     candidates.into_iter().collect()
+}
+
+fn looks_like_nominal_role_type(value: &str, catalog: &DraftCatalog) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.contains("fn(")
+        || trimmed.starts_with("Vec<")
+        || trimmed.starts_with("Option<")
+        || trimmed.starts_with("HashMap<")
+        || trimmed.starts_with("std::collections::")
+        || matches!(
+            trimmed,
+            "String"
+                | "str"
+                | "bool"
+                | "char"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "usize"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "isize"
+                | "f32"
+                | "f64"
+                | "()"
+        )
+    {
+        return false;
+    }
+    if catalog.exports.contains(trimmed) {
+        return true;
+    }
+    trimmed.contains("::")
+        && trimmed
+            .rsplit("::")
+            .next()
+            .is_some_and(|segment| segment.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()))
 }
 
 fn looks_like_type(value: &str, catalog: &DraftCatalog) -> bool {
@@ -1646,6 +2014,534 @@ impl DraftDocumentInfoExt for DraftDocument {
     }
 }
 
+/// Scan a prepared artifact's resolved types for external module paths and ensure each one's
+/// crate is registered in `drafts/dependencies.yml` and `drafts/types-manifest.yml`.
+///
+/// Uses `drafts/capability_registry.yml` as the source of truth for the crate metadata
+/// (features, default_features, external_path_prefixes). Returns the number of crates added.
+fn ensure_external_dependencies_from_prepared(
+    workspace: &Workspace,
+    prepared: &PreparedArtifact,
+) -> Result<usize> {
+    let mut added = 0usize;
+    let mut seen_roots: BTreeSet<String> = BTreeSet::new();
+
+    let consider = |ty: &str, added: &mut usize, seen_roots: &mut BTreeSet<String>| -> Result<()> {
+        let trimmed = ty.trim_start_matches('&').trim_start();
+        let trimmed = trimmed.strip_prefix("mut ").unwrap_or(trimmed);
+        let Some(first_segment) = trimmed.split("::").next() else {
+            return Ok(());
+        };
+        if first_segment.is_empty() || !trimmed.contains("::") {
+            return Ok(());
+        }
+        let root = first_segment.trim().to_string();
+        if !seen_roots.insert(root.clone()) {
+            return Ok(());
+        }
+        if crate::manifest::ensure_external_dependency_for_type(workspace, trimmed)? {
+            *added += 1;
+        }
+        Ok(())
+    };
+
+    for field in &prepared.fields {
+        if let Some(rust) = field.type_status.rust() {
+            consider(rust, &mut added, &mut seen_roots)?;
+        }
+    }
+    for role in &prepared.roles {
+        if let Some(rust) = role.type_status.rust() {
+            consider(rust, &mut added, &mut seen_roots)?;
+        }
+        for method in &role.methods {
+            if let Some(rust) = method.return_status.rust() {
+                consider(rust, &mut added, &mut seen_roots)?;
+            }
+            for param in &method.parameters {
+                if let Some(rust) = param.type_status.rust() {
+                    consider(rust, &mut added, &mut seen_roots)?;
+                }
+            }
+        }
+    }
+    for prop in &prepared.props {
+        if let Some(rust) = prop.type_status.rust() {
+            consider(rust, &mut added, &mut seen_roots)?;
+        }
+    }
+    for collab in &prepared.collaborators {
+        if let Some(rust) = collab.type_status.rust() {
+            consider(rust, &mut added, &mut seen_roots)?;
+        }
+    }
+    for functionality in &prepared.functionalities {
+        if let Some(rust) = functionality.return_status.rust() {
+            consider(rust, &mut added, &mut seen_roots)?;
+        }
+        for param in &functionality.parameters {
+            if let Some(rust) = param.type_status.rust() {
+                consider(rust, &mut added, &mut seen_roots)?;
+            }
+        }
+    }
+
+    Ok(added)
+}
+
+/// Second pass over all prepared artifacts: inspect type references and text across the workspace
+/// and upgrade each Data artifact's `derives` list with the traits its usages imply.
+///
+/// Today we infer:
+/// - `Eq`, `Hash`, `PartialEq` when a data type appears as the key of `HashMap`, `HashSet`, or
+///   `DashMap`.
+/// - `Ord`, `PartialOrd`, `Eq`, `PartialEq` when the type is the key of `BTreeMap` / `BTreeSet`.
+///
+/// These are the most common sources of post-scaffold `E0277`/`E0369` compile errors that our
+/// deterministic compile-repair would otherwise have to patch round-by-round.
+///
+/// Returns the number of artifacts whose `derives` list was modified.
+fn apply_cross_artifact_derive_inference(workspace: &Workspace) -> Result<usize> {
+    if !workspace.prepared_dir.is_dir() {
+        return Ok(0);
+    }
+
+    let prepared_paths = collect_all_prepared_yaml_paths(&workspace.prepared_dir)?;
+    if prepared_paths.is_empty() {
+        return Ok(0);
+    }
+
+    // Load everything up front so we can do cross-artifact analysis.
+    let mut artifacts: Vec<(PathBuf, PreparedArtifact)> = Vec::with_capacity(prepared_paths.len());
+    for path in &prepared_paths {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let parsed: PreparedArtifact = match serde_yaml::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        artifacts.push((path.clone(), parsed));
+    }
+
+    // Index data-kind artifacts by export name so we know which ones we're allowed to patch.
+    let mut data_index: BTreeMap<String, usize> = BTreeMap::new();
+    for (idx, (_, artifact)) in artifacts.iter().enumerate() {
+        if artifact.source.kind == "data" {
+            data_index.insert(artifact.export.name.clone(), idx);
+        }
+    }
+
+    // Accumulate required-derive sets, keyed by the data export name.
+    let mut required: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (_, artifact) in &artifacts {
+        collect_derive_requirements(artifact, &data_index, &mut required);
+    }
+
+    let mut patched = 0usize;
+    for (name, traits) in required {
+        let Some(&idx) = data_index.get(&name) else {
+            continue;
+        };
+        let (path, artifact) = &mut artifacts[idx];
+        let mut existing: BTreeSet<String> = artifact.derives.iter().cloned().collect();
+        let before = existing.len();
+        for trait_name in &traits {
+            existing.insert(trait_name.clone());
+        }
+        if existing.len() == before {
+            continue;
+        }
+        let mut new_derives: Vec<String> = existing.into_iter().collect();
+        new_derives.sort();
+        artifact.derives = new_derives;
+        let yaml = serde_yaml::to_string(artifact)
+            .with_context(|| format!("Failed to serialize {}", path.display()))?;
+        fs::write(&*path, yaml)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        patched += 1;
+    }
+
+    Ok(patched)
+}
+
+/// Second cross-artifact pass: align each role method's first parameter (the role player) with
+/// the *collaborator's* matching method receiver.
+///
+/// For each context role method `<role>.<method>`:
+/// 1. Look up the collaborator artifact by the role's exported Rust type name.
+/// 2. Find the delegate method on the collaborator:
+///    - For data collaborators: getters are always `&self` on immutable data; if the method
+///      matches a getter, keep `&T`.
+///    - For context/projection collaborators: match a functionality by name and read its
+///      `receiver` (`&self`, `&mut self`, or `self`).
+/// 3. Set the role-player parameter type to `&T` / `&mut T` / `T` accordingly, overwriting
+///    even previously-resolved values because mutability is a structural fact, not a modelling
+///    choice.
+///
+/// Returns the number of artifacts whose role method signatures changed.
+fn apply_cross_artifact_role_method_sync(workspace: &Workspace) -> Result<usize> {
+    if !workspace.prepared_dir.is_dir() {
+        return Ok(0);
+    }
+    let prepared_paths = collect_all_prepared_yaml_paths(&workspace.prepared_dir)?;
+    if prepared_paths.is_empty() {
+        return Ok(0);
+    }
+
+    let mut artifacts: Vec<(PathBuf, PreparedArtifact)> = Vec::with_capacity(prepared_paths.len());
+    for path in &prepared_paths {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let parsed: PreparedArtifact = match serde_yaml::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        artifacts.push((path.clone(), parsed));
+    }
+
+    // Build an index keyed by export name (Rust type name).
+    let mut by_export: BTreeMap<String, usize> = BTreeMap::new();
+    for (idx, (_, artifact)) in artifacts.iter().enumerate() {
+        by_export.insert(artifact.export.name.clone(), idx);
+    }
+
+    // Collect sync plans. Each plan: which artifact index to patch + which role method + new
+    // parameter type string.
+    struct SyncPlan {
+        artifact_idx: usize,
+        role_idx: usize,
+        method_idx: usize,
+        new_param_type: String,
+        new_receiver: &'static str,
+    }
+    let mut plans: Vec<SyncPlan> = Vec::new();
+
+    for (idx, (_, artifact)) in artifacts.iter().enumerate() {
+        if artifact.source.kind != "context" {
+            continue;
+        }
+        for (ridx, role) in artifact.roles.iter().enumerate() {
+            let Some(role_type_rust) = role.type_status.rust() else {
+                continue;
+            };
+            let simple_role_type = simple_type_name(role_type_rust);
+            let Some(&collab_idx) = by_export.get(&simple_role_type) else {
+                continue;
+            };
+            let collaborator = &artifacts[collab_idx].1;
+            for (midx, role_method) in role.methods.iter().enumerate() {
+                let Some(collab_receiver) = lookup_collaborator_receiver(
+                    collaborator,
+                    &role_method.name,
+                ) else {
+                    continue;
+                };
+                let desired = match collab_receiver {
+                    CollabReceiver::RefSelf => ("&".to_string() + &simple_role_type, "&self"),
+                    CollabReceiver::MutRefSelf => {
+                        ("&mut ".to_string() + &simple_role_type, "&self")
+                    }
+                    CollabReceiver::OwnedSelf => (simple_role_type.clone(), "&self"),
+                };
+                let current = role_method
+                    .parameters
+                    .first()
+                    .and_then(|p| p.type_status.rust())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if current == desired.0 {
+                    continue;
+                }
+                plans.push(SyncPlan {
+                    artifact_idx: idx,
+                    role_idx: ridx,
+                    method_idx: midx,
+                    new_param_type: desired.0,
+                    new_receiver: desired.1,
+                });
+            }
+        }
+    }
+
+    // Track which artifacts actually changed so we only re-serialize those.
+    let mut changed_idx: BTreeSet<usize> = BTreeSet::new();
+    for plan in plans {
+        let artifact = &mut artifacts[plan.artifact_idx].1;
+        let role = &mut artifact.roles[plan.role_idx];
+        let method = &mut role.methods[plan.method_idx];
+        if let Some(param) = method.parameters.first_mut() {
+            param.type_status = ValueStatus::resolved(
+                plan.new_param_type.clone(),
+                "prepare.collab_sync",
+            );
+        }
+        method.receiver = Some(plan.new_receiver.to_string());
+        // Re-render the signature string so scaffold picks up the new shape deterministically.
+        let return_type = method
+            .return_status
+            .rust()
+            .map(str::to_string)
+            .unwrap_or_else(|| "()".to_string());
+        let rendered = render_signature(
+            &sanitize_identifier(&method.name),
+            Some(plan.new_receiver),
+            &method.parameters,
+            &return_type,
+        );
+        method.signature = ValueStatus::resolved(rendered, "prepare.collab_sync");
+        changed_idx.insert(plan.artifact_idx);
+    }
+
+    for idx in &changed_idx {
+        let (path, artifact) = &artifacts[*idx];
+        let yaml = serde_yaml::to_string(artifact)
+            .with_context(|| format!("Failed to serialize {}", path.display()))?;
+        fs::write(path, yaml)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+
+    Ok(changed_idx.len())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollabReceiver {
+    RefSelf,
+    MutRefSelf,
+    OwnedSelf,
+}
+
+/// Look up the collaborator's matching method receiver.
+///
+/// Priority:
+/// 1. A `functionality` with the same name → use its `receiver` field.
+/// 2. A `getter` with the same name → `&self` (data type).
+/// 3. Otherwise: `None` (unknown; leave the role method alone).
+fn lookup_collaborator_receiver(
+    collaborator: &PreparedArtifact,
+    method_name: &str,
+) -> Option<CollabReceiver> {
+    for functionality in &collaborator.functionalities {
+        if functionality.name == method_name {
+            return Some(classify_receiver(functionality.receiver.as_deref()));
+        }
+    }
+    for getter in &collaborator.getters {
+        if getter.name == method_name {
+            return Some(CollabReceiver::RefSelf);
+        }
+    }
+    None
+}
+
+fn classify_receiver(receiver: Option<&str>) -> CollabReceiver {
+    match receiver.map(str::trim) {
+        Some("&mut self") => CollabReceiver::MutRefSelf,
+        Some("self") | Some("mut self") => CollabReceiver::OwnedSelf,
+        _ => CollabReceiver::RefSelf,
+    }
+}
+
+fn collect_all_prepared_yaml_paths(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    walk_yaml(root, &mut out)?;
+    Ok(out)
+}
+
+fn walk_yaml(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            walk_yaml(&path, out)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("yml") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Walk all resolved type strings in `artifact` and record required derives for any data export
+/// mentioned as a container key.
+fn collect_derive_requirements(
+    artifact: &PreparedArtifact,
+    data_index: &BTreeMap<String, usize>,
+    required: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    // Collect all type strings worth scanning.
+    let mut type_strings: Vec<String> = Vec::new();
+
+    for field in &artifact.fields {
+        if let Some(rust) = field.type_status.rust.as_ref() {
+            type_strings.push(rust.clone());
+        }
+    }
+    for role in &artifact.roles {
+        if let Some(rust) = role.type_status.rust.as_ref() {
+            type_strings.push(rust.clone());
+        }
+        for method in &role.methods {
+            push_method_types(method, &mut type_strings);
+        }
+    }
+    for prop in &artifact.props {
+        if let Some(rust) = prop.type_status.rust.as_ref() {
+            type_strings.push(rust.clone());
+        }
+    }
+    for collaborator in &artifact.collaborators {
+        if let Some(rust) = collaborator.type_status.rust.as_ref() {
+            type_strings.push(rust.clone());
+        }
+    }
+    for functionality in &artifact.functionalities {
+        push_method_types(functionality, &mut type_strings);
+    }
+
+    for type_string in &type_strings {
+        for (container, key_type) in extract_generic_container_keys(type_string) {
+            let simple = simple_type_name(&key_type);
+            if !data_index.contains_key(&simple) {
+                continue;
+            }
+            let entry = required.entry(simple).or_default();
+            match container.as_str() {
+                "HashMap" | "HashSet" | "DashMap" | "IndexMap" | "IndexSet" => {
+                    entry.insert("Eq".to_string());
+                    entry.insert("Hash".to_string());
+                    entry.insert("PartialEq".to_string());
+                }
+                "BTreeMap" | "BTreeSet" => {
+                    entry.insert("Eq".to_string());
+                    entry.insert("Ord".to_string());
+                    entry.insert("PartialEq".to_string());
+                    entry.insert("PartialOrd".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn push_method_types(method: &MethodSpec, out: &mut Vec<String>) {
+    if let Some(rust) = method.return_status.rust.as_ref() {
+        out.push(rust.clone());
+    }
+    for parameter in &method.parameters {
+        if let Some(rust) = parameter.type_status.rust.as_ref() {
+            out.push(rust.clone());
+        }
+    }
+}
+
+/// Extract `(container_name, key_type_string)` pairs from a Rust type expression.
+///
+/// Only recognises a fixed set of map/set containers where the first generic parameter is the
+/// hash/order key. Nested occurrences are walked recursively.
+fn extract_generic_container_keys(type_string: &str) -> Vec<(String, String)> {
+    const CONTAINERS: &[&str] = &[
+        "HashMap",
+        "HashSet",
+        "BTreeMap",
+        "BTreeSet",
+        "IndexMap",
+        "IndexSet",
+        "DashMap",
+    ];
+    let mut results = Vec::new();
+    for container in CONTAINERS {
+        let mut search_from = 0usize;
+        while let Some(idx) = type_string[search_from..].find(container) {
+            let absolute = search_from + idx;
+            let before_ok = absolute == 0
+                || !type_string.as_bytes()[absolute - 1].is_ascii_alphanumeric()
+                    && type_string.as_bytes()[absolute - 1] != b'_';
+            let after = absolute + container.len();
+            if after >= type_string.len() || !before_ok {
+                search_from = after;
+                continue;
+            }
+            // Skip any whitespace and require a `<`.
+            let tail = &type_string[after..];
+            let mut tail_iter = tail.char_indices();
+            let mut gen_start = None;
+            for (offset, ch) in tail_iter.by_ref() {
+                if ch == '<' {
+                    gen_start = Some(offset + 1);
+                    break;
+                }
+                if !ch.is_whitespace() {
+                    break;
+                }
+            }
+            let Some(gen_start) = gen_start else {
+                search_from = after;
+                continue;
+            };
+            let key_slice = tail[gen_start..].to_string();
+            let Some(key_type) = first_generic_argument(&key_slice) else {
+                search_from = after;
+                continue;
+            };
+            results.push(((*container).to_string(), key_type.trim().to_string()));
+            search_from = after;
+        }
+    }
+    results
+}
+
+/// Given the contents after the opening `<` of a Rust generic list, return the first comma-
+/// separated argument (respecting nested angle brackets).
+fn first_generic_argument(inside: &str) -> Option<String> {
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for ch in inside.chars() {
+        match ch {
+            '<' => {
+                depth += 1;
+                out.push(ch);
+            }
+            '>' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+                out.push(ch);
+            }
+            ',' if depth == 0 => break,
+            _ => out.push(ch),
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Strip reference markers, module paths, and lifetimes from a Rust type expression.
+fn simple_type_name(raw: &str) -> String {
+    let mut s = raw.trim();
+    while let Some(rest) = s.strip_prefix('&') {
+        s = rest.trim_start();
+        if let Some(after_mut) = s.strip_prefix("mut ") {
+            s = after_mut.trim_start();
+        }
+        // Skip a single lifetime token like `'a `.
+        if let Some(after_tick) = s.strip_prefix('\'') {
+            let end = after_tick
+                .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .unwrap_or(after_tick.len());
+            s = after_tick[end..].trim_start();
+        }
+    }
+    let last_segment = s.rsplit("::").next().unwrap_or(s);
+    // Drop generics (e.g. `Foo<Bar>` → `Foo`).
+    let generic_start = last_segment.find('<').unwrap_or(last_segment.len());
+    last_segment[..generic_start].trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,7 +2557,8 @@ mod tests {
         DraftCatalog {
             exports: export_set,
             normalized,
-            data_drafts: BTreeMap::new(),
+            role_hints: BTreeMap::new(),
+            resolved_role_types: BTreeMap::new(),
         }
     }
 
@@ -1682,7 +2579,7 @@ mod tests {
         let catalog = test_catalog(&["GameLoopContext"]);
         let manifest = TypesManifest {
             primitives: vec!["u32".to_string()],
-            external_path_prefixes: vec!["std::".to_string()],
+            external_path_prefixes: vec!["std::".to_string(), "rand::".to_string()],
             allowlists: ManifestAllowlists {
                 data: vec!["Board".to_string()],
                 projection: vec!["StringRenderer".to_string()],
@@ -1702,5 +2599,134 @@ mod tests {
         assert!(available.contains(&"TerminalRenderer".to_string()));
         assert!(available.contains(&"u32".to_string()));
         assert!(available.contains(&"std::".to_string()));
+        assert!(available.contains(&"rand::".to_string()));
+        assert!(available.contains(&"rand::rngs::ThreadRng".to_string()));
+        assert!(available.contains(&"rand::rngs::StdRng".to_string()));
+        assert!(available.contains(&"rand::rngs::SmallRng".to_string()));
+    }
+
+    #[test]
+    fn nominal_role_type_rejects_function_pointer_guess() {
+        let catalog = test_catalog(&["Board", "Snake"]);
+        let status = resolve_nominal_role_type(
+            "food_dropper",
+            "fn(&Board, &Snake) -> Option<Position>",
+            &["Chooses food positions"],
+            &catalog,
+        );
+
+        assert!(!status.is_resolved());
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("role player `food_dropper` must resolve to a nominal concrete type")
+        );
+    }
+
+    #[test]
+    fn role_methods_require_explicit_signature_even_when_role_type_resolves() {
+        let methods = prepare_role_methods(
+            &RoleMethodGroup {
+                role: "command".to_string(),
+                methods: vec![crate::draft_parser::RoleMethod {
+                    name: "next_action".to_string(),
+                    detail: "Returns the next gameplay action.".to_string(),
+                }],
+            },
+            "command",
+            &ValueStatus::resolved("CommandInputContext", "test"),
+        );
+
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].receiver.as_deref(), Some("&self"));
+        assert_eq!(methods[0].parameters[0].name, "command_");
+        assert_eq!(
+            methods[0].parameters[0].type_status.rust.as_deref(),
+            Some("&CommandInputContext")
+        );
+        assert_eq!(
+            methods[0].signature.reason.as_deref(),
+            Some("role method `next_action` on role `command` has no explicit signature")
+        );
+        assert!(methods[0].body.is_none());
+    }
+
+    #[test]
+    fn explicit_role_method_signature_builds_context_wrapper_with_role_parameter() {
+        let methods = prepare_role_methods(
+            &RoleMethodGroup {
+                role: "command".to_string(),
+                methods: vec![crate::draft_parser::RoleMethod {
+                    name: "next_action".to_string(),
+                    detail: "Signature: `next_action() -> Option<UserAction>`".to_string(),
+                }],
+            },
+            "command",
+            &ValueStatus::resolved("CommandInputContext", "test"),
+        );
+
+        assert_eq!(methods.len(), 1);
+        assert_eq!(
+            methods[0].signature.rust.as_deref(),
+            Some("next_action(&self, command_: &CommandInputContext) -> Option<UserAction>")
+        );
+        assert_eq!(methods[0].parameters.len(), 1);
+        assert_eq!(methods[0].parameters[0].name, "command_");
+    }
+
+    #[test]
+    fn role_type_is_not_inferred_from_matching_method_surface() {
+        let catalog = test_catalog(&["CommandInputContext"]);
+        let status = resolve_nominal_role_type_from_texts(
+            "command",
+            &["Shared input stream", "Captures keys and returns the next gameplay action"],
+            &catalog,
+        );
+
+        assert!(!status.is_resolved());
+        assert_eq!(
+            status.reason.as_deref(),
+            Some("no nominal concrete Rust type could be inferred for `command`")
+        );
+    }
+
+    #[test]
+    fn app_collaborator_type_uses_matching_context_role_hints_as_evidence() {
+        let context = CompositeDraft {
+            info: crate::draft_parser::DraftInfo {
+                kind: crate::draft_parser::ArtifactKind::Context,
+                relative_path: "contexts/game_loop.md".to_string(),
+                title: "GameLoopContext".to_string(),
+            },
+            purpose: "game loop".to_string(),
+            roles: vec![crate::draft_parser::RolePlayer {
+                name: "food_dropper".to_string(),
+                why_involved: "an RNG used to choose new food positions".to_string(),
+                expected_behavior:
+                    "Chooses a free interior food position, or no position if none is available"
+                        .to_string(),
+                explicit_type: None,
+            }],
+            role_methods: Vec::new(),
+            props: Vec::new(),
+            functionalities: Vec::new(),
+            notes: Vec::new(),
+        };
+        let catalog = build_catalog(&[DraftDocument::Context(context)], BTreeMap::new());
+        let status = resolve_nominal_collaborator_type_from_texts(
+            "food_dropper",
+            &["Chooses the next food placement on a free interior non-wall, non-snake cell."],
+            &catalog,
+        );
+
+        assert!(!status.is_resolved());
+        let evidence_texts = status
+            .evidence
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(evidence_texts.contains(&"an RNG used to choose new food positions"));
+        assert!(evidence_texts.contains(
+            &"Chooses a free interior food position, or no position if none is available"
+        ));
     }
 }

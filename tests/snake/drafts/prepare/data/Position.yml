@@ -37,3 +37,6 @@ constructor:
 derives:
 - Clone
 - Debug
+- Eq
+- Hash
+- PartialEq

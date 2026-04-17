@@ -14,7 +14,9 @@ roles:
     status: fixed
     rust: std::io::Stdin
     source: fix.agent
-    reason: no concrete Rust type could be inferred for `stdin_source`
+    candidates:
+    - crossterm::event::EventStream
+    reason: no nominal concrete Rust type could be inferred for `stdin_source`
     evidence:
     - section: stdin_source
       text: Supplies keyboard input from stdin
@@ -23,14 +25,24 @@ roles:
   methods:
   - name: read_available
     signature:
-      status: fixed
-      rust: 'read_available(&self, stdin_source_: &std::io::Stdin) -> Vec<crossterm::event::KeyEvent>'
-      source: fix.agent
-      reason: role method `read_available` on role `stdin_source` is missing a parseable signature
+      status: resolved
+      rust: 'read_available(&self, stdin_source_: std::io::Stdin) -> Vec<crossterm::event::KeyEvent>'
+      source: prepare.canonical
+      reason: role method `read_available` on role `stdin_source` has no explicit signature
       evidence:
       - section: Role Methods / stdin_source
         text: Returns all currently available key presses in arrival order without waiting.
     receiver: '&self'
+    parameters:
+    - name: stdin_source_
+      type:
+        status: fixed
+        rust: std::io::Stdin
+        source: fix.agent
+        reason: role method `read_available` is waiting for role `stdin_source` to resolve
+        evidence:
+        - section: Role Methods / stdin_source
+          text: Returns all currently available key presses in arrival order without waiting.
     returns:
       status: fixed
       rust: Vec<crossterm::event::KeyEvent>
@@ -66,7 +78,9 @@ functionalities:
       status: fixed
       rust: std::io::Stdin
       source: fix.agent
-      reason: no concrete Rust type could be inferred for `stdin_source`
+      candidates:
+      - crossterm::event::EventStream
+      reason: no nominal concrete Rust type could be inferred for `stdin_source`
       evidence:
       - section: stdin_source
         text: Supplies keyboard input from stdin
@@ -104,14 +118,14 @@ functionalities:
             name: buffer
 - name: capture
   signature:
-    status: fixed
+    status: resolved
     rust: capture(&mut self) -> ()
-    source: fix.agent
+    source: prepare.canonical
     reason: functionality `capture` is missing a parseable signature
     evidence:
     - section: Functionalities / capture
       text: Ask `stdin_source` for all currently available key presses without waiting. Append each returned key press to the end of `buffer` in arrival order.
-  receiver: '&self'
+  receiver: '&mut self'
   returns:
     status: fixed
     rust: ()
@@ -141,15 +155,11 @@ functionalities:
     evidence:
     - section: Functionalities / next_key
       text: If `buffer` is non-empty, remove and return the oldest key event. If `buffer` is empty, return no key.
-  receiver: '&self'
+  receiver: '&mut self'
   returns:
-    status: fixed
+    status: resolved
     rust: Option<crossterm::event::KeyEvent>
     source: fix.agent
-    reason: functionality `next_key` return type is unknown
-    evidence:
-    - section: Functionalities / next_key
-      text: If `buffer` is non-empty, remove and return the oldest key event. If `buffer` is empty, return no key.
   flow:
   - If `buffer` is non-empty, remove and return the oldest key event.
   - If `buffer` is empty, return no key.
@@ -165,15 +175,11 @@ functionalities:
     evidence:
     - section: Functionalities / next_action
       text: 'Remove the oldest key from `buffer` via the same queue as `next_key`. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire. If the key maps to an action, return it. If the key has no gameplay meaning, discard it and repeat from step 1. If `buffer` is exhausted with no valid action found, return no action.'
-  receiver: '&self'
+  receiver: '&mut self'
   returns:
-    status: fixed
+    status: resolved
     rust: Option<UserAction>
     source: fix.agent
-    reason: functionality `next_action` return type is unknown
-    evidence:
-    - section: Functionalities / next_action
-      text: 'Remove the oldest key from `buffer` via the same queue as `next_key`. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire. If the key maps to an action, return it. If the key has no gameplay meaning, discard it and repeat from step 1. If `buffer` is exhausted with no valid action found, return no action.'
   flow:
   - Remove the oldest key from `buffer` via the same queue as `next_key`.
   - 'Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire.'

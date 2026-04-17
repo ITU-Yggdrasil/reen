@@ -7,7 +7,9 @@ export:
   name: UserAction
 mutable: false
 variants:
-- name: MovementDirection
+- name: Movement
+  payload_types:
+  - Direction
   meaning: A movement command
   notes:
   - Carries one movement direction

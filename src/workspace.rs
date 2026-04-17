@@ -1,5 +1,6 @@
 use crate::draft_parser::ArtifactKind;
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ pub const DRAFTS_DIR: &str = "drafts";
 pub const PREPARED_DIR: &str = "drafts/prepare";
 pub const STATE_DIR: &str = ".reen";
 pub const GENERATED_MANIFEST: &str = ".reen/generated_files.json";
+pub const CONFIG_FILE: &str = "reen.yml";
 
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -15,6 +17,80 @@ pub struct Workspace {
     pub drafts_dir: PathBuf,
     pub prepared_dir: PathBuf,
     pub state_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ReenConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbose: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contexts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projections: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub prepare: CommandConfig,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub scaffold: CommandConfig,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub build: CommandConfig,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub compile: CommandConfig,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub run: CommandConfig,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub test: CommandConfig,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub clear: CommandConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct CommandConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbose: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contexts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projections: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+impl CommandConfig {
+    pub fn is_empty(&self) -> bool {
+        self.fix.is_none()
+            && self.verbose.is_none()
+            && self.debug.is_none()
+            && self.dry_run.is_none()
+            && self.contexts.is_none()
+            && self.projections.is_none()
+            && self.data.is_none()
+            && self.app.is_none()
+            && self.profile.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +164,28 @@ impl Workspace {
             state_dir: root.join(STATE_DIR),
             root,
         })
+    }
+
+    pub fn config_path(&self) -> PathBuf {
+        self.root.join(CONFIG_FILE)
+    }
+
+    pub fn load_config(&self) -> Result<ReenConfig> {
+        let path = self.config_path();
+        if !path.is_file() {
+            return Ok(ReenConfig::default());
+        }
+        let raw =
+            fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let config = serde_yaml::from_str(&raw)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        Ok(config)
+    }
+
+    pub fn save_config(&self, config: &ReenConfig) -> Result<()> {
+        let path = self.config_path();
+        let yaml = serde_yaml::to_string(config)?;
+        fs::write(&path, yaml).with_context(|| format!("Failed to write {}", path.display()))
     }
 
     pub fn ensure_drafts_exist(&self) -> Result<()> {

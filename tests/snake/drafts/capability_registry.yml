@@ -25,4 +25,13 @@ providers:
   - serde
   capabilities:
   - datetime_utc
+- domain: randomness
+  crate: rand
+  version: '*'
+  default_features: true
+  features: []
+  capabilities:
+  - randomness
+  external_path_prefixes:
+  - 'rand::'
 unmapped_capabilities: []

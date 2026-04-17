@@ -75,8 +75,17 @@ pub struct DataField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataVariant {
     pub name: String,
+    pub payload_types: Vec<String>,
     pub meaning: String,
     pub notes: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFunctionalityDraft {
+    pub name: String,
+    pub kind: String,
+    pub signature: String,
+    pub behavior: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,7 +160,7 @@ pub struct DataDraft {
     pub rules: Vec<String>,
     pub construction_rules: Vec<String>,
     pub access_rules: Vec<String>,
-    pub functionality_sections: Vec<Section>,
+    pub functionalities: Vec<DataFunctionalityDraft>,
     pub notes: Vec<String>,
 }
 
@@ -250,6 +259,11 @@ fn parse_data_draft(info: DraftInfo, content: &str) -> Result<DataDraft> {
     } else {
         Vec::new()
     };
+    let functionalities = if let Some(section) = find_section(&sections, "Functionalities") {
+        parse_data_functionalities(&info.relative_path, &section.body)?
+    } else {
+        Vec::new()
+    };
     if fields.is_empty() == variants.is_empty() {
         bail!(
             "Draft schema validation failed for {}:\n- Data drafts must contain exactly one of `## Fields` or `## Variants`",
@@ -269,15 +283,7 @@ fn parse_data_draft(info: DraftInfo, content: &str) -> Result<DataDraft> {
         access_rules: bullet_lines(
             find_section(&sections, "Access Rules").map(|section| section.body.as_str()),
         ),
-        functionality_sections: find_section(&sections, "Functionalities")
-            .map(|section| parse_subsections(&section.body))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|subsection| Section {
-                title: subsection.title,
-                body: subsection.body,
-            })
-            .collect(),
+        functionalities,
         notes: bullet_lines(find_section(&sections, "Notes").map(|section| section.body.as_str())),
     })
 }
@@ -506,12 +512,109 @@ fn parse_variants_table(relative_path: &str, body: &str) -> Result<Vec<DataVaria
     Ok(table
         .rows
         .iter()
-        .map(|row| DataVariant {
-            name: row[0].clone(),
-            meaning: row[1].clone(),
-            notes: row[2].clone(),
+        .map(|row| {
+            let (name, payload_types) = parse_variant_decl(&row[0])?;
+            Ok(DataVariant {
+                name,
+                payload_types,
+                meaning: row[1].clone(),
+                notes: row[2].clone(),
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>>>()?)
+}
+
+fn parse_data_functionalities(
+    relative_path: &str,
+    body: &str,
+) -> Result<Vec<DataFunctionalityDraft>> {
+    if body.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let tables = parse_tables(body);
+    if tables.len() != 1 {
+        bail!(
+            "Draft schema validation failed for {}:\n- `## Functionalities` in data drafts must contain exactly one markdown table",
+            relative_path
+        );
+    }
+    let table = &tables[0];
+    if table.headers != ["Method", "Kind", "Signature", "Behavior"] {
+        bail!(
+            "Draft schema validation failed for {}:\n- `## Functionalities` in data drafts must use `Method | Kind | Signature | Behavior`",
+            relative_path
+        );
+    }
+    table
+        .rows
+        .iter()
+        .map(|row| {
+            let name = strip_code_ticks(&row[0]);
+            if name.is_empty() {
+                bail!(
+                    "Draft schema validation failed for {}:\n- Data functionality rows must name a method",
+                    relative_path
+                );
+            }
+            let signature = strip_code_ticks(&row[2]);
+            if signature.is_empty() {
+                bail!(
+                    "Draft schema validation failed for {}:\n- Data functionality `{}` is missing a signature",
+                    relative_path,
+                    name
+                );
+            }
+            Ok(DataFunctionalityDraft {
+                name,
+                kind: row[1].trim().to_string(),
+                signature,
+                behavior: row[3].trim().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_variant_decl(raw: &str) -> Result<(String, Vec<String>)> {
+    let trimmed = strip_code_ticks(raw);
+    let Some(open) = trimmed.find('(') else {
+        return Ok((trimmed, Vec::new()));
+    };
+    let Some(close) = trimmed.rfind(')') else {
+        bail!("variant `{trimmed}` is missing `)`");
+    };
+    let name = trimmed[..open].trim().to_string();
+    if name.is_empty() {
+        bail!("variant `{trimmed}` is missing a variant name");
+    }
+    let inner = trimmed[open + 1..close].trim();
+    let payload_types = if inner.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_types(inner)
+    };
+    Ok((name, payload_types))
+}
+
+fn split_top_level_types(value: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (idx, ch) in value.char_indices() {
+        match ch {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' | '}' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                items.push(value[start..idx].trim().to_string());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = value[start..].trim();
+    if !tail.is_empty() {
+        items.push(tail.to_string());
+    }
+    items
 }
 
 fn parse_collaborators_table(relative_path: &str, body: &str) -> Result<Vec<CollaboratorDraft>> {
@@ -1060,4 +1163,48 @@ fn matches_ignore_ascii_case(value: &str, options: &[&str]) -> bool {
     options
         .iter()
         .any(|option| value.eq_ignore_ascii_case(option))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_data_draft_preserves_tuple_variants_and_functionality_table() {
+        let info = DraftInfo {
+            kind: ArtifactKind::Data,
+            relative_path: "data/UserAction.md".to_string(),
+            title: "UserAction".to_string(),
+        };
+        let draft = parse_data_draft(
+            info,
+            r#"# UserAction
+
+## Description
+
+User action values.
+
+## Variants
+
+| Variant | Meaning | Notes |
+|---|---|---|
+| `Movement(Direction)` | Move | Carries a direction |
+| `Fire` | Fire | Space bar |
+
+## Functionalities
+
+| Method | Kind | Signature | Behavior |
+|---|---|---|---|
+| `is_fire` | Instance method | `is_fire(&self) -> bool` | Returns whether the action is fire. |
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(draft.variants.len(), 2);
+        assert_eq!(draft.variants[0].name, "Movement");
+        assert_eq!(draft.variants[0].payload_types, vec!["Direction"]);
+        assert_eq!(draft.functionalities.len(), 1);
+        assert_eq!(draft.functionalities[0].name, "is_fire");
+        assert_eq!(draft.functionalities[0].signature, "is_fire(&self) -> bool");
+    }
 }

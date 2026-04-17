@@ -90,6 +90,8 @@ pub struct FieldSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VariantSpec {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub payload_types: Vec<String>,
     pub meaning: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
@@ -346,6 +348,7 @@ impl PreparedArtifact {
     }
 
     pub fn refresh_ambiguity_index(&mut self) {
+        self.normalize_method_signatures();
         let mut ambiguities = Vec::new();
         let mut scanned_paths = BTreeSet::new();
         for (idx, field) in self.fields.iter().enumerate() {
@@ -426,33 +429,40 @@ impl PreparedArtifact {
     /// Idempotent — safe to call after initial prepare and again after fix-agent patches.
     pub fn propagate_resolved_types(&mut self) {
         for role in &mut self.roles {
-            let Some(ty) = role.type_status.rust().map(|s| s.to_string()) else {
-                continue;
-            };
             let role_param_name = format!("{}_", role.name);
-            let ref_ty = format!("&{ty}");
 
             for method in &mut role.methods {
+                method.receiver = Some("&self".to_string());
+                if method
+                    .parameters
+                    .iter()
+                    .all(|parameter| parameter.name != role_param_name)
+                {
+                    method.parameters.insert(
+                        0,
+                        ParameterSpec {
+                            name: role_param_name.clone(),
+                            type_status: ValueStatus::missing(
+                                format!(
+                                    "role method `{}` is waiting for role `{}` to resolve",
+                                    method.name, role.name
+                                ),
+                                Vec::new(),
+                            ),
+                        },
+                    );
+                }
                 if let Some(param) = method
                     .parameters
                     .iter_mut()
                     .find(|p| p.name == role_param_name)
+                    && let Some(ty) = role.type_status.rust().map(|s| s.to_string())
+                    && !param.type_status.is_resolved()
                 {
-                    if !param.type_status.is_resolved() {
-                        param.type_status =
-                            ValueStatus::resolved(ref_ty.clone(), "prepare.role_player");
-                    }
+                    param.type_status =
+                        ValueStatus::resolved(format!("&{ty}"), "prepare.role_player");
                 }
-
-                if let Some(sig) = method.signature.rust().map(|s| s.to_string()) {
-                    if !sig.contains(&format!("{role_param_name}:")) {
-                        method.signature.rust = Some(insert_role_player_in_signature(
-                            &sig,
-                            &role_param_name,
-                            &ref_ty,
-                        ));
-                    }
-                }
+                method.sync_signature_from_structure();
             }
         }
 
@@ -461,20 +471,18 @@ impl PreparedArtifact {
             .iter_mut()
             .find(|m| m.name == "new" && m.receiver.is_none())
         {
-            let params_text = ctor
-                .parameters
-                .iter()
-                .map(|p| {
-                    format!(
-                        "{}: {}",
-                        p.name,
-                        p.type_status.rust.as_deref().unwrap_or("Unknown")
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            let new_sig = format!("new({params_text}) -> Self");
-            ctor.signature.rust = Some(new_sig);
+            ctor.sync_signature_from_structure();
+        }
+    }
+
+    fn normalize_method_signatures(&mut self) {
+        for method in &mut self.functionalities {
+            method.normalize_signature_state();
+        }
+        for role in &mut self.roles {
+            for method in &mut role.methods {
+                method.normalize_signature_state();
+            }
         }
     }
 
@@ -500,8 +508,67 @@ impl PreparedArtifact {
     }
 
     pub fn apply_fix_at_path(&mut self, path: &str, value: &str) -> bool {
+        self.apply_fix_at_path_with_candidates(path, value, None)
+    }
+
+    pub fn apply_fix_at_path_with_candidates(
+        &mut self,
+        path: &str,
+        value: &str,
+        candidates: Option<&[String]>,
+    ) -> bool {
+        if let Some((role_idx, method_idx)) = parse_double_index(path, "roles", "methods", "signature")
+        {
+            let Some(role) = self.roles.get_mut(role_idx) else {
+                return false;
+            };
+            let Some(role_ty) = role.type_status.rust().map(|ty| ty.to_string()) else {
+                return false;
+            };
+            let Some(method) = role.methods.get_mut(method_idx) else {
+                return false;
+            };
+            let Ok(parsed) = parse_method_signature(value, &method.name) else {
+                return false;
+            };
+            method.receiver = Some("&self".to_string());
+            method.parameters = vec![ParameterSpec {
+                name: format!("{}_", role.name),
+                type_status: ValueStatus::resolved(format!("&{role_ty}"), "prepare.role_player"),
+            }];
+            method.parameters.extend(parsed.parameters.into_iter().map(|parameter| ParameterSpec {
+                name: parameter.0,
+                type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
+            }));
+            method.return_status = ValueStatus::resolved(parsed.return_type, "fix.agent");
+            method.signature.apply_fix(value);
+            method.sync_signature_from_structure();
+            mark_fixed_ambiguities(&mut self.ambiguities, path);
+            return true;
+        }
+        if let Some(idx) = parse_single_index(path, "functionalities", "signature") {
+            let Some(method) = self.functionalities.get_mut(idx) else {
+                return false;
+            };
+            let Ok(parsed) = parse_method_signature(value, &method.name) else {
+                return false;
+            };
+            method.receiver = parsed.receiver;
+            method.parameters = parsed.parameters.into_iter().map(|parameter| ParameterSpec {
+                name: parameter.0,
+                type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
+            }).collect();
+            method.return_status = ValueStatus::resolved(parsed.return_type, "fix.agent");
+            method.signature.apply_fix(value);
+            method.sync_signature_from_structure();
+            mark_fixed_ambiguities(&mut self.ambiguities, path);
+            return true;
+        }
         if let Some(vs) = self.resolve_value_status_mut(path) {
-            vs.apply_fix(value);
+            vs.apply_fix_with_candidates(value, candidates);
+            if path.ends_with(".returns") || path.ends_with(".type") {
+                self.sync_signature_for_path(path);
+            }
             for amb in &mut self.ambiguities {
                 if amb.path == path && amb.severity == "blocking" {
                     amb.severity = "fixed".to_string();
@@ -510,6 +577,43 @@ impl PreparedArtifact {
             return true;
         }
         false
+    }
+
+    fn sync_signature_for_path(&mut self, path: &str) {
+        if let Some((role_idx, method_idx)) = parse_double_index(path, "roles", "methods", "returns")
+        {
+            if let Some(method) = self
+                .roles
+                .get_mut(role_idx)
+                .and_then(|role| role.methods.get_mut(method_idx))
+            {
+                method.sync_signature_from_structure();
+            }
+            return;
+        }
+        if let Some((role_idx, method_idx)) = parse_role_method_parameter_path(path)
+        {
+            if let Some(method) = self
+                .roles
+                .get_mut(role_idx)
+                .and_then(|role| role.methods.get_mut(method_idx))
+            {
+                method.sync_signature_from_structure();
+            }
+            return;
+        }
+        if let Some(idx) = parse_single_index(path, "functionalities", "returns") {
+            if let Some(method) = self.functionalities.get_mut(idx) {
+                method.sync_signature_from_structure();
+            }
+            return;
+        }
+        if let Some((method_idx, _param_idx)) =
+            parse_double_index(path, "functionalities", "parameters", "type")
+            && let Some(method) = self.functionalities.get_mut(method_idx)
+        {
+            method.sync_signature_from_structure();
+        }
     }
 
     fn resolve_value_status_mut(&mut self, path: &str) -> Option<&mut ValueStatus> {
@@ -581,6 +685,13 @@ impl PreparedArtifact {
         for field in &self.fields {
             field.type_status.collect_type_names(&mut types);
         }
+        for variant in &self.variants {
+            for payload_type in &variant.payload_types {
+                for name in extract_type_names(payload_type) {
+                    types.insert(name);
+                }
+            }
+        }
         for role in &self.roles {
             role.type_status.collect_type_names(&mut types);
             for method in &role.methods {
@@ -603,6 +714,50 @@ impl PreparedArtifact {
 }
 
 impl MethodSpec {
+    fn normalize_signature_state(&mut self) {
+        let has_structured_shape = self.receiver.is_some()
+            || !self.parameters.is_empty()
+            || self.return_status.is_resolved();
+        if !has_structured_shape {
+            if let Some(signature) = self.signature.rust.as_deref()
+                && let Ok(parsed) = parse_method_signature(signature, &self.name)
+            {
+                self.receiver = parsed.receiver;
+                self.parameters = parsed
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| ParameterSpec {
+                        name: parameter.0,
+                        type_status: ValueStatus::resolved(parameter.1, "prepare.signature"),
+                    })
+                    .collect();
+                if !self.return_status.is_resolved() {
+                    self.return_status =
+                        ValueStatus::resolved(parsed.return_type, "prepare.signature");
+                }
+            }
+        }
+        self.sync_signature_from_structure();
+    }
+
+    fn sync_signature_from_structure(&mut self) {
+        let Some(signature) = render_method_signature(
+            &self.name,
+            self.receiver.as_deref(),
+            &self.parameters,
+            self.return_status.rust(),
+        ) else {
+            return;
+        };
+        if self.signature.status.is_empty() || !self.signature.is_resolved() {
+            self.signature.status = "resolved".to_string();
+        }
+        self.signature.rust = Some(signature);
+        if self.signature.source.is_none() {
+            self.signature.source = Some("prepare.canonical".to_string());
+        }
+    }
+
     fn collect_ambiguities(
         &self,
         out: &mut Vec<Ambiguity>,
@@ -804,9 +959,37 @@ impl ValueStatus {
     }
 
     pub fn apply_fix(&mut self, value: impl Into<String>) {
+        self.apply_fix_with_candidates(value, None::<Vec<String>>);
+    }
+
+    pub fn apply_fix_with_candidates<I, S>(&mut self, value: impl Into<String>, candidates: Option<I>)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let chosen = value.into();
         self.status = "fixed".to_string();
-        self.rust = Some(value.into());
+        self.rust = Some(chosen.clone());
         self.source = Some("fix.agent".to_string());
+        let mut preserved = Vec::new();
+        if let Some(candidates) = candidates {
+            for candidate in candidates {
+                let candidate = candidate.as_ref().trim();
+                if candidate.is_empty() || candidate == chosen {
+                    continue;
+                }
+                if !preserved.iter().any(|existing| existing == candidate) {
+                    preserved.push(candidate.to_string());
+                }
+            }
+        } else {
+            for candidate in &self.candidates {
+                if candidate != &chosen && !preserved.iter().any(|existing| existing == candidate) {
+                    preserved.push(candidate.clone());
+                }
+            }
+        }
+        self.candidates = preserved;
     }
 
     pub fn rust(&self) -> Option<&str> {
@@ -1027,39 +1210,104 @@ fn resolve_method_field<'a>(
     }
 }
 
-fn insert_role_player_in_signature(sig: &str, param_name: &str, param_type: &str) -> String {
-    let Some(open) = sig.find('(') else {
-        return sig.to_string();
-    };
-    let Some(close) = sig.rfind(')') else {
-        return sig.to_string();
-    };
-    let prefix = &sig[..open + 1];
-    let inner = sig[open + 1..close].trim();
-    let suffix = &sig[close..];
-    let role_param = format!("{param_name}: {param_type}");
-
-    if inner.is_empty() {
-        return format!("{prefix}{role_param}{suffix}");
+fn render_method_signature(
+    name: &str,
+    receiver: Option<&str>,
+    parameters: &[ParameterSpec],
+    return_type: Option<&str>,
+) -> Option<String> {
+    let return_type = return_type?;
+    if parameters.iter().any(|parameter| !parameter.type_status.is_resolved()) {
+        return None;
     }
+    let mut parts = Vec::new();
+    if let Some(receiver) = receiver {
+        parts.push(receiver.to_string());
+    }
+    parts.extend(parameters.iter().map(|parameter| {
+        format!(
+            "{}: {}",
+            parameter.name,
+            parameter.type_status.rust().unwrap_or("Unknown")
+        )
+    }));
+    Some(format!("{name}({}) -> {return_type}", parts.join(", ")))
+}
 
-    let first_comma = inner.find(',');
-    let first_part = if let Some(pos) = first_comma {
-        inner[..pos].trim()
-    } else {
-        inner
+#[derive(Debug, Clone)]
+struct ParsedMethodSignature {
+    receiver: Option<String>,
+    parameters: Vec<(String, String)>,
+    return_type: String,
+}
+
+fn parse_method_signature(signature: &str, expected_name: &str) -> Result<ParsedMethodSignature> {
+    let trimmed = signature.trim().trim_matches('`');
+    let Some((left, right)) = trimmed.split_once("->") else {
+        bail!("signature `{trimmed}` is missing `->`");
     };
-    let is_receiver = matches!(first_part, "&self" | "&mut self" | "self");
-
-    if is_receiver {
-        if let Some(pos) = first_comma {
-            let rest = inner[pos + 1..].trim();
-            format!("{prefix}{first_part}, {role_param}, {rest}{suffix}")
-        } else {
-            format!("{prefix}{first_part}, {role_param}{suffix}")
+    let left = left.trim();
+    let return_type = right.trim().to_string();
+    let Some(open) = left.find('(') else {
+        bail!("signature `{trimmed}` is missing `(`");
+    };
+    let Some(close) = left.rfind(')') else {
+        bail!("signature `{trimmed}` is missing `)`");
+    };
+    let name = left[..open].trim();
+    if name != expected_name {
+        bail!("signature `{trimmed}` describes `{name}` but expected `{expected_name}`");
+    }
+    let inner = left[open + 1..close].trim();
+    let mut receiver = None;
+    let mut parameters = Vec::new();
+    for part in split_signature_params(inner) {
+        if part.is_empty() {
+            continue;
         }
-    } else {
-        format!("{prefix}{role_param}, {inner}{suffix}")
+        if matches!(part.as_str(), "&self" | "&mut self" | "self") {
+            receiver = Some(part);
+            continue;
+        }
+        let Some((param_name, param_type)) = part.split_once(':') else {
+            bail!("signature parameter `{part}` is missing `:`");
+        };
+        parameters.push((param_name.trim().to_string(), param_type.trim().to_string()));
+    }
+    Ok(ParsedMethodSignature {
+        receiver,
+        parameters,
+        return_type,
+    })
+}
+
+fn split_signature_params(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (idx, ch) in value.char_indices() {
+        match ch {
+            '(' | '{' | '[' | '<' => depth += 1,
+            ')' | '}' | ']' | '>' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(value[start..idx].trim().to_string());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = value[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail.to_string());
+    }
+    parts
+}
+
+fn mark_fixed_ambiguities(ambiguities: &mut [Ambiguity], path: &str) {
+    for ambiguity in ambiguities {
+        if ambiguity.path == path && ambiguity.severity == "blocking" {
+            ambiguity.severity = "fixed".to_string();
+        }
     }
 }
 
@@ -1073,5 +1321,174 @@ fn parse_indexed_path(path: &str) -> Option<(&str, Option<(usize, &str)>)> {
         Some((collection, Some((idx, ""))))
     } else {
         Some((collection, Some((idx, rest))))
+    }
+}
+
+fn parse_single_index(path: &str, collection: &str, field: &str) -> Option<usize> {
+    let prefix = format!("{collection}[");
+    let suffix = format!("].{field}");
+    let rest = path.strip_prefix(&prefix)?;
+    let rest = rest.strip_suffix(&suffix)?;
+    rest.parse().ok()
+}
+
+fn parse_double_index(path: &str, outer: &str, inner: &str, field: &str) -> Option<(usize, usize)> {
+    let prefix = format!("{outer}[");
+    let rest = path.strip_prefix(&prefix)?;
+    let close = rest.find(']')?;
+    let outer_idx: usize = rest[..close].parse().ok()?;
+    let mid = format!("].{inner}[");
+    let rest = rest[close..].strip_prefix(&mid)?;
+    let close2 = rest.find(']')?;
+    let inner_idx: usize = rest[..close2].parse().ok()?;
+    let expected_tail = format!("].{field}");
+    rest[close2..].strip_prefix(&expected_tail)?;
+    Some((outer_idx, inner_idx))
+}
+
+fn parse_role_method_parameter_path(path: &str) -> Option<(usize, usize)> {
+    let prefix = "roles[";
+    let rest = path.strip_prefix(prefix)?;
+    let close = rest.find(']')?;
+    let role_idx: usize = rest[..close].parse().ok()?;
+    let rest = rest[close..].strip_prefix("].methods[")?;
+    let close2 = rest.find(']')?;
+    let method_idx: usize = rest[..close2].parse().ok()?;
+    rest[close2..].strip_prefix("].parameters[")?;
+    Some((role_idx, method_idx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn missing_method(name: &str) -> MethodSpec {
+        MethodSpec {
+            name: name.to_string(),
+            signature: ValueStatus::missing("missing signature".to_string(), Vec::new()),
+            receiver: Some("&self".to_string()),
+            parameters: Vec::new(),
+            return_status: ValueStatus::missing("missing return".to_string(), Vec::new()),
+            flow: Vec::new(),
+            extensions: Vec::new(),
+            guarantee: Vec::new(),
+            references: None,
+            body: None,
+        }
+    }
+
+    #[test]
+    fn apply_signature_fix_updates_structured_method_fields() {
+        let mut prepared = PreparedArtifact::empty(
+            "context",
+            "x.md".to_string(),
+            "X".to_string(),
+            "X".to_string(),
+            true,
+        );
+        prepared.functionalities.push(missing_method("next_action"));
+
+        assert!(prepared.apply_fix_at_path(
+            "functionalities[0].signature",
+            "next_action(&mut self, buffer: VecDeque<KeyPress>) -> Option<UserAction>"
+        ));
+
+        let method = &prepared.functionalities[0];
+        assert_eq!(method.receiver.as_deref(), Some("&mut self"));
+        assert_eq!(method.parameters.len(), 1);
+        assert_eq!(method.parameters[0].name, "buffer");
+        assert_eq!(
+            method.parameters[0].type_status.rust.as_deref(),
+            Some("VecDeque<KeyPress>")
+        );
+        assert_eq!(method.return_status.rust.as_deref(), Some("Option<UserAction>"));
+        assert_eq!(
+            method.signature.rust.as_deref(),
+            Some("next_action(&mut self, buffer: VecDeque<KeyPress>) -> Option<UserAction>")
+        );
+    }
+
+    #[test]
+    fn role_method_signature_fix_injects_role_player_parameter() {
+        let mut prepared = PreparedArtifact::empty(
+            "context",
+            "x.md".to_string(),
+            "X".to_string(),
+            "X".to_string(),
+            true,
+        );
+        prepared.roles.push(RoleSpec {
+            name: "game_state".to_string(),
+            purpose: "state".to_string(),
+            expected_behavior: "supports getters".to_string(),
+            type_status: ValueStatus::resolved("GameState", "test"),
+            methods: vec![missing_method("food")],
+        });
+
+        assert!(prepared.apply_fix_at_path(
+            "roles[0].methods[0].signature",
+            "food(&self) -> Option<Food>"
+        ));
+
+        let method = &prepared.roles[0].methods[0];
+        assert_eq!(method.receiver.as_deref(), Some("&self"));
+        assert_eq!(method.parameters.len(), 1);
+        assert_eq!(method.parameters[0].name, "game_state_");
+        assert_eq!(
+            method.parameters[0].type_status.rust.as_deref(),
+            Some("&GameState")
+        );
+        assert_eq!(method.return_status.rust.as_deref(), Some("Option<Food>"));
+        assert_eq!(
+            method.signature.rust.as_deref(),
+            Some("food(&self, game_state_: &GameState) -> Option<Food>")
+        );
+    }
+
+    #[test]
+    fn apply_type_fix_preserves_remaining_candidates() {
+        let mut prepared = PreparedArtifact::empty(
+            "context",
+            "x.md".to_string(),
+            "X".to_string(),
+            "X".to_string(),
+            true,
+        );
+        prepared.roles.push(RoleSpec {
+            name: "food_dropper".to_string(),
+            purpose: "randomness".to_string(),
+            expected_behavior: "drops food".to_string(),
+            type_status: ValueStatus::ambiguous(
+                vec![
+                    "rand::rngs::ThreadRng".to_string(),
+                    "rand::rngs::StdRng".to_string(),
+                    "rand::rngs::SmallRng".to_string(),
+                ],
+                "multiple RNG candidates".to_string(),
+                Vec::new(),
+            ),
+            methods: Vec::new(),
+        });
+
+        assert!(prepared.apply_fix_at_path_with_candidates(
+            "roles[0].type",
+            "rand::rngs::ThreadRng",
+            Some(&[
+                "rand::rngs::ThreadRng".to_string(),
+                "rand::rngs::StdRng".to_string(),
+                "rand::rngs::SmallRng".to_string(),
+            ])
+        ));
+
+        let status = &prepared.roles[0].type_status;
+        assert_eq!(status.status, "fixed");
+        assert_eq!(status.rust.as_deref(), Some("rand::rngs::ThreadRng"));
+        assert_eq!(
+            status.candidates,
+            vec![
+                "rand::rngs::StdRng".to_string(),
+                "rand::rngs::SmallRng".to_string()
+            ]
+        );
     }
 }

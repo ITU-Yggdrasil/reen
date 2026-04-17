@@ -17,9 +17,13 @@ roles:
   methods:
   - name: width
     signature:
-      status: resolved
-      rust: 'width(&self, board_: &Board) -> u32'
-      source: prepare.signature
+      status: fixed
+      rust: 'width(&self, board_: &Board) -> usize'
+      source: fix.agent
+      reason: role method `width` on role `Board` has no explicit signature
+      evidence:
+      - section: Role Methods / Board
+        text: Returns the number of columns in the picture.
     receiver: '&self'
     parameters:
     - name: board_
@@ -29,23 +33,17 @@ roles:
         source: prepare.role_player
     returns:
       status: resolved
-      rust: u32
-      source: prepare.signature
-    body:
-      steps:
-      - op: return
-        expr:
-          op: call_instance_method
-          receiver:
-            op: var
-            name: board_
-          method: width
-          args: []
+      rust: usize
+      source: fix.agent
   - name: height
     signature:
-      status: resolved
-      rust: 'height(&self, board_: &Board) -> u32'
-      source: prepare.signature
+      status: fixed
+      rust: 'height(&self, board_: &Board) -> usize'
+      source: fix.agent
+      reason: role method `height` on role `Board` has no explicit signature
+      evidence:
+      - section: Role Methods / Board
+        text: Returns the number of rows in the picture.
     receiver: '&self'
     parameters:
     - name: board_
@@ -55,24 +53,14 @@ roles:
         source: prepare.role_player
     returns:
       status: resolved
-      rust: u32
-      source: prepare.signature
-    body:
-      steps:
-      - op: return
-        expr:
-          op: call_instance_method
-          receiver:
-            op: var
-            name: board_
-          method: height
-          args: []
+      rust: usize
+      source: fix.agent
   - name: symbol_at
     signature:
       status: fixed
       rust: 'symbol_at(&self, board_: &Board, x: usize, y: usize) -> char'
       source: fix.agent
-      reason: role method `symbol_at` on role `Board` is missing a parseable signature
+      reason: role method `symbol_at` on role `Board` has no explicit signature
       evidence:
       - section: Role Methods / Board
         text: Returns the symbol to show at a given coordinate.
@@ -83,14 +71,20 @@ roles:
         status: resolved
         rust: '&Board'
         source: prepare.role_player
+    - name: x
+      type:
+        status: resolved
+        rust: usize
+        source: fix.agent
+    - name: y
+      type:
+        status: resolved
+        rust: usize
+        source: fix.agent
     returns:
-      status: fixed
+      status: resolved
       rust: char
       source: fix.agent
-      reason: role method `symbol_at` return type is unknown
-      evidence:
-      - section: Role Methods / Board
-        text: Returns the symbol to show at a given coordinate.
 props:
 - name: score
   meaning: Score shown below the board
@@ -98,6 +92,9 @@ props:
     status: fixed
     rust: u32
     source: fix.agent
+    candidates:
+    - i32
+    - usize
     reason: no concrete Rust type could be inferred for `score`
     evidence:
     - section: score
@@ -110,7 +107,7 @@ functionalities:
 - name: render
   signature:
     status: fixed
-    rust: 'render(&self, board: &Board, score: u32) -> String'
+    rust: render(&self) -> String
     source: fix.agent
     reason: functionality `render` is missing a parseable signature
     evidence:
@@ -118,13 +115,9 @@ functionalities:
       text: 'Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`). Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`. Append a newline character after each row. After the last row, append the score line `Score: <score>` followed by a newline. Return the complete string.'
   receiver: '&self'
   returns:
-    status: fixed
+    status: resolved
     rust: String
     source: fix.agent
-    reason: functionality `render` return type is unknown
-    evidence:
-    - section: Functionalities / render
-      text: 'Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`). Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`. Append a newline character after each row. After the last row, append the score line `Score: <score>` followed by a newline. Return the complete string.'
   flow:
   - Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`).
   - Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`.
@@ -139,6 +132,12 @@ functionalities:
     props:
     - score
 ambiguities:
+- path: roles[0].methods[0].body
+  severity: info
+  message: method `width` body is missing
+- path: roles[0].methods[1].body
+  severity: info
+  message: method `height` body is missing
 - path: roles[0].methods[2].body
   severity: info
   message: method `symbol_at` body is missing

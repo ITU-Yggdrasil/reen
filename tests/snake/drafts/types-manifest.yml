@@ -133,6 +133,7 @@ external_path_prefixes:
 - 'std::'
 - 'tokio::'
 - 'tracing::'
+- 'rand::'
 allowlists:
   data:
   - ()

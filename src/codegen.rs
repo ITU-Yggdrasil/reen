@@ -1,18 +1,84 @@
 use crate::build_tracker::{BuildTracker, hash_string};
 use crate::compile_repair::{
-    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, parse_compile_errors, run_cargo_build,
+    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, canonicalize_stderr_for_compare, is_structural_error,
+    parse_compile_errors, run_cargo_build,
 };
 use crate::prepared::{
-    Ambiguity, Body, CollectionEntry, Expression, GetterSpec, MethodSpec, PreparedArtifact,
+    Ambiguity, Body, CollectionEntry, Expression, FieldSpec, GetterSpec, MethodSpec, PreparedArtifact,
     Statement,
 };
 use crate::workspace::{GENERATED_MANIFEST, Workspace};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Shape of a role method's first parameter (the role player).
+///
+/// Determines how call sites spell the receiver argument: `&self.<role>` vs `&mut self.<role>`
+/// vs `self.<role>.clone()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RolePlayerCallShape {
+    ImmutableRef,
+    MutableRef,
+    Owned,
+}
+
+thread_local! {
+    /// Per-composite-file map from `(role_field_name, method_name)` → call-site shape.
+    /// Populated at the start of `generate_composite_file` and consulted by
+    /// `render_expression` for `Expression::CallRoleMethod`. Cleared when the file is done.
+    static ROLE_PLAYER_SHAPES: RefCell<BTreeMap<(String, String), RolePlayerCallShape>> =
+        RefCell::new(BTreeMap::new());
+}
+
+fn classify_role_player_shape(param_rust: &str) -> RolePlayerCallShape {
+    let trimmed = param_rust.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('&') {
+        if rest.trim_start().starts_with("mut ") {
+            RolePlayerCallShape::MutableRef
+        } else {
+            RolePlayerCallShape::ImmutableRef
+        }
+    } else {
+        RolePlayerCallShape::Owned
+    }
+}
+
+fn load_role_player_shapes(artifact: &PreparedArtifact) {
+    ROLE_PLAYER_SHAPES.with(|cell| {
+        let mut map = cell.borrow_mut();
+        map.clear();
+        for role in &artifact.roles {
+            for method in &role.methods {
+                let Some(first) = method.parameters.first() else {
+                    continue;
+                };
+                let Some(rust) = first.type_status.rust() else {
+                    continue;
+                };
+                let shape = classify_role_player_shape(rust);
+                map.insert((role.name.clone(), method.name.clone()), shape);
+            }
+        }
+    });
+}
+
+fn lookup_role_player_shape(role: &str, method: &str) -> RolePlayerCallShape {
+    ROLE_PLAYER_SHAPES.with(|cell| {
+        cell.borrow()
+            .get(&(role.to_string(), method.to_string()))
+            .copied()
+            .unwrap_or(RolePlayerCallShape::ImmutableRef)
+    })
+}
+
+fn clear_role_player_shapes() {
+    ROLE_PLAYER_SHAPES.with(|cell| cell.borrow_mut().clear());
+}
 #[derive(Debug, Clone)]
 pub struct ScaffoldOptions {
     pub selection: crate::workspace::Selection,
@@ -46,13 +112,21 @@ struct DependencyPackage {
     version: String,
 }
 
+const SCAFFOLD_TRACKER_VERSION: &str = "scaffold:v2:spec-doc-comments";
+
 pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> Result<()> {
     let prepared_paths = workspace.prepared_paths(&options.selection)?;
     let mut tracker = BuildTracker::load(&workspace.root)?;
     let loaded = load_prepared_artifacts(workspace, &prepared_paths)?;
     validate_loaded_artifacts(&loaded)?;
+    if options.fix {
+        ensure_manifests_cover_prepared(workspace, &loaded)?;
+    }
     let dependency_manifest = load_dependency_manifest(workspace)?;
-    let aggregate_hash = combined_hash(&loaded)?;
+    let aggregate_hash = hash_string(&format!(
+        "{SCAFFOLD_TRACKER_VERSION}:{}",
+        combined_hash(&loaded)?
+    ));
     if tracker.is_current("scaffold", "scaffold:workspace", &aggregate_hash)
         && workspace.root.join(GENERATED_MANIFEST).exists()
     {
@@ -89,6 +163,9 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
         fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
     }
     write_generated_manifest(workspace, generated.keys())?;
+
+    tracker.clear_stage("build");
+    tracker.save(&workspace.root)?;
     if options.debug {
         write_debug_dump(workspace, &loaded)?;
     }
@@ -107,22 +184,37 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
 
     let max_rounds = COMPILE_FIX_MAX_ROUNDS;
     let mut last_stderr = result.stderr;
+    let mut last_canonical = canonicalize_stderr_for_compare(&last_stderr);
+    let mut stuck_rounds: u32 = 0;
     for round in 1..=max_rounds {
-        let fixes = parse_compile_errors(&last_stderr);
+        if is_structural_error(&last_stderr) {
+            eprint!("{}", last_stderr);
+            bail!(
+                "Scaffold failed to compile with a structural error (missing field / duplicate \
+                 method / unknown type). This indicates drift between prepared YAML and the \
+                 generated scaffold — re-run `reen prepare --fix` before retrying `reen scaffold --fix`."
+            );
+        }
+
+        let error_count = count_compile_errors_text(&last_stderr);
+        if options.verbose {
+            eprintln!(
+                "scaffold --fix round {round}/{max_rounds} ({error_count} compile error(s) remaining)"
+            );
+        }
+
+        let fixes = parse_compile_errors(workspace, &last_stderr);
         if fixes.is_empty() {
             eprint!("{}", last_stderr);
             bail!("Generated project failed to compile but no auto-fixable errors were found");
         }
         if options.verbose {
-            eprintln!(
-                "scaffold --fix round {round}: applying {} fix(es)",
-                fixes.len()
-            );
+            eprintln!("  deterministic: applying {} fix(es)", fixes.len());
         }
         for fix in &fixes {
             apply_compile_fix(workspace, fix)?;
             if options.verbose {
-                eprintln!("  {}", fix.description());
+                eprintln!("    {}", fix.description());
             }
         }
         let result = run_cargo_build(workspace)?;
@@ -131,10 +223,124 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
             tracker.save(&workspace.root)?;
             return Ok(());
         }
-        last_stderr = result.stderr;
+        let new_stderr = result.stderr;
+        let new_canonical = canonicalize_stderr_for_compare(&new_stderr);
+        let new_error_count = count_compile_errors_text(&new_stderr);
+        if new_canonical == last_canonical {
+            stuck_rounds += 1;
+            if options.verbose {
+                eprintln!(
+                    "  no progress after fix(es) (stuck round {stuck_rounds})"
+                );
+            }
+            if stuck_rounds >= 3 {
+                eprint!("{}", new_stderr);
+                bail!(
+                    "Scaffold fix loop bailing: {} consecutive rounds produced no change in compiler output",
+                    stuck_rounds
+                );
+            }
+        } else {
+            stuck_rounds = 0;
+            if options.verbose {
+                let delta = new_error_count as i64 - error_count as i64;
+                eprintln!("  after fix(es): {new_error_count} error(s) ({delta:+})");
+            }
+        }
+        last_stderr = new_stderr;
+        last_canonical = new_canonical;
     }
     eprint!("{}", last_stderr);
     bail!("Generated project still fails to compile after {max_rounds} fix rounds");
+}
+
+fn count_compile_errors_text(stderr: &str) -> usize {
+    stderr
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            t.starts_with("error[") || t.starts_with("error:")
+        })
+        .count()
+}
+
+/// Ensure every external path referenced by the loaded prepared artifacts has a corresponding
+/// entry in `drafts/dependencies.yml` and `drafts/types-manifest.yml`.
+///
+/// Called only when `scaffold --fix` is in effect; failures here are soft — we only log and
+/// continue, since the subsequent `collect_required_dependencies` check still produces the
+/// authoritative error if a crate remains unregistered.
+fn ensure_manifests_cover_prepared(
+    workspace: &Workspace,
+    loaded: &[LoadedArtifact],
+) -> Result<()> {
+    let mut seen_roots: BTreeSet<String> = BTreeSet::new();
+    for item in loaded {
+        let artifact = &item.artifact;
+        for rust_type in artifact_type_strings(artifact) {
+            let trimmed = rust_type.trim_start_matches('&').trim_start();
+            let trimmed = trimmed.strip_prefix("mut ").unwrap_or(trimmed);
+            if !trimmed.contains("::") {
+                continue;
+            }
+            let root = trimmed.split("::").next().unwrap_or_default().to_string();
+            if root.is_empty()
+                || matches!(root.as_str(), "std" | "core" | "alloc" | "crate" | "self" | "super")
+            {
+                continue;
+            }
+            if !seen_roots.insert(root.clone()) {
+                continue;
+            }
+            let _ = crate::manifest::ensure_external_dependency_for_type(workspace, trimmed);
+        }
+    }
+    Ok(())
+}
+
+fn artifact_type_strings(artifact: &PreparedArtifact) -> Vec<String> {
+    let mut out = Vec::new();
+    for field in &artifact.fields {
+        if let Some(rust) = field.type_status.rust() {
+            out.push(rust.to_string());
+        }
+    }
+    for role in &artifact.roles {
+        if let Some(rust) = role.type_status.rust() {
+            out.push(rust.to_string());
+        }
+        for method in &role.methods {
+            if let Some(rust) = method.return_status.rust() {
+                out.push(rust.to_string());
+            }
+            for param in &method.parameters {
+                if let Some(rust) = param.type_status.rust() {
+                    out.push(rust.to_string());
+                }
+            }
+        }
+    }
+    for prop in &artifact.props {
+        if let Some(rust) = prop.type_status.rust() {
+            out.push(rust.to_string());
+        }
+    }
+    for collab in &artifact.collaborators {
+        if let Some(rust) = collab.type_status.rust() {
+            out.push(rust.to_string());
+        }
+    }
+    for functionality in &artifact.functionalities {
+        if let Some(rust) = functionality.return_status.rust() {
+            out.push(rust.to_string());
+        }
+        for param in &functionality.parameters {
+            if let Some(rust) = param.type_status.rust() {
+                out.push(rust.to_string());
+            }
+        }
+    }
+    out
 }
 
 pub fn clear_generated_outputs(workspace: &Workspace, dry_run: bool) -> Result<()> {
@@ -612,6 +818,12 @@ fn generate_data_file(
     export_kinds: &BTreeMap<String, String>,
 ) -> Result<String> {
     let imports = render_imports(artifact, export_kinds, "crate");
+    let explicit_method_names = artifact
+        .functionalities
+        .iter()
+        .filter(|method| method.name != "new")
+        .map(|method| method.name.as_str())
+        .collect::<BTreeSet<_>>();
     let mut out = String::new();
     if !imports.is_empty() {
         out.push_str(&imports);
@@ -623,10 +835,23 @@ fn generate_data_file(
         format!("#[derive({})]\n", artifact.derives.join(", "))
     };
     out.push_str(&derives);
+    out.push_str(&render_doc_comment(&artifact_doc_lines(artifact), 0));
     if !artifact.variants.is_empty() {
         out.push_str(&format!("pub enum {} {{\n", artifact.export.name));
         for variant in &artifact.variants {
-            out.push_str(&format!("    {},\n", variant.name));
+            out.push_str(&render_doc_comment(
+                &item_doc_lines(&variant.meaning, &variant.notes),
+                1,
+            ));
+            if variant.payload_types.is_empty() {
+                out.push_str(&format!("    {},\n", variant.name));
+            } else {
+                out.push_str(&format!(
+                    "    {}({}),\n",
+                    variant.name,
+                    variant.payload_types.join(", ")
+                ));
+            }
         }
         out.push_str("}\n");
         return Ok(out);
@@ -643,6 +868,10 @@ fn generate_data_file(
             &format!("fields[{idx}].type"),
             1,
         ));
+        out.push_str(&render_doc_comment(
+            &item_doc_lines(&field.meaning, &field.notes),
+            1,
+        ));
         out.push_str(&format!("    {}: {},\n", field.name, ty));
     }
     out.push_str("}\n\n");
@@ -650,7 +879,11 @@ fn generate_data_file(
     if artifact.constructor.is_some() {
         out.push_str(&render_constructor(artifact, 1)?);
     }
-    for getter in &artifact.getters {
+    for getter in artifact
+        .getters
+        .iter()
+        .filter(|getter| !explicit_method_names.contains(getter.name.as_str()))
+    {
         out.push_str(&render_getter(artifact, getter, 1)?);
     }
     for (idx, method) in artifact.functionalities.iter().enumerate() {
@@ -673,12 +906,23 @@ fn generate_composite_file(
     artifact: &PreparedArtifact,
     export_kinds: &BTreeMap<String, String>,
 ) -> Result<String> {
+    load_role_player_shapes(artifact);
+    let result = generate_composite_file_inner(artifact, export_kinds);
+    clear_role_player_shapes();
+    result
+}
+
+fn generate_composite_file_inner(
+    artifact: &PreparedArtifact,
+    export_kinds: &BTreeMap<String, String>,
+) -> Result<String> {
     let imports = render_imports(artifact, export_kinds, "crate");
     let mut out = String::new();
     if !imports.is_empty() {
         out.push_str(&imports);
         out.push('\n');
     }
+    out.push_str(&render_doc_comment(&artifact_doc_lines(artifact), 0));
     out.push_str(&format!("pub struct {} {{\n", artifact.export.name));
     for (idx, role) in artifact.roles.iter().enumerate() {
         let ty = role
@@ -690,6 +934,7 @@ fn generate_composite_file(
             &format!("roles[{idx}].type"),
             1,
         ));
+        out.push_str(&render_doc_comment(&role_doc_lines(role), 1));
         out.push_str(&format!("    {}: {},\n", role.name, ty));
     }
     for (idx, prop) in artifact.props.iter().enumerate() {
@@ -700,6 +945,10 @@ fn generate_composite_file(
         out.push_str(&fixme_comment(
             &artifact.ambiguities,
             &format!("props[{idx}].type"),
+            1,
+        ));
+        out.push_str(&render_doc_comment(
+            &item_doc_lines(&prop.meaning, &prop.notes),
             1,
         ));
         out.push_str(&format!("    {}: {},\n", prop.name, ty));
@@ -804,7 +1053,12 @@ fn render_getter(
         "copy" => format!("self.{}", field.name),
         _ => format!("&self.{}", field.name),
     };
-    Ok(format!(
+    let mut out = String::new();
+    out.push_str(&render_doc_comment(
+        &getter_doc_lines(field, getter),
+        indent,
+    ));
+    out.push_str(&format!(
         "{}pub fn {}(&self) -> {} {{\n{}{}\n{}}}\n",
         indent_str(indent),
         getter.name,
@@ -812,7 +1066,8 @@ fn render_getter(
         indent_str(indent + 1),
         body,
         indent_str(indent)
-    ))
+    ));
+    Ok(out)
 }
 
 fn render_method_with_fixme(
@@ -831,6 +1086,10 @@ fn render_method_with_fixme(
     out.push_str(&fixme_comment(
         ambiguities,
         &format!("{base_path}.returns"),
+        indent,
+    ));
+    out.push_str(&render_doc_comment(
+        &method_doc_lines(method, role_name),
         indent,
     ));
     let visibility = if role_name.is_some() { "" } else { "pub " };
@@ -1023,13 +1282,19 @@ fn render_expression(expr: &Expression) -> Result<String> {
         }
         Expression::ConstructEnum { type_name, variant } => format!("{type_name}::{variant}"),
         Expression::CallRoleMethod { role, method, args } => {
-            // Role methods take `&self.<role>` as their first argument (the role player).
-            // Remaining args follow separated by commas.
+            // Role methods take the role player as their first argument. Its call-site shape
+            // (`&`, `&mut`, owned) is determined by the first parameter of the prepared role
+            // method signature, cached in ROLE_PLAYER_SHAPES for this file.
             let domain_args = render_call_args(args)?;
+            let first_arg = match lookup_role_player_shape(role, method) {
+                RolePlayerCallShape::ImmutableRef => format!("&self.{role}"),
+                RolePlayerCallShape::MutableRef => format!("&mut self.{role}"),
+                RolePlayerCallShape::Owned => format!("self.{role}.clone()"),
+            };
             let all_args = if domain_args.is_empty() {
-                format!("&self.{role}")
+                first_arg
             } else {
-                format!("&self.{role}, {domain_args}")
+                format!("{first_arg}, {domain_args}")
             };
             format!("self.{role}_{method}({all_args})")
         }
@@ -1207,6 +1472,113 @@ fn indent_str(depth: usize) -> String {
     "    ".repeat(depth)
 }
 
+fn render_doc_comment(lines: &[String], indent: usize) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for line in lines {
+        out.push_str(&format!("{}/// {}\n", indent_str(indent), line));
+    }
+    out
+}
+
+fn artifact_doc_lines(artifact: &PreparedArtifact) -> Vec<String> {
+    vec![format!(
+        "Generated from {} specification `{}`.",
+        artifact.source.kind, artifact.source.path
+    )]
+}
+
+fn item_doc_lines(summary: &str, notes: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
+    push_doc_text(&mut lines, summary);
+    for note in notes {
+        lines.push(format!("Note: {}", normalize_doc_text(note)));
+    }
+    lines
+}
+
+fn role_doc_lines(role: &crate::prepared::RoleSpec) -> Vec<String> {
+    let mut lines = Vec::new();
+    push_doc_text(&mut lines, &role.purpose);
+    if !role.expected_behavior.trim().is_empty() {
+        lines.push(format!(
+            "Expected behavior: {}",
+            normalize_doc_text(&role.expected_behavior)
+        ));
+    }
+    lines
+}
+
+fn getter_doc_lines(field: &FieldSpec, getter: &GetterSpec) -> Vec<String> {
+    let mut lines = Vec::new();
+    if !field.meaning.trim().is_empty() {
+        lines.push(format!("Returns {}.", normalize_doc_text(&field.meaning)));
+    }
+    if getter.mode == "copy" {
+        lines.push("Getter returns the stored value by copy.".to_string());
+    } else {
+        lines.push("Getter returns a shared reference to the stored value.".to_string());
+    }
+    lines
+}
+
+fn method_doc_lines(method: &MethodSpec, role_name: Option<&str>) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(role_name) = role_name {
+        lines.push(format!("Role method for `{role_name}`."));
+    }
+    if !method.flow.is_empty() {
+        lines.push("Flow:".to_string());
+        for step in &method.flow {
+            lines.push(format!("- {}", normalize_doc_text(step)));
+        }
+    }
+    if !method.extensions.is_empty() {
+        lines.push("Extensions:".to_string());
+        for step in &method.extensions {
+            lines.push(format!("- {}", normalize_doc_text(step)));
+        }
+    }
+    if !method.guarantee.is_empty() {
+        lines.push("Guarantee:".to_string());
+        for line in &method.guarantee {
+            lines.push(format!("- {}", normalize_doc_text(line)));
+        }
+    }
+    if let Some(references) = method.references.as_ref() {
+        let mut parts = Vec::new();
+        if !references.roles.is_empty() {
+            parts.push(format!("roles={}", references.roles.join(", ")));
+        }
+        if !references.props.is_empty() {
+            parts.push(format!("props={}", references.props.join(", ")));
+        }
+        if !references.types.is_empty() {
+            parts.push(format!("types={}", references.types.join(", ")));
+        }
+        if !references.role_methods.is_empty() {
+            parts.push(format!("role_methods={}", references.role_methods.join(", ")));
+        }
+        if !parts.is_empty() {
+            lines.push(format!("References: {}.", parts.join("; ")));
+        }
+    }
+    lines
+}
+
+fn push_doc_text(lines: &mut Vec<String>, text: &str) {
+    let normalized = normalize_doc_text(text);
+    if !normalized.is_empty() {
+        lines.push(normalized);
+    }
+}
+
+fn normalize_doc_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn is_builtin_type(name: &str) -> bool {
     matches!(
         name,
@@ -1252,6 +1624,10 @@ fn prune_empty_dirs(path: &Path, root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prepared::{
+        Body, ExportInfo, Expression, FieldSpec, MethodReferences, MethodSpec, SourceInfo,
+        Statement, ValueStatus, VariantSpec,
+    };
 
     #[test]
     fn collect_required_dependencies_uses_manifest_and_ignores_local_roots() {
@@ -1326,5 +1702,141 @@ fn main() {
 
         assert!(rendered.contains(r#"chrono = { version = "0.4", features = ["serde"] }"#));
         assert!(rendered.contains(r#"crossterm = "0.27""#));
+    }
+
+    #[test]
+    fn generate_data_file_renders_tuple_variants() {
+        let mut artifact = PreparedArtifact::empty(
+            "data",
+            "data/UserAction.md".to_string(),
+            "UserAction".to_string(),
+            "UserAction".to_string(),
+            false,
+        );
+        artifact.source = SourceInfo {
+            path: "data/UserAction.md".to_string(),
+            kind: "data".to_string(),
+            title: "UserAction".to_string(),
+        };
+        artifact.export = ExportInfo {
+            name: "UserAction".to_string(),
+        };
+        artifact.variants = vec![
+            VariantSpec {
+                name: "Movement".to_string(),
+                payload_types: vec!["Direction".to_string()],
+                meaning: "move".to_string(),
+                notes: Vec::new(),
+            },
+            VariantSpec {
+                name: "Fire".to_string(),
+                payload_types: Vec::new(),
+                meaning: "fire".to_string(),
+                notes: Vec::new(),
+            },
+        ];
+
+        let rendered = generate_data_file(&artifact, &BTreeMap::new()).unwrap();
+
+        assert!(rendered.contains("Movement(Direction)"));
+        assert!(rendered.contains("Fire,"));
+    }
+
+    #[test]
+    fn generate_data_file_skips_synthesized_getter_when_functionality_has_same_name() {
+        let mut artifact = PreparedArtifact::empty(
+            "data",
+            "data/GameState.md".to_string(),
+            "GameState".to_string(),
+            "GameState".to_string(),
+            false,
+        );
+        artifact.fields = vec![FieldSpec {
+            name: "game_started".to_string(),
+            meaning: "start timestamp".to_string(),
+            type_status: ValueStatus::resolved("u64", "test"),
+            getter_accessible: true,
+            notes: Vec::new(),
+        }];
+        artifact.getters = vec![GetterSpec {
+            name: "game_started".to_string(),
+            field: "game_started".to_string(),
+            mode: "copy".to_string(),
+        }];
+        artifact.functionalities = vec![MethodSpec {
+            name: "game_started".to_string(),
+            signature: ValueStatus::resolved("game_started(&self) -> u64", "test"),
+            receiver: Some("&self".to_string()),
+            parameters: Vec::new(),
+            return_status: ValueStatus::resolved("u64", "test"),
+            flow: Vec::new(),
+            extensions: Vec::new(),
+            guarantee: Vec::new(),
+            references: None,
+            body: Some(Body {
+                steps: vec![Statement::Return {
+                    expr: Some(Expression::Field {
+                        base: "self".to_string(),
+                        name: "game_started".to_string(),
+                    }),
+                }],
+            }),
+        }];
+
+        let rendered = generate_data_file(&artifact, &BTreeMap::new()).unwrap();
+
+        assert_eq!(rendered.matches("pub fn game_started").count(), 1, "{rendered}");
+    }
+
+    #[test]
+    fn generate_composite_file_emits_spec_doc_comments_for_methods_and_roles() {
+        let mut artifact = PreparedArtifact::empty(
+            "context",
+            "contexts/GameLoop.md".to_string(),
+            "GameLoop".to_string(),
+            "GameLoopContext".to_string(),
+            true,
+        );
+        artifact.roles = vec![crate::prepared::RoleSpec {
+            name: "command".to_string(),
+            purpose: "Provides player input.".to_string(),
+            expected_behavior: "Translates keys into user actions.".to_string(),
+            type_status: ValueStatus::resolved("CommandInputContext", "test"),
+            methods: Vec::new(),
+        }];
+        artifact.functionalities = vec![MethodSpec {
+            name: "tick".to_string(),
+            signature: ValueStatus::resolved("tick(&mut self) -> PlayerState", "test"),
+            receiver: Some("&mut self".to_string()),
+            parameters: Vec::new(),
+            return_status: ValueStatus::resolved("PlayerState", "test"),
+            flow: vec![
+                "Read the next action from command.".to_string(),
+                "Advance the snake.".to_string(),
+            ],
+            extensions: vec!["No action -> keep current direction.".to_string()],
+            guarantee: vec!["Returns the updated player state.".to_string()],
+            references: Some(MethodReferences {
+                roles: vec!["command".to_string()],
+                props: Vec::new(),
+                types: vec!["PlayerState".to_string()],
+                role_methods: vec!["command_next_action".to_string()],
+            }),
+            body: Some(Body {
+                steps: vec![Statement::Return {
+                    expr: Some(Expression::Var {
+                        name: "PlayerState::Alive".to_string(),
+                    }),
+                }],
+            }),
+        }];
+
+        let rendered = generate_composite_file(&artifact, &BTreeMap::new()).unwrap();
+
+        assert!(rendered.contains("/// Provides player input."));
+        assert!(rendered.contains("/// Expected behavior: Translates keys into user actions."));
+        assert!(rendered.contains("/// Flow:"));
+        assert!(rendered.contains("/// - Read the next action from command."));
+        assert!(rendered.contains("/// References: roles=command; types=PlayerState; role_methods=command_next_action."));
     }
 }

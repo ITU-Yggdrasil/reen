@@ -15,8 +15,6 @@ fields:
     source: fix.agent
     candidates:
     - '&[Position]'
-    - Position
-    - Vec<Position>
     reason: multiple type candidates were found for `body`
     evidence:
     - section: body

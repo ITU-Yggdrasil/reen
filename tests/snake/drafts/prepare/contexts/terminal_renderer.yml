@@ -20,7 +20,7 @@ roles:
       status: fixed
       rust: 'render(&self, string_renderer_: &StringRenderer, board: &Board, score: u32) -> String'
       source: fix.agent
-      reason: role method `render` on role `string_renderer` is missing a parseable signature
+      reason: role method `render` on role `string_renderer` has no explicit signature
       evidence:
       - section: Role Methods / string_renderer
         text: Formats the current board picture and score as one text frame.
@@ -31,14 +31,20 @@ roles:
         status: resolved
         rust: '&StringRenderer'
         source: prepare.role_player
+    - name: board
+      type:
+        status: resolved
+        rust: '&Board'
+        source: fix.agent
+    - name: score
+      type:
+        status: resolved
+        rust: u32
+        source: fix.agent
     returns:
-      status: fixed
+      status: resolved
       rust: String
       source: fix.agent
-      reason: role method `render` return type is unknown
-      evidence:
-      - section: Role Methods / string_renderer
-        text: Formats the current board picture and score as one text frame.
 props:
 - name: screen
   meaning: Visible terminal area where the frame is shown
@@ -46,6 +52,8 @@ props:
     status: fixed
     rust: std::io::Stdout
     source: fix.agent
+    candidates:
+    - crossterm::terminal::Terminal<std::io::Stdout>
     reason: no concrete Rust type could be inferred for `screen`
     evidence:
     - section: screen
@@ -58,21 +66,28 @@ functionalities:
 - name: render
   signature:
     status: fixed
-    rust: 'render(&mut self, board: &Board, score: u32)'
+    rust: 'render(&mut self, board: &Board, score: u32) -> anyhow::Result<()>'
     source: fix.agent
     reason: functionality `render` is missing a parseable signature
     evidence:
     - section: Functionalities / render
       text: Ask `string_renderer` to format the current board picture and score as one text frame. Move the terminal cursor to the home position (top-left) on `screen`. Write the returned frame text to `screen`, left-aligned line by line. Flush `screen` so the frame appears immediately.
-  receiver: '&self'
+  receiver: '&mut self'
+  parameters:
+  - name: board
+    type:
+      status: resolved
+      rust: '&Board'
+      source: fix.agent
+  - name: score
+    type:
+      status: resolved
+      rust: u32
+      source: fix.agent
   returns:
-    status: fixed
-    rust: ()
+    status: resolved
+    rust: anyhow::Result<()>
     source: fix.agent
-    reason: functionality `render` return type is unknown
-    evidence:
-    - section: Functionalities / render
-      text: Ask `string_renderer` to format the current board picture and score as one text frame. Move the terminal cursor to the home position (top-left) on `screen`. Write the returned frame text to `screen`, left-aligned line by line. Flush `screen` so the frame appears immediately.
   flow:
   - Ask `string_renderer` to format the current board picture and score as one text frame.
   - Move the terminal cursor to the home position (top-left) on `screen`.

@@ -6,6 +6,12 @@ Represents a printable message value.
 
 ## Fields
 
-| Field | Meaning | Notes |
-|---|---|---|
-| text | Printable text content | Type is `String`. |
+| Field | Meaning | Accessible | Notes |
+|---|---|---|---|
+| text | Printable text content | no | Type is `String`. |
+
+## Functionalities
+
+| Method | Kind | Signature | Behavior |
+|---|---|---|---|
+| `text` | Instance getter | `text(&self) -> String` | Returns a clone of the printable text. |

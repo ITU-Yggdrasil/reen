@@ -9,8 +9,6 @@ Processes a stream of input data through a reader role player.
 | Role player | Why involved | Expected behaviour | Type |
 |---|---|---|---|
 | reader | Provides input bytes | Reads raw data from an external source | `std::io::Stdin` |
-| counter | Tracks how many items processed | Incremented after each item | integer |
-| label | Display name for the processor | Shown in output | string |
 | token | The current token being processed | Holds the active token value | |
 
 ## Role Methods
@@ -18,14 +16,6 @@ Processes a stream of input data through a reader role player.
 ### reader
 
 - **read_line**: Signature: `read_line(&self) -> std::io::Result<usize>`
-
-### counter
-
-- **increment**: Signature: `increment(&self) -> i64`
-
-### label
-
-- **display**: Signature: `display(&self) -> &String`
 
 ### token
 
@@ -35,6 +25,8 @@ Processes a stream of input data through a reader role player.
 
 | Prop | Meaning | Notes |
 |---|---|---|
+| counter | Tracks how many items processed | Type is `i64` |
+| label | Display name for the processor | Type is `String` |
 
 ## Functionalities
 
@@ -42,10 +34,10 @@ Processes a stream of input data through a reader role player.
 
 | Started by | Uses | Result |
 |---|---|---|
-| app startup | reader, counter, label, token | a processor context is created |
+| app startup | reader, token, counter, label | a processor context is created |
 
 **Flow:**
-1. Signature: `new(reader: std::io::Stdin, counter: i64, label: String, token: Token) -> Self`
+1. Signature: `new(reader: std::io::Stdin, token: Token, counter: i64, label: String) -> Self`
 
 | Given | When | Then |
 |---|---|---|
@@ -59,7 +51,7 @@ Processes a stream of input data through a reader role player.
 
 **Flow:**
 1. Signature: `process(&self) -> i64`
-2. Return `counter.increment()`.
+2. Return `counter`.
 
 | Given | When | Then |
 |---|---|---|

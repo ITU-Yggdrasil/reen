@@ -12,7 +12,7 @@ replacement, and pacing from one tick to the next.
 |---|---|---|
 | snake | Current snake positions and travel direction | Can provide the ordered body and the current direction |
 | command | Shared user input stream | Captures pending input and returns the next gameplay action from the shared queue |
-| food_dropper | Chooses new food positions | Chooses a free interior food position, or no position if none is available |
+| food_dropper | an RNG used to choose new food positions | Chooses a free interior food position, or no position if none is available |
 | game_state | Score, food placement, and round start time | Can provide score, food placement, and round start time, and can return updated copies with changed score or food placement |
 
 ## Role Methods

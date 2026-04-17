@@ -15,7 +15,7 @@ GreeterContext returns the message it was given.
 ### message
 
 - **text**
-  Signature: `text(&self) -> &String`
+  Signature: `text(&self) -> String`
 
 ## Props
 
@@ -30,8 +30,9 @@ GreeterContext returns the message it was given.
 |---|---|---|
 | app startup | message | a greeter context is created |
 
-Rules:
-- Signature: `new(message: Message) -> Self`
+**Flow:**
+1. Signature: `new(message: Message) -> Self`
+2. Store `message`.
 
 | Given | When | Then |
 |---|---|---|
@@ -41,11 +42,11 @@ Rules:
 
 | Started by | Uses | Result |
 |---|---|---|
-| app | message | `&String` |
+| app | message | `String` |
 
-Rules:
-- Signature: `render(&self) -> &String`
-- Return `message.text()`.
+**Flow:**
+1. Signature: `render(&self) -> String`
+2. Return `message.text()`.
 
 | Given | When | Then |
 |---|---|---|

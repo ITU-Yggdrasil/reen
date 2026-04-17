@@ -6,6 +6,8 @@ pub mod codegen;
 pub mod compile_repair;
 pub mod draft_parser;
 pub mod fix_agent;
+pub mod manifest;
 pub mod prepare;
 pub mod prepared;
+pub mod spec_context;
 pub mod workspace;

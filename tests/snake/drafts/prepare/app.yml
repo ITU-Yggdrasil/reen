@@ -35,12 +35,19 @@ collaborators:
   responsibility: Chooses the next food placement on a free interior non-wall, non-snake cell.
   type:
     status: fixed
-    rust: fn(&Board, &Snake) -> Option<Position>
+    rust: rand::rngs::SmallRng
     source: fix.agent
-    reason: no concrete Rust type could be inferred for `food_dropper`
+    candidates:
+    - rand::rngs::ThreadRng
+    - rand::rngs::StdRng
+    reason: no nominal concrete Rust type could be inferred for `food_dropper`
     evidence:
     - section: food_dropper
       text: Chooses the next food placement on a free interior non-wall, non-snake cell.
+    - section: food_dropper
+      text: Chooses a free interior food position, or no position if none is available
+    - section: food_dropper
+      text: an RNG used to choose new food positions
 functionalities:
 - name: main
   signature:

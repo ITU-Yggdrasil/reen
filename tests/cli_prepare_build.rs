@@ -118,7 +118,12 @@ fn scaffold_fails_when_prepared_has_blocking_ambiguity() {
     assert!(!prepare.status.success(), "{}", output_text(&prepare));
     let scaffold = run_reen(&project, ["scaffold"]);
     assert!(!scaffold.status.success(), "{}", output_text(&scaffold));
-    assert!(output_text(&scaffold).contains("blocking ambiguit"));
+    let rendered = output_text(&scaffold);
+    assert!(
+        rendered.contains("blocking ambiguit")
+            || rendered.contains("contains blocking ambiguities"),
+        "{rendered}"
+    );
 }
 
 #[test]
@@ -151,6 +156,14 @@ fn help_lists_scaffold_and_build() {
     assert!(
         rendered.contains("build"),
         "help should list build: {rendered}"
+    );
+    assert!(
+        rendered.contains("init"),
+        "help should list init: {rendered}"
+    );
+    assert!(
+        rendered.contains("manifest"),
+        "help should list manifest: {rendered}"
     );
     assert!(!rendered.contains("create"));
     assert!(!rendered.contains("check"));
@@ -275,6 +288,237 @@ fn build_without_api_key_gives_helpful_error() {
             "should mention ANTHROPIC_API_KEY or report no sites: {rendered}"
         );
     }
+}
+
+#[test]
+fn root_fix_from_reen_yml_applies_to_prepare() {
+    let project = copy_fixture("ambiguity");
+    fs::write(project.join("reen.yml"), "fix: true\n").expect("write reen.yml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["prepare"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(
+        output_text(&output).contains("ANTHROPIC_API_KEY"),
+        "{}",
+        output_text(&output)
+    );
+}
+
+#[test]
+fn command_fix_false_in_reen_yml_overrides_root_fix() {
+    let project = copy_fixture("ambiguity");
+    fs::write(
+        project.join("reen.yml"),
+        "fix: true\nprepare:\n  fix: false\n",
+    )
+    .expect("write reen.yml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["prepare"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        !rendered.contains("ANTHROPIC_API_KEY"),
+        "command override should disable root fix: {rendered}"
+    );
+    assert!(
+        rendered.contains("error[prepare]:"),
+        "prepare should still run and report ambiguities: {rendered}"
+    );
+}
+
+#[test]
+fn init_prepare_fix_writes_reen_yml_before_running_command() {
+    let project = copy_fixture("ambiguity");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["init", "prepare", "--fix"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        config.contains("prepare:\n  fix: true")
+            || config.contains("prepare:\r\n  fix: true"),
+        "init should persist prepare.fix into reen.yml:\n{config}"
+    );
+}
+
+#[test]
+fn init_root_fix_writes_reen_yml_without_running_command() {
+    let project = copy_fixture("success");
+
+    let output = run_reen(&project, ["init", "--fix"]);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        config.lines().any(|line| line.trim() == "fix: true"),
+        "init --fix should persist root fix:\n{config}"
+    );
+}
+
+#[test]
+fn manifest_types_add_prefix_creates_manifest_file() {
+    let project = copy_fixture("success");
+
+    let output = run_reen(&project, ["manifest", "types", "add-prefix", "rand::"]);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let manifest =
+        fs::read_to_string(project.join("drafts/types-manifest.yml")).expect("read manifest");
+    assert!(manifest.contains("external_path_prefixes:"));
+    assert!(manifest.contains("rand::"), "manifest should contain rand:::\n{manifest}");
+}
+
+#[test]
+fn manifest_types_add_prefix_is_idempotent() {
+    let project = copy_fixture("success");
+    let manifest_path = project.join("drafts/types-manifest.yml");
+    fs::write(&manifest_path, "external_path_prefixes:\n  - 'std::'\n").expect("write manifest");
+
+    let first = run_reen(&project, ["manifest", "types", "add-prefix", "rand::"]);
+    assert!(first.status.success(), "{}", output_text(&first));
+    let second = run_reen(&project, ["manifest", "types", "add-prefix", "rand::"]);
+    assert!(second.status.success(), "{}", output_text(&second));
+
+    let manifest = fs::read_to_string(manifest_path).expect("read manifest");
+    assert_eq!(manifest.matches("rand::").count(), 1, "{manifest}");
+    assert_eq!(manifest.matches("std::").count(), 1, "{manifest}");
+}
+
+#[test]
+fn manifest_capabilities_help_lists_add_provider() {
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .args(["manifest", "capabilities", "--help"])
+        .output()
+        .expect("run manifest capabilities help");
+    assert!(output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        rendered.contains("add"),
+        "manifest capabilities --help should list add: {rendered}"
+    );
+}
+
+#[test]
+fn manifest_capabilities_add_provider_writes_registry_dependencies_and_types() {
+    let project = copy_fixture("success");
+
+    let output = run_reen(
+        &project,
+        [
+            "manifest",
+            "capabilities",
+            "add",
+            "randomness",
+            "rand",
+            "--feature",
+            "std_rng",
+        ],
+    );
+
+    assert!(output.status.success(), "{}", output_text(&output));
+
+    let registry = fs::read_to_string(project.join("drafts/capability_registry.yml"))
+        .expect("read capability registry");
+    assert!(registry.contains("schema: reen.capability-registry/v1"));
+    assert!(registry.contains("domain: randomness"), "{registry}");
+    assert!(registry.contains("crate: rand"), "{registry}");
+    assert!(registry.contains("- randomness"), "{registry}");
+    assert!(registry.contains("rand::"), "{registry}");
+    assert!(
+        registry.contains("version: '*'") || registry.contains("version: \"*\""),
+        "{registry}"
+    );
+
+    let dependencies =
+        fs::read_to_string(project.join("drafts/dependencies.yml")).expect("read dependencies");
+    assert!(dependencies.contains("schema: reen.dependencies/v1"));
+    assert!(dependencies.contains("name: rand"), "{dependencies}");
+    assert!(dependencies.contains("- randomness"), "{dependencies}");
+    assert!(dependencies.contains("features = [\"std_rng\"]"), "{dependencies}");
+    assert!(
+        dependencies.contains("version = \"*\"") || dependencies.contains("version: '*'"),
+        "{dependencies}"
+    );
+
+    let manifest =
+        fs::read_to_string(project.join("drafts/types-manifest.yml")).expect("read types manifest");
+    assert!(manifest.contains("external_path_prefixes:"), "{manifest}");
+    assert!(manifest.contains("rand::"), "{manifest}");
+    assert!(!manifest.contains("allowlists:"), "{manifest}");
+}
+
+#[test]
+fn manifest_capabilities_add_provider_is_idempotent() {
+    let project = copy_fixture("success");
+
+    let first = run_reen(
+        &project,
+        [
+            "manifest",
+            "capabilities",
+            "add",
+            "randomness",
+            "rand",
+        ],
+    );
+    assert!(first.status.success(), "{}", output_text(&first));
+
+    let second = run_reen(
+        &project,
+        [
+            "manifest",
+            "capabilities",
+            "add",
+            "randomness",
+            "rand",
+        ],
+    );
+    assert!(second.status.success(), "{}", output_text(&second));
+
+    let registry = fs::read_to_string(project.join("drafts/capability_registry.yml"))
+        .expect("read capability registry");
+    assert_eq!(registry.matches("domain: randomness").count(), 1, "{registry}");
+    assert_eq!(registry.matches("- randomness").count(), 1, "{registry}");
+
+    let dependencies =
+        fs::read_to_string(project.join("drafts/dependencies.yml")).expect("read dependencies");
+    assert_eq!(dependencies.matches("name: rand").count(), 1, "{dependencies}");
+    assert_eq!(dependencies.matches("- randomness").count(), 1, "{dependencies}");
+
+    let manifest: serde_yaml::Value =
+        serde_yaml::from_str(&fs::read_to_string(project.join("drafts/types-manifest.yml"))
+            .expect("read types manifest"))
+        .expect("parse types manifest");
+    let mapping = manifest.as_mapping().expect("types manifest mapping");
+    let prefixes = mapping
+        .get(serde_yaml::Value::String("external_path_prefixes".to_string()))
+        .and_then(serde_yaml::Value::as_sequence)
+        .expect("prefix sequence");
+    assert_eq!(prefixes.len(), 1);
+    assert_eq!(prefixes[0].as_str(), Some("rand::"));
+    assert!(
+        mapping
+            .get(serde_yaml::Value::String("allowlists".to_string()))
+            .is_none(),
+        "simple capability add should only extend namespace prefixes"
+    );
 }
 
 #[test]
