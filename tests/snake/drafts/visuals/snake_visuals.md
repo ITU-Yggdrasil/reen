@@ -1,30 +1,46 @@
-# Visual Style
+The visual identity of TestCompany is defined with the following visual styles:
+    Colors:
+        Primary color of TestCompany is black.
+        Secondary color of TestCompany is red.
+        Foreground color is white.
+        Background color is white.
 
-## Description
+    Typography:
+        Primary font:
+            TestCompany seeks an inclusive style, with its primary font set to Inter.
+            The smallest font size is 16px, ensuring readability for all, with a line height of 24px.
+        Headings:
+            Bold, 700
+            Body text:
+                Regular 400
+            Font weights:
+                300 light
+                400 standard
+                700 bold
 
-This file defines the visual appearance of the Snake game in the terminal renderer.
-It is purely visual and does not affect game logic, collision rules, or mechanics.
+    Spacing:
+        The base unit of spacing is 8px, meaning 8px of space between components.
+        The scale steps are increments of 8px: 8, 16, 24, 32, and so on.
+        Outer margins:
+            32px or an increment of 16px from there.
+        Inner margins:
+            16px or an increment of 16px from there.
 
-## Board Appearance
+    Iconography:
+        The icon of TestCompany is a simple stylized T inside a circle.
+        The icon size is 24px for standard use.
+        Rules of using the icon:
+            Clear space around the icon is 16px.
+            Do not distort, rotate, animate, or otherwise transform the icon unless a specific brand guideline specifies it.
 
-- **Board walls / boundary**: Red
-- All wall cells (the outer border where x==0, y==0, x==width-1, or y==height-1) must be rendered in red.
-- Use ANSI escape codes to display the walls in red color.
-- The interior playing field remains the default background (usually black or dark).
-
-## Snake Appearance
-- Snake body ('s' characters) uses default terminal color (usually green or bright white).
-
-## Food Appearance
-- Food ('f' character) uses default terminal color (usually yellow or bright white).
-
-## Score Line
-- The "Score: XXX" line at the bottom uses default terminal color.
-
-## Rendering Notes
-- The TerminalRenderer must respect the colors defined in this visual style file.
-- Walls must appear red while keeping the existing ASCII characters ('w' for walls, 's' for snake, 'f' for food, ' ' for empty space).
-- This is a visual update only — no changes to Board logic, Snake movement, collisions, or GameState.
-
-## Goal
-Provide a quick visual test by making the game board (walls) red.
+    General Layout:
+        The general layout of the webpage is grid-based, with each component arranged in a consistent column structure.
+        The top of the webpage includes a navigation bar for accessing different sections of the site.
+    
+    Motion and Animation:
+        Keep motion to a minimum; animation should be used only for important transitions or feedback.
+        Do not assume motion or animation by default.
+    
+    Shapes:
+        Buttons are circular.
+        Containers are rounded rectangles.
