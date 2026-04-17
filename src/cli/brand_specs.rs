@@ -234,7 +234,7 @@ fn validate_required_section_order(section_order: &[String]) -> Result<()> {
         }
     }
 
-    let mut positions = HashMap::new();
+        let mut positions = HashMap::new();
     for (idx, section) in section_order.iter().enumerate() {
         positions.insert(section.as_str(), idx);
     }

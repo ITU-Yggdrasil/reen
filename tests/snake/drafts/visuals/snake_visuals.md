@@ -44,3 +44,24 @@ The visual identity of TestCompany is defined with the following visual styles:
     Shapes:
         Buttons are circular.
         Containers are rounded rectangles.
+
+    Hero Section
+Heading
+Text: “TESTCOMPANY”
+Style violations:
+Uses ultra-bold + italic mix (not part of system)
+Rotated slightly off-axis
+Color: red on black background (secondary on primary, but overstated dominance)
+Body Text
+Placed inside a white block on black background
+Violates:
+Foreground/background rules (should be white on white system consistency)
+Font family requirement (assumes monospace or mixed fallback instead of Inter)
+Alignment is slightly offset, not aligned to grid
+Call-to-Action Button
+Shape: rectangle (violates circular button rule)
+Position: shifted off-grid (not aligned to spacing system)
+Style:
+Red background with heavy shadow
+Slight rotation applied
+Hover effect includes rotation + scale (violates minimal motion rule)  
