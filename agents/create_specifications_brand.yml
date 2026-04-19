@@ -42,7 +42,6 @@ static_prompt: |
   6. `## Spacing System`
   7. `## Iconography`
   8. `## Motion`
-  9. `## Layout Principles`
   10. `## Token Reference Rules`
   11. `## Blocking Ambiguities` when applicable
   12. `## Implementation Choices Left Open` when applicable
@@ -66,8 +65,6 @@ static_prompt: |
   Under `## Spacing System`:
   - `### Base Unit`
   - `### Scale`
-  - `### Layout Margins`
-  - `### Gutters and Container Spacing`
 
   Under `## Iconography`:
   - `### Style`
@@ -79,10 +76,6 @@ static_prompt: |
   - `### Easing`
   - `### Usage Principles`
 
-  Under `## Layout Principles`:
-  - `### Grid`
-  - `### Breakpoints`
-  - `### Container Widths and Padding`
 
   ## Token Definition Rules
 

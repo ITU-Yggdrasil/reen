@@ -19,10 +19,13 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "Spacing System",
     "Iconography",
     "Motion",
-    "Layout Principles",
     "Token Reference Rules",
 ];
-const OPTIONAL_SECTIONS: &[&str] = &["Blocking Ambiguities", "Implementation Choices Left Open"];
+const OPTIONAL_SECTIONS: &[&str] = &[
+    "Layout Principles",
+    "Blocking Ambiguities",
+    "Implementation Choices Left Open",
+];
 
 const COLOR_SUBSECTIONS: &[&str] = &[
     "Primary",
@@ -38,7 +41,8 @@ const TYPOGRAPHY_SUBSECTIONS: &[&str] = &[
     "Line Heights",
     "Named Text Styles",
 ];
-const SPACING_SUBSECTIONS: &[&str] = &[
+const SPACING_REQUIRED_SUBSECTIONS: &[&str] = &["Base Unit", "Scale"];
+const SPACING_ALLOWED_SUBSECTIONS: &[&str] = &[
     "Base Unit",
     "Scale",
     "Layout Margins",
@@ -46,7 +50,12 @@ const SPACING_SUBSECTIONS: &[&str] = &[
 ];
 const ICONOGRAPHY_SUBSECTIONS: &[&str] = &["Style", "Size Set", "Usage Constraints"];
 const MOTION_SUBSECTIONS: &[&str] = &["Durations", "Easing", "Usage Principles"];
-const LAYOUT_SUBSECTIONS: &[&str] = &["Grid", "Breakpoints", "Container Widths and Padding"];
+const LAYOUT_SUBSECTIONS: &[&str] = &[
+    "Grid",
+    "Breakpoints",
+    "Container Widths and Padding",
+    "Shape Geometry",
+];
 
 #[derive(Clone, Debug, Default)]
 struct Section {
@@ -295,10 +304,9 @@ fn validate_required_subsections(sections: &BTreeMap<String, Section>) -> Result
     for (section_name, required) in [
         ("Color Tokens", COLOR_SUBSECTIONS),
         ("Typography", TYPOGRAPHY_SUBSECTIONS),
-        ("Spacing System", SPACING_SUBSECTIONS),
+        ("Spacing System", SPACING_REQUIRED_SUBSECTIONS),
         ("Iconography", ICONOGRAPHY_SUBSECTIONS),
         ("Motion", MOTION_SUBSECTIONS),
-        ("Layout Principles", LAYOUT_SUBSECTIONS),
     ] {
         let section = sections
             .get(section_name)
@@ -321,7 +329,7 @@ fn required_subsections_for(section_name: &str) -> &'static [&'static str] {
     match section_name {
         "Color Tokens" => COLOR_SUBSECTIONS,
         "Typography" => TYPOGRAPHY_SUBSECTIONS,
-        "Spacing System" => SPACING_SUBSECTIONS,
+        "Spacing System" => SPACING_ALLOWED_SUBSECTIONS,
         "Iconography" => ICONOGRAPHY_SUBSECTIONS,
         "Motion" => MOTION_SUBSECTIONS,
         "Layout Principles" => LAYOUT_SUBSECTIONS,
@@ -562,12 +570,6 @@ Structured visual identity for Acme.
 ### Scale
 - `brand.spacing.scale.4`: `16px`
 
-### Layout Margins
-- `brand.spacing.layout_margins.desktop`: `64px`
-
-### Gutters and Container Spacing
-- `brand.spacing.gutters.default`: `16px`
-
 ## Iconography
 ### Style
 - `brand.iconography.style.default`: `outlined`
@@ -587,16 +589,6 @@ Structured visual identity for Acme.
 
 ### Usage Principles
 - `brand.motion.usage.state_changes`: Use motion to indicate state changes.
-
-## Layout Principles
-### Grid
-- `brand.layout.grid.columns`: `12`
-
-### Breakpoints
-- `brand.layout.breakpoints.md`: `768px`
-
-### Container Widths and Padding
-- `brand.layout.container.max_width`: `1200px`
 
 ## Token Reference Rules
 - Downstream specifications must reference tokens by stable dotted token names such as `brand.colors.primary.default`.
@@ -635,6 +627,21 @@ Structured visual identity for Acme.
             validation.blocking_ambiguities,
             vec!["The draft does not define any semantic color tokens.".to_string()]
         );
+    }
+
+    #[test]
+    fn accepts_optional_spacing_layout_subsections_when_present() {
+        let spec = valid_brand_spec().replace(
+            "## Iconography",
+            "### Layout Margins\n- `brand.spacing.layout_margins.desktop`: `64px`\n\n### Gutters and Container Spacing\n- `brand.spacing.gutters.default`: `16px`\n\n## Iconography",
+        );
+        let validation = validate_brand_spec_content(&spec).expect("valid brand spec");
+        assert!(validation
+            .defined_tokens
+            .contains("brand.spacing.layout_margins.desktop"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.spacing.gutters.default"));
     }
 
     #[test]

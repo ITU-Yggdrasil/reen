@@ -676,10 +676,11 @@ fn finalize_specification_output(
     let mut actionable = Vec::new();
 
     if is_brand_draft_path(draft_file, DRAFTS_DIR) {
-        let validation = validate_brand_spec_content(&spec_content).with_context(|| {
-            format!(
-                "generated brand specification for '{}' is invalid",
-                draft_name
+        let validation = validate_brand_spec_content(&spec_content).map_err(|err| {
+            anyhow::anyhow!(
+                "generated brand specification for '{}' is invalid: {}",
+                draft_name,
+                err
             )
         })?;
         actionable = validation.blocking_ambiguities;
@@ -2078,6 +2079,22 @@ fn is_no_issue_placeholder_bullet(text: &str) -> bool {
     )
 }
 
+fn is_layout_specific_physical_blocker(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    normalized.contains("layout margins")
+        || normalized.contains("gutters and container spacing")
+        || normalized.contains("grid system")
+        || normalized.contains("no breakpoints defined")
+        || normalized.contains("container widths and padding")
+}
+
 fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
     let bullets = extract_bullets_with_indent(section);
     if bullets.is_empty() {
@@ -2089,7 +2106,8 @@ fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
 
     for i in 0..bullets.len() {
         actionable[i] = !is_language_or_paradigm_specific_detail(&bullets[i].1)
-            && !is_no_issue_placeholder_bullet(&bullets[i].1);
+            && !is_no_issue_placeholder_bullet(&bullets[i].1)
+            && !is_layout_specific_physical_blocker(&bullets[i].1);
         let parent_indent = bullets[i].0;
         let mut j = i + 1;
         while j < bullets.len() && bullets[j].0 > parent_indent {
@@ -2358,9 +2376,10 @@ fn clear_agent_response_cache_for_stage(
 fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> {
     let agents: &[&str] = match stage {
         Stage::Specification => &[
-            "create_specifications",
             "create_specifications_data",
             "create_specifications_context",
+            "create_specifications_external_api",
+            "create_specifications_brand",
             "create_specifications_main",
         ],
         Stage::Implementation => &["create_implementation", "create_implementation_brand"],
@@ -2435,12 +2454,21 @@ fn clear_stage_agent_cache_entries_by_name(
     match stage {
         Stage::Specification => {
             let files = resolve_input_files(DRAFTS_DIR, names_vec, "md", &CategoryFilter::all())?;
-            let levels = build_execution_plan(files, DRAFTS_DIR, None)?;
+            let levels = build_specification_execution_plan(
+                files,
+                DRAFTS_DIR,
+                !names.is_empty(),
+                &CategoryFilter::all(),
+            )?;
             for node in levels.into_iter().flatten() {
                 let draft_content = fs::read_to_string(&node.input_path).with_context(|| {
                     format!("Failed to read draft file: {}", node.input_path.display())
                 })?;
-                let additional = build_dependency_context(&node)?;
+                let additional = build_specification_context(
+                    &node.input_path,
+                    &draft_content,
+                    build_dependency_context(&node)?,
+                )?;
                 let agent_name =
                     determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
                 candidates.push((
@@ -4939,5 +4967,18 @@ pub fn app() {}
         let actionable = extract_actionable_blocking_bullets(section);
         assert_eq!(actionable.len(), 1);
         assert!(actionable[0].contains("Missing required role method"));
+    }
+
+    #[test]
+    fn ignores_layout_specific_blockers_for_visual_identity_specs() {
+        let section = r#"
+- **Layout Margins:** No values specified for layout margins.
+- **Gutters and Container Spacing:** No values specified for gutters or container spacing.
+- **Grid System:** No grid system or columns defined.
+- **Breakpoints:** No breakpoints defined for responsive design.
+- **Container Widths and Padding:** No values specified for container widths or padding.
+"#;
+        let actionable = extract_actionable_blocking_bullets(section);
+        assert!(actionable.is_empty());
     }
 }
