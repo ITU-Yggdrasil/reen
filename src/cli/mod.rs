@@ -3684,6 +3684,7 @@ fn determine_draft_input_path(
 /// - "create_specifications_data" for files in data/ folder
 /// - "create_specifications_context" for files in contexts/ folder
 /// - "create_specifications_external_api" for files in external_apis/ folder
+/// - "create_specifications_brand" for files in brands/ and visuals/ folders
 /// - "create_specifications_main" for files in root folder
 fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'static str {
     let draft_path = draft_file.to_path_buf();
@@ -3700,6 +3701,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
             "contexts" => "create_specifications_context",
             "external_apis" => "create_specifications_external_api",
             "brands" => "create_specifications_brand",
+            "visuals" => "create_specifications_brand",
             _ => "create_specifications_main",
         }
     } else {
@@ -4127,7 +4129,8 @@ mod tests {
         build_dependency_drafts_from_context, build_dependency_manifest,
         build_implementation_execution_plan, build_implemented_dependency_manifest,
         build_specification_execution_plan, determine_bdd_test_paths, determine_draft_input_path,
-        determine_implementation_output_path, determine_specification_output_path,
+        determine_implementation_output_path, determine_specification_agent,
+        determine_specification_output_path,
         ensure_dev_dependency_entry, extract_actionable_blocking_bullets,
         extract_compile_error_message, generated_project_structure_paths,
         implementation_agent_name, parse_generated_files, parse_generated_output_files,
@@ -4239,6 +4242,14 @@ Problem:
         )
         .expect("path mapping");
         assert_eq!(path, Path::new("drafts/brands/acme.md"));
+    }
+
+    #[test]
+    fn determine_specification_agent_routes_visuals_to_brand_agent() {
+        assert_eq!(
+            determine_specification_agent(Path::new("drafts/visuals/snake_visuals.md"), "drafts"),
+            "create_specifications_brand"
+        );
     }
 
     #[test]
