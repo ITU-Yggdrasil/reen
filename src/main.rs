@@ -6,7 +6,7 @@ use reen::manifest::{CapabilityProviderInput, add_capability_provider, add_types
 use reen::prepare::{
     PrepareOptions, RefineOptions, clear_prepared_outputs, prepare_workspace, refine_workspace,
 };
-use reen::workspace::{CommandConfig, ReenConfig, Selection, Workspace};
+use reen::workspace::{CommandConfig, RefineConfig, ReenConfig, Selection, Workspace};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
@@ -178,6 +178,22 @@ struct RefineArgs {
     )]
     prepared_only: bool,
 
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Minimum severity (0-100) for behavioral-ambiguity questions; default 40"
+    )]
+    min_severity: Option<u8>,
+
+    #[arg(long, help = "Skip the LLM-backed behavioral ambiguity review")]
+    skip_llm_review: bool,
+
+    #[arg(
+        long,
+        help = "Fail if the LLM review cannot run (no key, network error); default: warn and continue"
+    )]
+    require_llm_review: bool,
+
     #[arg(help = "Optional list of draft/artifact names without file extension")]
     names: Vec<String>,
 }
@@ -330,7 +346,9 @@ fn main() -> Result<()> {
                 workspace.save_config(&config)?;
             }
             if let Some(command) = args.command {
-                execute_command(command.into(), globals, &workspace, &config)?;
+                if !matches!(command, InitCommand::Refine(_)) {
+                    execute_command(command.into(), globals, &workspace, &config)?;
+                }
             }
         }
         Commands::Prepare(args) => {
@@ -422,11 +440,27 @@ fn execute_command(
                 bool_setting(args.app, None, config.app),
                 args.names,
             );
+            let refine_cfg = &config.refine;
             let options = RefineOptions {
                 selection,
                 verbose: bool_setting(globals.verbose, None, config.verbose),
                 drafts_only: args.drafts_only,
                 prepared_only: args.prepared_only,
+                min_behavioral_severity: args
+                    .min_severity
+                    .or(refine_cfg.min_severity)
+                    .or(config.min_severity)
+                    .unwrap_or(reen::draft_refine_llm::DEFAULT_MIN_SEVERITY),
+                skip_llm_review: bool_setting(
+                    args.skip_llm_review,
+                    refine_cfg.skip_llm_review,
+                    config.skip_llm_review,
+                ),
+                require_llm_review: bool_setting(
+                    args.require_llm_review,
+                    refine_cfg.require_llm_review,
+                    config.require_llm_review,
+                ),
             };
             refine_workspace(workspace, &options)?;
         }
@@ -527,20 +561,24 @@ fn execute_command(
 
 fn persist_init_settings(config: &mut ReenConfig, args: &InitArgs) {
     apply_root_init_flags(config, args);
-    if let Some(command) = &args.command {
-        let section = match command {
-            InitCommand::Prepare(_) => &mut config.prepare,
-            InitCommand::Refine(_) => return,
-            InitCommand::Scaffold(_) => &mut config.scaffold,
-            InitCommand::Build(_) => &mut config.build,
-            InitCommand::Compile => &mut config.compile,
-            InitCommand::Run { .. } => &mut config.run,
-            InitCommand::Test => &mut config.test,
-            InitCommand::Manifest(_) => return,
-            InitCommand::Clear(_) => &mut config.clear,
-        };
-        apply_command_init_flags(section, command);
+    let Some(command) = &args.command else {
+        return;
+    };
+    if let InitCommand::Refine(refine_args) = command {
+        apply_refine_init_flags(&mut config.refine, refine_args);
+        return;
     }
+    let section = match command {
+        InitCommand::Prepare(_) => &mut config.prepare,
+        InitCommand::Scaffold(_) => &mut config.scaffold,
+        InitCommand::Build(_) => &mut config.build,
+        InitCommand::Compile => &mut config.compile,
+        InitCommand::Run { .. } => &mut config.run,
+        InitCommand::Test => &mut config.test,
+        InitCommand::Manifest(_) | InitCommand::Refine(_) => return,
+        InitCommand::Clear(_) => &mut config.clear,
+    };
+    apply_command_init_flags(section, command);
 }
 
 fn apply_root_init_flags(config: &mut ReenConfig, args: &InitArgs) {
@@ -587,6 +625,14 @@ fn apply_command_init_flags(section: &mut CommandConfig, command: &InitCommand) 
         | InitCommand::Manifest(_)
         | InitCommand::Clear(_) => {}
     }
+}
+
+fn apply_refine_init_flags(section: &mut RefineConfig, args: &RefineArgs) {
+    if let Some(value) = args.min_severity {
+        section.min_severity = Some(value);
+    }
+    set_bool_if_requested(&mut section.skip_llm_review, args.skip_llm_review);
+    set_bool_if_requested(&mut section.require_llm_review, args.require_llm_review);
 }
 
 fn set_bool_if_requested(slot: &mut Option<bool>, requested: bool) {

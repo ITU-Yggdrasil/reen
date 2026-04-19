@@ -137,7 +137,9 @@ fn scaffold_fails_when_prepared_has_blocking_ambiguity() {
 fn refine_succeeds_on_good_raw_drafts_before_prepare_and_writes_report() {
     let project = copy_fixture("success");
 
-    let refine = run_reen(&project, ["refine"]);
+    // `--skip-llm-review` keeps this test deterministic regardless of whether the developer
+    // running it has `ANTHROPIC_API_KEY` set in their environment.
+    let refine = run_reen(&project, ["refine", "--skip-llm-review"]);
     assert!(refine.status.success(), "{}", output_text(&refine));
 
     let report_path = project.join(".reen/refine/report.md");
@@ -153,7 +155,7 @@ fn refine_succeeds_when_prepared_artifacts_are_deterministic() {
     let prepare = run_reen(&project, ["prepare"]);
     assert!(prepare.status.success(), "{}", output_text(&prepare));
 
-    let refine = run_reen(&project, ["refine"]);
+    let refine = run_reen(&project, ["refine", "--skip-llm-review"]);
     assert!(refine.status.success(), "{}", output_text(&refine));
 
     let report =
@@ -169,7 +171,7 @@ fn refine_succeeds_when_prepared_artifacts_are_deterministic() {
 fn refine_drafts_only_skips_prepared_review() {
     let project = copy_fixture("success");
 
-    let refine = run_reen(&project, ["refine", "--drafts-only"]);
+    let refine = run_reen(&project, ["refine", "--drafts-only", "--skip-llm-review"]);
     assert!(refine.status.success(), "{}", output_text(&refine));
 
     let report =
@@ -298,6 +300,7 @@ fn refine_accepts_aligned_snake_board_contract_subset() {
         &project,
         [
             "refine",
+            "--skip-llm-review",
             "Board",
             "GameState",
             "Snake",
@@ -308,6 +311,54 @@ fn refine_accepts_aligned_snake_board_contract_subset() {
         ],
     );
     assert!(refine.status.success(), "{}", output_text(&refine));
+}
+
+#[test]
+fn refine_skip_llm_review_flag_is_accepted() {
+    // Guard against accidental removal of the flag: a plain `--skip-llm-review` invocation
+    // must parse cleanly so callers and automation don't start failing after a refactor.
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .arg("refine")
+        .arg("--help")
+        .output()
+        .expect("run reen refine --help");
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        rendered.contains("--skip-llm-review"),
+        "refine --help must mention --skip-llm-review: {rendered}"
+    );
+    assert!(
+        rendered.contains("--min-severity"),
+        "refine --help must mention --min-severity: {rendered}"
+    );
+    assert!(
+        rendered.contains("--require-llm-review"),
+        "refine --help must mention --require-llm-review: {rendered}"
+    );
+}
+
+#[test]
+fn refine_require_llm_review_without_api_key_errors() {
+    // `--require-llm-review` promotes a missing API key / network failure from a warn-skip
+    // into a hard error. This is the main safety net for CI configurations that want to fail
+    // loudly if the behavioral review did not actually run.
+    let project = copy_fixture("success");
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["refine", "--require-llm-review"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen refine --require-llm-review");
+    assert!(!output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        rendered.contains("ANTHROPIC_API_KEY") || rendered.contains("require-llm-review"),
+        "expected error to mention the missing key or the flag: {rendered}"
+    );
 }
 
 #[test]
@@ -556,6 +607,80 @@ fn init_root_fix_writes_reen_yml_without_running_command() {
     assert!(
         config.lines().any(|line| line.trim() == "fix: true"),
         "init --fix should persist root fix:\n{config}"
+    );
+}
+
+#[test]
+fn init_refine_min_severity_persists_without_running_refine() {
+    let project = copy_fixture("success");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["init", "refine", "--min-severity", "90"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        !rendered.contains("refine"),
+        "init refine should NOT execute refine:\n{rendered}"
+    );
+    let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        config.contains("refine:\n  min-severity: 90")
+            || config.contains("refine:\r\n  min-severity: 90"),
+        "init refine --min-severity should persist refine.min-severity into reen.yml:\n{config}"
+    );
+}
+
+#[test]
+fn refine_picks_up_root_min_severity_from_reen_yml() {
+    // A root-level `min-severity: 90` in reen.yml (outside the `refine:` section) must be
+    // honoured as a fallback for the refine command's `--min-severity` dial. Verified via
+    // `--verbose`: the refine command echoes the effective min-severity on startup.
+    let project = copy_fixture("success");
+    fs::write(project.join("reen.yml"), "min-severity: 90\n").expect("write reen.yml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["refine", "--skip-llm-review", "--verbose"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        rendered.contains("min-severity=90"),
+        "refine should report the root-level min-severity 90 from reen.yml:\n{rendered}"
+    );
+}
+
+#[test]
+fn refine_prefers_refine_section_min_severity_over_root() {
+    // When both root-level `min-severity` and `refine.min-severity` are set, the nested
+    // refine-section value wins (matching the precedence used for other overlapping keys).
+    let project = copy_fixture("success");
+    fs::write(
+        project.join("reen.yml"),
+        "min-severity: 10\nrefine:\n  min-severity: 90\n",
+    )
+    .expect("write reen.yml");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["refine", "--skip-llm-review", "--verbose"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        rendered.contains("min-severity=90"),
+        "refine should prefer refine.min-severity over root:\n{rendered}"
     );
 }
 

@@ -89,7 +89,7 @@ When a new game is started:
 - Create a board from terminal width and height, leaving one line below for the
   score.
 - Create the initial head position at the center of the board.
-- Create the initial snake as a one-segment snake facing right.
+- Create the initial snake as a one-segment snake facing right, i.e. moving right.
 - Create one food dropper (a `rand::rngs::ThreadRng`) for that game session.
   The application **does not** call the food dropper directly to pick an
   initial food position — that logic is private to `GameLoopContext` and is
@@ -118,6 +118,7 @@ The application runs an outer loop with the following behavior.
 - Read environment variable `SNAKE_RENDERER`.
 - If `SNAKE_RENDERER=string`, use string-renderer-only output mode.
 - Otherwise use terminal-renderer output mode.
+- if the terminal is resized during game play. Resize the board accordingly. Snake and food doesn't change coordinates and if the snake is outside of the walls the game is over
 - Before entering the main loop, enable raw terminal input mode so single key
   presses are available immediately and input echo is disabled.
 - Immediately after enabling raw mode, clear the full terminal screen and move
@@ -171,7 +172,7 @@ separated and prevents `mismatched types: expected u16, found u32` errors.
   after a finished round, the full game board frame from the previous round is
   still on screen. A short `print!` at `MoveTo(0, row)` overwrites only the
   first N columns of `row`, leaving the tail of the previous frame's row
-  visibly sticking out to the right (`Press s to start a new gamewwwww...`).
+  visibly (`Press s to start a new gamewwwww...`).
   To prevent this, every start-screen redraw must:
   1. For each start-screen line, after `crossterm::cursor::MoveTo(0, row)` and
      **before** `print!`, emit

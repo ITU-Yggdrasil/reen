@@ -43,9 +43,7 @@ It is the canonical formatter for the visible game frame.
 | application startup or TerminalRenderer | board, score | a string renderer ready to produce frames is created |
 
 **Flow:**
-1. Signature: `new(board: Board, score: u32) -> Self`
-2. Store `board` as the role player the renderer will query for on-screen symbols.
-3. Store `score` as the prop appended below the rendered board on every frame.
+1. Store `board` as the role player the renderer will query for on-screen symbols.
 
 **Guarantee:** Construction captures only the provided renderer state; no other collaborators are fetched, inferred, or mutated.
 
@@ -57,10 +55,10 @@ It is the canonical formatter for the visible game frame.
 
 | Started by | Uses | Result |
 |---|---|---|
-| TerminalRenderer or the application | board, score | one text frame is returned |
+| TerminalRenderer or the application | score | one text frame is returned |
 
 **Flow:**
-1. Signature: `render(&self, board: &Board, score: u32) -> String`
+1. Signature: `render(&self,score: u32) -> String`
 2. Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`).
 3. Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`.
 4. Append a newline character after each row.

@@ -35,6 +35,29 @@ pub struct RefineOptions {
     pub verbose: bool,
     pub drafts_only: bool,
     pub prepared_only: bool,
+    /// Minimum behavioral-ambiguity severity (0..=100) the LLM review must hit before a
+    /// question is surfaced as a finding. Defaults to
+    /// [`crate::draft_refine_llm::DEFAULT_MIN_SEVERITY`].
+    pub min_behavioral_severity: u8,
+    /// Skip the LLM-backed behavioral review entirely.
+    pub skip_llm_review: bool,
+    /// Treat LLM unavailability (missing API key, network failure, malformed response) as a
+    /// hard error rather than silently skipping the behavioral phase.
+    pub require_llm_review: bool,
+}
+
+impl Default for RefineOptions {
+    fn default() -> Self {
+        Self {
+            selection: crate::workspace::Selection::default(),
+            verbose: false,
+            drafts_only: false,
+            prepared_only: false,
+            min_behavioral_severity: crate::draft_refine_llm::DEFAULT_MIN_SEVERITY,
+            skip_llm_review: false,
+            require_llm_review: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +237,14 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
 }
 
 pub fn refine_workspace(workspace: &Workspace, options: &RefineOptions) -> Result<()> {
+    if options.verbose {
+        println!(
+            "Refine options: min-severity={} skip-llm-review={} require-llm-review={}",
+            options.min_behavioral_severity,
+            options.skip_llm_review,
+            options.require_llm_review,
+        );
+    }
     let mut draft_phase = DraftPhaseReport::Skipped {
         reason: "skipped by `--prepared-only`".to_string(),
     };
@@ -259,7 +290,30 @@ pub fn refine_workspace(workspace: &Workspace, options: &RefineOptions) -> Resul
     if options.verbose {
         println!("Reviewing {} raw draft(s)", raw_paths.len());
     }
-    let draft_review = review_raw_drafts(workspace, &raw_paths)?;
+    let mut draft_review = review_raw_drafts(workspace, &raw_paths)?;
+
+    // Always run the behavioral phase alongside the deterministic one so the user sees every
+    // ambiguity in a single pass. Short-circuiting when deterministic findings exist meant
+    // semantic gaps stayed hidden behind a single "vague phrase" hit and forced multiple
+    // fix/rerun rounds. The cache keeps repeat runs free when drafts haven't changed.
+    if !options.skip_llm_review {
+        let behavioral_options = crate::draft_refine_llm::BehavioralReviewOptions {
+            min_severity: options.min_behavioral_severity,
+            require_llm: options.require_llm_review,
+            cache_dir: workspace.state_dir.join("cache").join("refine-llm"),
+            verbose: options.verbose,
+        };
+        let behavioral_findings = crate::draft_refine_llm::review_raw_drafts_behavioral(
+            workspace,
+            &raw_paths,
+            &behavioral_options,
+        )?;
+        if !behavioral_findings.is_empty() {
+            draft_review.findings.extend(behavioral_findings);
+            crate::draft_refine::sort_and_dedup_findings(&mut draft_review.findings);
+        }
+    }
+
     print_draft_findings(&draft_review);
     let draft_failures = draft_review.findings.len();
     draft_phase = DraftPhaseReport::Completed(draft_review);
@@ -434,7 +488,13 @@ fn print_draft_findings(review: &DraftReview) {
             Some(line) => format!("{}:{}", finding.draft_path, line),
             None => finding.draft_path.clone(),
         };
-        eprintln!("error[refine]: {}", finding.message);
+        match finding.severity {
+            Some(severity) => eprintln!(
+                "error[refine]: [severity {}] {}",
+                severity, finding.message
+            ),
+            None => eprintln!("error[refine]: {}", finding.message),
+        }
         eprintln!("  --> {} ({})", location, finding.category.as_str());
     }
 }
@@ -513,16 +573,22 @@ fn render_refine_report(
                     out.push_str(&format!("\n### {path}\n\n"));
                     if let Some(items) = grouped.get(path.as_str()) {
                         for finding in items {
+                            let severity_suffix = finding
+                                .severity
+                                .map(|value| format!(" [severity {value}]"))
+                                .unwrap_or_default();
                             match finding.source_line {
                                 Some(line) => out.push_str(&format!(
-                                    "- Line {} [{}] {}\n",
+                                    "- Line {} [{}]{} {}\n",
                                     line,
                                     finding.category.as_str(),
+                                    severity_suffix,
                                     finding.message
                                 )),
                                 None => out.push_str(&format!(
-                                    "- [{}] {}\n",
+                                    "- [{}]{} {}\n",
                                     finding.category.as_str(),
+                                    severity_suffix,
                                     finding.message
                                 )),
                             }

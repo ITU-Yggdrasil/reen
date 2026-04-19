@@ -130,13 +130,13 @@ replacement, and pacing from one tick to the next.
 1. Read the current UTC millisecond count into `now_ms`.
 2. Let `elapsed_ms` be `now_ms.saturating_sub(game_state.game_started_ms())`.
 3. Let `elapsed_s` be `elapsed_ms / 1000` (integer whole seconds).
-4. Let `wait_ms` be `max(10_u64, (100.0_f64 / (1.0_f64 + (1.0_f64 + elapsed_s as f64).ln())) as u64)`.
+4. Let `wait_ms` be `max(10_u64, (100.0_f64 / (1.0_f64 + (1.0_f64 + elapsed_s as f64).log(10))) as u64)`.
 5. Sleep `wait_ms` milliseconds.
 6. Call `command.capture()` to collect pending input.
-7. Read the next gameplay action via `command.next_action()`.
-8. If a movement action was received and it neither repeats nor directly reverses the current direction, update the snake's direction.
-9. Compute the next head position from the current head and the current direction.
-10. If the next head lands on a wall cell or a snake body cell, return `PlayerState::Dead`.
+7. Read the next gameplay action via `command.next_action()`. Only one action is read pr tick even if multiple are available.
+8. If a movement action was received and it neither repeats nor is the opposite of the current direction (as defined by `Direction`), update the snake's direction.
+9. Compute the next head position from the current head and the current direction. The board uses screen coordinates (see `data/Position.md` and `data/Direction.md`): `y = 0` is the **top** row and `y` grows **downward**, so `Direction::Up` must **decrease** `y` by 1, `Direction::Down` must **increase** `y` by 1, `Direction::Left` must decrease `x` by 1, and `Direction::Right` must increase `x` by 1. Do not use the mathematical convention where `y` grows upward — that would make the on-screen snake move the opposite way from the player's input.
+10. If the next head lands on a wall cell or a snake body cell or lands outside the board, i.e. x >= width or y >= hight, return `PlayerState::Dead`.
 11. If food exists and the next head matches the food position, grow the snake by one segment, increase the score by 10, and call `food_dropper.drop()` for a replacement food position using the updated snake.
 12. Otherwise, advance the snake without growing; leave score and food placement unchanged.
 13. Return `PlayerState::Alive`.

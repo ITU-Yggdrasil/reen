@@ -89,7 +89,7 @@ resetting or replacing it.
 1. Remove the oldest key from `buffer` via the same queue as `next_key`.
 2. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire.
 3. If the key maps to an action, return it.
-4. If the key has no gameplay meaning, discard it and repeat from step 1.
+4. If the key has no gameplay meaning, repeat until a valid key is found or the `buffer` is empty.
 5. If `buffer` is exhausted with no valid action found, return no action.
 
 | Given | When | Then |

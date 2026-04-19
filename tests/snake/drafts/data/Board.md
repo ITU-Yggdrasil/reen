@@ -4,8 +4,11 @@
 
 The board is the complete renderable picture for one Snake frame.
 
-The coordinate system is zero-based, starts in the lower-left corner `(0,0)`,
-and extends to the upper-right corner `(width - 1, height - 1)`.
+The coordinate system is zero-based and uses screen-style coordinates, matching
+`Position`: the origin `(0, 0)` is the **top-left** cell, `x` increases to the
+right, and `y` increases **downward**. The bottom-right cell is
+`(width - 1, height - 1)`. This is the opposite of the mathematical convention
+where `y` grows upward — do not assume the mathematical convention.
 
 ## Fields
 
