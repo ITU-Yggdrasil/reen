@@ -55,19 +55,23 @@ struct Section {
 }
 
 pub fn is_brand_draft_path(path: &Path, drafts_dir: &str) -> bool {
-    path.strip_prefix(Path::new(drafts_dir))
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .and_then(|component| component.as_os_str().to_str())
-        == Some("brands")
+    matches!(
+        path.strip_prefix(Path::new(drafts_dir))
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .and_then(|component| component.as_os_str().to_str()),
+        Some("brands" | "visuals")
+    )
 }
 
 pub fn is_brand_spec_path(path: &Path, specifications_dir: &str) -> bool {
-    path.strip_prefix(Path::new(specifications_dir))
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .and_then(|component| component.as_os_str().to_str())
-        == Some("brands")
+    matches!(
+        path.strip_prefix(Path::new(specifications_dir))
+            .ok()
+            .and_then(|relative| relative.components().next())
+            .and_then(|component| component.as_os_str().to_str()),
+        Some("brands" | "visuals")
+    )
 }
 
 pub fn validate_brand_spec_content(spec_content: &str) -> Result<BrandSpecValidation> {
@@ -234,7 +238,7 @@ fn validate_required_section_order(section_order: &[String]) -> Result<()> {
         }
     }
 
-    let mut positions = HashMap::new();
+        let mut positions = HashMap::new();
     for (idx, section) in section_order.iter().enumerate() {
         positions.insert(section.as_str(), idx);
     }
@@ -432,13 +436,18 @@ fn collect_tokens_from_lines(lines: &[String], pattern: &Regex, out: &mut BTreeS
 }
 
 fn collect_defined_brand_tokens(specifications_dir: &str) -> Result<BTreeSet<String>> {
-    let brand_dir = Path::new(specifications_dir).join("brands");
-    if !brand_dir.exists() {
+    let mut files = Vec::new();
+    for folder in ["brands", "visuals"] {
+        let candidate_dir = Path::new(specifications_dir).join(folder);
+        if candidate_dir.exists() {
+            collect_markdown_files_recursive(&candidate_dir, &mut files)?;
+        }
+    }
+
+    if files.is_empty() {
         return Ok(BTreeSet::new());
     }
 
-    let mut files = Vec::new();
-    collect_markdown_files_recursive(&brand_dir, &mut files)?;
     files.sort();
 
     let mut token_to_file: HashMap<String, PathBuf> = HashMap::new();
@@ -487,7 +496,8 @@ struct ParsedBrandSpec {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_brand_token_references, unresolved_brand_token_references,
+        collect_brand_token_references, is_brand_draft_path, is_brand_spec_path,
+        unresolved_brand_token_references,
         validate_brand_spec_content,
     };
     use std::fs;
@@ -676,6 +686,44 @@ Structured visual identity for Acme.
         assert!(err
             .to_string()
             .contains("duplicate brand token 'brand.colors.primary.default'"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn brand_path_detection_accepts_visuals_and_brands() {
+        assert!(is_brand_draft_path(
+            std::path::Path::new("drafts/brands/acme.md"),
+            "drafts"
+        ));
+        assert!(is_brand_draft_path(
+            std::path::Path::new("drafts/visuals/snake.md"),
+            "drafts"
+        ));
+        assert!(is_brand_spec_path(
+            std::path::Path::new("specifications/brands/acme.md"),
+            "specifications"
+        ));
+        assert!(is_brand_spec_path(
+            std::path::Path::new("specifications/visuals/snake.md"),
+            "specifications"
+        ));
+    }
+
+    #[test]
+    fn unresolved_reference_detection_reads_visuals_and_brands() {
+        let root = temp_root("visuals_refs");
+        let specs = root.join("specifications");
+        fs::create_dir_all(specs.join("visuals")).expect("mkdir visuals");
+        fs::write(specs.join("visuals/snake.md"), valid_brand_spec()).expect("write visuals spec");
+
+        let unresolved = unresolved_brand_token_references(
+            "brand.colors.primary.default brand.layout.breakpoints.xl",
+            specs.to_str().expect("spec path"),
+        )
+        .expect("resolved refs");
+
+        assert_eq!(unresolved, vec!["brand.layout.breakpoints.xl".to_string()]);
 
         let _ = fs::remove_dir_all(root);
     }

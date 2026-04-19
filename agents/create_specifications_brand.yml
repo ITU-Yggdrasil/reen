@@ -13,7 +13,7 @@ static_prompt: |
   - Do NOT add color values, typography values, spacing scales, motion timings, or layout rules that are not explicitly stated
   - Do NOT add component-specific styling, screen-specific decisions, or implementation/framework details
   - Do NOT silently complete missing primitive families with made-up defaults
-  - If required brand primitives are missing or unclear, mark them as **unspecified** and add them to **Blocking Ambiguities**
+  - If required brand primitive families are missing or unclear, mark them as **unspecified** and add them to **Blocking Ambiguities**
 
   Your job is to make the draft precise, not more complete.
 
@@ -91,6 +91,9 @@ static_prompt: |
   - Define tokens in markdown lists or tables using inline code for the token name
   - If a section has no defined token because the draft is missing the information, write `Unspecified from draft.` in that subsection and add a corresponding item to **Blocking Ambiguities**
   - Tokens must remain implementation-neutral; do not emit CSS variables, Tailwind classes, framework config, or component bindings
+  - If the draft provides a named color (for example `black`, `red`, `light gray`), treat it as a valid specified token value; do NOT require conversion to hex/RGB/HSL unless the draft explicitly requires that format
+  - If the draft specifies a font family, fallback stacks are OPTIONAL and non-blocking unless the draft explicitly requires fallback families
+  - If the draft specifies high-level shapes (for example circular buttons, rounded containers) without numeric geometry values, treat exact border-radius numbers as non-blocking implementation detail unless explicitly required by the draft
 
   ## Allowed Transformations
 
@@ -119,6 +122,7 @@ static_prompt: |
   - Each item must be concise and reviewable
   - Keep it business-facing and design-facing, not implementation-facing
   - Omit the section entirely when there are no blocking ambiguities
+  - Do NOT add blocking items for representation precision only (for example named color vs hex), optional fallback stacks, or unspecified geometric implementation numbers unless explicitly required by the draft
 
   ## Implementation Choices Left Open
 
@@ -126,6 +130,7 @@ static_prompt: |
 
   - Keep each item explicitly non-blocking
   - Omit the section entirely when there are no such choices
+  - Prefer placing precision-level or rendering-level details here when required behavior is still clear (for example exact color encoding format, fallback font stack choice, exact border-radius values for abstract shape rules)
 
   ## Validation Checklist
 
