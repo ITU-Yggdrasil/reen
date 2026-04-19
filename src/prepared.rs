@@ -369,11 +369,8 @@ impl PreparedArtifact {
                 &format!("role `{}` type is unresolved", role.name),
             );
             for (method_idx, method) in role.methods.iter().enumerate() {
-                method.collect_ambiguities(
-                    &mut ambiguities,
-                    &mut scanned_paths,
-                    format!("roles[{idx}].methods[{method_idx}]"),
-                );
+                let base_path = format!("roles[{idx}].methods[{method_idx}]");
+                method.collect_ambiguities(&mut ambiguities, &mut scanned_paths, base_path.clone());
             }
         }
         for (idx, prop) in self.props.iter().enumerate() {
@@ -395,13 +392,10 @@ impl PreparedArtifact {
             );
         }
         for (idx, method) in self.functionalities.iter().enumerate() {
-            method.collect_ambiguities(
-                &mut ambiguities,
-                &mut scanned_paths,
-                format!("functionalities[{idx}]"),
-            );
+            let base_path = format!("functionalities[{idx}]");
+            method.collect_ambiguities(&mut ambiguities, &mut scanned_paths, base_path.clone());
         }
-        // Preserve manually-added blocking ambiguities (structural issues from prepare_document)
+        // Preserve manually-added blocking ambiguities (structural issues from prepare_document),
         // but NOT stale entries for paths the value scan already covers.
         ambiguities.extend(
             self.ambiguities
@@ -486,6 +480,45 @@ impl PreparedArtifact {
         }
     }
 
+    /// Re-assert the invariant that every role method's first explicit parameter (the
+    /// `<role>_` role-player slot) is a reference (`&T`, or `&mut T` when the method body
+    /// needs mutation) rather than an owned value.
+    ///
+    /// This runs after every `apply_fix_at_path_with_candidates` call so that a fix-agent
+    /// that writes `roles[i].methods[j].parameters[0].type = "Stdin"` (owned) can't leak
+    /// through and compile-break the scaffold with "cannot move out of self.<role>" errors.
+    ///
+    /// The receiver mutability on the role method itself is left untouched — role methods
+    /// are `&self` by reen convention unless the originating spec explicitly asks for
+    /// `&mut self`, and we do not infer that here.
+    pub(crate) fn normalize_role_method_parameters(&mut self) {
+        for role in &mut self.roles {
+            let role_param_name = format!("{}_", role.name);
+            for method in &mut role.methods {
+                let Some(param) = method
+                    .parameters
+                    .iter_mut()
+                    .find(|p| p.name == role_param_name)
+                else {
+                    continue;
+                };
+                let Some(rust) = param.type_status.rust().map(str::to_string) else {
+                    continue;
+                };
+                let normalized = ensure_role_player_param_reference(&rust);
+                if normalized != rust {
+                    let source = param
+                        .type_status
+                        .source
+                        .clone()
+                        .unwrap_or_else(|| "prepare.role_player".to_string());
+                    param.type_status = ValueStatus::resolved(normalized, source);
+                }
+                method.sync_signature_from_structure();
+            }
+        }
+    }
+
     pub fn blocking_ambiguities(&self) -> impl Iterator<Item = &Ambiguity> {
         self.ambiguities
             .iter()
@@ -517,7 +550,8 @@ impl PreparedArtifact {
         value: &str,
         candidates: Option<&[String]>,
     ) -> bool {
-        if let Some((role_idx, method_idx)) = parse_double_index(path, "roles", "methods", "signature")
+        if let Some((role_idx, method_idx)) =
+            parse_double_index(path, "roles", "methods", "signature")
         {
             let Some(role) = self.roles.get_mut(role_idx) else {
                 return false;
@@ -536,14 +570,22 @@ impl PreparedArtifact {
                 name: format!("{}_", role.name),
                 type_status: ValueStatus::resolved(format!("&{role_ty}"), "prepare.role_player"),
             }];
-            method.parameters.extend(parsed.parameters.into_iter().map(|parameter| ParameterSpec {
-                name: parameter.0,
-                type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
-            }));
+            method
+                .parameters
+                .extend(
+                    parsed
+                        .parameters
+                        .into_iter()
+                        .map(|parameter| ParameterSpec {
+                            name: parameter.0,
+                            type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
+                        }),
+                );
             method.return_status = ValueStatus::resolved(parsed.return_type, "fix.agent");
             method.signature.apply_fix(value);
             method.sync_signature_from_structure();
             mark_fixed_ambiguities(&mut self.ambiguities, path);
+            self.normalize_role_method_parameters();
             return true;
         }
         if let Some(idx) = parse_single_index(path, "functionalities", "signature") {
@@ -554,14 +596,19 @@ impl PreparedArtifact {
                 return false;
             };
             method.receiver = parsed.receiver;
-            method.parameters = parsed.parameters.into_iter().map(|parameter| ParameterSpec {
-                name: parameter.0,
-                type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
-            }).collect();
+            method.parameters = parsed
+                .parameters
+                .into_iter()
+                .map(|parameter| ParameterSpec {
+                    name: parameter.0,
+                    type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
+                })
+                .collect();
             method.return_status = ValueStatus::resolved(parsed.return_type, "fix.agent");
             method.signature.apply_fix(value);
             method.sync_signature_from_structure();
             mark_fixed_ambiguities(&mut self.ambiguities, path);
+            self.normalize_role_method_parameters();
             return true;
         }
         if let Some(vs) = self.resolve_value_status_mut(path) {
@@ -574,13 +621,15 @@ impl PreparedArtifact {
                     amb.severity = "fixed".to_string();
                 }
             }
+            self.normalize_role_method_parameters();
             return true;
         }
         false
     }
 
     fn sync_signature_for_path(&mut self, path: &str) {
-        if let Some((role_idx, method_idx)) = parse_double_index(path, "roles", "methods", "returns")
+        if let Some((role_idx, method_idx)) =
+            parse_double_index(path, "roles", "methods", "returns")
         {
             if let Some(method) = self
                 .roles
@@ -591,8 +640,7 @@ impl PreparedArtifact {
             }
             return;
         }
-        if let Some((role_idx, method_idx)) = parse_role_method_parameter_path(path)
-        {
+        if let Some((role_idx, method_idx)) = parse_role_method_parameter_path(path) {
             if let Some(method) = self
                 .roles
                 .get_mut(role_idx)
@@ -787,14 +835,6 @@ impl MethodSpec {
                 &format!("parameter `{}` type is unresolved", parameter.name),
             );
         }
-        if self.body.is_none() && self.flow.is_empty() {
-            out.push(Ambiguity {
-                path: format!("{base_path}.body"),
-                severity: "info".to_string(),
-                message: format!("method `{}` body is missing", self.name),
-                source_line: None,
-            });
-        }
     }
 
     fn collect_type_names(&self, types: &mut BTreeSet<String>) {
@@ -962,8 +1002,11 @@ impl ValueStatus {
         self.apply_fix_with_candidates(value, None::<Vec<String>>);
     }
 
-    pub fn apply_fix_with_candidates<I, S>(&mut self, value: impl Into<String>, candidates: Option<I>)
-    where
+    pub fn apply_fix_with_candidates<I, S>(
+        &mut self,
+        value: impl Into<String>,
+        candidates: Option<I>,
+    ) where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
@@ -1217,7 +1260,10 @@ fn render_method_signature(
     return_type: Option<&str>,
 ) -> Option<String> {
     let return_type = return_type?;
-    if parameters.iter().any(|parameter| !parameter.type_status.is_resolved()) {
+    if parameters
+        .iter()
+        .any(|parameter| !parameter.type_status.is_resolved())
+    {
         return None;
     }
     let mut parts = Vec::new();
@@ -1232,6 +1278,27 @@ fn render_method_signature(
         )
     }));
     Some(format!("{name}({}) -> {return_type}", parts.join(", ")))
+}
+
+/// Turn a raw role-player parameter type into a reference form.
+///
+/// Rules:
+/// - Leave `&T`, `&mut T`, and `&'a T` alone — the caller already picked a reference shape.
+/// - Prepend `&` to any other resolved type.
+/// - Leave empty / `Unknown` alone — an unresolved type isn't actionable.
+///
+/// We deliberately default to immutable reference. Mutable receivers for role-method bodies
+/// are driven by whether the body calls a `&mut` method on the player, which is computed
+/// elsewhere; this normalizer is strictly a safety net against owned types sneaking in.
+fn ensure_role_player_param_reference(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "Unknown" {
+        return raw.to_string();
+    }
+    if trimmed.starts_with('&') {
+        return trimmed.to_string();
+    }
+    format!("&{trimmed}")
 }
 
 #[derive(Debug, Clone)]
@@ -1401,7 +1468,10 @@ mod tests {
             method.parameters[0].type_status.rust.as_deref(),
             Some("VecDeque<KeyPress>")
         );
-        assert_eq!(method.return_status.rust.as_deref(), Some("Option<UserAction>"));
+        assert_eq!(
+            method.return_status.rust.as_deref(),
+            Some("Option<UserAction>")
+        );
         assert_eq!(
             method.signature.rust.as_deref(),
             Some("next_action(&mut self, buffer: VecDeque<KeyPress>) -> Option<UserAction>")
@@ -1490,5 +1560,84 @@ mod tests {
                 "rand::rngs::SmallRng".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn role_player_parameter_type_fix_normalizes_to_reference() {
+        // Regression for the `cannot move out of self.stdin_source` class of errors.
+        // When the fix-agent writes `roles[0].methods[0].parameters[0].type = "Stdin"` (owned),
+        // the prepare layer must rewrite it to `&Stdin` so the generated role method signature
+        // borrows the role player rather than taking ownership.
+        let mut prepared = PreparedArtifact::empty(
+            "context",
+            "x.md".to_string(),
+            "X".to_string(),
+            "X".to_string(),
+            true,
+        );
+        let mut method = missing_method("read_available");
+        method.receiver = Some("&self".to_string());
+        method.parameters = vec![ParameterSpec {
+            name: "stdin_source_".to_string(),
+            type_status: ValueStatus::missing("missing".to_string(), Vec::new()),
+        }];
+        method.return_status = ValueStatus::resolved("Vec<KeyEvent>".to_string(), "test");
+        prepared.roles.push(RoleSpec {
+            name: "stdin_source".to_string(),
+            purpose: "input".to_string(),
+            expected_behavior: "polls stdin".to_string(),
+            type_status: ValueStatus::resolved("std::io::Stdin", "test"),
+            methods: vec![method],
+        });
+
+        assert!(
+            prepared.apply_fix_at_path("roles[0].methods[0].parameters[0].type", "std::io::Stdin")
+        );
+
+        let param = &prepared.roles[0].methods[0].parameters[0];
+        assert_eq!(
+            param.type_status.rust.as_deref(),
+            Some("&std::io::Stdin"),
+            "role-player parameter should be normalized to a reference"
+        );
+        let sig = prepared.roles[0].methods[0]
+            .signature
+            .rust
+            .as_deref()
+            .unwrap_or("");
+        assert!(
+            sig.contains("stdin_source_: &std::io::Stdin"),
+            "rendered signature should show `&std::io::Stdin`, got {sig}"
+        );
+    }
+
+    #[test]
+    fn role_player_parameter_type_fix_leaves_existing_reference_alone() {
+        let mut prepared = PreparedArtifact::empty(
+            "context",
+            "x.md".to_string(),
+            "X".to_string(),
+            "X".to_string(),
+            true,
+        );
+        let mut method = missing_method("read");
+        method.receiver = Some("&self".to_string());
+        method.parameters = vec![ParameterSpec {
+            name: "board_".to_string(),
+            type_status: ValueStatus::missing("missing".to_string(), Vec::new()),
+        }];
+        method.return_status = ValueStatus::resolved("u8".to_string(), "test");
+        prepared.roles.push(RoleSpec {
+            name: "board".to_string(),
+            purpose: "board".to_string(),
+            expected_behavior: "reads".to_string(),
+            type_status: ValueStatus::resolved("Board", "test"),
+            methods: vec![method],
+        });
+
+        assert!(prepared.apply_fix_at_path("roles[0].methods[0].parameters[0].type", "&mut Board"));
+
+        let param = &prepared.roles[0].methods[0].parameters[0];
+        assert_eq!(param.type_status.rust.as_deref(), Some("&mut Board"));
     }
 }

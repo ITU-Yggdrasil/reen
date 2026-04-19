@@ -40,6 +40,13 @@ fn copy_dir_recursive(source: &Path, target: &Path) {
     }
 }
 
+fn copy_file(source: &Path, target: &Path) {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).expect("mkdir parent");
+    }
+    fs::copy(source, target).expect("copy file");
+}
+
 fn run_reen<I, S>(project_root: &Path, args: I) -> Output
 where
     I: IntoIterator<Item = S>,
@@ -127,6 +134,183 @@ fn scaffold_fails_when_prepared_has_blocking_ambiguity() {
 }
 
 #[test]
+fn refine_succeeds_on_good_raw_drafts_before_prepare_and_writes_report() {
+    let project = copy_fixture("success");
+
+    let refine = run_reen(&project, ["refine"]);
+    assert!(refine.status.success(), "{}", output_text(&refine));
+
+    let report_path = project.join(".reen/refine/report.md");
+    assert!(report_path.is_file(), "refine report missing");
+    let report = fs::read_to_string(report_path).expect("read refine report");
+    assert!(report.contains("## Draft Review"), "{report}");
+    assert!(report.contains("Prepared review: skipped"), "{report}");
+}
+
+#[test]
+fn refine_succeeds_when_prepared_artifacts_are_deterministic() {
+    let project = copy_fixture("success");
+    let prepare = run_reen(&project, ["prepare"]);
+    assert!(prepare.status.success(), "{}", output_text(&prepare));
+
+    let refine = run_reen(&project, ["refine"]);
+    assert!(refine.status.success(), "{}", output_text(&refine));
+
+    let report =
+        fs::read_to_string(project.join(".reen/refine/report.md")).expect("read refine report");
+    assert!(report.contains("## Prepared Review"), "{report}");
+    assert!(
+        report.contains("No blocking prepared-review findings."),
+        "{report}"
+    );
+}
+
+#[test]
+fn refine_drafts_only_skips_prepared_review() {
+    let project = copy_fixture("success");
+
+    let refine = run_reen(&project, ["refine", "--drafts-only"]);
+    assert!(refine.status.success(), "{}", output_text(&refine));
+
+    let report =
+        fs::read_to_string(project.join(".reen/refine/report.md")).expect("read refine report");
+    assert!(report.contains("skipped by `--drafts-only`"), "{report}");
+}
+
+#[test]
+fn refine_rejects_behavioral_ambiguity_in_raw_drafts() {
+    let project = copy_fixture("behavioral_ambiguity");
+
+    let refine = run_reen(&project, ["refine"]);
+    assert!(!refine.status.success(), "{}", output_text(&refine));
+    let rendered = output_text(&refine);
+    assert!(
+        rendered.contains("current situation") || rendered.contains("appropriate"),
+        "{rendered}"
+    );
+
+    let report =
+        fs::read_to_string(project.join(".reen/refine/report.md")).expect("read refine report");
+    assert!(report.contains("Line 25 [concreteness]"), "{report}");
+}
+
+#[test]
+fn refine_prepared_only_accepts_prose_only_app_flow() {
+    let project = copy_fixture("behavioral_ambiguity");
+    let prepare = run_reen(&project, ["prepare"]);
+    assert!(prepare.status.success(), "{}", output_text(&prepare));
+
+    let refine = run_reen(&project, ["refine", "--prepared-only"]);
+    assert!(refine.status.success(), "{}", output_text(&refine));
+}
+
+#[test]
+fn scaffold_accepts_prose_only_app_flow() {
+    let project = copy_fixture("behavioral_ambiguity");
+    let prepare = run_reen(&project, ["prepare"]);
+    assert!(prepare.status.success(), "{}", output_text(&prepare));
+
+    let scaffold = run_reen(&project, ["scaffold"]);
+    assert!(scaffold.status.success(), "{}", output_text(&scaffold));
+}
+
+#[test]
+fn refine_and_scaffold_reject_prepared_contract_mismatch() {
+    let project = copy_fixture("success");
+    let prepare = run_reen(&project, ["prepare"]);
+    assert!(prepare.status.success(), "{}", output_text(&prepare));
+
+    let prepared_path = project.join("drafts/prepare/app.yml");
+    let yaml = fs::read_to_string(&prepared_path).expect("read prepared app");
+    let broken = yaml.replacen(
+        "kind: string\n          value: Hello, world!",
+        "kind: integer\n          value: '42'",
+        1,
+    );
+    assert_ne!(broken, yaml, "expected to corrupt the prepared app body");
+    fs::write(&prepared_path, broken).expect("write broken prepared app");
+
+    let refine = run_reen(&project, ["refine"]);
+    assert!(!refine.status.success(), "{}", output_text(&refine));
+    let refine_text = output_text(&refine);
+    assert!(
+        refine_text.contains("contract mismatch")
+            || refine_text.contains("expects `String` but got integer literal"),
+        "{refine_text}"
+    );
+
+    let scaffold = run_reen(&project, ["scaffold"]);
+    assert!(!scaffold.status.success(), "{}", output_text(&scaffold));
+    let scaffold_text = output_text(&scaffold);
+    assert!(
+        scaffold_text.contains("contract mismatches")
+            || scaffold_text.contains("expects `String` but got integer literal"),
+        "{scaffold_text}"
+    );
+}
+
+#[test]
+fn refine_rejects_explicit_draft_contract_mismatch() {
+    let project = copy_fixture("draft_review_mismatch");
+
+    let refine = run_reen(&project, ["refine"]);
+    assert!(!refine.status.success(), "{}", output_text(&refine));
+    let rendered = output_text(&refine);
+    assert!(
+        rendered.contains("renderer.render(board_picture)")
+            || rendered.contains("explicitly expects `Board`")
+            || rendered.contains("std::collections::HashMap<Position, char>"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn refine_accepts_aligned_snake_board_contract_subset() {
+    let project = temp_project_dir("snake_contracts");
+    let drafts_root = project.join("drafts");
+
+    let repo_drafts = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("snake")
+        .join("drafts");
+
+    for relative in [
+        "data/Board.md",
+        "data/GameState.md",
+        "data/Snake.md",
+        "data/Food.md",
+        "contexts/game_loop.md",
+        "contexts/terminal_renderer.md",
+        "projections/string_renderer.md",
+        "prepare/data/Board.yml",
+        "prepare/data/GameState.yml",
+        "prepare/data/Snake.yml",
+        "prepare/data/Food.yml",
+        "prepare/contexts/game_loop.yml",
+        "prepare/contexts/terminal_renderer.yml",
+        "prepare/projections/string_renderer.yml",
+    ] {
+        copy_file(&repo_drafts.join(relative), &drafts_root.join(relative));
+    }
+    fs::write(project.join("reen.yml"), "fix: false\n").expect("write reen.yml");
+
+    let refine = run_reen(
+        &project,
+        [
+            "refine",
+            "Board",
+            "GameState",
+            "Snake",
+            "Food",
+            "game_loop",
+            "string_renderer",
+            "terminal_renderer",
+        ],
+    );
+    assert!(refine.status.success(), "{}", output_text(&refine));
+}
+
+#[test]
 fn scaffold_succeeds_from_prepared_yaml() {
     let project = copy_fixture("success");
     let prepare = run_reen(&project, ["prepare"]);
@@ -142,13 +326,17 @@ fn scaffold_succeeds_from_prepared_yaml() {
 }
 
 #[test]
-fn help_lists_scaffold_and_build() {
+fn help_lists_refine_scaffold_and_build() {
     let output = Command::new(env!("CARGO_BIN_EXE_reen"))
         .arg("--help")
         .output()
         .expect("run help");
     assert!(output.status.success(), "{}", output_text(&output));
     let rendered = output_text(&output);
+    assert!(
+        rendered.contains("refine"),
+        "help should list refine: {rendered}"
+    );
     assert!(
         rendered.contains("scaffold"),
         "help should list scaffold: {rendered}"
@@ -352,8 +540,7 @@ fn init_prepare_fix_writes_reen_yml_before_running_command() {
     assert!(!output.status.success(), "{}", output_text(&output));
     let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
     assert!(
-        config.contains("prepare:\n  fix: true")
-            || config.contains("prepare:\r\n  fix: true"),
+        config.contains("prepare:\n  fix: true") || config.contains("prepare:\r\n  fix: true"),
         "init should persist prepare.fix into reen.yml:\n{config}"
     );
 }
@@ -382,7 +569,10 @@ fn manifest_types_add_prefix_creates_manifest_file() {
     let manifest =
         fs::read_to_string(project.join("drafts/types-manifest.yml")).expect("read manifest");
     assert!(manifest.contains("external_path_prefixes:"));
-    assert!(manifest.contains("rand::"), "manifest should contain rand:::\n{manifest}");
+    assert!(
+        manifest.contains("rand::"),
+        "manifest should contain rand:::\n{manifest}"
+    );
 }
 
 #[test]
@@ -451,7 +641,10 @@ fn manifest_capabilities_add_provider_writes_registry_dependencies_and_types() {
     assert!(dependencies.contains("schema: reen.dependencies/v1"));
     assert!(dependencies.contains("name: rand"), "{dependencies}");
     assert!(dependencies.contains("- randomness"), "{dependencies}");
-    assert!(dependencies.contains("features = [\"std_rng\"]"), "{dependencies}");
+    assert!(
+        dependencies.contains("features = [\"std_rng\"]"),
+        "{dependencies}"
+    );
     assert!(
         dependencies.contains("version = \"*\"") || dependencies.contains("version: '*'"),
         "{dependencies}"
@@ -470,45 +663,48 @@ fn manifest_capabilities_add_provider_is_idempotent() {
 
     let first = run_reen(
         &project,
-        [
-            "manifest",
-            "capabilities",
-            "add",
-            "randomness",
-            "rand",
-        ],
+        ["manifest", "capabilities", "add", "randomness", "rand"],
     );
     assert!(first.status.success(), "{}", output_text(&first));
 
     let second = run_reen(
         &project,
-        [
-            "manifest",
-            "capabilities",
-            "add",
-            "randomness",
-            "rand",
-        ],
+        ["manifest", "capabilities", "add", "randomness", "rand"],
     );
     assert!(second.status.success(), "{}", output_text(&second));
 
     let registry = fs::read_to_string(project.join("drafts/capability_registry.yml"))
         .expect("read capability registry");
-    assert_eq!(registry.matches("domain: randomness").count(), 1, "{registry}");
+    assert_eq!(
+        registry.matches("domain: randomness").count(),
+        1,
+        "{registry}"
+    );
     assert_eq!(registry.matches("- randomness").count(), 1, "{registry}");
 
     let dependencies =
         fs::read_to_string(project.join("drafts/dependencies.yml")).expect("read dependencies");
-    assert_eq!(dependencies.matches("name: rand").count(), 1, "{dependencies}");
-    assert_eq!(dependencies.matches("- randomness").count(), 1, "{dependencies}");
+    assert_eq!(
+        dependencies.matches("name: rand").count(),
+        1,
+        "{dependencies}"
+    );
+    assert_eq!(
+        dependencies.matches("- randomness").count(),
+        1,
+        "{dependencies}"
+    );
 
-    let manifest: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(project.join("drafts/types-manifest.yml"))
-            .expect("read types manifest"))
-        .expect("parse types manifest");
+    let manifest: serde_yaml::Value = serde_yaml::from_str(
+        &fs::read_to_string(project.join("drafts/types-manifest.yml"))
+            .expect("read types manifest"),
+    )
+    .expect("parse types manifest");
     let mapping = manifest.as_mapping().expect("types manifest mapping");
     let prefixes = mapping
-        .get(serde_yaml::Value::String("external_path_prefixes".to_string()))
+        .get(serde_yaml::Value::String(
+            "external_path_prefixes".to_string(),
+        ))
         .and_then(serde_yaml::Value::as_sequence)
         .expect("prefix sequence");
     assert_eq!(prefixes.len(), 1);

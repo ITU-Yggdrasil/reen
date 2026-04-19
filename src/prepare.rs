@@ -3,12 +3,14 @@ use crate::draft_parser::{
     AppDraft, CompositeDraft, DataDraft, DraftDocument, FunctionalityDraft, RoleMethodGroup,
     parse_draft_file,
 };
+use crate::draft_refine::{DraftReview, DraftReviewFinding, review_raw_drafts};
 use crate::fix_agent;
 use crate::prepared::{
     Ambiguity, Body, CollaboratorSpec, ConstructorPolicy, Evidence, ExportInfo, Expression,
     FieldSpec, GetterSpec, MethodReferences, MethodSpec, ParameterSpec, PreparedArtifact, PropSpec,
     RoleSpec, SourceInfo, Statement, StructFieldValue, ValueStatus, VariantSpec,
 };
+use crate::prepared_contracts::collect_contract_issues;
 use crate::workspace::Workspace;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -25,6 +27,14 @@ pub struct PrepareOptions {
     pub verbose: bool,
     pub debug: bool,
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefineOptions {
+    pub selection: crate::workspace::Selection,
+    pub verbose: bool,
+    pub drafts_only: bool,
+    pub prepared_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -113,8 +123,8 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
         if has_blockers && options.fix {
             let available_types =
                 available_types_for_draft(types_manifest.as_ref(), draft.info().kind, &catalog);
-            let dependency_notes = crate::build_agent::render_dependency_context(workspace)
-                .unwrap_or_default();
+            let dependency_notes =
+                crate::build_agent::render_dependency_context(workspace).unwrap_or_default();
             let fixed_count = fix_agent::fix_ambiguities_with_dependency_notes(
                 &content,
                 &available_types,
@@ -203,6 +213,372 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     Ok(())
 }
 
+pub fn refine_workspace(workspace: &Workspace, options: &RefineOptions) -> Result<()> {
+    let mut draft_phase = DraftPhaseReport::Skipped {
+        reason: "skipped by `--prepared-only`".to_string(),
+    };
+    let prepared_phase;
+
+    if options.prepared_only {
+        let prepared_paths = workspace.prepared_paths(&options.selection)?;
+        if options.verbose {
+            println!("Refining {} prepared artifact(s)", prepared_paths.len());
+        }
+        let summary = review_prepared_paths(workspace, &prepared_paths)?;
+        print_prepared_findings(&summary);
+        let has_failures = summary.blocking_ambiguities > 0 || summary.contract_mismatches > 0;
+        prepared_phase = PreparedPhaseReport::Completed(summary);
+        write_refine_report(workspace, &draft_phase, &prepared_phase)?;
+        if has_failures {
+            let PreparedPhaseReport::Completed(summary) = &prepared_phase else {
+                unreachable!()
+            };
+            anyhow::bail!(
+                "refine found {} blocking ambiguit{} and {} contract mismatch{} across prepared artifact(s); see errors above",
+                summary.blocking_ambiguities,
+                if summary.blocking_ambiguities == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
+                summary.contract_mismatches,
+                if summary.contract_mismatches == 1 {
+                    ""
+                } else {
+                    "es"
+                }
+            );
+        }
+        if options.verbose {
+            println!("Refine found no blocking ambiguities or contract mismatches");
+        }
+        return Ok(());
+    }
+
+    let raw_paths = workspace.raw_draft_paths(&options.selection)?;
+    if options.verbose {
+        println!("Reviewing {} raw draft(s)", raw_paths.len());
+    }
+    let draft_review = review_raw_drafts(workspace, &raw_paths)?;
+    print_draft_findings(&draft_review);
+    let draft_failures = draft_review.findings.len();
+    draft_phase = DraftPhaseReport::Completed(draft_review);
+
+    if draft_failures > 0 {
+        prepared_phase = PreparedPhaseReport::Skipped {
+            reason: "skipped because draft review found blocking issues".to_string(),
+        };
+        write_refine_report(workspace, &draft_phase, &prepared_phase)?;
+        anyhow::bail!(
+            "refine found {} blocking draft review finding{}; see errors above",
+            draft_failures,
+            if draft_failures == 1 { "" } else { "s" }
+        );
+    }
+
+    if options.drafts_only {
+        prepared_phase = PreparedPhaseReport::Skipped {
+            reason: "skipped by `--drafts-only`".to_string(),
+        };
+        write_refine_report(workspace, &draft_phase, &prepared_phase)?;
+        if options.verbose {
+            println!("Draft review found no blocking issues");
+        }
+        return Ok(());
+    }
+
+    let prepared_paths = workspace.matching_prepared_paths_for_raw(&raw_paths)?;
+    if prepared_paths.is_empty() {
+        prepared_phase = PreparedPhaseReport::Skipped {
+            reason: "skipped because no matching prepared artifacts exist".to_string(),
+        };
+        write_refine_report(workspace, &draft_phase, &prepared_phase)?;
+        if options.verbose {
+            println!("Draft review found no blocking issues; prepared review skipped");
+        }
+        return Ok(());
+    }
+
+    if options.verbose {
+        println!(
+            "Refining {} matching prepared artifact(s)",
+            prepared_paths.len()
+        );
+    }
+    let summary = review_prepared_paths(workspace, &prepared_paths)?;
+    print_prepared_findings(&summary);
+    let has_failures = summary.blocking_ambiguities > 0 || summary.contract_mismatches > 0;
+    prepared_phase = PreparedPhaseReport::Completed(summary);
+    write_refine_report(workspace, &draft_phase, &prepared_phase)?;
+
+    if has_failures {
+        let PreparedPhaseReport::Completed(summary) = &prepared_phase else {
+            unreachable!()
+        };
+        anyhow::bail!(
+            "refine found {} blocking ambiguit{} and {} contract mismatch{} across prepared artifact(s); see errors above",
+            summary.blocking_ambiguities,
+            if summary.blocking_ambiguities == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            summary.contract_mismatches,
+            if summary.contract_mismatches == 1 {
+                ""
+            } else {
+                "es"
+            }
+        );
+    }
+
+    if options.verbose {
+        println!("Refine found no blocking draft issues, ambiguities, or contract mismatches");
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct PreparedReviewFinding {
+    location_path: String,
+    location_line: Option<usize>,
+    detail_path: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreparedReviewSummary {
+    reviewed_paths: Vec<String>,
+    findings: Vec<PreparedReviewFinding>,
+    blocking_ambiguities: usize,
+    contract_mismatches: usize,
+}
+
+#[derive(Debug, Clone)]
+enum DraftPhaseReport {
+    Completed(DraftReview),
+    Skipped { reason: String },
+}
+
+#[derive(Debug, Clone)]
+enum PreparedPhaseReport {
+    Completed(PreparedReviewSummary),
+    Skipped { reason: String },
+}
+
+fn review_prepared_paths(
+    workspace: &Workspace,
+    prepared_paths: &[PathBuf],
+) -> Result<PreparedReviewSummary> {
+    let mut summary = PreparedReviewSummary {
+        reviewed_paths: prepared_paths
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&workspace.root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect(),
+        ..PreparedReviewSummary::default()
+    };
+    let mut artifacts = Vec::new();
+
+    for path in prepared_paths {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let mut prepared: PreparedArtifact = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse prepared artifact {}", path.display()))?;
+        prepared.refresh_ambiguity_index();
+        let source_path = workspace.root.join(&prepared.source.path);
+        if source_path.is_file() {
+            let source = fs::read_to_string(&source_path)
+                .with_context(|| format!("Failed to read {}", source_path.display()))?;
+            enrich_ambiguity_lines(&mut prepared, &source);
+        }
+        prepared.validate()?;
+
+        let blockers = prepared.blocking_ambiguities().cloned().collect::<Vec<_>>();
+        summary.blocking_ambiguities += blockers.len();
+        summary
+            .findings
+            .extend(blockers.into_iter().map(|ambiguity| PreparedReviewFinding {
+                location_path: prepared.source.path.clone(),
+                location_line: ambiguity.source_line,
+                detail_path: ambiguity.path,
+                message: ambiguity.message,
+            }));
+
+        artifacts.push(prepared);
+    }
+
+    let contract_issues = collect_contract_issues(&artifacts);
+    summary.contract_mismatches = contract_issues.len();
+    for issue in contract_issues {
+        let prepared = &artifacts[issue.artifact_index];
+        summary.findings.push(PreparedReviewFinding {
+            location_path: prepared.source.path.clone(),
+            location_line: issue.ambiguity.source_line,
+            detail_path: issue.ambiguity.path,
+            message: issue.ambiguity.message,
+        });
+    }
+
+    Ok(summary)
+}
+
+fn print_draft_findings(review: &DraftReview) {
+    for finding in &review.findings {
+        let location = match finding.source_line {
+            Some(line) => format!("{}:{}", finding.draft_path, line),
+            None => finding.draft_path.clone(),
+        };
+        eprintln!("error[refine]: {}", finding.message);
+        eprintln!("  --> {} ({})", location, finding.category.as_str());
+    }
+}
+
+fn print_prepared_findings(summary: &PreparedReviewSummary) {
+    for finding in &summary.findings {
+        let location = match finding.location_line {
+            Some(line) => format!("{}:{}", finding.location_path, line),
+            None => finding.location_path.clone(),
+        };
+        eprintln!("error[refine]: {}", finding.message);
+        eprintln!("  --> {} ({})", location, finding.detail_path);
+    }
+}
+
+fn write_refine_report(
+    workspace: &Workspace,
+    draft_phase: &DraftPhaseReport,
+    prepared_phase: &PreparedPhaseReport,
+) -> Result<()> {
+    let path = workspace.refine_report_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let report = render_refine_report(draft_phase, prepared_phase);
+    fs::write(&path, report).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+fn render_refine_report(
+    draft_phase: &DraftPhaseReport,
+    prepared_phase: &PreparedPhaseReport,
+) -> String {
+    let mut out = String::new();
+    out.push_str("# Reen Refine Report\n\n");
+    out.push_str("## Summary\n\n");
+    match draft_phase {
+        DraftPhaseReport::Completed(review) => {
+            out.push_str(&format!(
+                "- Draft review: {} draft(s), {} blocking finding(s)\n",
+                review.reviewed_paths.len(),
+                review.findings.len()
+            ));
+        }
+        DraftPhaseReport::Skipped { reason } => {
+            out.push_str(&format!("- Draft review: skipped ({reason})\n"));
+        }
+    }
+    match prepared_phase {
+        PreparedPhaseReport::Completed(summary) => {
+            out.push_str(&format!(
+                "- Prepared review: {} artifact(s), {} blocking ambiguities, {} contract mismatches\n",
+                summary.reviewed_paths.len(),
+                summary.blocking_ambiguities,
+                summary.contract_mismatches
+            ));
+        }
+        PreparedPhaseReport::Skipped { reason } => {
+            out.push_str(&format!("- Prepared review: skipped ({reason})\n"));
+        }
+    }
+    out.push_str("\n## Draft Review\n\n");
+    match draft_phase {
+        DraftPhaseReport::Completed(review) => {
+            if review.findings.is_empty() {
+                out.push_str("No blocking draft-review findings.\n");
+            } else {
+                let mut grouped = BTreeMap::<&str, Vec<&DraftReviewFinding>>::new();
+                for finding in &review.findings {
+                    grouped
+                        .entry(finding.draft_path.as_str())
+                        .or_default()
+                        .push(finding);
+                }
+                for path in &review.reviewed_paths {
+                    out.push_str(&format!("\n### {path}\n\n"));
+                    if let Some(items) = grouped.get(path.as_str()) {
+                        for finding in items {
+                            match finding.source_line {
+                                Some(line) => out.push_str(&format!(
+                                    "- Line {} [{}] {}\n",
+                                    line,
+                                    finding.category.as_str(),
+                                    finding.message
+                                )),
+                                None => out.push_str(&format!(
+                                    "- [{}] {}\n",
+                                    finding.category.as_str(),
+                                    finding.message
+                                )),
+                            }
+                        }
+                    } else {
+                        out.push_str("- No blocking findings.\n");
+                    }
+                }
+            }
+        }
+        DraftPhaseReport::Skipped { reason } => {
+            out.push_str(&format!("Skipped: {reason}\n"));
+        }
+    }
+
+    out.push_str("\n## Prepared Review\n\n");
+    match prepared_phase {
+        PreparedPhaseReport::Completed(summary) => {
+            if summary.findings.is_empty() {
+                out.push_str("No blocking prepared-review findings.\n");
+            } else {
+                let mut grouped = BTreeMap::<&str, Vec<&PreparedReviewFinding>>::new();
+                for finding in &summary.findings {
+                    grouped
+                        .entry(finding.location_path.as_str())
+                        .or_default()
+                        .push(finding);
+                }
+                for path in &summary.reviewed_paths {
+                    out.push_str(&format!("\n### {path}\n\n"));
+                    if let Some(items) = grouped.get(path.as_str()) {
+                        for finding in items {
+                            match finding.location_line {
+                                Some(line) => out.push_str(&format!(
+                                    "- Line {} [{}] {}\n",
+                                    line, finding.detail_path, finding.message
+                                )),
+                                None => out.push_str(&format!(
+                                    "- [{}] {}\n",
+                                    finding.detail_path, finding.message
+                                )),
+                            }
+                        }
+                    } else {
+                        out.push_str("- No blocking findings.\n");
+                    }
+                }
+            }
+        }
+        PreparedPhaseReport::Skipped { reason } => {
+            out.push_str(&format!("Skipped: {reason}\n"));
+        }
+    }
+    out
+}
+
 fn load_types_manifest(workspace: &Workspace) -> Result<Option<TypesManifest>> {
     let path = workspace.drafts_dir.join("types-manifest.yml");
     if !path.is_file() {
@@ -230,7 +606,11 @@ fn available_types_for_draft(
     types.extend(manifest.primitives.iter().cloned());
     types.extend(manifest.external_path_prefixes.iter().cloned());
     for prefix in &manifest.external_path_prefixes {
-        types.extend(builtin_external_type_candidates(prefix).iter().map(|value| value.to_string()));
+        types.extend(
+            builtin_external_type_candidates(prefix)
+                .iter()
+                .map(|value| value.to_string()),
+        );
     }
 
     match kind {
@@ -393,7 +773,9 @@ fn build_catalog(
             .push(export.clone());
         if let DraftDocument::Projection(draft) | DraftDocument::Context(draft) = doc {
             for role in &draft.roles {
-                let entry = role_hints.entry(sanitize_identifier(&role.name)).or_default();
+                let entry = role_hints
+                    .entry(sanitize_identifier(&role.name))
+                    .or_default();
                 if !role.why_involved.trim().is_empty() {
                     entry.push(role.why_involved.trim().to_string());
                 }
@@ -443,17 +825,20 @@ fn load_resolved_role_types(workspace: &Workspace) -> BTreeMap<String, String> {
         };
         for role in &artifact.roles {
             if let Some(rust) = role.type_status.rust() {
-                out.entry(role.name.clone()).or_insert_with(|| rust.to_string());
+                out.entry(role.name.clone())
+                    .or_insert_with(|| rust.to_string());
             }
         }
         for prop in &artifact.props {
             if let Some(rust) = prop.type_status.rust() {
-                out.entry(prop.name.clone()).or_insert_with(|| rust.to_string());
+                out.entry(prop.name.clone())
+                    .or_insert_with(|| rust.to_string());
             }
         }
         for collab in &artifact.collaborators {
             if let Some(rust) = collab.type_status.rust() {
-                out.entry(collab.name.clone()).or_insert_with(|| rust.to_string());
+                out.entry(collab.name.clone())
+                    .or_insert_with(|| rust.to_string());
             }
         }
     }
@@ -753,15 +1138,23 @@ fn prepare_functionality(
     body_context: &BodyParseContext,
     _catalog: &DraftCatalog,
 ) -> Result<MethodSpec> {
-    if functionality.name == "new" {
+    // Auto-generate `new` as a trivial struct constructor only when the draft leaves the
+    // flow empty. When the draft provides explicit flow for `new` (e.g. a context that must
+    // perform scenario setup like picking an initial food position), fall through to the
+    // normal per-functionality path so the build agent — not prepare — implements the body.
+    // `new` stays an associated function (no `self` receiver) regardless.
+    let is_new = functionality.name == "new";
+    if is_new && functionality.flow.is_empty() {
         return Ok(auto_constructor_method(draft, _catalog));
     }
 
     let is_context = draft.info.kind == crate::draft_parser::ArtifactKind::Context;
     // Functionalities on contexts default to `&self` but are upgraded to `&mut self` when the
     // behavioral description implies mutation (verb-based detection + `self.X = …` patterns).
-    // Projections stay `&self` by definition.
-    let mutates = is_context
+    // Projections stay `&self` by definition. `new` is always an associated function, so it
+    // has no default receiver — we force `None` below.
+    let mutates = !is_new
+        && is_context
         && flow_implies_mutation(
             &functionality.flow,
             &functionality.extensions,
@@ -782,11 +1175,17 @@ fn prepare_functionality(
     let (signature_status, receiver, parameters, return_status) = if let Some(parsed) = &signature {
         (
             ValueStatus::resolved(parsed.original.clone(), "prepare.signature"),
-            // Honour any receiver the BA put in the Signature marker; fall back to the type default.
-            parsed
-                .receiver
-                .clone()
-                .or_else(|| Some(default_receiver.to_string())),
+            // Honour any receiver the BA put in the Signature marker; fall back to the type
+            // default — except for `new`, which is always an associated function and must
+            // keep `receiver = None` even when the Signature marker omits one.
+            if is_new {
+                parsed.receiver.clone()
+            } else {
+                parsed
+                    .receiver
+                    .clone()
+                    .or_else(|| Some(default_receiver.to_string()))
+            },
             parsed
                 .parameters
                 .iter()
@@ -806,7 +1205,11 @@ fn prepare_functionality(
                 ),
                 evidence.clone(),
             ),
-            Some(default_receiver.to_string()),
+            if is_new {
+                None
+            } else {
+                Some(default_receiver.to_string())
+            },
             Vec::new(),
             ValueStatus::missing(
                 format!(
@@ -1010,37 +1413,20 @@ fn prepare_app(app: &AppDraft, catalog: &DraftCatalog) -> Result<PreparedArtifac
     }
 
     let body_result = parse_body_from_rules(&rules, &BodyParseContext::default());
-    let body_error = body_result.as_ref().err().map(|error| error.to_string());
     let body = body_result.ok();
+    let flow = if body.is_some() { Vec::new() } else { rules };
     prepared.functionalities.push(MethodSpec {
         name: "main".to_string(),
         signature: ValueStatus::resolved("main() -> ()", "prepare.auto"),
         receiver: None,
         parameters: Vec::new(),
         return_status: ValueStatus::resolved("()", "prepare.auto"),
-        flow: Vec::new(),
+        flow,
         extensions: Vec::new(),
         guarantee: Vec::new(),
         references: None,
         body,
     });
-
-    if prepared
-        .functionalities
-        .first()
-        .and_then(|method| method.body.as_ref())
-        .is_none()
-    {
-        prepared.ambiguities.push(Ambiguity {
-            path: "functionalities[0].body".to_string(),
-            severity: "info".to_string(),
-            message: format!(
-                "app main flow could not be normalized into deterministic steps: {}",
-                body_error.unwrap_or_else(|| "missing body".to_string())
-            ),
-            source_line: None,
-        });
-    }
     Ok(prepared)
 }
 
@@ -1524,10 +1910,39 @@ fn extract_signature_marker(lines: &[String]) -> Option<String> {
 /// Deliberately avoids false positives from read-verbs like `match`, `check`, `return`.
 fn flow_implies_mutation(flow: &[String], extensions: &[String], guarantee: &[String]) -> bool {
     const MUTATION_VERBS: &[&str] = &[
-        "push", "pop", "insert", "remove", "delete", "update", "set", "reset", "append",
-        "prepend", "replace", "clear", "advance", "increment", "decrement", "record",
-        "consume", "capture", "drain", "fill", "swap", "take", "assign", "write", "emit",
-        "extend", "flush", "rotate", "shift", "drop", "move", "mutate", "accumulate",
+        "push",
+        "pop",
+        "insert",
+        "remove",
+        "delete",
+        "update",
+        "set",
+        "reset",
+        "append",
+        "prepend",
+        "replace",
+        "clear",
+        "advance",
+        "increment",
+        "decrement",
+        "record",
+        "consume",
+        "capture",
+        "drain",
+        "fill",
+        "swap",
+        "take",
+        "assign",
+        "write",
+        "emit",
+        "extend",
+        "flush",
+        "rotate",
+        "shift",
+        "drop",
+        "move",
+        "mutate",
+        "accumulate",
         "store",
     ];
     let combined: String = flow
@@ -1692,7 +2107,10 @@ fn resolve_nominal_collaborator_type_from_texts(
     if let Some(hints) = catalog.role_hints.get(&sanitize_identifier(name)) {
         combined.extend(hints.iter().cloned());
     }
-    let refs = combined.iter().map(|text| text.as_str()).collect::<Vec<_>>();
+    let refs = combined
+        .iter()
+        .map(|text| text.as_str())
+        .collect::<Vec<_>>();
     resolve_nominal_role_type_from_texts(name, &refs, catalog)
 }
 
@@ -1831,10 +2249,12 @@ fn looks_like_nominal_role_type(value: &str, catalog: &DraftCatalog) -> bool {
         return true;
     }
     trimmed.contains("::")
-        && trimmed
-            .rsplit("::")
-            .next()
-            .is_some_and(|segment| segment.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()))
+        && trimmed.rsplit("::").next().is_some_and(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_uppercase())
+        })
 }
 
 fn looks_like_type(value: &str, catalog: &DraftCatalog) -> bool {
@@ -2156,8 +2576,7 @@ fn apply_cross_artifact_derive_inference(workspace: &Workspace) -> Result<usize>
         artifact.derives = new_derives;
         let yaml = serde_yaml::to_string(artifact)
             .with_context(|| format!("Failed to serialize {}", path.display()))?;
-        fs::write(&*path, yaml)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+        fs::write(&*path, yaml).with_context(|| format!("Failed to write {}", path.display()))?;
         patched += 1;
     }
 
@@ -2230,10 +2649,9 @@ fn apply_cross_artifact_role_method_sync(workspace: &Workspace) -> Result<usize>
             };
             let collaborator = &artifacts[collab_idx].1;
             for (midx, role_method) in role.methods.iter().enumerate() {
-                let Some(collab_receiver) = lookup_collaborator_receiver(
-                    collaborator,
-                    &role_method.name,
-                ) else {
+                let Some(collab_receiver) =
+                    lookup_collaborator_receiver(collaborator, &role_method.name)
+                else {
                     continue;
                 };
                 let desired = match collab_receiver {
@@ -2271,10 +2689,8 @@ fn apply_cross_artifact_role_method_sync(workspace: &Workspace) -> Result<usize>
         let role = &mut artifact.roles[plan.role_idx];
         let method = &mut role.methods[plan.method_idx];
         if let Some(param) = method.parameters.first_mut() {
-            param.type_status = ValueStatus::resolved(
-                plan.new_param_type.clone(),
-                "prepare.collab_sync",
-            );
+            param.type_status =
+                ValueStatus::resolved(plan.new_param_type.clone(), "prepare.collab_sync");
         }
         method.receiver = Some(plan.new_receiver.to_string());
         // Re-render the signature string so scaffold picks up the new shape deterministically.
@@ -2297,8 +2713,7 @@ fn apply_cross_artifact_role_method_sync(workspace: &Workspace) -> Result<usize>
         let (path, artifact) = &artifacts[*idx];
         let yaml = serde_yaml::to_string(artifact)
             .with_context(|| format!("Failed to serialize {}", path.display()))?;
-        fs::write(path, yaml)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+        fs::write(path, yaml).with_context(|| format!("Failed to write {}", path.display()))?;
     }
 
     Ok(changed_idx.len())
@@ -2440,13 +2855,7 @@ fn push_method_types(method: &MethodSpec, out: &mut Vec<String>) {
 /// hash/order key. Nested occurrences are walked recursively.
 fn extract_generic_container_keys(type_string: &str) -> Vec<(String, String)> {
     const CONTAINERS: &[&str] = &[
-        "HashMap",
-        "HashSet",
-        "BTreeMap",
-        "BTreeSet",
-        "IndexMap",
-        "IndexSet",
-        "DashMap",
+        "HashMap", "HashSet", "BTreeMap", "BTreeSet", "IndexMap", "IndexSet", "DashMap",
     ];
     let mut results = Vec::new();
     for container in CONTAINERS {
@@ -2678,7 +3087,10 @@ mod tests {
         let catalog = test_catalog(&["CommandInputContext"]);
         let status = resolve_nominal_role_type_from_texts(
             "command",
-            &["Shared input stream", "Captures keys and returns the next gameplay action"],
+            &[
+                "Shared input stream",
+                "Captures keys and returns the next gameplay action",
+            ],
             &catalog,
         );
 
@@ -2728,5 +3140,157 @@ mod tests {
         assert!(evidence_texts.contains(
             &"Chooses a free interior food position, or no position if none is available"
         ));
+    }
+
+    #[test]
+    fn prepare_app_keeps_prose_flow_when_body_normalization_fails() {
+        let app = AppDraft {
+            info: crate::draft_parser::DraftInfo {
+                kind: crate::draft_parser::ArtifactKind::App,
+                relative_path: "app.md".to_string(),
+                title: "Example App".to_string(),
+            },
+            application_kind: Some("cli_app".to_string()),
+            sections: BTreeMap::from([(
+                "Main Flow".to_string(),
+                "- Keep the greeting interaction running in the appropriate way for the current situation."
+                    .to_string(),
+            )]),
+            collaborators: Vec::new(),
+        };
+
+        let prepared = prepare_app(&app, &test_catalog(&[])).expect("prepare app");
+        let main = prepared
+            .functionalities
+            .first()
+            .expect("prepared app main functionality");
+
+        assert!(main.body.is_none());
+        assert_eq!(
+            main.flow,
+            vec!["Keep the greeting interaction running in the appropriate way for the current situation.".to_string()]
+        );
+        assert!(prepared.ambiguities.is_empty());
+    }
+
+    #[test]
+    fn snake_render_contracts_prepare_with_board_and_u32_signatures() {
+        let drafts_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("snake")
+            .join("drafts");
+
+        let load = |relative: &str| {
+            let path = drafts_root.join(relative);
+            let content = std::fs::read_to_string(&path).expect("read snake draft");
+            parse_draft_file(&path, &drafts_root, &content).expect("parse snake draft")
+        };
+
+        let board_doc = load("data/Board.md");
+        let snake_doc = load("data/Snake.md");
+        let food_doc = load("data/Food.md");
+        let game_state_doc = load("data/GameState.md");
+        let game_loop_doc = load("contexts/game_loop.md");
+        let string_renderer_doc = load("projections/string_renderer.md");
+        let terminal_renderer_doc = load("contexts/terminal_renderer.md");
+
+        let docs = vec![
+            board_doc.clone(),
+            snake_doc,
+            food_doc,
+            game_state_doc,
+            game_loop_doc.clone(),
+            string_renderer_doc.clone(),
+            terminal_renderer_doc.clone(),
+        ];
+        let catalog = build_catalog(&docs, BTreeMap::new());
+
+        let board = prepare_document(&board_doc, &catalog).expect("prepare board");
+        let game_loop = prepare_document(&game_loop_doc, &catalog).expect("prepare game loop");
+        let string_renderer =
+            prepare_document(&string_renderer_doc, &catalog).expect("prepare string renderer");
+        let terminal_renderer =
+            prepare_document(&terminal_renderer_doc, &catalog).expect("prepare terminal renderer");
+
+        let cells = board
+            .fields
+            .iter()
+            .find(|field| field.name == "cells")
+            .expect("board cells field");
+        assert_eq!(
+            cells.type_status.rust.as_deref(),
+            Some("std::collections::HashMap<Position, char>")
+        );
+        let symbol_at = board
+            .functionalities
+            .iter()
+            .find(|method| method.name == "symbol_at")
+            .expect("Board::symbol_at");
+        assert_eq!(
+            symbol_at.signature.rust.as_deref(),
+            Some("symbol_at(&self, x: u32, y: u32) -> char")
+        );
+
+        let current_board = game_loop
+            .functionalities
+            .iter()
+            .find(|method| method.name == "current_board")
+            .expect("GameLoopContext::current_board");
+        assert_eq!(current_board.return_status.rust.as_deref(), Some("Board"));
+
+        let board_role = string_renderer
+            .roles
+            .iter()
+            .find(|role| role.name == "board")
+            .expect("StringRenderer board role");
+        let width = board_role
+            .methods
+            .iter()
+            .find(|method| method.name == "width")
+            .expect("board.width");
+        assert_eq!(
+            width.signature.rust.as_deref(),
+            Some("width(&self, board_: &Board) -> u32")
+        );
+        let symbol_at_role = board_role
+            .methods
+            .iter()
+            .find(|method| method.name == "symbol_at")
+            .expect("board.symbol_at");
+        assert_eq!(
+            symbol_at_role.signature.rust.as_deref(),
+            Some("symbol_at(&self, board_: &Board, x: u32, y: u32) -> char")
+        );
+        let render = string_renderer
+            .functionalities
+            .iter()
+            .find(|method| method.name == "render")
+            .expect("StringRenderer::render");
+        assert_eq!(
+            render.signature.rust.as_deref(),
+            Some("render(&self, board: &Board, score: u32) -> String")
+        );
+
+        let render_role = terminal_renderer
+            .roles
+            .iter()
+            .find(|role| role.name == "string_renderer")
+            .and_then(|role| role.methods.iter().find(|method| method.name == "render"))
+            .expect("TerminalRenderer string_renderer.render");
+        assert_eq!(
+            render_role.signature.rust.as_deref(),
+            Some(
+                "render(&self, string_renderer_: &StringRenderer, board: &Board, score: u32) -> String"
+            )
+        );
+        let terminal_render = terminal_renderer
+            .functionalities
+            .iter()
+            .find(|method| method.name == "render")
+            .expect("TerminalRenderer::render");
+        assert_eq!(
+            terminal_render.signature.rust.as_deref(),
+            Some("render(&self, board: &Board, score: u32) -> anyhow::Result<()>")
+        );
     }
 }

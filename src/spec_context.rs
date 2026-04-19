@@ -77,7 +77,10 @@ pub(crate) fn load_artifact_spec_context_for_generated_file(
     }))
 }
 
-pub(crate) fn prepared_relative_for_generated_file(workspace: &Workspace, generated_file: &Path) -> Option<PathBuf> {
+pub(crate) fn prepared_relative_for_generated_file(
+    workspace: &Workspace,
+    generated_file: &Path,
+) -> Option<PathBuf> {
     let relative = generated_file
         .strip_prefix(&workspace.root)
         .unwrap_or(generated_file);
@@ -95,8 +98,15 @@ pub(crate) fn prepared_relative_for_generated_file(workspace: &Workspace, genera
     if !matches!(section, "contexts" | "projections" | "data") {
         return None;
     }
-    let stem = Path::new(parts[2]).file_stem()?.to_string_lossy().to_string();
-    Some(PathBuf::from(PREPARED_DIR).join(section).join(format!("{stem}.yml")))
+    let stem = Path::new(parts[2])
+        .file_stem()?
+        .to_string_lossy()
+        .to_string();
+    Some(
+        PathBuf::from(PREPARED_DIR)
+            .join(section)
+            .join(format!("{stem}.yml")),
+    )
 }
 
 fn resolve_draft_path(workspace: &Workspace, source_path: &str) -> PathBuf {

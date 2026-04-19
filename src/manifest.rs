@@ -21,17 +21,17 @@ pub struct CapabilityProviderInput {
 /// provider is registered, this is a no-op (the caller will surface the missing crate error).
 ///
 /// Returns `true` when a manifest change was persisted.
-pub fn ensure_external_dependency_for_type(
-    workspace: &Workspace,
-    rust_type: &str,
-) -> Result<bool> {
+pub fn ensure_external_dependency_for_type(workspace: &Workspace, rust_type: &str) -> Result<bool> {
     let trimmed = rust_type.trim();
     if !trimmed.contains("::") {
         return Ok(false);
     }
     let crate_root = trimmed.split("::").next().unwrap_or_default();
     if crate_root.is_empty()
-        || matches!(crate_root, "std" | "core" | "alloc" | "crate" | "self" | "super")
+        || matches!(
+            crate_root,
+            "std" | "core" | "alloc" | "crate" | "self" | "super"
+        )
     {
         return Ok(false);
     }
@@ -62,7 +62,9 @@ pub fn ensure_external_dependency_for_type(
         if string_field(map, "crate") != Some(crate_root) {
             continue;
         }
-        let domain = string_field(map, "domain").unwrap_or(crate_root).to_string();
+        let domain = string_field(map, "domain")
+            .unwrap_or(crate_root)
+            .to_string();
         let features = map
             .get(Value::String("features".to_string()))
             .and_then(Value::as_sequence)
@@ -122,10 +124,7 @@ pub fn ensure_external_dependency_for_type(
     Ok(true)
 }
 
-fn manifests_already_cover(
-    workspace: &Workspace,
-    input: &CapabilityProviderInput,
-) -> Result<bool> {
+fn manifests_already_cover(workspace: &Workspace, input: &CapabilityProviderInput) -> Result<bool> {
     let deps_path = workspace.drafts_dir.join("dependencies.yml");
     let deps_has_crate = if deps_path.is_file() {
         let raw = fs::read_to_string(&deps_path)
@@ -238,7 +237,8 @@ fn normalize_capability_input(input: &CapabilityProviderInput) -> Result<Capabil
     let mut external_path_prefixes = if input.external_path_prefixes.is_empty() {
         vec![inferred_prefix]
     } else {
-        input.external_path_prefixes
+        input
+            .external_path_prefixes
             .iter()
             .map(|value| normalize_prefix(value).map(str::to_string))
             .collect::<Result<Vec<_>>>()?
@@ -295,7 +295,11 @@ fn update_dependencies_manifest(
     let packages = ensure_sequence_field(mapping, "packages", path)?;
     let package = find_or_create_package(packages, path, &input.crate_name)?;
     set_string_field(package, "name", &input.crate_name);
-    set_string_field(package, "version", &render_dependency_version(input.default_features, &input.features));
+    set_string_field(
+        package,
+        "version",
+        &render_dependency_version(input.default_features, &input.features),
+    );
     merge_string_sequence(package, "capabilities", &input.capabilities, path)?;
     Ok(())
 }
@@ -335,8 +339,8 @@ fn render_dependency_version(default_features: bool, features: &[String]) -> Str
 
 fn load_yaml_or_empty(path: &Path) -> Result<Value> {
     if path.is_file() {
-        let raw =
-            fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
         serde_yaml::from_str::<Value>(&raw)
             .with_context(|| format!("Failed to parse {}", path.display()))
     } else {
@@ -351,7 +355,8 @@ fn write_yaml_document(path: &Path, document: &Value, dry_run: bool) -> Result<(
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
     fs::write(path, yaml).with_context(|| format!("Failed to write {}", path.display()))?;
     Ok(())
@@ -381,24 +386,25 @@ fn find_or_create_provider<'a>(
     domain: &str,
     crate_name: &str,
 ) -> Result<&'a mut Mapping> {
-    let existing = providers
-        .iter()
-        .position(|value| {
-            let Some(mapping) = value.as_mapping() else {
-                return false;
-            };
-            string_field(mapping, "domain") == Some(domain)
-                && string_field(mapping, "crate") == Some(crate_name)
-        });
+    let existing = providers.iter().position(|value| {
+        let Some(mapping) = value.as_mapping() else {
+            return false;
+        };
+        string_field(mapping, "domain") == Some(domain)
+            && string_field(mapping, "crate") == Some(crate_name)
+    });
     let index = if let Some(index) = existing {
         index
     } else {
         providers.push(Value::Mapping(Mapping::new()));
         providers.len() - 1
     };
-    providers[index]
-        .as_mapping_mut()
-        .ok_or_else(|| anyhow!("{} field `providers` must contain YAML mappings", path.display()))
+    providers[index].as_mapping_mut().ok_or_else(|| {
+        anyhow!(
+            "{} field `providers` must contain YAML mappings",
+            path.display()
+        )
+    })
 }
 
 fn find_or_create_package<'a>(
@@ -418,9 +424,12 @@ fn find_or_create_package<'a>(
         packages.push(Value::Mapping(Mapping::new()));
         packages.len() - 1
     };
-    packages[index]
-        .as_mapping_mut()
-        .ok_or_else(|| anyhow!("{} field `packages` must contain YAML mappings", path.display()))
+    packages[index].as_mapping_mut().ok_or_else(|| {
+        anyhow!(
+            "{} field `packages` must contain YAML mappings",
+            path.display()
+        )
+    })
 }
 
 fn merge_string_sequence(
@@ -591,16 +600,29 @@ mod tests {
         add_capability_provider(&workspace, &input, false).unwrap();
 
         let registry = fs::read_to_string(root.join("drafts/capability_registry.yml")).unwrap();
-        assert_eq!(registry.matches("domain: randomness").count(), 1, "{registry}");
+        assert_eq!(
+            registry.matches("domain: randomness").count(),
+            1,
+            "{registry}"
+        );
         assert_eq!(registry.matches("- randomness").count(), 1, "{registry}");
 
         let dependencies = fs::read_to_string(root.join("drafts/dependencies.yml")).unwrap();
-        assert_eq!(dependencies.matches("name: rand").count(), 1, "{dependencies}");
-        assert_eq!(dependencies.matches("- randomness").count(), 1, "{dependencies}");
+        assert_eq!(
+            dependencies.matches("name: rand").count(),
+            1,
+            "{dependencies}"
+        );
+        assert_eq!(
+            dependencies.matches("- randomness").count(),
+            1,
+            "{dependencies}"
+        );
 
-        let manifest: Value =
-            serde_yaml::from_str(&fs::read_to_string(root.join("drafts/types-manifest.yml")).unwrap())
-                .unwrap();
+        let manifest: Value = serde_yaml::from_str(
+            &fs::read_to_string(root.join("drafts/types-manifest.yml")).unwrap(),
+        )
+        .unwrap();
         let mapping = manifest.as_mapping().unwrap();
         let prefixes = mapping
             .get(Value::String("external_path_prefixes".to_string()))

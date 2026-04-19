@@ -3,7 +3,9 @@ use clap::{Args, Parser, Subcommand};
 use reen::build_tracker::BuildTracker;
 use reen::codegen::{ScaffoldOptions, clear_generated_outputs, scaffold_workspace};
 use reen::manifest::{CapabilityProviderInput, add_capability_provider, add_types_prefix};
-use reen::prepare::{PrepareOptions, clear_prepared_outputs, prepare_workspace};
+use reen::prepare::{
+    PrepareOptions, RefineOptions, clear_prepared_outputs, prepare_workspace, refine_workspace,
+};
 use reen::workspace::{CommandConfig, ReenConfig, Selection, Workspace};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
@@ -43,6 +45,11 @@ enum Commands {
 
     #[command(about = "Prepare per-draft YAML artifacts under drafts/prepare")]
     Prepare(PrepareArgs),
+
+    #[command(
+        about = "Review raw drafts for completeness/concreteness/ambiguity, then prepared artifacts when available"
+    )]
+    Refine(RefineArgs),
 
     #[command(about = "Generate Rust source files from prepared artifacts")]
     Scaffold(ScaffoldArgs),
@@ -102,10 +109,13 @@ struct InitArgs {
 #[derive(Subcommand, Clone)]
 enum InitCommand {
     Prepare(PrepareArgs),
+    Refine(RefineArgs),
     Scaffold(ScaffoldArgs),
     Build(BuildArgs),
     Compile,
-    Run { args: Vec<String> },
+    Run {
+        args: Vec<String>,
+    },
     Test,
     #[command(subcommand)]
     Clear(ClearCommand),
@@ -137,6 +147,38 @@ struct PrepareArgs {
     fix: bool,
 
     #[arg(help = "Optional list of draft names without file extension")]
+    names: Vec<String>,
+}
+
+#[derive(Args, Clone)]
+struct RefineArgs {
+    #[arg(long, help = "Only process context drafts/artifacts")]
+    contexts: bool,
+
+    #[arg(long, help = "Only process projection drafts/artifacts")]
+    projections: bool,
+
+    #[arg(long, help = "Only process data drafts/artifacts")]
+    data: bool,
+
+    #[arg(long, help = "Only process the app draft/artifact")]
+    app: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "prepared_only",
+        help = "Run only the raw-draft review phase"
+    )]
+    drafts_only: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "drafts_only",
+        help = "Run only the prepared-artifact review phase"
+    )]
+    prepared_only: bool,
+
+    #[arg(help = "Optional list of draft/artifact names without file extension")]
     names: Vec<String>,
 }
 
@@ -222,9 +264,7 @@ enum TypesManifestCommand {
 
 #[derive(Subcommand, Clone)]
 enum CapabilitiesManifestCommand {
-    #[command(
-        about = "Add a capability domain and allow its crate namespace under drafts/"
-    )]
+    #[command(about = "Add a capability domain and allow its crate namespace under drafts/")]
     Add {
         #[arg(help = "Capability domain, for example `randomness`")]
         domain: String,
@@ -257,6 +297,7 @@ enum CapabilitiesManifestCommand {
 #[derive(Clone)]
 enum RunnableCommand {
     Prepare(PrepareArgs),
+    Refine(RefineArgs),
     Scaffold(ScaffoldArgs),
     Build(BuildArgs),
     Compile,
@@ -295,8 +336,16 @@ fn main() -> Result<()> {
         Commands::Prepare(args) => {
             execute_command(RunnableCommand::Prepare(args), globals, &workspace, &config)?;
         }
+        Commands::Refine(args) => {
+            execute_command(RunnableCommand::Refine(args), globals, &workspace, &config)?;
+        }
         Commands::Scaffold(args) => {
-            execute_command(RunnableCommand::Scaffold(args), globals, &workspace, &config)?;
+            execute_command(
+                RunnableCommand::Scaffold(args),
+                globals,
+                &workspace,
+                &config,
+            )?;
         }
         Commands::Build(args) => {
             execute_command(RunnableCommand::Build(args), globals, &workspace, &config)?;
@@ -323,6 +372,7 @@ impl From<InitCommand> for RunnableCommand {
     fn from(value: InitCommand) -> Self {
         match value {
             InitCommand::Prepare(args) => Self::Prepare(args),
+            InitCommand::Refine(args) => Self::Refine(args),
             InitCommand::Scaffold(args) => Self::Scaffold(args),
             InitCommand::Build(args) => Self::Build(args),
             InitCommand::Compile => Self::Compile,
@@ -363,6 +413,22 @@ fn execute_command(
                 dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
             };
             prepare_workspace(workspace, &options)?;
+        }
+        RunnableCommand::Refine(args) => {
+            let selection = selection_from_effective_flags(
+                bool_setting(args.contexts, None, config.contexts),
+                bool_setting(args.projections, None, config.projections),
+                bool_setting(args.data, None, config.data),
+                bool_setting(args.app, None, config.app),
+                args.names,
+            );
+            let options = RefineOptions {
+                selection,
+                verbose: bool_setting(globals.verbose, None, config.verbose),
+                drafts_only: args.drafts_only,
+                prepared_only: args.prepared_only,
+            };
+            refine_workspace(workspace, &options)?;
         }
         RunnableCommand::Scaffold(args) => {
             let section = &config.scaffold;
@@ -436,27 +502,20 @@ fn execute_command(
             }
         },
         RunnableCommand::Clear(cmd) => match cmd {
-            ClearCommand::Prepared => {
-                clear_prepared_outputs(
-                    workspace,
-                    bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
-                )?
-            }
-            ClearCommand::Generated => {
-                clear_generated_outputs(
-                    workspace,
-                    bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
-                )?
-            }
-            ClearCommand::Built => {
-                clear_build_tracker(
-                    workspace,
-                    bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
-                )?
-            }
+            ClearCommand::Prepared => clear_prepared_outputs(
+                workspace,
+                bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
+            )?,
+            ClearCommand::Generated => clear_generated_outputs(
+                workspace,
+                bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
+            )?,
+            ClearCommand::Built => clear_build_tracker(
+                workspace,
+                bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
+            )?,
             ClearCommand::All => {
-                let dry_run =
-                    bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run);
+                let dry_run = bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run);
                 clear_prepared_outputs(workspace, dry_run)?;
                 clear_generated_outputs(workspace, dry_run)?;
                 clear_build_tracker(workspace, dry_run)?;
@@ -471,6 +530,7 @@ fn persist_init_settings(config: &mut ReenConfig, args: &InitArgs) {
     if let Some(command) = &args.command {
         let section = match command {
             InitCommand::Prepare(_) => &mut config.prepare,
+            InitCommand::Refine(_) => return,
             InitCommand::Scaffold(_) => &mut config.scaffold,
             InitCommand::Build(_) => &mut config.build,
             InitCommand::Compile => &mut config.compile,
@@ -506,6 +566,7 @@ fn apply_command_init_flags(section: &mut CommandConfig, command: &InitCommand) 
                 section.profile = Some(profile.clone());
             }
         }
+        InitCommand::Refine(_) => {}
         InitCommand::Scaffold(args) => {
             set_bool_if_requested(&mut section.contexts, args.contexts);
             set_bool_if_requested(&mut section.projections, args.projections);

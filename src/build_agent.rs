@@ -2,9 +2,11 @@ use crate::agent_runner::{AgentRequest, AgentRunner, SystemBlock};
 use crate::build_compile_agent::apply_agent_compile_fixes;
 use crate::build_tracker::{BuildTracker, hash_string};
 use crate::compile_repair::{
-    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, canonicalize_stderr_for_compare, is_structural_error,
-    parse_compile_errors, run_cargo_build,
+    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, canonicalize_stderr_for_compare,
+    is_structural_error, run_cargo_build,
 };
+use crate::prepared::PreparedArtifact;
+use crate::prepared_contracts::collect_contract_issues;
 use crate::spec_context::load_artifact_spec_context_for_generated_file;
 use crate::workspace::{GENERATED_MANIFEST, Workspace};
 use anyhow::{Context, Result, bail};
@@ -93,10 +95,16 @@ There are two distinct call shapes — do not conflate them:
 ### Implementing role method bodies — CRITICAL
 When writing the body of `fn <role>_<method>(&self, <role>_: &<RolePlayerType>, …)`:
 
-- You MAY call methods on the role player via `<role>_.<api_method>(args)` — but ONLY methods that are explicitly declared in the role player's prepared YAML (listed below under "Role player APIs"). The fact that the role method happens to share a name with a would-be role-player method does NOT mean that method exists. Check the API block.
+- You MAY call methods on the role player via `<role>_.<api_method>(args)` — but ONLY methods that are explicitly declared in the relevant prepared YAML (listed below under "Workspace type APIs"). The fact that the role method happens to share a name with a would-be role-player method does NOT mean that method exists. Check the API block.
 - If the role player does not expose what you need, you MUST NOT invent methods on it. Data types are "barely smart" and are never extended to satisfy a use case. Compose the result from the role player's real API combined with other roles, props, and role methods visible on `self`.
 - You MAY call other role methods on `self` to build up the logic: `self.<other_role>_<other_method>(&self.<other_role>, …)`.
 - Never call `.unwrap()`, `.clone()`, `.expect(...)`, or any other method on a role player unless you can point to it in that role player's spec. Primitives and std types like `Option`/`Result` follow their own rules (see the role player's Rust type).
+
+## Props and collaborators
+Props and collaborators also have authoritative API surfaces. If a prop or collaborator has a local
+workspace type, its public getters and functionalities are listed below under "Workspace type APIs".
+Do NOT invent methods on props or collaborators either. If a needed capability is absent from that
+API block, compose the behavior from the real API plus other roles, props, and role methods.
 
 ## Behavioral description in prepared YAML
 When a method has natural-language flow steps (i.e. could not be reduced to machine-readable IR),
@@ -121,6 +129,8 @@ pub fn build_workspace(workspace: &Workspace, options: &BuildOptions) -> Result<
         bail!("No scaffolded files found; run `reen scaffold` first");
     }
 
+    ensure_selected_prepared_are_ready(workspace, &options.selection)?;
+
     let manifest: GeneratedManifest = {
         let content = fs::read_to_string(&manifest_path)
             .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
@@ -130,116 +140,200 @@ pub fn build_workspace(workspace: &Workspace, options: &BuildOptions) -> Result<
 
     let allowed_files: HashSet<String> = manifest.files.iter().cloned().collect();
 
-    let sites = collect_todo_sites(workspace, &manifest)?;
-    if !sites.is_empty() {
-        let runner = AgentRunner::from_env()?;
-        let mut tracker = BuildTracker::load(&workspace.root)?;
+    run_todo_implementation_pass(workspace, options, &manifest)?;
 
-        let cached_context = build_cached_context(workspace, &manifest)?;
+    if !options.dry_run {
+        verify_project_compiles(workspace, options, &allowed_files, &manifest)?;
+    }
 
-        if options.verbose {
-            eprintln!(
-                "build-agent: {} todo site(s) to implement (model: {})",
-                sites.len(),
-                runner.model()
+    Ok(())
+}
+
+fn ensure_selected_prepared_are_ready(
+    workspace: &Workspace,
+    selection: &crate::workspace::Selection,
+) -> Result<()> {
+    let prepared_paths = workspace.prepared_paths(selection)?;
+    let mut loaded = Vec::new();
+    for path in prepared_paths {
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let mut artifact: PreparedArtifact = serde_yaml::from_str(&content)
+            .with_context(|| format!("Failed to parse prepared artifact {}", path.display()))?;
+        artifact.refresh_ambiguity_index();
+        artifact.validate()?;
+
+        if artifact.blocking_ambiguities().next().is_some() {
+            let messages = artifact
+                .blocking_ambiguities()
+                .map(|ambiguity| format!("{}: {}", ambiguity.path, ambiguity.message))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "Prepared artifact {} contains blocking ambiguities:\n{}",
+                path.display(),
+                messages
             );
         }
+        loaded.push((path, artifact));
+    }
 
-        let system_blocks = vec![
-            SystemBlock::cached(SYSTEM_PROMPT),
-            SystemBlock::cached(&cached_context),
-        ];
+    let artifacts = loaded
+        .iter()
+        .map(|(_, artifact)| artifact.clone())
+        .collect::<Vec<_>>();
+    let contract_issues = collect_contract_issues(&artifacts);
+    if !contract_issues.is_empty() {
+        let messages = contract_issues
+            .iter()
+            .map(|issue| {
+                let (path, _) = &loaded[issue.artifact_index];
+                format!(
+                    "{}: {}: {}",
+                    path.display(),
+                    issue.ambiguity.path,
+                    issue.ambiguity.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!("Prepared artifacts contain contract mismatches:\n{messages}");
+    }
+    Ok(())
+}
 
-        let mut implemented = 0usize;
-        for site in &sites {
-            let user_message = build_method_user_message(workspace, site)?;
-            let track_key = format!("build:{}:{}", site.file.display(), site.fn_signature);
-            let input_hash = hash_string(&format!(
-                "{BUILD_TRACKER_VERSION}\n{SYSTEM_PROMPT}\n{cached_context}\n{user_message}"
-            ));
-            if tracker.is_current("build", &track_key, &input_hash) {
-                if options.verbose {
-                    eprintln!("  skip {} (up to date)", site.fn_signature);
-                }
-                continue;
-            }
+/// Scan the generated manifest for `todo!()` sites and drive the LLM to replace each with a
+/// real body. Invoked both from the initial `reen build` pass and from the compile-repair
+/// loop after a `RevertBodyToTodo` fix reinserts a todo site mid-run.
+///
+/// `keys_to_invalidate` is the set of BuildTracker keys to drop before the pass starts so
+/// cached entries from an earlier run don't mask a re-prompt. The initial pass passes `None`.
+fn run_todo_implementation_pass(
+    workspace: &Workspace,
+    options: &BuildOptions,
+    manifest: &GeneratedManifest,
+) -> Result<usize> {
+    run_todo_implementation_pass_with_invalidation(workspace, options, manifest, &[])
+}
 
+fn run_todo_implementation_pass_with_invalidation(
+    workspace: &Workspace,
+    options: &BuildOptions,
+    manifest: &GeneratedManifest,
+    keys_to_invalidate: &[String],
+) -> Result<usize> {
+    let sites = collect_todo_sites(workspace, manifest)?;
+    if sites.is_empty() {
+        if options.verbose && keys_to_invalidate.is_empty() {
+            println!("No todo!() sites found — nothing to implement");
+        }
+        return Ok(0);
+    }
+
+    let runner = AgentRunner::from_env()?;
+    let mut tracker = BuildTracker::load(&workspace.root)?;
+    for key in keys_to_invalidate {
+        tracker.clear_key(key);
+    }
+
+    let cached_context = build_cached_context(workspace, manifest)?;
+
+    if options.verbose {
+        eprintln!(
+            "build-agent: {} todo site(s) to implement (model: {})",
+            sites.len(),
+            runner.model()
+        );
+    }
+
+    let system_blocks = vec![
+        SystemBlock::cached(SYSTEM_PROMPT),
+        SystemBlock::cached(&cached_context),
+    ];
+
+    let mut implemented = 0usize;
+    for site in &sites {
+        let user_message = build_method_user_message(workspace, site)?;
+        let track_key = format!("build:{}:{}", site.file.display(), site.fn_signature);
+        let input_hash = hash_string(&format!(
+            "{BUILD_TRACKER_VERSION}\n{SYSTEM_PROMPT}\n{cached_context}\n{user_message}"
+        ));
+        if tracker.is_current("build", &track_key, &input_hash) {
             if options.verbose {
-                eprintln!("  implementing {} ...", site.fn_signature);
+                eprintln!("  skip {} (up to date)", site.fn_signature);
             }
+            continue;
+        }
 
-            if options.dry_run {
-                continue;
+        if options.verbose {
+            eprintln!("  implementing {} ...", site.fn_signature);
+        }
+
+        if options.dry_run {
+            continue;
+        }
+
+        let body = runner.run(&AgentRequest {
+            system: system_blocks.clone(),
+            user_content: &user_message,
+            temperature: 0.2,
+            max_tokens: 4096,
+        })?;
+
+        let body = strip_code_fences(&body);
+        if is_self_recursive_body(&body, &site.fn_signature) {
+            if options.verbose {
+                eprintln!(
+                    "  rejecting self-recursive body for {}; re-prompting with warning",
+                    site.fn_signature
+                );
             }
-
+            let retry_message = format!(
+                "{user_message}\n\nIMPORTANT: Your previous attempt produced a body that \
+                 simply calls the same method it is implementing (`self.<same name>(...)`), \
+                 which would cause infinite recursion. Re-read the draft and prepared YAML: \
+                 the method's body MUST be implemented in terms of role methods \
+                 (named `<role>_<method>` on `self`), fields on `self`, or collaborator \
+                 methods — never the function being implemented itself."
+            );
             let body = runner.run(&AgentRequest {
                 system: system_blocks.clone(),
-                user_content: &user_message,
+                user_content: &retry_message,
                 temperature: 0.2,
                 max_tokens: 4096,
             })?;
-
             let body = strip_code_fences(&body);
             if is_self_recursive_body(&body, &site.fn_signature) {
                 if options.verbose {
                     eprintln!(
-                        "  rejecting self-recursive body for {}; re-prompting with warning",
+                        "  still recursive after retry; leaving todo!() in place for {}",
                         site.fn_signature
                     );
                 }
-                let retry_message = format!(
-                    "{user_message}\n\nIMPORTANT: Your previous attempt produced a body that \
-                     simply calls the same method it is implementing (`self.<same name>(...)`), \
-                     which would cause infinite recursion. Re-read the draft and prepared YAML: \
-                     the method's body MUST be implemented in terms of role methods \
-                     (named `<role>_<method>` on `self`), fields on `self`, or collaborator \
-                     methods — never the function being implemented itself."
-                );
-                let body = runner.run(&AgentRequest {
-                    system: system_blocks.clone(),
-                    user_content: &retry_message,
-                    temperature: 0.2,
-                    max_tokens: 4096,
-                })?;
-                let body = strip_code_fences(&body);
-                if is_self_recursive_body(&body, &site.fn_signature) {
-                    if options.verbose {
-                        eprintln!(
-                            "  still recursive after retry; leaving todo!() in place for {}",
-                            site.fn_signature
-                        );
-                    }
-                    continue;
-                }
-                replace_todo_in_file(&site.file, &site.todo_marker, &body)?;
-            } else {
-                replace_todo_in_file(&site.file, &site.todo_marker, &body)?;
+                continue;
             }
-
-            tracker.update("build", track_key, input_hash);
-            implemented += 1;
-
-            if options.verbose {
-                eprintln!("  wrote body for {}", site.fn_signature);
-            }
+            replace_todo_in_file(&site.file, &site.todo_marker, &body)?;
+        } else {
+            replace_todo_in_file(&site.file, &site.todo_marker, &body)?;
         }
 
-        if !options.dry_run {
-            tracker.save(&workspace.root)?;
-        }
+        tracker.update("build", track_key, input_hash);
+        implemented += 1;
 
         if options.verbose {
-            eprintln!("build-agent: implemented {} method(s)", implemented);
+            eprintln!("  wrote body for {}", site.fn_signature);
         }
-    } else if options.verbose {
-        println!("No todo!() sites found — nothing to implement");
     }
 
     if !options.dry_run {
-        verify_project_compiles(workspace, options, &allowed_files)?;
+        tracker.save(&workspace.root)?;
     }
 
-    Ok(())
+    if options.verbose {
+        eprintln!("build-agent: implemented {} method(s)", implemented);
+    }
+
+    Ok(implemented)
 }
 
 fn build_method_user_message(workspace: &Workspace, site: &TodoSite) -> Result<String> {
@@ -258,7 +352,7 @@ fn build_method_user_message(workspace: &Workspace, site: &TodoSite) -> Result<S
     }
 
     if let Some(role_player_api_block) = render_role_player_api_block(workspace, &site.file)? {
-        user_message.push_str("# Role player APIs (authoritative — do not invent methods)\n\n");
+        user_message.push_str("# Workspace type APIs (authoritative — do not invent methods)\n\n");
         user_message.push_str(&role_player_api_block);
     }
 
@@ -268,7 +362,7 @@ fn build_method_user_message(workspace: &Workspace, site: &TodoSite) -> Result<S
 /// Gather the real public APIs of every role player referenced by the enclosing artifact so the
 /// LLM can see which methods actually exist on each collaborator. Returns `None` if the generated
 /// file doesn't map to an artifact or the artifact has no roles/collaborators.
-fn render_role_player_api_block(
+pub(crate) fn render_role_player_api_block(
     workspace: &Workspace,
     generated_file: &Path,
 ) -> Result<Option<String>> {
@@ -291,16 +385,21 @@ fn render_role_player_api_block(
         Err(_) => return Ok(None),
     };
 
-    // Collect (role_field_name, rust_type) entries from roles + collaborators.
-    let mut role_types: Vec<(String, String)> = Vec::new();
+    // Collect (binding kind, binding name, rust_type) entries from roles + collaborators + props.
+    let mut role_types: Vec<(&str, String, String)> = Vec::new();
     for role in &artifact.roles {
         if let Some(ty) = role.type_status.rust() {
-            role_types.push((role.name.clone(), ty.to_string()));
+            role_types.push(("Role", role.name.clone(), ty.to_string()));
         }
     }
     for collab in &artifact.collaborators {
         if let Some(ty) = collab.type_status.rust() {
-            role_types.push((collab.name.clone(), ty.to_string()));
+            role_types.push(("Collaborator", collab.name.clone(), ty.to_string()));
+        }
+    }
+    for prop in &artifact.props {
+        if let Some(ty) = prop.type_status.rust() {
+            role_types.push(("Prop", prop.name.clone(), ty.to_string()));
         }
     }
     if role_types.is_empty() {
@@ -313,16 +412,12 @@ fn render_role_player_api_block(
     let all_artifacts = load_all_prepared_artifacts(&prepared_dir)?;
 
     let mut out = String::new();
-    let mut seen = HashSet::new();
-    for (role_name, rust_type) in &role_types {
+    for (binding_kind, role_name, rust_type) in &role_types {
         // Strip borrows and generic wrappers to get the export name we can match on.
         let simple = simple_export_name(rust_type);
         let Some(simple) = simple else {
             continue;
         };
-        if !seen.insert(simple.clone()) {
-            continue;
-        }
         let Some(target) = all_artifacts
             .iter()
             .find(|artifact| artifact.export.name == simple)
@@ -331,7 +426,7 @@ fn render_role_player_api_block(
         };
 
         out.push_str(&format!(
-            "## Role `{role_name}` → `{rust_type}`\n\n"
+            "## {binding_kind} `{role_name}` → `{rust_type}`\n\n"
         ));
         let methods = summarize_public_methods(target);
         if methods.is_empty() {
@@ -339,7 +434,7 @@ fn render_role_player_api_block(
                 "_(No public methods declared on this type. Do not call any methods on it.)_\n\n",
             );
         } else {
-            out.push_str("Allowed public methods (call ONLY these on the role player):\n");
+            out.push_str("Allowed public methods (call ONLY these on this binding):\n");
             for sig in methods {
                 out.push_str(&format!("- `{sig}`\n"));
             }
@@ -407,11 +502,7 @@ fn summarize_public_methods(artifact: &crate::prepared::PreparedArtifact) -> Vec
         let params = method
             .parameters
             .iter()
-            .filter_map(|p| {
-                p.type_status
-                    .rust()
-                    .map(|ty| format!("{}: {}", p.name, ty))
-            })
+            .filter_map(|p| p.type_status.rust().map(|ty| format!("{}: {}", p.name, ty)))
             .collect::<Vec<_>>()
             .join(", ");
         let head = if params.is_empty() {
@@ -435,10 +526,7 @@ fn load_all_prepared_artifacts(
     Ok(out)
 }
 
-fn walk_prepared_dir(
-    dir: &Path,
-    out: &mut Vec<crate::prepared::PreparedArtifact>,
-) -> Result<()> {
+fn walk_prepared_dir(dir: &Path, out: &mut Vec<crate::prepared::PreparedArtifact>) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("Failed to read {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
@@ -463,6 +551,7 @@ fn verify_project_compiles(
     workspace: &Workspace,
     options: &BuildOptions,
     manifest_files: &HashSet<String>,
+    manifest: &GeneratedManifest,
 ) -> Result<()> {
     let mut result = run_cargo_build(workspace)?;
     if result.success {
@@ -477,6 +566,7 @@ fn verify_project_compiles(
     }
 
     let mut last_stderr = result.stderr;
+    let mut last_diagnostics = result.diagnostics;
     let mut last_canonical = canonicalize_stderr_for_compare(&last_stderr);
     let mut stuck_rounds: u32 = 0;
     for round in 1..=COMPILE_FIX_MAX_ROUNDS {
@@ -498,19 +588,46 @@ fn verify_project_compiles(
             );
         }
 
-        let fixes = parse_compile_errors(workspace, &last_stderr);
+        // Union rustc's own structured `suggested_replacement` patches with the string-match
+        // parsers. The two passes cover disjoint error families (rustc suggests casts and
+        // trait imports; string-match handles `.unwrap()` on plain `T`, borrow conflicts,
+        // parse errors, …), so a "prefer JSON, else fall back" layering would silently hide
+        // the second family whenever *any* JSON suggestion was present. See
+        // `collect_all_compile_fixes` for the full rationale.
+        let fixes =
+            crate::compile_repair::collect_all_compile_fixes(workspace, &last_stderr, &last_diagnostics);
         let round_action = if !fixes.is_empty() {
             if options.verbose {
-                eprintln!(
-                    "  deterministic: applying {} fix(es)",
-                    fixes.len()
-                );
+                eprintln!("  deterministic: applying {} fix(es)", fixes.len());
             }
+            let mut revert_keys = Vec::new();
             for fix in &fixes {
                 apply_compile_fix(workspace, fix)?;
                 if options.verbose {
                     eprintln!("    {}", fix.description());
                 }
+                if let crate::compile_repair::CompileFix::RevertBodyToTodo { file, .. } = fix {
+                    // Gather every todo site back from the file so we can pass the exact
+                    // tracker keys to `run_todo_implementation_pass_with_invalidation`.
+                    // The new todo marker will be re-found on rescan below; we just need
+                    // every key that points at this file to be invalidated.
+                    revert_keys.push(file.display().to_string());
+                }
+            }
+            if !revert_keys.is_empty() {
+                if options.verbose {
+                    eprintln!(
+                        "  todo re-implementation: {} file(s) had bodies reverted",
+                        revert_keys.len()
+                    );
+                }
+                let keys_to_clear = collect_tracker_keys_for_files(workspace, &revert_keys)?;
+                let _ = run_todo_implementation_pass_with_invalidation(
+                    workspace,
+                    options,
+                    manifest,
+                    &keys_to_clear,
+                )?;
             }
             "deterministic"
         } else {
@@ -524,6 +641,7 @@ fn verify_project_compiles(
                 workspace,
                 manifest_files,
                 &last_stderr,
+                &last_diagnostics,
                 &runner,
                 options.verbose,
             )?;
@@ -544,6 +662,7 @@ fn verify_project_compiles(
             return Ok(());
         }
         let new_stderr = result.stderr;
+        let new_diagnostics = result.diagnostics;
         let new_canonical = canonicalize_stderr_for_compare(&new_stderr);
         let new_error_count = count_compile_errors(&new_stderr);
         if new_canonical == last_canonical {
@@ -571,6 +690,7 @@ fn verify_project_compiles(
             }
         }
         last_stderr = new_stderr;
+        last_diagnostics = new_diagnostics;
         last_canonical = new_canonical;
     }
 
@@ -594,6 +714,34 @@ fn count_compile_errors(stderr: &str) -> usize {
 #[derive(Debug, Deserialize, Serialize)]
 struct GeneratedManifest {
     files: Vec<String>,
+}
+
+/// Given a set of workspace-relative file paths that just had `RevertBodyToTodo` applied,
+/// enumerate the tracker keys (`build:<file>:<fn_signature>`) for every function inside
+/// those files. The compile-repair loop uses this to invalidate cache entries before rerunning
+/// the build-agent so the LLM gets re-prompted rather than skipping the site.
+fn collect_tracker_keys_for_files(
+    workspace: &Workspace,
+    relative_files: &[String],
+) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    for relative in relative_files {
+        let path = workspace.root.join(relative);
+        if !path.is_file() {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains("fn ") && trimmed.ends_with('{') {
+                keys.push(format!("build:{}:{}", path.display(), trimmed));
+            }
+        }
+    }
+    Ok(keys)
 }
 
 fn collect_todo_sites(
@@ -746,8 +894,8 @@ pub(crate) fn render_dependency_context(workspace: &Workspace) -> Result<String>
     if !path.is_file() {
         return Ok(String::new());
     }
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
     let value: serde_yaml::Value = match serde_yaml::from_str(&raw) {
         Ok(v) => v,
         Err(_) => return Ok(String::new()),
@@ -762,7 +910,9 @@ pub(crate) fn render_dependency_context(workspace: &Workspace) -> Result<String>
 
     let mut crates: Vec<(String, String)> = Vec::new();
     for pkg in packages {
-        let Some(map) = pkg.as_mapping() else { continue };
+        let Some(map) = pkg.as_mapping() else {
+            continue;
+        };
         let name = map
             .get(serde_yaml::Value::String("name".to_string()))
             .and_then(serde_yaml::Value::as_str)
@@ -1253,7 +1403,9 @@ mod tests {
         fs::create_dir_all(dir.join("drafts/prepare/data")).unwrap();
         fs::create_dir_all(dir.join("drafts/prepare/projections")).unwrap();
         fs::create_dir_all(dir.join("src/projections")).unwrap();
-        fs::write(dir.join("drafts/prepare/data/Board.yml"), r#"schema: reen.prepare/v1
+        fs::write(
+            dir.join("drafts/prepare/data/Board.yml"),
+            r#"schema: reen.prepare/v1
 source:
   path: data/Board.md
   kind: data
@@ -1281,7 +1433,9 @@ getters:
 - name: height
   field: height
   mode: copy
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         fs::write(
             dir.join("drafts/prepare/projections/string_renderer.yml"),
             r#"schema: reen.prepare/v1
@@ -1350,6 +1504,89 @@ roles:
         assert!(
             !block.contains("symbol_at"),
             "symbol_at must NOT appear because Board does not declare it: {block}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workspace_type_api_block_includes_props() {
+        let dir = std::env::temp_dir().join(format!(
+            "reen_prop_api_block_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("drafts/prepare/data")).unwrap();
+        fs::create_dir_all(dir.join("drafts/prepare/contexts")).unwrap();
+        fs::create_dir_all(dir.join("src/contexts")).unwrap();
+        fs::write(
+            dir.join("drafts/prepare/data/Board.yml"),
+            r#"schema: reen.prepare/v1
+source:
+  path: data/Board.md
+  kind: data
+  title: Board
+export:
+  name: Board
+mutable: false
+fields:
+- name: width
+  meaning: Width
+  type:
+    status: resolved
+    rust: u32
+    source: test
+- name: height
+  meaning: Height
+  type:
+    status: resolved
+    rust: u32
+    source: test
+getters:
+- name: width
+  field: width
+  mode: copy
+- name: height
+  field: height
+  mode: copy
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("drafts/prepare/contexts/game_loop.yml"),
+            r#"schema: reen.prepare/v1
+source:
+  path: contexts/game_loop.md
+  kind: context
+  title: GameLoopContext
+export:
+  name: GameLoopContext
+mutable: true
+props:
+- name: board
+  meaning: Base board picture
+  type:
+    status: resolved
+    rust: Board
+    source: test
+  notes: []
+"#,
+        )
+        .unwrap();
+        let workspace = crate::workspace::Workspace::discover(dir.clone()).unwrap();
+        let generated = dir.join("src/contexts/game_loop.rs");
+        let block = render_role_player_api_block(&workspace, &generated)
+            .unwrap()
+            .expect("expected a block when a prop uses a local type");
+        assert!(
+            block.contains("Prop `board` → `Board`"),
+            "block should name the prop: {block}"
+        );
+        assert!(
+            block.contains("fn width(&self) -> u32"),
+            "block should list getter methods for prop types: {block}"
         );
         let _ = fs::remove_dir_all(&dir);
     }

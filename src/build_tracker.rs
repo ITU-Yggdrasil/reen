@@ -57,6 +57,13 @@ impl BuildTracker {
     pub fn clear_stage(&mut self, stage: &str) {
         self.entries.retain(|_, entry| entry.stage != stage);
     }
+
+    /// Drop a single tracker entry by its key (regardless of stage). Used by the compile-repair
+    /// loop when it reverts a method body back to `todo!()` and wants the next build-agent pass
+    /// to rerun the LLM for that site rather than hitting the cache.
+    pub fn clear_key(&mut self, key: &str) {
+        self.entries.remove(key);
+    }
 }
 
 pub fn hash_string(input: &str) -> String {

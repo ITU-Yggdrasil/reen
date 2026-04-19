@@ -8,23 +8,75 @@ export:
 mutable: false
 fields:
 - name: width
-  meaning: Width of the rectangular board
+  meaning: Width of the rectangular board picture
   type:
-    status: defaulted
+    status: resolved
     rust: u32
-    source: scalar_default
+    source: draft_hint
   getter_accessible: true
   notes:
-  - Positive whole number
+  - Type `u32`; positive whole number
 - name: height
-  meaning: Height of the rectangular board
+  meaning: Height of the rectangular board picture
   type:
-    status: defaulted
+    status: resolved
     rust: u32
-    source: scalar_default
+    source: draft_hint
   getter_accessible: true
   notes:
-  - Positive whole number
+  - Type `u32`; positive whole number
+- name: cells
+  meaning: Symbol stored at each visible coordinate
+  type:
+    status: resolved
+    rust: std::collections::HashMap<Position, char>
+    source: draft_hint
+  getter_accessible: false
+  notes:
+  - Type `std::collections::HashMap<Position, char>`; contains every in-bounds visible coordinate exactly once
+functionalities:
+- name: symbol_at
+  signature:
+    status: resolved
+    rust: 'symbol_at(&self, x: u32, y: u32) -> char'
+    source: draft.functionality
+  receiver: '&self'
+  parameters:
+  - name: x
+    type:
+      status: resolved
+      rust: u32
+      source: draft.functionality
+  - name: y
+    type:
+      status: resolved
+      rust: u32
+      source: draft.functionality
+  returns:
+    status: resolved
+    rust: char
+    source: draft.functionality
+- name: with_symbol_at
+  signature:
+    status: resolved
+    rust: 'with_symbol_at(&self, position: Position, symbol: char) -> Board'
+    source: draft.functionality
+  receiver: '&self'
+  parameters:
+  - name: position
+    type:
+      status: resolved
+      rust: Position
+      source: draft.functionality
+  - name: symbol
+    type:
+      status: resolved
+      rust: char
+      source: draft.functionality
+  returns:
+    status: resolved
+    rust: Board
+    source: draft.functionality
 getters:
 - name: width
   field: width
@@ -37,7 +89,10 @@ constructor:
 invariants:
 - '`width` must be greater than `0`.'
 - '`height` must be greater than `0`.'
-- Cells where `x == 0`, `y == 0`, `x == width - 1`, or `y == height - 1` are wall cells.
+- '`cells` contains one entry for every coordinate where `0 <= x < width` and `0 <= y < height`.'
+- '`cells` contains no entry outside those bounds.'
+- Cells where `x == 0`, `y == 0`, `x == width - 1`, or `y == height - 1` may contain wall symbols.
+- Interior cells may contain blank space, snake symbols, or food symbols depending on the current frame.
 derives:
 - Clone
 - Debug

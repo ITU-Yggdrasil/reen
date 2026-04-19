@@ -1,12 +1,13 @@
 use crate::build_tracker::{BuildTracker, hash_string};
 use crate::compile_repair::{
-    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, canonicalize_stderr_for_compare, is_structural_error,
-    parse_compile_errors, run_cargo_build,
+    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, canonicalize_stderr_for_compare,
+    is_structural_error, run_cargo_build,
 };
 use crate::prepared::{
-    Ambiguity, Body, CollectionEntry, Expression, FieldSpec, GetterSpec, MethodSpec, PreparedArtifact,
-    Statement,
+    Ambiguity, Body, CollectionEntry, Expression, FieldSpec, GetterSpec, MethodSpec,
+    PreparedArtifact, Statement,
 };
+use crate::prepared_contracts::collect_contract_issues;
 use crate::workspace::{GENERATED_MANIFEST, Workspace};
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -184,6 +185,7 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
 
     let max_rounds = COMPILE_FIX_MAX_ROUNDS;
     let mut last_stderr = result.stderr;
+    let mut last_diagnostics = result.diagnostics;
     let mut last_canonical = canonicalize_stderr_for_compare(&last_stderr);
     let mut stuck_rounds: u32 = 0;
     for round in 1..=max_rounds {
@@ -203,7 +205,8 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
             );
         }
 
-        let fixes = parse_compile_errors(workspace, &last_stderr);
+        let fixes =
+            crate::compile_repair::collect_all_compile_fixes(workspace, &last_stderr, &last_diagnostics);
         if fixes.is_empty() {
             eprint!("{}", last_stderr);
             bail!("Generated project failed to compile but no auto-fixable errors were found");
@@ -224,14 +227,13 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
             return Ok(());
         }
         let new_stderr = result.stderr;
+        let new_diagnostics = result.diagnostics;
         let new_canonical = canonicalize_stderr_for_compare(&new_stderr);
         let new_error_count = count_compile_errors_text(&new_stderr);
         if new_canonical == last_canonical {
             stuck_rounds += 1;
             if options.verbose {
-                eprintln!(
-                    "  no progress after fix(es) (stuck round {stuck_rounds})"
-                );
+                eprintln!("  no progress after fix(es) (stuck round {stuck_rounds})");
             }
             if stuck_rounds >= 3 {
                 eprint!("{}", new_stderr);
@@ -248,6 +250,7 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
             }
         }
         last_stderr = new_stderr;
+        last_diagnostics = new_diagnostics;
         last_canonical = new_canonical;
     }
     eprint!("{}", last_stderr);
@@ -270,10 +273,7 @@ fn count_compile_errors_text(stderr: &str) -> usize {
 /// Called only when `scaffold --fix` is in effect; failures here are soft — we only log and
 /// continue, since the subsequent `collect_required_dependencies` check still produces the
 /// authoritative error if a crate remains unregistered.
-fn ensure_manifests_cover_prepared(
-    workspace: &Workspace,
-    loaded: &[LoadedArtifact],
-) -> Result<()> {
+fn ensure_manifests_cover_prepared(workspace: &Workspace, loaded: &[LoadedArtifact]) -> Result<()> {
     let mut seen_roots: BTreeSet<String> = BTreeSet::new();
     for item in loaded {
         let artifact = &item.artifact;
@@ -285,7 +285,10 @@ fn ensure_manifests_cover_prepared(
             }
             let root = trimmed.split("::").next().unwrap_or_default().to_string();
             if root.is_empty()
-                || matches!(root.as_str(), "std" | "core" | "alloc" | "crate" | "self" | "super")
+                || matches!(
+                    root.as_str(),
+                    "std" | "core" | "alloc" | "crate" | "self" | "super"
+                )
             {
                 continue;
             }
@@ -447,6 +450,28 @@ fn validate_loaded_artifacts(loaded: &[LoadedArtifact]) -> Result<()> {
                 name
             );
         }
+    }
+
+    let artifacts = loaded
+        .iter()
+        .map(|item| item.artifact.clone())
+        .collect::<Vec<_>>();
+    let contract_issues = collect_contract_issues(&artifacts);
+    if !contract_issues.is_empty() {
+        let rendered = contract_issues
+            .iter()
+            .map(|issue| {
+                let item = &loaded[issue.artifact_index];
+                format!(
+                    "{}: {}: {}",
+                    item.prepared_path.display(),
+                    issue.ambiguity.path,
+                    issue.ambiguity.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        bail!("Prepared artifacts contain contract mismatches:\n{rendered}");
     }
     Ok(())
 }
@@ -984,7 +1009,7 @@ fn generate_app_file(
     export_kinds: &BTreeMap<String, String>,
     library_crate: &str,
 ) -> Result<String> {
-    let imports = render_imports(artifact, export_kinds, library_crate);
+    let imports = render_app_imports(artifact, export_kinds, library_crate);
     let mut out = String::new();
     if !imports.is_empty() {
         out.push_str(&imports);
@@ -1398,6 +1423,36 @@ fn render_imports(
     format!("use {}::{{{}}};\n", root, imports.join(", "))
 }
 
+/// Imports for the generated `src/main.rs`.
+///
+/// The `app` artifact is the top-level orchestrator: its flow prose cannot enumerate every type
+/// that its implementation will transitively reference (e.g. a return type of a collaborator
+/// method such as `game_loop_context.tick() -> PlayerState`). To give the implementation agent
+/// unambiguous access to the domain — and to avoid `E0433: use of undeclared type` errors after
+/// the body is filled in — we import every library-crate export from the generated library.
+fn render_app_imports(
+    artifact: &PreparedArtifact,
+    export_kinds: &BTreeMap<String, String>,
+    library_crate: &str,
+) -> String {
+    let mut imports = export_kinds
+        .iter()
+        .filter(|(name, kind)| {
+            kind.as_str() != "app" && name.as_str() != artifact.export.name.as_str()
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    imports.sort();
+    if imports.is_empty() {
+        return String::new();
+    }
+    format!(
+        "#[allow(unused_imports)]\nuse {}::{{{}}};\n",
+        library_crate,
+        imports.join(", ")
+    )
+}
+
 fn package_name(root: &Path) -> String {
     let base = root
         .file_name()
@@ -1559,7 +1614,10 @@ fn method_doc_lines(method: &MethodSpec, role_name: Option<&str>) -> Vec<String>
             parts.push(format!("types={}", references.types.join(", ")));
         }
         if !references.role_methods.is_empty() {
-            parts.push(format!("role_methods={}", references.role_methods.join(", ")));
+            parts.push(format!(
+                "role_methods={}",
+                references.role_methods.join(", ")
+            ));
         }
         if !parts.is_empty() {
             lines.push(format!("References: {}.", parts.join("; ")));
@@ -1785,7 +1843,11 @@ fn main() {
 
         let rendered = generate_data_file(&artifact, &BTreeMap::new()).unwrap();
 
-        assert_eq!(rendered.matches("pub fn game_started").count(), 1, "{rendered}");
+        assert_eq!(
+            rendered.matches("pub fn game_started").count(),
+            1,
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -1837,6 +1899,8 @@ fn main() {
         assert!(rendered.contains("/// Expected behavior: Translates keys into user actions."));
         assert!(rendered.contains("/// Flow:"));
         assert!(rendered.contains("/// - Read the next action from command."));
-        assert!(rendered.contains("/// References: roles=command; types=PlayerState; role_methods=command_next_action."));
+        assert!(rendered.contains(
+            "/// References: roles=command; types=PlayerState; role_methods=command_next_action."
+        ));
     }
 }

@@ -17,13 +17,9 @@ roles:
   methods:
   - name: body
     signature:
-      status: fixed
-      rust: 'body(&self, snake_: &Snake) -> std::collections::VecDeque<Position>'
-      source: fix.agent
-      reason: role method `body` on role `snake` has no explicit signature
-      evidence:
-      - section: Role Methods / snake
-        text: Returns the snake positions in order, with the head first.
+      status: resolved
+      rust: 'body(&self, snake_: &Snake) -> &Vec<Position>'
+      source: prepare.signature
     receiver: '&self'
     parameters:
     - name: snake_
@@ -33,8 +29,18 @@ roles:
         source: prepare.role_player
     returns:
       status: resolved
-      rust: std::collections::VecDeque<Position>
-      source: fix.agent
+      rust: '&Vec<Position>'
+      source: prepare.signature
+    body:
+      steps:
+      - op: return
+        expr:
+          op: call_instance_method
+          receiver:
+            op: var
+            name: snake_
+          method: body
+          args: []
   - name: direction
     signature:
       status: fixed
@@ -116,9 +122,6 @@ roles:
     status: fixed
     rust: rand::rngs::ThreadRng
     source: fix.agent
-    candidates:
-    - rand::rngs::StdRng
-    - rand::rngs::SmallRng
     reason: no nominal concrete Rust type could be inferred for `food_dropper`
     evidence:
     - section: food_dropper
@@ -160,13 +163,9 @@ roles:
   methods:
   - name: score
     signature:
-      status: fixed
+      status: resolved
       rust: 'score(&self, game_state_: &GameState) -> u32'
-      source: fix.agent
-      reason: role method `score` on role `game_state` has no explicit signature
-      evidence:
-      - section: Role Methods / game_state
-        text: Returns the current score.
+      source: prepare.signature
     receiver: '&self'
     parameters:
     - name: game_state_
@@ -177,16 +176,22 @@ roles:
     returns:
       status: resolved
       rust: u32
-      source: fix.agent
+      source: prepare.signature
+    body:
+      steps:
+      - op: return
+        expr:
+          op: call_instance_method
+          receiver:
+            op: var
+            name: game_state_
+          method: score
+          args: []
   - name: food
     signature:
-      status: fixed
-      rust: 'food(&self, game_state_: &GameState) -> Option<Position>'
-      source: fix.agent
-      reason: role method `food` on role `game_state` has no explicit signature
-      evidence:
-      - section: Role Methods / game_state
-        text: Returns the current food placement, if any.
+      status: resolved
+      rust: 'food(&self, game_state_: &GameState) -> Option<Food>'
+      source: prepare.signature
     receiver: '&self'
     parameters:
     - name: game_state_
@@ -196,8 +201,18 @@ roles:
         source: prepare.role_player
     returns:
       status: resolved
-      rust: Option<Position>
-      source: fix.agent
+      rust: Option<Food>
+      source: prepare.signature
+    body:
+      steps:
+      - op: return
+        expr:
+          op: call_instance_method
+          receiver:
+            op: var
+            name: game_state_
+          method: food
+          args: []
   - name: game_started_ms
     signature:
       status: fixed
@@ -268,13 +283,13 @@ roles:
         text: Returns the same game state with a different food placement.
 props:
 - name: board
-  meaning: Playfield size and wall boundaries
+  meaning: Base board picture for the current round
   type:
     status: resolved
     rust: Board
     source: name_match
   notes:
-  - The outer ring of the board is treated as walls
+  - The outer ring of the board is treated as walls. `board` is the reusable board picture whose walls and empty interior are overlaid with snake and food for the current tick.
 functionalities:
 - name: new
   signature:
@@ -303,9 +318,6 @@ functionalities:
       status: fixed
       rust: rand::rngs::ThreadRng
       source: fix.agent
-      candidates:
-      - rand::rngs::StdRng
-      - rand::rngs::SmallRng
       reason: no nominal concrete Rust type could be inferred for `food_dropper`
       evidence:
       - section: food_dropper
@@ -355,49 +367,46 @@ functionalities:
             name: board
 - name: current_board
   signature:
-    status: fixed
-    rust: current_board(&self) -> std::collections::HashMap<Position, char>
-    source: fix.agent
-    reason: functionality `current_board` is missing a parseable signature
-    evidence:
-    - section: Functionalities / current_board
-      text: Create an empty map from `Position` to `char` (`std::collections::HashMap<Position, char>`). For each boundary cell of `board`, set the symbol to `w`. For each unoccupied interior cell, set the symbol to a space. For each cell in the snake body, set the symbol to `s`. If food exists in `game_state`, set the food cell's symbol to `f`. Return the completed map.
+    status: resolved
+    rust: current_board(&self) -> Board
+    source: prepare.signature
   receiver: '&self'
   returns:
     status: resolved
-    rust: std::collections::HashMap<Position, char>
-    source: fix.agent
+    rust: Board
+    source: prepare.signature
   flow:
-  - Create an empty map from `Position` to `char` (`std::collections::HashMap<Position, char>`).
-  - For each boundary cell of `board`, set the symbol to `w`.
-  - For each unoccupied interior cell, set the symbol to a space.
-  - For each cell in the snake body, set the symbol to `s`.
-  - If food exists in `game_state`, set the food cell's symbol to `f`.
-  - Return the completed map.
+  - 'Signature: `current_board(&self) -> Board`'
+  - Let `board_picture` be a clone of `board`.
+  - For each `Position` in the snake body, reassign `board_picture` to the result of `board_picture.with_symbol_at(position, 's')`. Do not attempt to mutate `board_picture` in place; `Board` is an immutable value and exposes no in-place setter — `with_symbol_at` is the only way to produce an overlaid board picture.
+  - If `game_state.food()` is `Some(food)`, reassign `board_picture` to `board_picture.with_symbol_at(food.position(), 'f')`.
+  - Return `board_picture`.
+  guarantee:
+  - The returned `Board` is the complete rendered board picture for the current tick. It is derived from the base `board` prop together with `snake` and `game_state`, and every snake body cell and food cell in the returned board shows `s` or `f` respectively.
   references:
     roles:
     - game_state
+    - snake
     props:
     - board
 - name: get_score
   signature:
-    status: fixed
+    status: resolved
     rust: get_score(&self) -> u32
-    source: fix.agent
-    reason: functionality `get_score` is missing a parseable signature
-    evidence:
-    - section: Functionalities / get_score
-      text: Return the score from `game_state`.
+    source: prepare.signature
   receiver: '&self'
   returns:
     status: resolved
     rust: u32
-    source: fix.agent
-  flow:
-  - Return the score from `game_state`.
-  references:
-    roles:
-    - game_state
+    source: prepare.signature
+  body:
+    steps:
+    - op: return
+      expr:
+        op: call_role_method
+        role: game_state
+        method: score
+        args: []
 - name: tick
   signature:
     status: fixed
@@ -439,34 +448,3 @@ functionalities:
     - game_state
 invariants:
 - GameLoopContext owns the game rules for steering, movement, collision
-ambiguities:
-- path: roles[0].methods[0].body
-  severity: info
-  message: method `body` body is missing
-- path: roles[0].methods[1].body
-  severity: info
-  message: method `direction` body is missing
-- path: roles[1].methods[0].body
-  severity: info
-  message: method `capture` body is missing
-- path: roles[1].methods[1].body
-  severity: info
-  message: method `next_action` body is missing
-- path: roles[2].methods[0].body
-  severity: info
-  message: method `drop` body is missing
-- path: roles[3].methods[0].body
-  severity: info
-  message: method `score` body is missing
-- path: roles[3].methods[1].body
-  severity: info
-  message: method `food` body is missing
-- path: roles[3].methods[2].body
-  severity: info
-  message: method `game_started_ms` body is missing
-- path: roles[3].methods[3].body
-  severity: info
-  message: method `with_score` body is missing
-- path: roles[3].methods[4].body
-  severity: info
-  message: method `with_food_placement` body is missing

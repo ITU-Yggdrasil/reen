@@ -504,7 +504,10 @@ fn current_value_status<'a>(
         return prepared.props.get(idx).map(|prop| &prop.type_status);
     }
     if let Some(idx) = parse_single_index(path, "collaborators", "type") {
-        return prepared.collaborators.get(idx).map(|item| &item.type_status);
+        return prepared
+            .collaborators
+            .get(idx)
+            .map(|item| &item.type_status);
     }
     if let Some(idx) = parse_single_index(path, "roles", "type") {
         return prepared.roles.get(idx).map(|role| &role.type_status);
@@ -534,7 +537,10 @@ fn current_value_status<'a>(
             .map(|param| &param.type_status);
     }
     if let Some(idx) = parse_single_index(path, "functionalities", "signature") {
-        return prepared.functionalities.get(idx).map(|method| &method.signature);
+        return prepared
+            .functionalities
+            .get(idx)
+            .map(|method| &method.signature);
     }
     if let Some(idx) = parse_single_index(path, "functionalities", "returns") {
         return prepared
@@ -668,8 +674,7 @@ fn role_signature_has_unplumbable_param(
     path: &str,
     prepared: &PreparedArtifact,
 ) -> bool {
-    let Some((_role_idx, _method_idx)) =
-        parse_double_index(path, "roles", "methods", "signature")
+    let Some((_role_idx, _method_idx)) = parse_double_index(path, "roles", "methods", "signature")
     else {
         return false;
     };
@@ -693,15 +698,16 @@ fn role_signature_has_unplumbable_param(
         let Some((name, _)) = part.split_once(':') else {
             continue;
         };
-        let name = name.trim().trim_start_matches('&').trim().trim_end_matches('_');
+        let name = name
+            .trim()
+            .trim_start_matches('&')
+            .trim()
+            .trim_end_matches('_');
         let normalized = name.to_ascii_lowercase();
         if normalized.is_empty() || normalized == "self" {
             continue;
         }
-        if normalized.len() == 1
-            || normalized.starts_with('_')
-            || normalized.starts_with("arg")
-        {
+        if normalized.len() == 1 || normalized.starts_with('_') || normalized.starts_with("arg") {
             continue;
         }
         if plumbable.iter().any(|candidate| candidate == &normalized) {

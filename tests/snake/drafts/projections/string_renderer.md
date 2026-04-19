@@ -17,21 +17,41 @@ It is the canonical formatter for the visible game frame.
 ### Board
 
 - **width**
+  Signature: `width(&self) -> u32`
   Returns the number of columns in the picture.
 
 - **height**
+  Signature: `height(&self) -> u32`
   Returns the number of rows in the picture.
 
 - **symbol_at**
+  Signature: `symbol_at(&self, x: u32, y: u32) -> char`
   Returns the symbol to show at a given coordinate.
 
 ## Props
 
 | Prop | Meaning | Notes |
 |---|---|---|
-| score | Score shown below the board | Same score the user sees during play |
+| score | Score shown below the board | Type `u32`; same score the user sees during play |
 
 ## Functionalities
+
+### new
+
+| Started by | Uses | Result |
+|---|---|---|
+| application startup or TerminalRenderer | board, score | a string renderer ready to produce frames is created |
+
+**Flow:**
+1. Signature: `new(board: Board, score: u32) -> Self`
+2. Store `board` as the role player the renderer will query for on-screen symbols.
+3. Store `score` as the prop appended below the rendered board on every frame.
+
+**Guarantee:** Construction captures only the provided renderer state; no other collaborators are fetched, inferred, or mutated.
+
+| Given | When | Then |
+|---|---|---|
+| a board and a score of 12 | new is called | a string renderer bound to that board and score 12 is created |
 
 ### render
 
@@ -40,13 +60,14 @@ It is the canonical formatter for the visible game frame.
 | TerminalRenderer or the application | board, score | one text frame is returned |
 
 **Flow:**
-1. Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`).
-2. Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`.
-3. Append a newline character after each row.
-4. After the last row, append the score line `Score: <score>` followed by a newline.
-5. Return the complete string.
+1. Signature: `render(&self, board: &Board, score: u32) -> String`
+2. Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`).
+3. Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`.
+4. Append a newline character after each row.
+5. After the last row, append the score line `Score: <score>` followed by a newline.
+6. Return the complete string.
 
-**Guarantee:** The renderer reads symbols from `board` and `score`; it does not decide what belongs in any cell.
+**Guarantee:** The renderer reads symbols from the supplied `board` and `score`; it does not decide what belongs in any cell.
 
 | Given | When | Then |
 |---|---|---|

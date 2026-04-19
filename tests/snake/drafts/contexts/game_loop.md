@@ -20,6 +20,7 @@ replacement, and pacing from one tick to the next.
 ### snake
 
 - **body**
+  Signature: `body(&self) -> &Vec<Position>`
   Returns the snake positions in order, with the head first.
 
 - **direction**
@@ -43,9 +44,11 @@ replacement, and pacing from one tick to the next.
 ### game_state
 
 - **score**
+  Signature: `score(&self) -> u32`
   Returns the current score.
 
 - **food**
+  Signature: `food(&self) -> Option<Food>`
   Returns the current food placement, if any.
 
 - **game_started_ms**
@@ -61,7 +64,7 @@ replacement, and pacing from one tick to the next.
 
 | Prop | Meaning | Notes |
 |---|---|---|
-| board | Playfield size and wall boundaries | The outer ring of the board is treated as walls |
+| board | Base board picture for the current round | The outer ring of the board is treated as walls. `board` is the reusable board picture whose walls and empty interior are overlaid with snake and food for the current tick. |
 
 ## Functionalities
 
@@ -69,34 +72,39 @@ replacement, and pacing from one tick to the next.
 
 | Started by | Uses | Result |
 |---|---|---|
-| application startup | board, snake, command, food_dropper, game_state | game loop context is created |
+| application startup | board, snake, command, food_dropper, game_state | game loop context is created with an initial food placement chosen by the food dropper |
 
 **Flow:**
-1. Store the provided board, snake, command stream, food dropper, and game state as collaborators.
+1. Signature: `new(snake: Snake, command: CommandInputContext, food_dropper: rand::rngs::ThreadRng, game_state: GameState, board: Board) -> Self`
+2. Construct a mutable local context value `ctx` that stores the provided `board`, `snake`, `command`, `food_dropper`, and `game_state` in the corresponding fields exactly as supplied (the `game_state` passed in is expected to have no food placement yet — the caller is not responsible for picking initial food).
+3. Ask the food dropper for an initial food position by invoking the `food_dropper.drop()` role method on `ctx` (the same role method that `tick` uses in step 11 to replace food after the snake eats — the initial food placement is chosen with exactly the same logic).
+4. If step 3 returned `Some(position)`, replace `ctx.game_state` with `ctx.game_state.place_food(Some(Food::new(position)))`. If step 3 returned `None` (the board has no free interior cell — effectively impossible at the start of a normal round), leave `ctx.game_state` unchanged so the round starts with no food on the board.
+5. Return `ctx`.
 
-**Guarantee:** Input comes exclusively from the shared command stream; no separate stream is created.
+**Guarantee:** Input comes exclusively from the shared command stream; no separate stream is created. The `game_state` stored on the returned context reflects an initial food placement chosen by the food dropper — the caller does not place initial food itself, and the `Option<Food>` the caller put on the incoming `game_state` is overwritten by step 4 when the food dropper returns a position.
 
 | Given | When | Then |
 |---|---|---|
-| board, snake, shared input, food dropper, and game state are available | new is called | a game loop context is created with those collaborators |
+| board, snake, shared input, food dropper, and a game state with no food are available | new is called | a game loop context is created and its stored game state has a food placement on a free interior cell when one exists |
 
 ### current_board
 
 | Started by | Uses | Result |
 |---|---|---|
-| renderer or caller | board, snake, game_state | a picture of the current board is returned |
+| renderer or caller | board, snake, game_state | a `Board` representing the current board picture is returned |
 
 **Flow:**
-1. Create an empty map from `Position` to `char` (`std::collections::HashMap<Position, char>`).
-2. For each boundary cell of `board`, set the symbol to `w`.
-3. For each unoccupied interior cell, set the symbol to a space.
-4. For each cell in the snake body, set the symbol to `s`.
-5. If food exists in `game_state`, set the food cell's symbol to `f`.
-6. Return the completed map.
+1. Signature: `current_board(&self) -> Board`
+2. Let `board_picture` be a clone of `board`.
+3. For each `Position` in the snake body, reassign `board_picture` to the result of `board_picture.with_symbol_at(position, 's')`. Do not attempt to mutate `board_picture` in place; `Board` is an immutable value and exposes no in-place setter — `with_symbol_at` is the only way to produce an overlaid board picture.
+4. If `game_state.food()` is `Some(food)`, reassign `board_picture` to `board_picture.with_symbol_at(food.position(), 'f')`.
+5. Return `board_picture`.
+
+**Guarantee:** The returned `Board` is the complete rendered board picture for the current tick. It is derived from the base `board` prop together with `snake` and `game_state`, and every snake body cell and food cell in the returned board shows `s` or `f` respectively.
 
 | Given | When | Then |
 |---|---|---|
-| a round with walls, snake cells, and food | current_board is called | the returned picture shows `w`, space, `s`, and `f` in the correct places |
+| a round with walls, snake cells, and food | current_board is called | the returned `Board` shows `w`, space, `s`, and `f` in the correct places |
 
 ### get_score
 
@@ -105,7 +113,8 @@ replacement, and pacing from one tick to the next.
 | renderer or caller | game_state | current score is returned |
 
 **Flow:**
-1. Return the score from `game_state`.
+1. Signature: `get_score(&self) -> u32`
+2. Return `game_state.score()`.
 
 | Given | When | Then |
 |---|---|---|

@@ -26,7 +26,7 @@ roles:
   - name: read_available
     signature:
       status: resolved
-      rust: 'read_available(&self, stdin_source_: std::io::Stdin) -> Vec<crossterm::event::KeyEvent>'
+      rust: 'read_available(&self, stdin_source_: &std::io::Stdin) -> Vec<crossterm::event::KeyEvent>'
       source: prepare.canonical
       reason: role method `read_available` on role `stdin_source` has no explicit signature
       evidence:
@@ -36,13 +36,9 @@ roles:
     parameters:
     - name: stdin_source_
       type:
-        status: fixed
-        rust: std::io::Stdin
+        status: resolved
+        rust: '&std::io::Stdin'
         source: fix.agent
-        reason: role method `read_available` is waiting for role `stdin_source` to resolve
-        evidence:
-        - section: Role Methods / stdin_source
-          text: Returns all currently available key presses in arrival order without waiting.
     returns:
       status: fixed
       rust: Vec<crossterm::event::KeyEvent>
@@ -191,7 +187,3 @@ functionalities:
     - buffer
 invariants:
 - '`next_action` returns user actions. The game loop decides how a movement'
-ambiguities:
-- path: roles[0].methods[0].body
-  severity: info
-  message: method `read_available` body is missing

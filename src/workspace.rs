@@ -175,8 +175,8 @@ impl Workspace {
         if !path.is_file() {
             return Ok(ReenConfig::default());
         }
-        let raw =
-            fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
         let config = serde_yaml::from_str(&raw)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
         Ok(config)
@@ -238,6 +238,24 @@ impl Workspace {
             .join(PREPARED_DIR)
             .join(under_drafts)
             .with_extension("yml"))
+    }
+
+    pub fn matching_prepared_paths_for_raw(
+        &self,
+        raw_draft_paths: &[PathBuf],
+    ) -> Result<Vec<PathBuf>> {
+        let mut paths = raw_draft_paths
+            .iter()
+            .filter_map(|path| self.prepared_output_path(path).ok())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    pub fn refine_report_path(&self) -> PathBuf {
+        self.state_dir.join("refine").join("report.md")
     }
 }
 

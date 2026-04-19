@@ -17,13 +17,9 @@ roles:
   methods:
   - name: render
     signature:
-      status: fixed
+      status: resolved
       rust: 'render(&self, string_renderer_: &StringRenderer, board: &Board, score: u32) -> String'
-      source: fix.agent
-      reason: role method `render` on role `string_renderer` has no explicit signature
-      evidence:
-      - section: Role Methods / string_renderer
-        text: Formats the current board picture and score as one text frame.
+      source: prepare.signature
     receiver: '&self'
     parameters:
     - name: string_renderer_
@@ -35,64 +31,102 @@ roles:
       type:
         status: resolved
         rust: '&Board'
-        source: fix.agent
+        source: prepare.signature
     - name: score
       type:
         status: resolved
         rust: u32
-        source: fix.agent
+        source: prepare.signature
     returns:
       status: resolved
       rust: String
-      source: fix.agent
+      source: prepare.signature
+    body:
+      steps:
+      - op: return
+        expr:
+          op: call_instance_method
+          receiver:
+            op: var
+            name: string_renderer_
+          method: render
+          args:
+          - op: var
+            name: board
+          - op: var
+            name: score
 props:
 - name: screen
   meaning: Visible terminal area where the frame is shown
   type:
-    status: fixed
+    status: resolved
     rust: std::io::Stdout
-    source: fix.agent
-    candidates:
-    - crossterm::terminal::Terminal<std::io::Stdout>
-    reason: no concrete Rust type could be inferred for `screen`
-    evidence:
-    - section: screen
-      text: Visible terminal area where the frame is shown
-    - section: screen
-      text: The same screen is updated from one frame to the next
+    source: draft_hint
   notes:
-  - The same screen is updated from one frame to the next
+  - Type `std::io::Stdout`; the same screen is updated from one frame to the next
 functionalities:
+- name: new
+  signature:
+    status: resolved
+    rust: 'new(string_renderer: StringRenderer, screen: std::io::Stdout) -> Self'
+    source: prepare.auto
+  parameters:
+  - name: string_renderer
+    type:
+      status: resolved
+      rust: StringRenderer
+      source: name_match
+  - name: screen
+    type:
+      status: resolved
+      rust: std::io::Stdout
+      source: draft_hint
+  returns:
+    status: resolved
+    rust: Self
+    source: prepare.auto
+  body:
+    steps:
+    - op: return
+      expr:
+        op: construct_struct
+        type_name: Self
+        fields:
+        - name: string_renderer
+          expr:
+            op: var
+            name: string_renderer
+        - name: screen
+          expr:
+            op: var
+            name: screen
 - name: render
   signature:
-    status: fixed
-    rust: 'render(&mut self, board: &Board, score: u32) -> anyhow::Result<()>'
-    source: fix.agent
-    reason: functionality `render` is missing a parseable signature
-    evidence:
-    - section: Functionalities / render
-      text: Ask `string_renderer` to format the current board picture and score as one text frame. Move the terminal cursor to the home position (top-left) on `screen`. Write the returned frame text to `screen`, left-aligned line by line. Flush `screen` so the frame appears immediately.
-  receiver: '&mut self'
+    status: resolved
+    rust: 'render(&self, board: &Board, score: u32) -> anyhow::Result<()>'
+    source: prepare.signature
+  receiver: '&self'
   parameters:
   - name: board
     type:
       status: resolved
       rust: '&Board'
-      source: fix.agent
+      source: prepare.signature
   - name: score
     type:
       status: resolved
       rust: u32
-      source: fix.agent
+      source: prepare.signature
   returns:
     status: resolved
     rust: anyhow::Result<()>
-    source: fix.agent
+    source: prepare.signature
   flow:
+  - 'Signature: `render(&self, board: &Board, score: u32) -> anyhow::Result<()>`'
   - Ask `string_renderer` to format the current board picture and score as one text frame.
-  - Move the terminal cursor to the home position (top-left) on `screen`.
-  - Write the returned frame text to `screen`, left-aligned line by line.
-  - Flush `screen` so the frame appears immediately.
+  - Split the frame text into rows on the `'\n'` character. Empty rows (including any trailing one produced by a final `'\n'`) are skipped.
+  - For each row, starting at row index `0` and incrementing per row, position the cursor at column `0` of that row on `screen` using `crossterm::cursor::MoveTo(0, row)` and then write the row's characters. This makes every row begin at column `0` even when the terminal is in raw mode (where a bare `'\n'` does not return the cursor to column `0`).
+  - After all rows have been written, flush `screen` so the frame appears immediately.
   extensions:
   - 2a. The terminal supports the home escape sequence → the previously shown frame is overwritten in place without visible flicker.
   references:
@@ -100,7 +134,3 @@ functionalities:
     - string_renderer
     props:
     - screen
-ambiguities:
-- path: roles[0].methods[0].body
-  severity: info
-  message: method `render` body is missing

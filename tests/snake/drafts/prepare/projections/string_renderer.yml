@@ -17,13 +17,9 @@ roles:
   methods:
   - name: width
     signature:
-      status: fixed
-      rust: 'width(&self, board_: &Board) -> usize'
-      source: fix.agent
-      reason: role method `width` on role `Board` has no explicit signature
-      evidence:
-      - section: Role Methods / Board
-        text: Returns the number of columns in the picture.
+      status: resolved
+      rust: 'width(&self, board_: &Board) -> u32'
+      source: prepare.signature
     receiver: '&self'
     parameters:
     - name: board_
@@ -33,17 +29,23 @@ roles:
         source: prepare.role_player
     returns:
       status: resolved
-      rust: usize
-      source: fix.agent
+      rust: u32
+      source: prepare.signature
+    body:
+      steps:
+      - op: return
+        expr:
+          op: call_instance_method
+          receiver:
+            op: var
+            name: board_
+          method: width
+          args: []
   - name: height
     signature:
-      status: fixed
-      rust: 'height(&self, board_: &Board) -> usize'
-      source: fix.agent
-      reason: role method `height` on role `Board` has no explicit signature
-      evidence:
-      - section: Role Methods / Board
-        text: Returns the number of rows in the picture.
+      status: resolved
+      rust: 'height(&self, board_: &Board) -> u32'
+      source: prepare.signature
     receiver: '&self'
     parameters:
     - name: board_
@@ -53,17 +55,23 @@ roles:
         source: prepare.role_player
     returns:
       status: resolved
-      rust: usize
-      source: fix.agent
+      rust: u32
+      source: prepare.signature
+    body:
+      steps:
+      - op: return
+        expr:
+          op: call_instance_method
+          receiver:
+            op: var
+            name: board_
+          method: height
+          args: []
   - name: symbol_at
     signature:
-      status: fixed
-      rust: 'symbol_at(&self, board_: &Board, x: usize, y: usize) -> char'
-      source: fix.agent
-      reason: role method `symbol_at` on role `Board` has no explicit signature
-      evidence:
-      - section: Role Methods / Board
-        text: Returns the symbol to show at a given coordinate.
+      status: resolved
+      rust: 'symbol_at(&self, board_: &Board, x: u32, y: u32) -> char'
+      source: prepare.signature
     receiver: '&self'
     parameters:
     - name: board_
@@ -74,70 +82,108 @@ roles:
     - name: x
       type:
         status: resolved
-        rust: usize
-        source: fix.agent
+        rust: u32
+        source: prepare.signature
     - name: y
       type:
         status: resolved
-        rust: usize
-        source: fix.agent
+        rust: u32
+        source: prepare.signature
     returns:
       status: resolved
       rust: char
-      source: fix.agent
+      source: prepare.signature
+    body:
+      steps:
+      - op: return
+        expr:
+          op: call_instance_method
+          receiver:
+            op: var
+            name: board_
+          method: symbol_at
+          args:
+          - op: var
+            name: x
+          - op: var
+            name: y
 props:
 - name: score
   meaning: Score shown below the board
   type:
-    status: fixed
+    status: resolved
     rust: u32
-    source: fix.agent
-    candidates:
-    - i32
-    - usize
-    reason: no concrete Rust type could be inferred for `score`
-    evidence:
-    - section: score
-      text: Score shown below the board
-    - section: score
-      text: Same score the user sees during play
+    source: draft_hint
   notes:
-  - Same score the user sees during play
+  - Type `u32`; same score the user sees during play
 functionalities:
+- name: new
+  signature:
+    status: resolved
+    rust: 'new(board: Board, score: u32) -> Self'
+    source: prepare.auto
+  parameters:
+  - name: board
+    type:
+      status: resolved
+      rust: Board
+      source: name_match
+  - name: score
+    type:
+      status: resolved
+      rust: u32
+      source: draft_hint
+  returns:
+    status: resolved
+    rust: Self
+    source: prepare.auto
+  body:
+    steps:
+    - op: return
+      expr:
+        op: construct_struct
+        type_name: Self
+        fields:
+        - name: board
+          expr:
+            op: var
+            name: board
+        - name: score
+          expr:
+            op: var
+            name: score
 - name: render
   signature:
-    status: fixed
-    rust: render(&self) -> String
-    source: fix.agent
-    reason: functionality `render` is missing a parseable signature
-    evidence:
-    - section: Functionalities / render
-      text: 'Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`). Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`. Append a newline character after each row. After the last row, append the score line `Score: <score>` followed by a newline. Return the complete string.'
+    status: resolved
+    rust: 'render(&self, board: &Board, score: u32) -> String'
+    source: prepare.signature
   receiver: '&self'
+  parameters:
+  - name: board
+    type:
+      status: resolved
+      rust: '&Board'
+      source: prepare.signature
+  - name: score
+    type:
+      status: resolved
+      rust: u32
+      source: prepare.signature
   returns:
     status: resolved
     rust: String
-    source: fix.agent
+    source: prepare.signature
   flow:
+  - 'Signature: `render(&self, board: &Board, score: u32) -> String`'
   - Iterate rows from top (y = 0) to bottom (y = `board.height() - 1`).
   - Within each row, iterate columns from left (x = 0) to right (x = `board.width() - 1`), appending the symbol returned by `board.symbol_at(x, y)`.
   - Append a newline character after each row.
   - 'After the last row, append the score line `Score: <score>` followed by a newline.'
   - Return the complete string.
   guarantee:
-  - The renderer reads symbols from `board` and `score`; it does not decide what belongs in any cell.
+  - The renderer reads symbols from the supplied `board` and `score`; it does not decide what belongs in any cell.
   references:
     roles:
     - board
     props:
     - score
-ambiguities:
-- path: roles[0].methods[0].body
-  severity: info
-  message: method `width` body is missing
-- path: roles[0].methods[1].body
-  severity: info
-  message: method `height` body is missing
-- path: roles[0].methods[2].body
-  severity: info
-  message: method `symbol_at` body is missing
