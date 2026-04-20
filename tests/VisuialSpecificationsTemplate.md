@@ -47,11 +47,6 @@ The visual identity of [insert company name]:
                 Font size is 14px.
                 Font weight is 400.
                 Line height is 20px.
-
-    Spacing:
-        The base unit of spacing is 8px, meaning spacing changes in 8px increments across brand compositions.
-        The scale steps are increments of 8px: 8, 16, 24, 32, and so on.
-
     Iconography:
         Short description of icon
         The icon size is 24px for standard use.

@@ -4061,12 +4061,7 @@ fn determine_implementation_output_path(
 ) -> Result<PathBuf> {
     let relative_path = relative_specification_path(context_file, specifications_dir)?;
 
-    if relative_path
-        .components()
-        .next()
-        .and_then(|component| component.as_os_str().to_str())
-        == Some("brands")
-    {
+    if is_brand_spec_path(context_file, specifications_dir) {
         return Ok(PathBuf::from("Cargo.toml"));
     }
 
@@ -4304,6 +4299,16 @@ Problem:
     fn determine_implementation_output_path_maps_brand_specs_to_scaffold_tracking_file() {
         let path = determine_implementation_output_path(
             Path::new("specifications/brands/acme.md"),
+            "specifications",
+        )
+        .expect("implementation path");
+        assert_eq!(path, Path::new("Cargo.toml"));
+    }
+
+    #[test]
+    fn determine_implementation_output_path_maps_visual_brand_specs_to_scaffold_tracking_file() {
+        let path = determine_implementation_output_path(
+            Path::new("specifications/visuals/snake_visuals.md"),
             "specifications",
         )
         .expect("implementation path");
@@ -4973,7 +4978,6 @@ pub fn app() {}
     fn ignores_layout_specific_blockers_for_visual_identity_specs() {
         let section = r#"
 - **Layout Margins:** No values specified for layout margins.
-- **Gutters and Container Spacing:** No values specified for gutters or container spacing.
 - **Grid System:** No grid system or columns defined.
 - **Breakpoints:** No breakpoints defined for responsive design.
 - **Container Widths and Padding:** No values specified for container widths or padding.

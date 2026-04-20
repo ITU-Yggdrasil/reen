@@ -104,7 +104,7 @@ The system automatically selects the appropriate agent based on the file's locat
 **Characteristics**:
 - Outputs a structured markdown specification with a fixed section order
 - Defines reusable visual primitives
-- Covers colors, typography, spacing, iconography, motion, and layout
+- Covers colors, typography, imagery, iconography, motion, and layout
 - Is implementation-independent and component-independent
 - Serves as the authoritative token source for downstream specs
 - Surfaces missing required primitive families as explicit blocking ambiguities
@@ -115,7 +115,6 @@ The system automatically selects the appropriate agent based on the file's locat
 - `## Brand Metadata`
 - `## Color Tokens`
 - `## Typography`
-- `## Spacing System`
 - `## Iconography`
 - `## Motion`
 - `## Layout Principles`
