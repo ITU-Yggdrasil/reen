@@ -1,4 +1,4 @@
-## TestCompany â€” Brand Identity
+## TestCompany - Brand Identity
 
 ### Brand Overview
 

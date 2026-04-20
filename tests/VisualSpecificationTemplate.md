@@ -1,4 +1,4 @@
-# [Company Name] â€” Brand Identity
+# [Company Name] - Brand Identity
 
 ## Brand Overview
 
