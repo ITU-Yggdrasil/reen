@@ -6,13 +6,6 @@ TestCompany is defined by clarity, simplicity, and confidence. Its visual and ve
 
 The brand avoids unnecessary complexity and focuses on delivering a clean and consistent experience across all touchpoints.
 
----
-
-### Audience and Positioning
-
-TestCompany speaks to a broad, modern audience that values simplicity, efficiency, and clarity. The brand is positioned as reliable, accessible, and forward-thinking.
-
-It avoids overly technical, decorative, or exclusive expressions, instead focusing on being easy to understand and approachable to a wide range of users.
 
 ---
 
@@ -72,6 +65,14 @@ Visuals should feel:
 * Easy to understand
 
 Avoid overly busy, decorative, or abstract imagery that distracts from the message.
+
+---
+
+### Optional: Audience and Positioning
+
+TestCompany speaks to a broad, modern audience that values simplicity, efficiency, and clarity. The brand is positioned as reliable, accessible, and forward-thinking.
+
+It avoids overly technical, decorative, or exclusive expressions, instead focusing on being easy to understand and approachable to a wide range of users.
 
 ---
 
