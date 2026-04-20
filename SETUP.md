@@ -8,6 +8,18 @@ Ensure you have Rust installed. If not, install from [rustup.rs](https://rustup.
 ### 2. Environment Variables
 Reen loads provider credentials from your shell environment or a `.env` file in the project tree.
 
+### 3. Leptos support
+Ensure you have Leptos installed. If not, install from [github.com/leptos-rs] https://github.com/leptos-rs/cargo-leptos or follow these steps:
+
+To install: <br>
+`cargo install --locked cargo-leptos`
+
+Check it was downloaded properly: <br>
+`cargo leptos -V` 
+
+Add the WASM target:  <br>
+`rustup target add wasm32-unknown-unknown`
+
 ## LLM Provider Setup
 
 ### Ollama (Recommended - Local, No API Key Required)
