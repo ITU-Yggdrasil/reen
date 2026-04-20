@@ -2,7 +2,7 @@
 
 ## Brand Overview
 
-[Write 2â€“4 sentences describing the overall essence of the brand.  
+[Write 2-4 sentences describing the overall essence of the brand.  
 Focus on how it should feel and what makes it distinct.  
 Avoid technical or implementation details.]
 
@@ -15,13 +15,13 @@ Avoid technical or implementation details.]
 
 ### Tone Guidelines
 
-- [Guideline 1 â€” e.g., Clear and concise]
-- [Guideline 2 â€” e.g., Friendly but professional]
+- [Guideline 1 e.g., Clear and concise]
+- [Guideline 2 e.g., Friendly but professional]
 - [Guideline 3]
 
 ### Avoid
 
-- [What the tone should NOT be â€” e.g., overly technical, playful, formal]
+- [What the tone should NOT be e.g., overly technical, playful, formal]
 
 [Optional: Add a short example sentence that reflects the tone.]
 
@@ -46,7 +46,7 @@ Include general rules such as:
 [Describe the overall color approach.]
 
 Include:
-- Core colors (describe them, avoid naming like â€œprimary/secondaryâ€)  
+- Core colors (describe them, avoid naming like primary/secondary)  
 - How colors should be used (e.g., dominant vs. accent)  
 - Any supporting colors and when to use them  
 
