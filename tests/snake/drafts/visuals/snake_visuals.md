@@ -1,27 +1,10 @@
-## TestCompany — Brand Identity
+## TestCompany â€” Brand Identity
 
 ### Brand Overview
 
 TestCompany is defined by clarity, simplicity, and confidence. Its visual and verbal expression prioritizes ease of understanding, strong contrast, and a modern, approachable presence.
 
 The brand avoids unnecessary complexity and focuses on delivering a clean and consistent experience across all touchpoints.
-
----
-
-### Mission, Vision, Values
-
-**Mission**
-To deliver clear, accessible, and effective solutions through thoughtful design and communication.
-
-**Vision**
-To be recognized as a brand that stands for simplicity, clarity, and modern usability.
-
-**Values**
-
-* Clarity over complexity
-* Consistency across experiences
-* Accessibility and inclusivity
-* Purposeful design
 
 ---
 
@@ -50,7 +33,7 @@ Avoid overly playful, exaggerated, or complex language. The tone should feel nat
 ### Logo and Color System
 
 **Logo**
-The TestCompany icon is a simple, stylized “T” contained within a circle. It should be used consistently and without alteration.
+The TestCompany icon is a simple, stylized â€œTâ€ contained within a circle. It should be used consistently and without alteration.
 
 * Maintain clear space around the logo to ensure visibility
 * Do not distort, rotate, or decorate the mark
@@ -92,7 +75,7 @@ Avoid overly busy, decorative, or abstract imagery that distracts from the messa
 
 ---
 
-### Usage Guidelines and Examples
+### Optional: Usage Guidelines and Examples
 
 The TestCompany identity should always be applied with consistency and restraint.
 
@@ -107,5 +90,19 @@ Examples of correct usage should demonstrate clean layouts, balanced composition
 
 Incorrect usage includes cluttered layouts, low contrast, excessive decoration, or inconsistent typography.
 
-        
-    
+---
+
+### Optional: Mission, Vision, Values
+
+**Mission**
+To deliver clear, accessible, and effective solutions through thoughtful design and communication.
+
+**Vision**
+To be recognized as a brand that stands for simplicity, clarity, and modern usability.
+
+**Values**
+
+* Clarity over complexity
+* Consistency across experiences
+* Accessibility and inclusivity
+* Purposeful design

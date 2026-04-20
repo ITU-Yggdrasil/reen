@@ -1,29 +1,10 @@
-# [Company Name] — Brand Identity
+# [Company Name] â€” Brand Identity
 
 ## Brand Overview
 
-[Write 2–4 sentences describing the overall essence of the brand.  
+[Write 2â€“4 sentences describing the overall essence of the brand.  
 Focus on how it should feel and what makes it distinct.  
 Avoid technical or implementation details.]
-
----
-
-## Mission, Vision, Values
-
-### Mission
-[What does the company do, and for whom? Keep it concise.]
-
-### Vision
-[What long-term impact or future does the company aim to create?]
-
-### Values
-[List 3–5 core principles that guide decisions and behavior.]
-
-- [Value 1]
-- [Value 2]
-- [Value 3]
-- [Optional Value 4]
-- [Optional Value 5]
 
 ---
 
@@ -42,17 +23,17 @@ Avoid overly detailed segmentation or marketing jargon.
 
 ## Personality and Tone of Voice
 
-[Describe the brand’s personality in a few words or a short paragraph.]
+[Describe the brandâ€™s personality in a few words or a short paragraph.]
 
 ### Tone Guidelines
 
-- [Guideline 1 — e.g., Clear and concise]
-- [Guideline 2 — e.g., Friendly but professional]
+- [Guideline 1 â€” e.g., Clear and concise]
+- [Guideline 2 â€” e.g., Friendly but professional]
 - [Guideline 3]
 
 ### Avoid
 
-- [What the tone should NOT be — e.g., overly technical, playful, formal]
+- [What the tone should NOT be â€” e.g., overly technical, playful, formal]
 
 [Optional: Add a short example sentence that reflects the tone.]
 
@@ -77,7 +58,7 @@ Include general rules such as:
 [Describe the overall color approach.]
 
 Include:
-- Core colors (describe them, avoid naming like “primary/secondary”)  
+- Core colors (describe them, avoid naming like â€œprimary/secondaryâ€)  
 - How colors should be used (e.g., dominant vs. accent)  
 - Any supporting colors and when to use them  
 
@@ -111,7 +92,7 @@ Consider:
 
 ---
 
-## Usage Guidelines and Examples
+## Optional: Usage Guidelines and Examples
 
 [Explain how the identity should be applied overall.]
 
@@ -121,13 +102,32 @@ Consider:
 - [Best practice 2]
 - [Best practice 3]
 
-### Don’t
+### Donâ€™t
 
 - [Common mistake 1]
 - [Common mistake 2]
 - [Common mistake 3]
 
 [Optional: Describe what good vs. bad usage looks like in practice.]
+
+---
+
+## Optional: Mission, Vision, Values
+
+### Mission
+[Optional: What does the company do, and for whom? Keep it concise.]
+
+### Vision
+[Optional: What long-term impact or future does the company aim to create?]
+
+### Values
+[Optional: List 3â€“5 core principles that guide decisions and behavior.]
+
+- [Value 1]
+- [Value 2]
+- [Value 3]
+- [Optional Value 4]
+- [Optional Value 5]
 
 ---
 
