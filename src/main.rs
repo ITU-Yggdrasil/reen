@@ -144,8 +144,14 @@ enum CreateCommands {
         max_fix_attempts: u32,
     },
 
-    #[command(about = "Create implementation from context files")]
+    #[command(
+        about = "Create implementation from context files",
+        alias = "implementations"
+    )]
     Implementation {
+        #[arg(long, help = "Only process drafts from the visuals/ folder")]
+        visuals: bool,
+    
         #[arg(
             long,
             help = "When compilation fails after code generation, invoke the automatic compilation-fix loop"
@@ -169,6 +175,8 @@ enum CreateCommands {
         names: Vec<String>,
     },
 }
+
+
 
 #[derive(Args)]
 struct CreateArgs {
@@ -259,6 +267,7 @@ async fn main() -> Result<()> {
                     .await?;
                 }
                 CreateCommands::Implementation {
+                    visuals,
                     fix,
                     max_compile_fix_attempts,
                     names,
@@ -267,7 +276,7 @@ async fn main() -> Result<()> {
                         contexts: create_args.contexts,
                         data: create_args.data,
                         brands: create_args.brands,
-                        visuals: false,
+                        visuals,
                     };
                     cli::create_implementation(
                         names,
