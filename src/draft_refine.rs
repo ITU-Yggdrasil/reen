@@ -14,12 +14,6 @@ pub enum DraftReviewCategory {
     Completeness,
     Concreteness,
     Ambiguity,
-    /// Semantic under-specification surfaced by the LLM-backed behavioral review phase.
-    ///
-    /// These are *questions* the model wants answered in the draft — they sort last so that
-    /// structural issues (missing sections, vague phrasing, symbolic ambiguity) are addressed
-    /// first.
-    BehavioralAmbiguity,
 }
 
 impl DraftReviewCategory {
@@ -28,7 +22,6 @@ impl DraftReviewCategory {
             Self::Completeness => "completeness",
             Self::Concreteness => "concreteness",
             Self::Ambiguity => "ambiguity",
-            Self::BehavioralAmbiguity => "behavioral ambiguity",
         }
     }
 }
@@ -39,10 +32,9 @@ pub struct DraftReviewFinding {
     pub source_line: Option<usize>,
     pub category: DraftReviewCategory,
     pub message: String,
-    /// LLM-assigned severity score (0..=100) for `BehavioralAmbiguity` findings.
-    ///
-    /// `None` for deterministic findings produced by `review_raw_drafts`. Higher scores mean a
-    /// larger risk that an implementer would guess wrong without a draft clarification.
+    /// Severity score (0..=100). `None` for deterministic findings produced by
+    /// `review_raw_drafts`. Reserved for future use; LLM-backed severity scoring was removed in
+    /// Phase 0 and may return as part of the Claude Code refine surface.
     pub severity: Option<u8>,
 }
 
@@ -1766,70 +1758,6 @@ App.
     }
 
     #[test]
-    fn sort_and_dedup_orders_behavioral_ambiguity_after_other_categories() {
-        // Within the same (path, line) tuple, deterministic categories should print before
-        // the LLM-sourced behavioral-ambiguity category. This protects the "fix structural
-        // gaps first, then answer questions" flow from being re-ordered by accident.
-        let mut findings = vec![
-            finding(
-                "drafts/data/Position.md",
-                Some(12),
-                DraftReviewCategory::BehavioralAmbiguity,
-                "Does y=0 represent the top?",
-                Some(85),
-            ),
-            finding(
-                "drafts/data/Position.md",
-                Some(12),
-                DraftReviewCategory::Ambiguity,
-                "ambiguous reference",
-                None,
-            ),
-            finding(
-                "drafts/data/Position.md",
-                Some(12),
-                DraftReviewCategory::Completeness,
-                "missing section",
-                None,
-            ),
-        ];
-        sort_and_dedup_findings(&mut findings);
-        let categories: Vec<_> = findings.iter().map(|f| f.category).collect();
-        assert_eq!(
-            categories,
-            vec![
-                DraftReviewCategory::Completeness,
-                DraftReviewCategory::Ambiguity,
-                DraftReviewCategory::BehavioralAmbiguity,
-            ]
-        );
-    }
-
-    #[test]
-    fn sort_and_dedup_collapses_identical_behavioral_findings_regardless_of_severity() {
-        // Two runs can return the same question with slightly different severities. They must
-        // still dedupe to a single finding so the report doesn't drown in near-duplicates.
-        let mut findings = vec![
-            finding(
-                "drafts/data/Position.md",
-                Some(12),
-                DraftReviewCategory::BehavioralAmbiguity,
-                "Does y=0 represent the top?",
-                Some(85),
-            ),
-            finding(
-                "drafts/data/Position.md",
-                Some(12),
-                DraftReviewCategory::BehavioralAmbiguity,
-                "Does y=0 represent the top?",
-                Some(90),
-            ),
-        ];
-        sort_and_dedup_findings(&mut findings);
-        assert_eq!(findings.len(), 1);
-    }
-
-    #[test]
     fn the_right_side_is_not_flagged_as_vague() -> Result<()> {
         // Regression: "the right" as a spatial direction (opposite of left) must not be
         // treated as vague hand-waving. Only the explicitly vague completions like "the right
@@ -1907,11 +1835,4 @@ App.
         Ok(())
     }
 
-    #[test]
-    fn behavioral_ambiguity_category_prints_with_human_label() {
-        assert_eq!(
-            DraftReviewCategory::BehavioralAmbiguity.as_str(),
-            "behavioral ambiguity"
-        );
-    }
 }

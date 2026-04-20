@@ -1,8 +1,3 @@
-use crate::build_tracker::{BuildTracker, hash_string};
-use crate::compile_repair::{
-    COMPILE_FIX_MAX_ROUNDS, apply_compile_fix, canonicalize_stderr_for_compare,
-    is_structural_error, run_cargo_build,
-};
 use crate::prepared::{
     Ambiguity, Body, CollectionEntry, Expression, FieldSpec, GetterSpec, MethodSpec,
     PreparedArtifact, Statement,
@@ -83,7 +78,6 @@ fn clear_role_player_shapes() {
 #[derive(Debug, Clone)]
 pub struct ScaffoldOptions {
     pub selection: crate::workspace::Selection,
-    pub fix: bool,
     pub verbose: bool,
     pub debug: bool,
     pub dry_run: bool,
@@ -113,29 +107,11 @@ struct DependencyPackage {
     version: String,
 }
 
-const SCAFFOLD_TRACKER_VERSION: &str = "scaffold:v2:spec-doc-comments";
-
 pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> Result<()> {
     let prepared_paths = workspace.prepared_paths(&options.selection)?;
-    let mut tracker = BuildTracker::load(&workspace.root)?;
     let loaded = load_prepared_artifacts(workspace, &prepared_paths)?;
     validate_loaded_artifacts(&loaded)?;
-    if options.fix {
-        ensure_manifests_cover_prepared(workspace, &loaded)?;
-    }
     let dependency_manifest = load_dependency_manifest(workspace)?;
-    let aggregate_hash = hash_string(&format!(
-        "{SCAFFOLD_TRACKER_VERSION}:{}",
-        combined_hash(&loaded)?
-    ));
-    if tracker.is_current("scaffold", "scaffold:workspace", &aggregate_hash)
-        && workspace.root.join(GENERATED_MANIFEST).exists()
-    {
-        if options.verbose {
-            println!("Scaffold outputs are up to date");
-        }
-        return Ok(());
-    }
 
     let order = topo_sort(&loaded)?;
     let package_name = package_name(&workspace.root);
@@ -165,114 +141,14 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
     }
     write_generated_manifest(workspace, generated.keys())?;
 
-    tracker.clear_stage("build");
-    tracker.save(&workspace.root)?;
     if options.debug {
         write_debug_dump(workspace, &loaded)?;
     }
 
-    let result = run_cargo_build(workspace)?;
-    if result.success {
-        tracker.update("scaffold", "scaffold:workspace", aggregate_hash);
-        tracker.save(&workspace.root)?;
-        return Ok(());
-    }
-
-    if !options.fix {
-        eprint!("{}", result.stderr);
-        bail!("Generated project failed to compile; re-run with --fix to attempt auto-repair");
-    }
-
-    let max_rounds = COMPILE_FIX_MAX_ROUNDS;
-    let mut last_stderr = result.stderr;
-    let mut last_diagnostics = result.diagnostics;
-    let mut last_canonical = canonicalize_stderr_for_compare(&last_stderr);
-    let mut stuck_rounds: u32 = 0;
-    for round in 1..=max_rounds {
-        if is_structural_error(&last_stderr) {
-            eprint!("{}", last_stderr);
-            bail!(
-                "Scaffold failed to compile with a structural error (missing field / duplicate \
-                 method / unknown type). This indicates drift between prepared YAML and the \
-                 generated scaffold — re-run `reen prepare --fix` before retrying `reen scaffold --fix`."
-            );
-        }
-
-        let error_count = count_compile_errors_text(&last_stderr);
-        if options.verbose {
-            eprintln!(
-                "scaffold --fix round {round}/{max_rounds} ({error_count} compile error(s) remaining)"
-            );
-        }
-
-        let fixes =
-            crate::compile_repair::collect_all_compile_fixes(workspace, &last_stderr, &last_diagnostics);
-        if fixes.is_empty() {
-            eprint!("{}", last_stderr);
-            bail!("Generated project failed to compile but no auto-fixable errors were found");
-        }
-        if options.verbose {
-            eprintln!("  deterministic: applying {} fix(es)", fixes.len());
-        }
-        for fix in &fixes {
-            apply_compile_fix(workspace, fix)?;
-            if options.verbose {
-                eprintln!("    {}", fix.description());
-            }
-        }
-        let result = run_cargo_build(workspace)?;
-        if result.success {
-            tracker.update("scaffold", "scaffold:workspace", aggregate_hash);
-            tracker.save(&workspace.root)?;
-            return Ok(());
-        }
-        let new_stderr = result.stderr;
-        let new_diagnostics = result.diagnostics;
-        let new_canonical = canonicalize_stderr_for_compare(&new_stderr);
-        let new_error_count = count_compile_errors_text(&new_stderr);
-        if new_canonical == last_canonical {
-            stuck_rounds += 1;
-            if options.verbose {
-                eprintln!("  no progress after fix(es) (stuck round {stuck_rounds})");
-            }
-            if stuck_rounds >= 3 {
-                eprint!("{}", new_stderr);
-                bail!(
-                    "Scaffold fix loop bailing: {} consecutive rounds produced no change in compiler output",
-                    stuck_rounds
-                );
-            }
-        } else {
-            stuck_rounds = 0;
-            if options.verbose {
-                let delta = new_error_count as i64 - error_count as i64;
-                eprintln!("  after fix(es): {new_error_count} error(s) ({delta:+})");
-            }
-        }
-        last_stderr = new_stderr;
-        last_diagnostics = new_diagnostics;
-        last_canonical = new_canonical;
-    }
-    eprint!("{}", last_stderr);
-    bail!("Generated project still fails to compile after {max_rounds} fix rounds");
+    Ok(())
 }
 
-fn count_compile_errors_text(stderr: &str) -> usize {
-    stderr
-        .lines()
-        .filter(|line| {
-            let t = line.trim_start();
-            t.starts_with("error[") || t.starts_with("error:")
-        })
-        .count()
-}
-
-/// Ensure every external path referenced by the loaded prepared artifacts has a corresponding
-/// entry in `drafts/dependencies.yml` and `drafts/types-manifest.yml`.
-///
-/// Called only when `scaffold --fix` is in effect; failures here are soft — we only log and
-/// continue, since the subsequent `collect_required_dependencies` check still produces the
-/// authoritative error if a crate remains unregistered.
+#[allow(dead_code)]
 fn ensure_manifests_cover_prepared(workspace: &Workspace, loaded: &[LoadedArtifact]) -> Result<()> {
     let mut seen_roots: BTreeSet<String> = BTreeSet::new();
     for item in loaded {
@@ -378,9 +254,6 @@ pub fn clear_generated_outputs(workspace: &Workspace, dry_run: bool) -> Result<(
         }
         fs::remove_file(&manifest_path)
             .with_context(|| format!("Failed to remove {}", manifest_path.display()))?;
-        let mut tracker = BuildTracker::load(&workspace.root)?;
-        tracker.clear_stage("scaffold");
-        tracker.save(&workspace.root)?;
     }
     Ok(())
 }
@@ -474,18 +347,6 @@ fn validate_loaded_artifacts(loaded: &[LoadedArtifact]) -> Result<()> {
         bail!("Prepared artifacts contain contract mismatches:\n{rendered}");
     }
     Ok(())
-}
-
-fn combined_hash(loaded: &[LoadedArtifact]) -> Result<String> {
-    let mut contents = String::new();
-    for item in loaded {
-        let yaml = serde_yaml::to_string(&item.artifact)?;
-        contents.push_str(&item.artifact.source.path);
-        contents.push('\n');
-        contents.push_str(&yaml);
-        contents.push('\n');
-    }
-    Ok(hash_string(&contents))
 }
 
 fn load_dependency_manifest(workspace: &Workspace) -> Result<BTreeMap<String, String>> {

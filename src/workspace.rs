@@ -23,8 +23,6 @@ pub struct Workspace {
 #[serde(default, rename_all = "kebab-case")]
 pub struct ReenConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub verbose: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debug: Option<bool>,
@@ -40,29 +38,10 @@ pub struct ReenConfig {
     pub app: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// Root-level fallback for [`RefineConfig::min_severity`]. Accepted at the root so a user
-    /// can write a short `min-severity: 90` line without nesting under `refine:`. The nested
-    /// `refine.min-severity` takes precedence when both are set.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_severity: Option<u8>,
-    /// Root-level fallback for [`RefineConfig::skip_llm_review`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_llm_review: Option<bool>,
-    /// Root-level fallback for [`RefineConfig::require_llm_review`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub require_llm_review: Option<bool>,
     #[serde(skip_serializing_if = "CommandConfig::is_empty")]
     pub prepare: CommandConfig,
     #[serde(skip_serializing_if = "CommandConfig::is_empty")]
     pub scaffold: CommandConfig,
-    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
-    pub build: CommandConfig,
-    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
-    pub compile: CommandConfig,
-    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
-    pub run: CommandConfig,
-    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
-    pub test: CommandConfig,
     #[serde(skip_serializing_if = "CommandConfig::is_empty")]
     pub clear: CommandConfig,
     #[serde(skip_serializing_if = "CommandConfig::is_empty")]
@@ -76,9 +55,7 @@ pub struct ReenConfig {
 pub struct RefineConfig {
     // Standard section fields — mirror [`CommandConfig`] so a user can `reen config refine
     // --contexts --verbose` and have it behave exactly like the same flags on the sibling
-    // `prepare:` / `scaffold:` / `build:` sections.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix: Option<bool>,
+    // `prepare:` / `scaffold:` sections.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbose: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,17 +73,6 @@ pub struct RefineConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
 
-    // Refine-only fields.
-    /// Minimum behavioral-ambiguity severity (0..=100). `None` → use the library default from
-    /// [`crate::draft_refine_llm::DEFAULT_MIN_SEVERITY`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_severity: Option<u8>,
-    /// Disable the LLM-backed behavioral review entirely.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub skip_llm_review: Option<bool>,
-    /// Treat LLM unavailability as a hard error rather than a silent skip.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub require_llm_review: Option<bool>,
     /// Persisted equivalent of `--drafts-only`. Mutually exclusive with `prepared_only`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drafts_only: Option<bool>,
@@ -117,8 +83,7 @@ pub struct RefineConfig {
 
 impl RefineConfig {
     pub fn is_empty(&self) -> bool {
-        self.fix.is_none()
-            && self.verbose.is_none()
+        self.verbose.is_none()
             && self.debug.is_none()
             && self.dry_run.is_none()
             && self.contexts.is_none()
@@ -126,9 +91,6 @@ impl RefineConfig {
             && self.data.is_none()
             && self.app.is_none()
             && self.profile.is_none()
-            && self.min_severity.is_none()
-            && self.skip_llm_review.is_none()
-            && self.require_llm_review.is_none()
             && self.drafts_only.is_none()
             && self.prepared_only.is_none()
     }
@@ -137,8 +99,6 @@ impl RefineConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct CommandConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fix: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbose: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,8 +119,7 @@ pub struct CommandConfig {
 
 impl CommandConfig {
     pub fn is_empty(&self) -> bool {
-        self.fix.is_none()
-            && self.verbose.is_none()
+        self.verbose.is_none()
             && self.debug.is_none()
             && self.dry_run.is_none()
             && self.contexts.is_none()

@@ -1,10 +1,8 @@
-use crate::build_tracker::{BuildTracker, hash_file};
 use crate::draft_parser::{
     AppDraft, CompositeDraft, DataDraft, DraftDocument, FunctionalityDraft, RoleMethodGroup,
     parse_draft_file,
 };
 use crate::draft_refine::{DraftReview, DraftReviewFinding, review_raw_drafts};
-use crate::fix_agent;
 use crate::prepared::{
     Ambiguity, Body, CollaboratorSpec, ConstructorPolicy, Evidence, ExportInfo, Expression,
     FieldSpec, GetterSpec, MethodReferences, MethodSpec, ParameterSpec, PreparedArtifact, PropSpec,
@@ -19,45 +17,26 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Default floor for severity-scored findings. Phase 0 keeps this as a local constant so
+/// surviving callers compile; phase 1 will replace the whole scoring pipeline.
+#[allow(dead_code)]
+const DEFAULT_MIN_SEVERITY: u8 = 40;
+
 #[derive(Debug, Clone)]
 pub struct PrepareOptions {
     pub selection: crate::workspace::Selection,
     pub profile: Option<String>,
-    pub fix: bool,
     pub verbose: bool,
     pub debug: bool,
     pub dry_run: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RefineOptions {
     pub selection: crate::workspace::Selection,
     pub verbose: bool,
     pub drafts_only: bool,
     pub prepared_only: bool,
-    /// Minimum behavioral-ambiguity severity (0..=100) the LLM review must hit before a
-    /// question is surfaced as a finding. Defaults to
-    /// [`crate::draft_refine_llm::DEFAULT_MIN_SEVERITY`].
-    pub min_behavioral_severity: u8,
-    /// Skip the LLM-backed behavioral review entirely.
-    pub skip_llm_review: bool,
-    /// Treat LLM unavailability (missing API key, network failure, malformed response) as a
-    /// hard error rather than silently skipping the behavioral phase.
-    pub require_llm_review: bool,
-}
-
-impl Default for RefineOptions {
-    fn default() -> Self {
-        Self {
-            selection: crate::workspace::Selection::default(),
-            verbose: false,
-            drafts_only: false,
-            prepared_only: false,
-            min_behavioral_severity: crate::draft_refine_llm::DEFAULT_MIN_SEVERITY,
-            skip_llm_review: false,
-            require_llm_review: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -110,8 +89,7 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     let all_docs = load_supported_documents(workspace)?;
     let resolved_role_types = load_resolved_role_types(workspace);
     let catalog = build_catalog(&all_docs, resolved_role_types);
-    let types_manifest = load_types_manifest(workspace)?;
-    let mut tracker = BuildTracker::load(&workspace.root)?;
+    let _types_manifest = load_types_manifest(workspace)?;
     let mut wrote = 0usize;
     let mut blocking_total = 0usize;
 
@@ -129,50 +107,10 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
             .with_context(|| format!("Failed to read {}", path.display()))?;
         let draft = parse_draft_file(path, &workspace.drafts_dir, &content)?;
         let output_path = workspace.prepared_output_path(path)?;
-        let input_hash = hash_file(path)?;
-        let track_key = format!("prepare:{}", draft.info().relative_path());
-        if tracker.is_current("prepare", &track_key, &input_hash) && output_path.exists() {
-            if options.verbose {
-                println!("skip {}", draft.info().relative_path());
-            }
-            continue;
-        }
         let mut prepared = prepare_document(&draft, &catalog)?;
         prepared.propagate_resolved_types();
         prepared.refresh_ambiguity_index();
         enrich_ambiguity_lines(&mut prepared, &content);
-        let has_blockers = prepared.blocking_ambiguities().next().is_some();
-
-        if has_blockers && options.fix {
-            let available_types =
-                available_types_for_draft(types_manifest.as_ref(), draft.info().kind, &catalog);
-            let dependency_notes =
-                crate::build_agent::render_dependency_context(workspace).unwrap_or_default();
-            let fixed_count = fix_agent::fix_ambiguities_with_dependency_notes(
-                &content,
-                &available_types,
-                &dependency_notes,
-                &mut prepared,
-                options.verbose,
-            )?;
-            if fixed_count > 0 {
-                prepared.propagate_resolved_types();
-                prepared.refresh_ambiguity_index();
-                let added = ensure_external_dependencies_from_prepared(workspace, &prepared)?;
-                if options.verbose {
-                    eprintln!(
-                        "fix-agent: applied {} fix(es) for {}",
-                        fixed_count,
-                        draft.info().relative_path()
-                    );
-                    if added > 0 {
-                        eprintln!(
-                            "fix-agent: auto-registered {added} external crate(s) in drafts manifests"
-                        );
-                    }
-                }
-            }
-        }
 
         let blockers: Vec<_> = prepared.blocking_ambiguities().collect();
         if !blockers.is_empty() {
@@ -199,17 +137,12 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
             }
             fs::write(&output_path, yaml)
                 .with_context(|| format!("Failed to write {}", output_path.display()))?;
-            tracker.update("prepare", track_key, input_hash);
             wrote += 1;
         }
 
         if options.debug && !options.dry_run {
             write_prepare_debug_dump(workspace, &prepared)?;
         }
-    }
-
-    if !options.dry_run {
-        tracker.save(&workspace.root)?;
     }
 
     if !options.dry_run && blocking_total == 0 {
@@ -237,14 +170,6 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
 }
 
 pub fn refine_workspace(workspace: &Workspace, options: &RefineOptions) -> Result<()> {
-    if options.verbose {
-        println!(
-            "Refine options: min-severity={} skip-llm-review={} require-llm-review={}",
-            options.min_behavioral_severity,
-            options.skip_llm_review,
-            options.require_llm_review,
-        );
-    }
     let mut draft_phase = DraftPhaseReport::Skipped {
         reason: "skipped by `--prepared-only`".to_string(),
     };
@@ -290,29 +215,7 @@ pub fn refine_workspace(workspace: &Workspace, options: &RefineOptions) -> Resul
     if options.verbose {
         println!("Reviewing {} raw draft(s)", raw_paths.len());
     }
-    let mut draft_review = review_raw_drafts(workspace, &raw_paths)?;
-
-    // Always run the behavioral phase alongside the deterministic one so the user sees every
-    // ambiguity in a single pass. Short-circuiting when deterministic findings exist meant
-    // semantic gaps stayed hidden behind a single "vague phrase" hit and forced multiple
-    // fix/rerun rounds. The cache keeps repeat runs free when drafts haven't changed.
-    if !options.skip_llm_review {
-        let behavioral_options = crate::draft_refine_llm::BehavioralReviewOptions {
-            min_severity: options.min_behavioral_severity,
-            require_llm: options.require_llm_review,
-            cache_dir: workspace.state_dir.join("cache").join("refine-llm"),
-            verbose: options.verbose,
-        };
-        let behavioral_findings = crate::draft_refine_llm::review_raw_drafts_behavioral(
-            workspace,
-            &raw_paths,
-            &behavioral_options,
-        )?;
-        if !behavioral_findings.is_empty() {
-            draft_review.findings.extend(behavioral_findings);
-            crate::draft_refine::sort_and_dedup_findings(&mut draft_review.findings);
-        }
-    }
+    let draft_review = review_raw_drafts(workspace, &raw_paths)?;
 
     print_draft_findings(&draft_review);
     let draft_failures = draft_review.findings.len();
@@ -753,11 +656,6 @@ pub fn clear_prepared_outputs(workspace: &Workspace, dry_run: bool) -> Result<()
     } else if workspace.prepared_dir.exists() {
         fs::remove_dir_all(&workspace.prepared_dir)
             .with_context(|| format!("Failed to remove {}", workspace.prepared_dir.display()))?;
-    }
-    let mut tracker = BuildTracker::load(&workspace.root)?;
-    tracker.clear_stage("prepare");
-    if !dry_run {
-        tracker.save(&workspace.root)?;
     }
     Ok(())
 }
