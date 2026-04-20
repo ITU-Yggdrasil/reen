@@ -9,5 +9,5 @@ tests/**/src/
 tests/**/Cargo.*
 errors.txt
 .cursor/
-.claude/
+.claude/settings.local.json
 plans/
