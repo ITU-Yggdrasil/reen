@@ -40,8 +40,10 @@ struct GlobalCliOptions {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Persist defaults into reen.yml, then optionally run the wrapped command")]
-    Init(InitArgs),
+    #[command(
+        about = "Persist defaults into reen.yml (root or per-command). Never executes the wrapped command."
+    )]
+    Config(ConfigArgs),
 
     #[command(about = "Prepare per-draft YAML artifacts under drafts/prepare")]
     Prepare(PrepareArgs),
@@ -83,7 +85,7 @@ enum Commands {
 }
 
 #[derive(Args, Default, Clone)]
-struct InitArgs {
+struct ConfigArgs {
     #[arg(long, help = "Persist `fix: true` at the root of reen.yml")]
     fix: bool,
 
@@ -102,25 +104,119 @@ struct InitArgs {
     #[arg(long, help = "Persist `profile: ...` at the root of reen.yml")]
     profile: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Persist `min-severity: N` at the root of reen.yml"
+    )]
+    min_severity: Option<u8>,
+
+    #[arg(
+        long,
+        help = "Persist `skip-llm-review: true` at the root of reen.yml"
+    )]
+    skip_llm_review: bool,
+
+    #[arg(
+        long,
+        help = "Persist `require-llm-review: true` at the root of reen.yml"
+    )]
+    require_llm_review: bool,
+
     #[command(subcommand)]
-    command: Option<InitCommand>,
+    command: Option<ConfigCommand>,
 }
 
+/// Per-command persistence targets. Every variant writes only to its matching section in
+/// `reen.yml` — none of them execute the wrapped action.
 #[derive(Subcommand, Clone)]
-enum InitCommand {
-    Prepare(PrepareArgs),
-    Refine(RefineArgs),
-    Scaffold(ScaffoldArgs),
-    Build(BuildArgs),
+enum ConfigCommand {
+    #[command(about = "Persist defaults under `prepare:` in reen.yml")]
+    Prepare(PrepareConfigArgs),
+    #[command(about = "Persist defaults under `refine:` in reen.yml")]
+    Refine(RefineConfigArgs),
+    #[command(about = "Persist defaults under `scaffold:` in reen.yml")]
+    Scaffold(ScaffoldConfigArgs),
+    #[command(about = "Persist defaults under `build:` in reen.yml")]
+    Build(BuildConfigArgs),
+    #[command(about = "Persist global flags under `compile:` in reen.yml")]
     Compile,
-    Run {
-        args: Vec<String>,
-    },
+    #[command(about = "Persist global flags under `run:` in reen.yml")]
+    Run,
+    #[command(about = "Persist global flags under `test:` in reen.yml")]
     Test,
-    #[command(subcommand)]
-    Clear(ClearCommand),
-    #[command(subcommand)]
-    Manifest(ManifestCommand),
+    #[command(about = "Persist global flags under `clear:` in reen.yml")]
+    Clear,
+    #[command(about = "Persist global flags under `manifest:` in reen.yml")]
+    Manifest,
+}
+
+#[derive(Args, Clone, Default)]
+struct PrepareConfigArgs {
+    #[arg(long)]
+    fix: bool,
+    #[arg(long)]
+    contexts: bool,
+    #[arg(long)]
+    projections: bool,
+    #[arg(long)]
+    data: bool,
+    #[arg(long)]
+    app: bool,
+    #[arg(long)]
+    profile: Option<String>,
+}
+
+#[derive(Args, Clone, Default)]
+struct RefineConfigArgs {
+    #[arg(long)]
+    contexts: bool,
+    #[arg(long)]
+    projections: bool,
+    #[arg(long)]
+    data: bool,
+    #[arg(long)]
+    app: bool,
+    #[arg(long)]
+    profile: Option<String>,
+    #[arg(long, conflicts_with = "prepared_only")]
+    drafts_only: bool,
+    #[arg(long, conflicts_with = "drafts_only")]
+    prepared_only: bool,
+    #[arg(long, value_name = "N")]
+    min_severity: Option<u8>,
+    #[arg(long)]
+    skip_llm_review: bool,
+    #[arg(long)]
+    require_llm_review: bool,
+}
+
+#[derive(Args, Clone, Default)]
+struct ScaffoldConfigArgs {
+    #[arg(long)]
+    fix: bool,
+    #[arg(long)]
+    contexts: bool,
+    #[arg(long)]
+    projections: bool,
+    #[arg(long)]
+    data: bool,
+    #[arg(long)]
+    app: bool,
+}
+
+#[derive(Args, Clone, Default)]
+struct BuildConfigArgs {
+    #[arg(long)]
+    fix: bool,
+    #[arg(long)]
+    contexts: bool,
+    #[arg(long)]
+    projections: bool,
+    #[arg(long)]
+    data: bool,
+    #[arg(long)]
+    app: bool,
 }
 
 #[derive(Args, Clone)]
@@ -310,19 +406,6 @@ enum CapabilitiesManifestCommand {
     },
 }
 
-#[derive(Clone)]
-enum RunnableCommand {
-    Prepare(PrepareArgs),
-    Refine(RefineArgs),
-    Scaffold(ScaffoldArgs),
-    Build(BuildArgs),
-    Compile,
-    Run { args: Vec<String> },
-    Test,
-    Manifest(ManifestCommand),
-    Clear(ClearCommand),
-}
-
 fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
@@ -335,253 +418,228 @@ fn main() -> Result<()> {
     let mut config = workspace.load_config()?;
 
     match cli.command {
-        Commands::Init(args) => {
-            persist_init_settings(&mut config, &args);
-            if globals.dry_run {
-                println!(
-                    "[dry-run] would write {}",
-                    workspace.config_path().display()
-                );
-            } else {
-                workspace.save_config(&config)?;
-            }
-            if let Some(command) = args.command {
-                if !matches!(command, InitCommand::Refine(_)) {
-                    execute_command(command.into(), globals, &workspace, &config)?;
-                }
-            }
+        Commands::Config(args) => {
+            persist_config_settings(&mut config, &args, globals);
+            workspace.save_config(&config)?;
         }
-        Commands::Prepare(args) => {
-            execute_command(RunnableCommand::Prepare(args), globals, &workspace, &config)?;
-        }
-        Commands::Refine(args) => {
-            execute_command(RunnableCommand::Refine(args), globals, &workspace, &config)?;
-        }
-        Commands::Scaffold(args) => {
-            execute_command(
-                RunnableCommand::Scaffold(args),
-                globals,
-                &workspace,
-                &config,
-            )?;
-        }
-        Commands::Build(args) => {
-            execute_command(RunnableCommand::Build(args), globals, &workspace, &config)?;
-        }
-        Commands::Compile => {
-            execute_command(RunnableCommand::Compile, globals, &workspace, &config)?
-        }
-        Commands::Run { args } => {
-            execute_command(RunnableCommand::Run { args }, globals, &workspace, &config)?
-        }
-        Commands::Test => execute_command(RunnableCommand::Test, globals, &workspace, &config)?,
-        Commands::Manifest(cmd) => {
-            execute_command(RunnableCommand::Manifest(cmd), globals, &workspace, &config)?
-        }
-        Commands::Clear(cmd) => {
-            execute_command(RunnableCommand::Clear(cmd), globals, &workspace, &config)?
-        }
+        Commands::Prepare(args) => run_prepare(args, globals, &workspace, &config)?,
+        Commands::Refine(args) => run_refine(args, globals, &workspace, &config)?,
+        Commands::Scaffold(args) => run_scaffold(args, globals, &workspace, &config)?,
+        Commands::Build(args) => run_build(args, globals, &workspace, &config)?,
+        Commands::Compile => run_cargo_command("build", &[])?,
+        Commands::Run { args } => run_cargo_command("run", &args)?,
+        Commands::Test => run_cargo_command("test", &[])?,
+        Commands::Manifest(cmd) => run_manifest(cmd, globals, &workspace)?,
+        Commands::Clear(cmd) => run_clear(cmd, globals, &workspace, &config)?,
     }
 
     Ok(())
 }
 
-impl From<InitCommand> for RunnableCommand {
-    fn from(value: InitCommand) -> Self {
-        match value {
-            InitCommand::Prepare(args) => Self::Prepare(args),
-            InitCommand::Refine(args) => Self::Refine(args),
-            InitCommand::Scaffold(args) => Self::Scaffold(args),
-            InitCommand::Build(args) => Self::Build(args),
-            InitCommand::Compile => Self::Compile,
-            InitCommand::Run { args } => Self::Run { args },
-            InitCommand::Test => Self::Test,
-            InitCommand::Manifest(cmd) => Self::Manifest(cmd),
-            InitCommand::Clear(cmd) => Self::Clear(cmd),
-        }
-    }
-}
-
-fn execute_command(
-    command: RunnableCommand,
+fn run_prepare(
+    args: PrepareArgs,
     globals: GlobalCliOptions,
     workspace: &Workspace,
     config: &ReenConfig,
 ) -> Result<()> {
-    match command {
-        RunnableCommand::Prepare(args) => {
-            let section = &config.prepare;
-            let selection = selection_from_effective_flags(
-                bool_setting(args.contexts, section.contexts, config.contexts),
-                bool_setting(args.projections, section.projections, config.projections),
-                bool_setting(args.data, section.data, config.data),
-                bool_setting(args.app, section.app, config.app),
-                args.names,
-            );
-            let options = PrepareOptions {
-                selection,
-                profile: option_setting(
-                    args.profile,
-                    section.profile.clone(),
-                    config.profile.clone(),
-                ),
-                fix: bool_setting(args.fix, section.fix, config.fix),
-                verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
-                debug: bool_setting(globals.debug, section.debug, config.debug),
-                dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
-            };
-            prepare_workspace(workspace, &options)?;
+    let section = &config.prepare;
+    let selection = selection_from_effective_flags(
+        bool_setting(args.contexts, section.contexts, config.contexts),
+        bool_setting(args.projections, section.projections, config.projections),
+        bool_setting(args.data, section.data, config.data),
+        bool_setting(args.app, section.app, config.app),
+        args.names,
+    );
+    let options = PrepareOptions {
+        selection,
+        profile: option_setting(
+            args.profile,
+            section.profile.clone(),
+            config.profile.clone(),
+        ),
+        fix: bool_setting(args.fix, section.fix, config.fix),
+        verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
+        debug: bool_setting(globals.debug, section.debug, config.debug),
+        dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
+    };
+    prepare_workspace(workspace, &options)
+}
+
+fn run_refine(
+    args: RefineArgs,
+    globals: GlobalCliOptions,
+    workspace: &Workspace,
+    config: &ReenConfig,
+) -> Result<()> {
+    let refine_cfg = &config.refine;
+    let selection = selection_from_effective_flags(
+        bool_setting(args.contexts, refine_cfg.contexts, config.contexts),
+        bool_setting(args.projections, refine_cfg.projections, config.projections),
+        bool_setting(args.data, refine_cfg.data, config.data),
+        bool_setting(args.app, refine_cfg.app, config.app),
+        args.names,
+    );
+    let options = RefineOptions {
+        selection,
+        verbose: bool_setting(globals.verbose, refine_cfg.verbose, config.verbose),
+        drafts_only: bool_setting(args.drafts_only, refine_cfg.drafts_only, None),
+        prepared_only: bool_setting(args.prepared_only, refine_cfg.prepared_only, None),
+        min_behavioral_severity: args
+            .min_severity
+            .or(refine_cfg.min_severity)
+            .or(config.min_severity)
+            .unwrap_or(reen::draft_refine_llm::DEFAULT_MIN_SEVERITY),
+        skip_llm_review: bool_setting(
+            args.skip_llm_review,
+            refine_cfg.skip_llm_review,
+            config.skip_llm_review,
+        ),
+        require_llm_review: bool_setting(
+            args.require_llm_review,
+            refine_cfg.require_llm_review,
+            config.require_llm_review,
+        ),
+    };
+    refine_workspace(workspace, &options)
+}
+
+fn run_scaffold(
+    args: ScaffoldArgs,
+    globals: GlobalCliOptions,
+    workspace: &Workspace,
+    config: &ReenConfig,
+) -> Result<()> {
+    let section = &config.scaffold;
+    let selection = selection_from_effective_flags(
+        bool_setting(args.contexts, section.contexts, config.contexts),
+        bool_setting(args.projections, section.projections, config.projections),
+        bool_setting(args.data, section.data, config.data),
+        bool_setting(args.app, section.app, config.app),
+        args.names,
+    );
+    let options = ScaffoldOptions {
+        selection,
+        fix: bool_setting(args.fix, section.fix, config.fix),
+        verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
+        debug: bool_setting(globals.debug, section.debug, config.debug),
+        dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
+    };
+    scaffold_workspace(workspace, &options)
+}
+
+fn run_build(
+    args: BuildArgs,
+    globals: GlobalCliOptions,
+    workspace: &Workspace,
+    config: &ReenConfig,
+) -> Result<()> {
+    let section = &config.build;
+    let selection = selection_from_effective_flags(
+        bool_setting(args.contexts, section.contexts, config.contexts),
+        bool_setting(args.projections, section.projections, config.projections),
+        bool_setting(args.data, section.data, config.data),
+        bool_setting(args.app, section.app, config.app),
+        args.names,
+    );
+    let options = reen::build_agent::BuildOptions {
+        selection,
+        fix: bool_setting(args.fix, section.fix, config.fix),
+        verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
+        debug: bool_setting(globals.debug, section.debug, config.debug),
+        dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
+    };
+    reen::build_agent::build_workspace(workspace, &options)
+}
+
+fn run_manifest(
+    cmd: ManifestCommand,
+    globals: GlobalCliOptions,
+    workspace: &Workspace,
+) -> Result<()> {
+    match cmd {
+        ManifestCommand::Types(TypesManifestCommand::AddPrefix { prefix }) => {
+            add_types_prefix(workspace, &prefix, globals.dry_run)
         }
-        RunnableCommand::Refine(args) => {
-            let selection = selection_from_effective_flags(
-                bool_setting(args.contexts, None, config.contexts),
-                bool_setting(args.projections, None, config.projections),
-                bool_setting(args.data, None, config.data),
-                bool_setting(args.app, None, config.app),
-                args.names,
-            );
-            let refine_cfg = &config.refine;
-            let options = RefineOptions {
-                selection,
-                verbose: bool_setting(globals.verbose, None, config.verbose),
-                drafts_only: args.drafts_only,
-                prepared_only: args.prepared_only,
-                min_behavioral_severity: args
-                    .min_severity
-                    .or(refine_cfg.min_severity)
-                    .or(config.min_severity)
-                    .unwrap_or(reen::draft_refine_llm::DEFAULT_MIN_SEVERITY),
-                skip_llm_review: bool_setting(
-                    args.skip_llm_review,
-                    refine_cfg.skip_llm_review,
-                    config.skip_llm_review,
-                ),
-                require_llm_review: bool_setting(
-                    args.require_llm_review,
-                    refine_cfg.require_llm_review,
-                    config.require_llm_review,
-                ),
-            };
-            refine_workspace(workspace, &options)?;
-        }
-        RunnableCommand::Scaffold(args) => {
-            let section = &config.scaffold;
-            let selection = selection_from_effective_flags(
-                bool_setting(args.contexts, section.contexts, config.contexts),
-                bool_setting(args.projections, section.projections, config.projections),
-                bool_setting(args.data, section.data, config.data),
-                bool_setting(args.app, section.app, config.app),
-                args.names,
-            );
-            let options = ScaffoldOptions {
-                selection,
-                fix: bool_setting(args.fix, section.fix, config.fix),
-                verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
-                debug: bool_setting(globals.debug, section.debug, config.debug),
-                dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
-            };
-            scaffold_workspace(workspace, &options)?;
-        }
-        RunnableCommand::Build(args) => {
-            let section = &config.build;
-            let selection = selection_from_effective_flags(
-                bool_setting(args.contexts, section.contexts, config.contexts),
-                bool_setting(args.projections, section.projections, config.projections),
-                bool_setting(args.data, section.data, config.data),
-                bool_setting(args.app, section.app, config.app),
-                args.names,
-            );
-            let options = reen::build_agent::BuildOptions {
-                selection,
-                fix: bool_setting(args.fix, section.fix, config.fix),
-                verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
-                debug: bool_setting(globals.debug, section.debug, config.debug),
-                dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
-            };
-            reen::build_agent::build_workspace(workspace, &options)?;
-        }
-        RunnableCommand::Compile => {
-            run_cargo_command("build", &[])?;
-        }
-        RunnableCommand::Run { args } => {
-            run_cargo_command("run", &args)?;
-        }
-        RunnableCommand::Test => {
-            run_cargo_command("test", &[])?;
-        }
-        RunnableCommand::Manifest(cmd) => match cmd {
-            ManifestCommand::Types(TypesManifestCommand::AddPrefix { prefix }) => {
-                add_types_prefix(workspace, &prefix, globals.dry_run)?;
-            }
-            ManifestCommand::Capabilities(CapabilitiesManifestCommand::Add {
+        ManifestCommand::Capabilities(CapabilitiesManifestCommand::Add {
+            domain,
+            crate_name,
+            no_default_features,
+            feature,
+            prefix,
+            capability,
+        }) => add_capability_provider(
+            workspace,
+            &CapabilityProviderInput {
                 domain,
                 crate_name,
-                no_default_features,
-                feature,
-                prefix,
-                capability,
-            }) => {
-                add_capability_provider(
-                    workspace,
-                    &CapabilityProviderInput {
-                        domain,
-                        crate_name,
-                        capabilities: capability,
-                        features: feature,
-                        default_features: !no_default_features,
-                        external_path_prefixes: prefix,
-                    },
-                    globals.dry_run,
-                )?;
-            }
-        },
-        RunnableCommand::Clear(cmd) => match cmd {
-            ClearCommand::Prepared => clear_prepared_outputs(
-                workspace,
-                bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
-            )?,
-            ClearCommand::Generated => clear_generated_outputs(
-                workspace,
-                bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
-            )?,
-            ClearCommand::Built => clear_build_tracker(
-                workspace,
-                bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run),
-            )?,
-            ClearCommand::All => {
-                let dry_run = bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run);
-                clear_prepared_outputs(workspace, dry_run)?;
-                clear_generated_outputs(workspace, dry_run)?;
-                clear_build_tracker(workspace, dry_run)?;
-            }
-        },
+                capabilities: capability,
+                features: feature,
+                default_features: !no_default_features,
+                external_path_prefixes: prefix,
+            },
+            globals.dry_run,
+        ),
     }
-    Ok(())
 }
 
-fn persist_init_settings(config: &mut ReenConfig, args: &InitArgs) {
-    apply_root_init_flags(config, args);
+fn run_clear(
+    cmd: ClearCommand,
+    globals: GlobalCliOptions,
+    workspace: &Workspace,
+    config: &ReenConfig,
+) -> Result<()> {
+    let dry_run = bool_setting(globals.dry_run, config.clear.dry_run, config.dry_run);
+    match cmd {
+        ClearCommand::Prepared => clear_prepared_outputs(workspace, dry_run),
+        ClearCommand::Generated => clear_generated_outputs(workspace, dry_run),
+        ClearCommand::Built => clear_build_tracker(workspace, dry_run),
+        ClearCommand::All => {
+            clear_prepared_outputs(workspace, dry_run)?;
+            clear_generated_outputs(workspace, dry_run)?;
+            clear_build_tracker(workspace, dry_run)
+        }
+    }
+}
+
+fn persist_config_settings(
+    config: &mut ReenConfig,
+    args: &ConfigArgs,
+    globals: GlobalCliOptions,
+) {
     let Some(command) = &args.command else {
+        // Root-level persistence: both the locally-declared flags and the global flags go
+        // at the top of `reen.yml` when no subcommand is provided.
+        apply_root_config_flags(config, args);
+        apply_root_globals(config, globals);
         return;
     };
-    if let InitCommand::Refine(refine_args) = command {
-        apply_refine_init_flags(&mut config.refine, refine_args);
-        return;
+
+    match command {
+        ConfigCommand::Prepare(cmd_args) => {
+            apply_prepare_config(&mut config.prepare, cmd_args);
+            apply_section_globals(&mut config.prepare, globals);
+        }
+        ConfigCommand::Refine(cmd_args) => {
+            apply_refine_config(&mut config.refine, cmd_args);
+            apply_refine_globals(&mut config.refine, globals);
+        }
+        ConfigCommand::Scaffold(cmd_args) => {
+            apply_scaffold_config(&mut config.scaffold, cmd_args);
+            apply_section_globals(&mut config.scaffold, globals);
+        }
+        ConfigCommand::Build(cmd_args) => {
+            apply_build_config(&mut config.build, cmd_args);
+            apply_section_globals(&mut config.build, globals);
+        }
+        ConfigCommand::Compile => apply_section_globals(&mut config.compile, globals),
+        ConfigCommand::Run => apply_section_globals(&mut config.run, globals),
+        ConfigCommand::Test => apply_section_globals(&mut config.test, globals),
+        ConfigCommand::Clear => apply_section_globals(&mut config.clear, globals),
+        ConfigCommand::Manifest => apply_section_globals(&mut config.manifest, globals),
     }
-    let section = match command {
-        InitCommand::Prepare(_) => &mut config.prepare,
-        InitCommand::Scaffold(_) => &mut config.scaffold,
-        InitCommand::Build(_) => &mut config.build,
-        InitCommand::Compile => &mut config.compile,
-        InitCommand::Run { .. } => &mut config.run,
-        InitCommand::Test => &mut config.test,
-        InitCommand::Manifest(_) | InitCommand::Refine(_) => return,
-        InitCommand::Clear(_) => &mut config.clear,
-    };
-    apply_command_init_flags(section, command);
 }
 
-fn apply_root_init_flags(config: &mut ReenConfig, args: &InitArgs) {
+fn apply_root_config_flags(config: &mut ReenConfig, args: &ConfigArgs) {
     set_bool_if_requested(&mut config.fix, args.fix);
     set_bool_if_requested(&mut config.contexts, args.contexts);
     set_bool_if_requested(&mut config.projections, args.projections);
@@ -590,44 +648,76 @@ fn apply_root_init_flags(config: &mut ReenConfig, args: &InitArgs) {
     if let Some(profile) = &args.profile {
         config.profile = Some(profile.clone());
     }
+    if let Some(value) = args.min_severity {
+        config.min_severity = Some(value);
+    }
+    set_bool_if_requested(&mut config.skip_llm_review, args.skip_llm_review);
+    set_bool_if_requested(&mut config.require_llm_review, args.require_llm_review);
 }
 
-fn apply_command_init_flags(section: &mut CommandConfig, command: &InitCommand) {
-    match command {
-        InitCommand::Prepare(args) => {
-            set_bool_if_requested(&mut section.contexts, args.contexts);
-            set_bool_if_requested(&mut section.projections, args.projections);
-            set_bool_if_requested(&mut section.data, args.data);
-            set_bool_if_requested(&mut section.app, args.app);
-            set_bool_if_requested(&mut section.fix, args.fix);
-            if let Some(profile) = &args.profile {
-                section.profile = Some(profile.clone());
-            }
-        }
-        InitCommand::Refine(_) => {}
-        InitCommand::Scaffold(args) => {
-            set_bool_if_requested(&mut section.contexts, args.contexts);
-            set_bool_if_requested(&mut section.projections, args.projections);
-            set_bool_if_requested(&mut section.data, args.data);
-            set_bool_if_requested(&mut section.app, args.app);
-            set_bool_if_requested(&mut section.fix, args.fix);
-        }
-        InitCommand::Build(args) => {
-            set_bool_if_requested(&mut section.contexts, args.contexts);
-            set_bool_if_requested(&mut section.projections, args.projections);
-            set_bool_if_requested(&mut section.data, args.data);
-            set_bool_if_requested(&mut section.app, args.app);
-            set_bool_if_requested(&mut section.fix, args.fix);
-        }
-        InitCommand::Compile
-        | InitCommand::Run { .. }
-        | InitCommand::Test
-        | InitCommand::Manifest(_)
-        | InitCommand::Clear(_) => {}
+fn apply_root_globals(config: &mut ReenConfig, globals: GlobalCliOptions) {
+    set_bool_if_requested(&mut config.verbose, globals.verbose);
+    set_bool_if_requested(&mut config.debug, globals.debug);
+    set_bool_if_requested(&mut config.dry_run, globals.dry_run);
+}
+
+fn apply_section_globals(section: &mut CommandConfig, globals: GlobalCliOptions) {
+    set_bool_if_requested(&mut section.verbose, globals.verbose);
+    set_bool_if_requested(&mut section.debug, globals.debug);
+    set_bool_if_requested(&mut section.dry_run, globals.dry_run);
+}
+
+fn apply_refine_globals(section: &mut RefineConfig, globals: GlobalCliOptions) {
+    set_bool_if_requested(&mut section.verbose, globals.verbose);
+    set_bool_if_requested(&mut section.debug, globals.debug);
+    set_bool_if_requested(&mut section.dry_run, globals.dry_run);
+}
+
+fn apply_prepare_config(section: &mut CommandConfig, args: &PrepareConfigArgs) {
+    set_bool_if_requested(&mut section.fix, args.fix);
+    set_bool_if_requested(&mut section.contexts, args.contexts);
+    set_bool_if_requested(&mut section.projections, args.projections);
+    set_bool_if_requested(&mut section.data, args.data);
+    set_bool_if_requested(&mut section.app, args.app);
+    if let Some(profile) = &args.profile {
+        section.profile = Some(profile.clone());
     }
 }
 
-fn apply_refine_init_flags(section: &mut RefineConfig, args: &RefineArgs) {
+fn apply_scaffold_config(section: &mut CommandConfig, args: &ScaffoldConfigArgs) {
+    set_bool_if_requested(&mut section.fix, args.fix);
+    set_bool_if_requested(&mut section.contexts, args.contexts);
+    set_bool_if_requested(&mut section.projections, args.projections);
+    set_bool_if_requested(&mut section.data, args.data);
+    set_bool_if_requested(&mut section.app, args.app);
+}
+
+fn apply_build_config(section: &mut CommandConfig, args: &BuildConfigArgs) {
+    set_bool_if_requested(&mut section.fix, args.fix);
+    set_bool_if_requested(&mut section.contexts, args.contexts);
+    set_bool_if_requested(&mut section.projections, args.projections);
+    set_bool_if_requested(&mut section.data, args.data);
+    set_bool_if_requested(&mut section.app, args.app);
+}
+
+fn apply_refine_config(section: &mut RefineConfig, args: &RefineConfigArgs) {
+    set_bool_if_requested(&mut section.contexts, args.contexts);
+    set_bool_if_requested(&mut section.projections, args.projections);
+    set_bool_if_requested(&mut section.data, args.data);
+    set_bool_if_requested(&mut section.app, args.app);
+    if let Some(profile) = &args.profile {
+        section.profile = Some(profile.clone());
+    }
+    // `drafts_only` / `prepared_only` are mutually exclusive; set one, clear the other so a
+    // later `reen config refine --prepared-only` overrides an earlier `--drafts-only`.
+    if args.drafts_only {
+        section.drafts_only = Some(true);
+        section.prepared_only = None;
+    }
+    if args.prepared_only {
+        section.prepared_only = Some(true);
+        section.drafts_only = None;
+    }
     if let Some(value) = args.min_severity {
         section.min_severity = Some(value);
     }

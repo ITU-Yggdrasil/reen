@@ -65,6 +65,8 @@ pub struct ReenConfig {
     pub test: CommandConfig,
     #[serde(skip_serializing_if = "CommandConfig::is_empty")]
     pub clear: CommandConfig,
+    #[serde(skip_serializing_if = "CommandConfig::is_empty")]
+    pub manifest: CommandConfig,
     #[serde(skip_serializing_if = "RefineConfig::is_empty")]
     pub refine: RefineConfig,
 }
@@ -72,6 +74,29 @@ pub struct ReenConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct RefineConfig {
+    // Standard section fields — mirror [`CommandConfig`] so a user can `reen config refine
+    // --contexts --verbose` and have it behave exactly like the same flags on the sibling
+    // `prepare:` / `scaffold:` / `build:` sections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verbose: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contexts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projections: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+
+    // Refine-only fields.
     /// Minimum behavioral-ambiguity severity (0..=100). `None` → use the library default from
     /// [`crate::draft_refine_llm::DEFAULT_MIN_SEVERITY`].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,13 +107,30 @@ pub struct RefineConfig {
     /// Treat LLM unavailability as a hard error rather than a silent skip.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub require_llm_review: Option<bool>,
+    /// Persisted equivalent of `--drafts-only`. Mutually exclusive with `prepared_only`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drafts_only: Option<bool>,
+    /// Persisted equivalent of `--prepared-only`. Mutually exclusive with `drafts_only`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepared_only: Option<bool>,
 }
 
 impl RefineConfig {
     pub fn is_empty(&self) -> bool {
-        self.min_severity.is_none()
+        self.fix.is_none()
+            && self.verbose.is_none()
+            && self.debug.is_none()
+            && self.dry_run.is_none()
+            && self.contexts.is_none()
+            && self.projections.is_none()
+            && self.data.is_none()
+            && self.app.is_none()
+            && self.profile.is_none()
+            && self.min_severity.is_none()
             && self.skip_llm_review.is_none()
             && self.require_llm_review.is_none()
+            && self.drafts_only.is_none()
+            && self.prepared_only.is_none()
     }
 }
 

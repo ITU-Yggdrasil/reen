@@ -397,8 +397,12 @@ fn help_lists_refine_scaffold_and_build() {
         "help should list build: {rendered}"
     );
     assert!(
-        rendered.contains("init"),
-        "help should list init: {rendered}"
+        rendered.contains("config"),
+        "help should list config: {rendered}"
+    );
+    assert!(
+        !rendered.contains("init"),
+        "help should NOT list legacy init: {rendered}"
     );
     assert!(
         rendered.contains("manifest"),
@@ -578,45 +582,15 @@ fn command_fix_false_in_reen_yml_overrides_root_fix() {
 }
 
 #[test]
-fn init_prepare_fix_writes_reen_yml_before_running_command() {
+fn config_prepare_fix_persists_without_running_prepare() {
+    // The former `init prepare --fix` both persisted AND ran prepare. Under `config`, the
+    // wrapped command is never executed — we only write to `reen.yml`. Using the ambiguity
+    // fixture makes the distinction obvious: running prepare here would exit non-zero.
     let project = copy_fixture("ambiguity");
 
     let output = Command::new(env!("CARGO_BIN_EXE_reen"))
         .current_dir(&project)
-        .args(["init", "prepare", "--fix"])
-        .env_remove("ANTHROPIC_API_KEY")
-        .output()
-        .expect("run reen");
-
-    assert!(!output.status.success(), "{}", output_text(&output));
-    let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
-    assert!(
-        config.contains("prepare:\n  fix: true") || config.contains("prepare:\r\n  fix: true"),
-        "init should persist prepare.fix into reen.yml:\n{config}"
-    );
-}
-
-#[test]
-fn init_root_fix_writes_reen_yml_without_running_command() {
-    let project = copy_fixture("success");
-
-    let output = run_reen(&project, ["init", "--fix"]);
-
-    assert!(output.status.success(), "{}", output_text(&output));
-    let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
-    assert!(
-        config.lines().any(|line| line.trim() == "fix: true"),
-        "init --fix should persist root fix:\n{config}"
-    );
-}
-
-#[test]
-fn init_refine_min_severity_persists_without_running_refine() {
-    let project = copy_fixture("success");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
-        .current_dir(&project)
-        .args(["init", "refine", "--min-severity", "90"])
+        .args(["config", "prepare", "--fix"])
         .env_remove("ANTHROPIC_API_KEY")
         .output()
         .expect("run reen");
@@ -624,14 +598,167 @@ fn init_refine_min_severity_persists_without_running_refine() {
     assert!(output.status.success(), "{}", output_text(&output));
     let rendered = output_text(&output);
     assert!(
-        !rendered.contains("refine"),
-        "init refine should NOT execute refine:\n{rendered}"
+        !rendered.contains("error[prepare]"),
+        "config prepare should NOT execute prepare:\n{rendered}"
+    );
+    let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        config.contains("prepare:\n  fix: true") || config.contains("prepare:\r\n  fix: true"),
+        "config prepare --fix should persist prepare.fix into reen.yml:\n{config}"
+    );
+}
+
+#[test]
+fn config_root_fix_persists_to_root() {
+    let project = copy_fixture("success");
+
+    let output = run_reen(&project, ["config", "--fix"]);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        config.lines().any(|line| line.trim() == "fix: true"),
+        "config --fix should persist root fix:\n{config}"
+    );
+}
+
+#[test]
+fn config_root_min_severity_and_verbose_persist_to_root() {
+    // Root-level refine-specific flags and the global --verbose all land at the top of
+    // `reen.yml` when no subcommand is given.
+    let project = copy_fixture("success");
+
+    let output = run_reen(
+        &project,
+        ["config", "--min-severity", "42", "--skip-llm-review", "--verbose"],
+    );
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let cfg = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        cfg.lines().any(|line| line.trim() == "verbose: true"),
+        "config --verbose should persist root verbose:\n{cfg}"
+    );
+    assert!(
+        cfg.lines().any(|line| line.trim() == "min-severity: 42"),
+        "config --min-severity should persist root min-severity:\n{cfg}"
+    );
+    assert!(
+        cfg.lines().any(|line| line.trim() == "skip-llm-review: true"),
+        "config --skip-llm-review should persist root skip-llm-review:\n{cfg}"
+    );
+}
+
+#[test]
+fn config_refine_min_severity_persists_without_running_refine() {
+    let project = copy_fixture("success");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["config", "refine", "--min-severity", "90"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        !rendered.contains("Refining") && !rendered.contains("Reviewing"),
+        "config refine should NOT execute refine:\n{rendered}"
     );
     let config = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
     assert!(
         config.contains("refine:\n  min-severity: 90")
             || config.contains("refine:\r\n  min-severity: 90"),
-        "init refine --min-severity should persist refine.min-severity into reen.yml:\n{config}"
+        "config refine --min-severity should persist refine.min-severity into reen.yml:\n{config}"
+    );
+}
+
+#[test]
+fn config_refine_contexts_persists_and_is_honoured_by_refine() {
+    // `reen config refine --contexts --min-severity 90` writes into the refine section; a
+    // subsequent bare `reen refine` reads those as if the flags had been supplied.
+    let project = copy_fixture("success");
+
+    let persist = run_reen(
+        &project,
+        [
+            "config",
+            "refine",
+            "--contexts",
+            "--min-severity",
+            "90",
+        ],
+    );
+    assert!(persist.status.success(), "{}", output_text(&persist));
+    let cfg = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        cfg.contains("refine:") && cfg.contains("contexts: true") && cfg.contains("min-severity: 90"),
+        "config refine should write nested refine.contexts + refine.min-severity:\n{cfg}"
+    );
+
+    let refine = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["refine", "--skip-llm-review", "--verbose"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .expect("run reen");
+    assert!(refine.status.success(), "{}", output_text(&refine));
+    let rendered = output_text(&refine);
+    assert!(
+        rendered.contains("min-severity=90"),
+        "refine should honour persisted refine.min-severity:\n{rendered}"
+    );
+}
+
+#[test]
+fn config_compile_verbose_persists_compile_verbose() {
+    // `reen config compile --verbose` persists ONLY the global --verbose into the compile
+    // section — compile has no other configurable flags.
+    let project = copy_fixture("success");
+
+    let output = run_reen(&project, ["config", "compile", "--verbose"]);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let cfg = fs::read_to_string(project.join("reen.yml")).expect("read reen.yml");
+    assert!(
+        cfg.contains("compile:\n  verbose: true")
+            || cfg.contains("compile:\r\n  verbose: true"),
+        "config compile --verbose should persist compile.verbose:\n{cfg}"
+    );
+}
+
+#[test]
+fn config_subcommand_does_not_run_cargo_compile() {
+    // Belt-and-braces: confirm `config compile` does NOT invoke `cargo build` even in a
+    // project without a generated Cargo.toml (the success fixture has no generated code).
+    let project = copy_fixture("success");
+
+    let output = run_reen(&project, ["config", "compile"]);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    let rendered = output_text(&output);
+    assert!(
+        !rendered.contains("Compiling") && !rendered.contains("error: could not find"),
+        "config compile should NOT invoke cargo build:\n{rendered}"
+    );
+}
+
+#[test]
+fn legacy_init_command_is_removed() {
+    // `init` was renamed to `config`; the old name must no longer parse.
+    let project = copy_fixture("success");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_reen"))
+        .current_dir(&project)
+        .args(["init", "--fix"])
+        .output()
+        .expect("run reen");
+
+    assert!(
+        !output.status.success(),
+        "legacy `init` should fail to parse: {}",
+        output_text(&output)
     );
 }
 
