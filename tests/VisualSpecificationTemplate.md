@@ -6,18 +6,6 @@
 Focus on how it should feel and what makes it distinct.  
 Avoid technical or implementation details.]
 
----
-
-## Audience and Positioning
-
-[Describe the target audience and how the brand is positioned in relation to them.]
-
-Consider:
-- Who is the primary audience?
-- What do they care about?
-- How should the brand be perceived (e.g., reliable, innovative, accessible)?
-
-Avoid overly detailed segmentation or marketing jargon.
 
 ---
 
@@ -121,13 +109,26 @@ Consider:
 [Optional: What long-term impact or future does the company aim to create?]
 
 ### Values
-[Optional: List 3â€“5 core principles that guide decisions and behavior.]
+[Optional: List core principles that guide decisions and behavior.]
 
 - [Value 1]
 - [Value 2]
 - [Value 3]
 - [Optional Value 4]
 - [Optional Value 5]
+
+---
+
+## Optional: Audience and Positioning
+
+[Describe the target audience and how the brand is positioned in relation to them.]
+
+Consider:
+- Who is the primary audience?
+- What do they care about?
+- How should the brand be perceived (e.g., reliable, innovative, accessible)?
+
+Avoid overly detailed segmentation or marketing jargon.
 
 ---
 
