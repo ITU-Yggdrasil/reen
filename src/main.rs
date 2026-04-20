@@ -5,11 +5,12 @@ use reen::manifest::{CapabilityProviderInput, add_capability_provider, add_types
 use reen::prepare::{
     PrepareOptions, RefineOptions, clear_prepared_outputs, prepare_workspace, refine_workspace,
 };
+use reen::verify;
 use reen::workspace::{CommandConfig, RefineConfig, ReenConfig, Selection, Workspace};
 
 #[derive(Parser)]
 #[command(name = "reen")]
-#[command(about = "Prepare DCI-English drafts and deterministically build Rust code")]
+#[command(about = "DCI-native spec compiler and verifier")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -46,12 +47,15 @@ enum Commands {
     Prepare(PrepareArgs),
 
     #[command(
-        about = "Review raw drafts for completeness/concreteness/ambiguity, then prepared artifacts when available"
+        about = "Review raw drafts for completeness/concreteness/ambiguity"
     )]
     Refine(RefineArgs),
 
     #[command(about = "Generate Rust source files from prepared artifacts")]
     Scaffold(ScaffoldArgs),
+
+    #[command(about = "Verify Rust source against prepared specification")]
+    Verify(VerifyArgs),
 
     #[command(subcommand, about = "Edit Reen manifest files under drafts/")]
     Manifest(ManifestCommand),
@@ -74,9 +78,6 @@ struct ConfigArgs {
     #[arg(long, help = "Persist `data: true` at the root of reen.yml")]
     data: bool,
 
-    #[arg(long, help = "Persist `app: true` at the root of reen.yml")]
-    app: bool,
-
     #[arg(long, help = "Persist `profile: ...` at the root of reen.yml")]
     profile: Option<String>,
 
@@ -84,8 +85,7 @@ struct ConfigArgs {
     command: Option<ConfigCommand>,
 }
 
-/// Per-command persistence targets. Every variant writes only to its matching section in
-/// `reen.yml` — none of them execute the wrapped action.
+/// Per-command persistence targets.
 #[derive(Subcommand, Clone)]
 enum ConfigCommand {
     #[command(about = "Persist defaults under `prepare:` in reen.yml")]
@@ -109,8 +109,6 @@ struct PrepareConfigArgs {
     #[arg(long)]
     data: bool,
     #[arg(long)]
-    app: bool,
-    #[arg(long)]
     profile: Option<String>,
 }
 
@@ -122,8 +120,6 @@ struct RefineConfigArgs {
     projections: bool,
     #[arg(long)]
     data: bool,
-    #[arg(long)]
-    app: bool,
     #[arg(long)]
     profile: Option<String>,
     #[arg(long, conflicts_with = "prepared_only")]
@@ -140,8 +136,6 @@ struct ScaffoldConfigArgs {
     projections: bool,
     #[arg(long)]
     data: bool,
-    #[arg(long)]
-    app: bool,
 }
 
 #[derive(Args, Clone)]
@@ -155,10 +149,7 @@ struct PrepareArgs {
     #[arg(long, help = "Only process drafts from drafts/data/")]
     data: bool,
 
-    #[arg(long, help = "Only process drafts/app.md")]
-    app: bool,
-
-    #[arg(long, help = "Reserved for future prepare-agent profiles")]
+    #[arg(long, help = "Reserved for future prepare profiles")]
     profile: Option<String>,
 
     #[arg(help = "Optional list of draft names without file extension")]
@@ -175,9 +166,6 @@ struct RefineArgs {
 
     #[arg(long, help = "Only process data drafts/artifacts")]
     data: bool,
-
-    #[arg(long, help = "Only process the app draft/artifact")]
-    app: bool,
 
     #[arg(
         long,
@@ -208,11 +196,17 @@ struct ScaffoldArgs {
     #[arg(long, help = "Only process prepared data artifacts")]
     data: bool,
 
-    #[arg(long, help = "Only process the prepared app artifact")]
-    app: bool,
-
     #[arg(help = "Optional list of prepared artifact names without file extension")]
     names: Vec<String>,
+}
+
+#[derive(Args, Clone)]
+struct VerifyArgs {
+    #[arg(help = "Path to the Rust source file to verify")]
+    path: String,
+
+    #[arg(long, help = "Path to the prepared YAML artifact (auto-detected if omitted)")]
+    prepared: Option<String>,
 }
 
 #[derive(Subcommand, Clone)]
@@ -296,6 +290,7 @@ fn main() -> Result<()> {
         Commands::Prepare(args) => run_prepare(args, globals, &workspace, &config)?,
         Commands::Refine(args) => run_refine(args, globals, &workspace, &config)?,
         Commands::Scaffold(args) => run_scaffold(args, globals, &workspace, &config)?,
+        Commands::Verify(args) => run_verify(args, &workspace)?,
         Commands::Manifest(cmd) => run_manifest(cmd, globals, &workspace)?,
         Commands::Clear(cmd) => run_clear(cmd, globals, &workspace, &config)?,
     }
@@ -310,11 +305,10 @@ fn run_prepare(
     config: &ReenConfig,
 ) -> Result<()> {
     let section = &config.prepare;
-    let selection = selection_from_effective_flags(
+    let selection = selection_from_flags(
         bool_setting(args.contexts, section.contexts, config.contexts),
         bool_setting(args.projections, section.projections, config.projections),
         bool_setting(args.data, section.data, config.data),
-        bool_setting(args.app, section.app, config.app),
         args.names,
     );
     let options = PrepareOptions {
@@ -338,11 +332,10 @@ fn run_refine(
     config: &ReenConfig,
 ) -> Result<()> {
     let refine_cfg = &config.refine;
-    let selection = selection_from_effective_flags(
+    let selection = selection_from_flags(
         bool_setting(args.contexts, refine_cfg.contexts, config.contexts),
         bool_setting(args.projections, refine_cfg.projections, config.projections),
         bool_setting(args.data, refine_cfg.data, config.data),
-        bool_setting(args.app, refine_cfg.app, config.app),
         args.names,
     );
     let options = RefineOptions {
@@ -361,11 +354,10 @@ fn run_scaffold(
     config: &ReenConfig,
 ) -> Result<()> {
     let section = &config.scaffold;
-    let selection = selection_from_effective_flags(
+    let selection = selection_from_flags(
         bool_setting(args.contexts, section.contexts, config.contexts),
         bool_setting(args.projections, section.projections, config.projections),
         bool_setting(args.data, section.data, config.data),
-        bool_setting(args.app, section.app, config.app),
         args.names,
     );
     let options = ScaffoldOptions {
@@ -375,6 +367,66 @@ fn run_scaffold(
         dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
     };
     scaffold_workspace(workspace, &options)
+}
+
+fn run_verify(args: VerifyArgs, workspace: &Workspace) -> Result<()> {
+    use reen::prepared::PreparedArtifact;
+    use anyhow::Context;
+    use std::path::Path;
+    use std::process;
+
+    let rs_path = Path::new(&args.path);
+    if !rs_path.is_file() {
+        eprintln!("error: file not found: {}", rs_path.display());
+        process::exit(2);
+    }
+
+    // Find the prepared YAML: explicit --prepared or auto-detect from the .rs path
+    let prepared_path = if let Some(p) = &args.prepared {
+        std::path::PathBuf::from(p)
+    } else {
+        auto_detect_prepared(workspace, rs_path)?
+    };
+
+    if !prepared_path.is_file() {
+        eprintln!(
+            "error: prepared artifact not found: {}",
+            prepared_path.display()
+        );
+        process::exit(2);
+    }
+
+    let raw = std::fs::read_to_string(&prepared_path)
+        .with_context(|| format!("Failed to read {}", prepared_path.display()))?;
+    let artifact: PreparedArtifact = serde_yaml::from_str(&raw)
+        .with_context(|| format!("Failed to parse {}", prepared_path.display()))?;
+
+    let result = verify::verify_file(rs_path, &artifact)?;
+
+    if result.is_ok() {
+        println!("{}", result.render());
+    } else {
+        eprint!("{}", result.render());
+        process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Auto-detect the prepared YAML for a Rust source file.
+/// e.g. src/contexts/money_transfer.rs → drafts/prepare/contexts/money_transfer.yml
+fn auto_detect_prepared(
+    workspace: &Workspace,
+    rs_path: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    let relative = rs_path
+        .strip_prefix(&workspace.root)
+        .unwrap_or(rs_path);
+    // Strip "src/" prefix and change extension to .yml under drafts/prepare/
+    let under_src = relative
+        .strip_prefix("src")
+        .unwrap_or(relative);
+    Ok(workspace.root.join("drafts/prepare").join(under_src).with_extension("yml"))
 }
 
 fn run_manifest(
@@ -431,8 +483,6 @@ fn persist_config_settings(
     globals: GlobalCliOptions,
 ) {
     let Some(command) = &args.command else {
-        // Root-level persistence: both the locally-declared flags and the global flags go
-        // at the top of `reen.yml` when no subcommand is provided.
         apply_root_config_flags(config, args);
         apply_root_globals(config, globals);
         return;
@@ -460,7 +510,6 @@ fn apply_root_config_flags(config: &mut ReenConfig, args: &ConfigArgs) {
     set_bool_if_requested(&mut config.contexts, args.contexts);
     set_bool_if_requested(&mut config.projections, args.projections);
     set_bool_if_requested(&mut config.data, args.data);
-    set_bool_if_requested(&mut config.app, args.app);
     if let Some(profile) = &args.profile {
         config.profile = Some(profile.clone());
     }
@@ -488,7 +537,6 @@ fn apply_prepare_config(section: &mut CommandConfig, args: &PrepareConfigArgs) {
     set_bool_if_requested(&mut section.contexts, args.contexts);
     set_bool_if_requested(&mut section.projections, args.projections);
     set_bool_if_requested(&mut section.data, args.data);
-    set_bool_if_requested(&mut section.app, args.app);
     if let Some(profile) = &args.profile {
         section.profile = Some(profile.clone());
     }
@@ -498,19 +546,15 @@ fn apply_scaffold_config(section: &mut CommandConfig, args: &ScaffoldConfigArgs)
     set_bool_if_requested(&mut section.contexts, args.contexts);
     set_bool_if_requested(&mut section.projections, args.projections);
     set_bool_if_requested(&mut section.data, args.data);
-    set_bool_if_requested(&mut section.app, args.app);
 }
 
 fn apply_refine_config(section: &mut RefineConfig, args: &RefineConfigArgs) {
     set_bool_if_requested(&mut section.contexts, args.contexts);
     set_bool_if_requested(&mut section.projections, args.projections);
     set_bool_if_requested(&mut section.data, args.data);
-    set_bool_if_requested(&mut section.app, args.app);
     if let Some(profile) = &args.profile {
         section.profile = Some(profile.clone());
     }
-    // `drafts_only` / `prepared_only` are mutually exclusive; set one, clear the other so a
-    // later `reen config refine --prepared-only` overrides an earlier `--drafts-only`.
     if args.drafts_only {
         section.drafts_only = Some(true);
         section.prepared_only = None;
@@ -542,12 +586,11 @@ fn option_setting<T>(
     cli_value.or(command_config).or(root_config)
 }
 
-fn selection_from_effective_flags(
+fn selection_from_flags(
     contexts: bool,
     projections: bool,
     data: bool,
-    app: bool,
     names: Vec<String>,
 ) -> Selection {
-    Selection::new(contexts, projections, data, app, names)
+    Selection::new(contexts, projections, data, false, names)
 }

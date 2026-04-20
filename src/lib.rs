@@ -5,4 +5,6 @@ pub mod manifest;
 pub mod prepare;
 pub mod prepared;
 pub mod prepared_contracts;
+pub mod test_synth;
+pub mod verify;
 pub mod workspace;

@@ -1,8 +1,124 @@
 use crate::workspace::Workspace;
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Sequence, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+
+// ── DCI Vocabulary Manifest ───────────────────────────────────────
+
+/// The DCI ubiquitous vocabulary — the authoritative list of data and projection
+/// names available to any context draft.
+///
+/// Loaded from `drafts/vocabulary.yml`. Prepare refuses to resolve a name not
+/// present in the manifest or locally introduced in the same draft.
+#[derive(Debug, Clone, Default)]
+pub struct DciVocabulary {
+    /// Maps a name to its kind ("data" or "projection").
+    entries: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VocabularyFile {
+    #[serde(default)]
+    schema: String,
+    #[serde(default)]
+    data: Vec<String>,
+    #[serde(default)]
+    projections: Vec<String>,
+}
+
+impl DciVocabulary {
+    /// Load the vocabulary from `drafts/vocabulary.yml`.
+    ///
+    /// If the file doesn't exist, returns an empty vocabulary. If it exists
+    /// but also has draft files, auto-discover data and projection names
+    /// from the directory structure.
+    pub fn load(workspace: &Workspace) -> Result<Self> {
+        let mut vocab = Self::default();
+
+        // Auto-discover from directory structure
+        vocab.discover_from_drafts(&workspace.drafts_dir)?;
+
+        // Layer explicit vocabulary.yml on top
+        let path = workspace.drafts_dir.join("vocabulary.yml");
+        if path.is_file() {
+            let raw = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read {}", path.display()))?;
+            let file: VocabularyFile = serde_yaml::from_str(&raw)
+                .with_context(|| format!("Failed to parse {}", path.display()))?;
+            for name in file.data {
+                vocab.entries.insert(name, "data".to_string());
+            }
+            for name in file.projections {
+                vocab.entries.insert(name, "projection".to_string());
+            }
+        }
+
+        Ok(vocab)
+    }
+
+    /// Create an empty vocabulary (for testing).
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Add an entry to the vocabulary.
+    pub fn add(&mut self, name: &str, kind: &str) {
+        self.entries.insert(name.to_string(), kind.to_string());
+    }
+
+    /// Resolve a name against the vocabulary.
+    ///
+    /// Returns `Some("data")` or `Some("projection")` if the name is known,
+    /// `None` if it is not in the vocabulary.
+    pub fn resolve(&self, name: &str) -> Option<String> {
+        self.entries.get(name).cloned()
+    }
+
+    /// Auto-discover data and projection names from the drafts directory.
+    fn discover_from_drafts(&mut self, drafts_dir: &Path) -> Result<()> {
+        let data_dir = drafts_dir.join("data");
+        if data_dir.is_dir() {
+            for entry in fs::read_dir(&data_dir)
+                .with_context(|| format!("read_dir {}", data_dir.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        self.entries.insert(stem.to_string(), "data".to_string());
+                    }
+                }
+            }
+        }
+
+        let proj_dir = drafts_dir.join("projections");
+        if proj_dir.is_dir() {
+            for entry in fs::read_dir(&proj_dir)
+                .with_context(|| format!("read_dir {}", proj_dir.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        self.entries
+                            .insert(stem.to_string(), "projection".to_string());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn entries(&self) -> &BTreeMap<String, String> {
+        &self.entries
+    }
+}
+
+// ── Capability Provider (kept from v1) ────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct CapabilityProviderInput {

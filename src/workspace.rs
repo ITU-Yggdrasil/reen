@@ -162,21 +162,13 @@ impl Selection {
 
     pub fn includes(&self, kind: ArtifactKind) -> bool {
         if !self.has_explicit_kind_filter() {
-            return matches!(
-                kind,
-                ArtifactKind::Context
-                    | ArtifactKind::Projection
-                    | ArtifactKind::Data
-                    | ArtifactKind::App
-            );
+            return true;
         }
 
         match kind {
             ArtifactKind::Context => self.contexts,
             ArtifactKind::Projection => self.projections,
             ArtifactKind::Data => self.data,
-            ArtifactKind::App => self.app,
-            ArtifactKind::UnsupportedApi => false,
         }
     }
 
@@ -315,15 +307,6 @@ fn collect_raw_drafts(
             if matches!(first, Some("prepare")) {
                 continue;
             }
-            if matches!(first, Some("apis" | "external_apis")) {
-                if dir_contains_markdown(&path)? {
-                    bail!(
-                        "Unsupported draft scope under {}. V1 does not support drafts/apis or drafts/external_apis.",
-                        path.display()
-                    );
-                }
-                continue;
-            }
             collect_raw_drafts(root, &path, selection, out)?;
             continue;
         }
@@ -390,19 +373,6 @@ fn collect_prepared_artifacts(
     Ok(())
 }
 
-fn dir_contains_markdown(dir: &Path) -> Result<bool> {
-    for entry in fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_dir() && dir_contains_markdown(&path)? {
-            return Ok(true);
-        }
-        if path.extension().and_then(|value| value.to_str()) == Some("md") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
 
 fn normalize_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()

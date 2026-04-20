@@ -1,46 +1,63 @@
-use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
-pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v1";
+pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v2";
 
+/// The three DCI artifact kinds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Data,
+    Projection,
+    Context,
+}
+
+/// A fully-resolved, prepared artifact in the v2 schema.
+///
+/// Fields are grouped by artifact kind. Kind-inappropriate fields serialize as empty
+/// collections (and are skipped in YAML output via `skip_serializing_if`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedArtifact {
     pub schema: String,
+    pub kind: ArtifactKind,
     pub source: SourceInfo,
     pub export: ExportInfo,
-    /// Whether the enclosing Rust type is mutable (`true` for contexts, `false` for data/projections).
-    ///
-    /// Mutable types expose their public methods with `&mut self`; immutable types use `&self`.
-    /// Role methods always use `&self` on the context regardless of this flag (the role player
-    /// argument carries any needed mutability instead).
-    ///
-    /// Defaults to `false` when absent (legacy prepared files pre-date this field).
-    #[serde(default)]
-    pub mutable: bool,
+
+    // ── Context-only ──────────────────────────────────────────────
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<FieldSpec>,
+    pub role_players: Vec<RolePlayerSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub variants: Vec<VariantSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roles: Vec<RoleSpec>,
+    pub role_methods: Vec<RoleMethodGroupSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub props: Vec<PropSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub collaborators: Vec<CollaboratorSpec>,
+    pub functionalities: Vec<FunctionalitySpec>,
+
+    // ── Data-only ─────────────────────────────────────────────────
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub functionalities: Vec<MethodSpec>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub getters: Vec<GetterSpec>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub constructor: Option<ConstructorPolicy>,
+    pub attributes: Vec<AttributeSpec>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invariants: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub derives: Vec<String>,
+    pub operations: Vec<OperationSpec>,
+
+    // ── Projection-only ───────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_data: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queries: Vec<QuerySpec>,
+
+    // ── Shared across all kinds ───────────────────────────────────
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenarios: Vec<ScenarioSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthesised_tests: Vec<SynthesisedTest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vocabulary_bindings: Vec<VocabularyBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ambiguities: Vec<Ambiguity>,
 }
+
+// ── Source / Export ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SourceInfo {
@@ -54,1590 +71,151 @@ pub struct ExportInfo {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Evidence {
-    pub section: String,
-    pub text: String,
-}
+// ── Context types ─────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ValueStatus {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rust: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub candidates: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<Evidence>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FieldSpec {
+pub struct RolePlayerSpec {
     pub name: String,
-    pub meaning: String,
-    #[serde(rename = "type")]
-    pub type_status: ValueStatus,
-    #[serde(default)]
-    pub getter_accessible: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
+    /// Data or projection name from the manifest.
+    pub data_type: String,
+    pub responsibility: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VariantSpec {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub payload_types: Vec<String>,
-    pub meaning: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
+pub struct RoleMethodGroupSpec {
+    pub role: String,
+    pub methods: Vec<RoleMethodSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RoleSpec {
+pub struct RoleMethodSpec {
     pub name: String,
-    pub purpose: String,
-    pub expected_behavior: String,
-    #[serde(rename = "type")]
-    pub type_status: ValueStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub methods: Vec<MethodSpec>,
+    /// The canonical `<role>_<method>` name used in Rust.
+    pub canonical_name: String,
+    /// Signature hint inferred from scenarios and role method description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_hint: Option<String>,
+    /// Draft text that describes this role method's responsibility.
+    pub citation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PropSpec {
     pub name: String,
-    pub meaning: String,
-    #[serde(rename = "type")]
-    pub type_status: ValueStatus,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CollaboratorSpec {
+pub struct FunctionalitySpec {
     pub name: String,
-    pub responsibility: String,
-    #[serde(rename = "type")]
-    pub type_status: ValueStatus,
+    /// Prose describing the enactment.
+    pub description: String,
+    /// Role method names referenced in this functionality's prose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub role_method_refs: Vec<String>,
 }
 
+// ── Data types ────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GetterSpec {
+pub struct AttributeSpec {
     pub name: String,
-    pub field: String,
-    pub mode: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ConstructorPolicy {
-    pub kind: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MethodSpec {
+pub struct OperationSpec {
     pub name: String,
-    pub signature: ValueStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub receiver: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parameters: Vec<ParameterSpec>,
-    #[serde(rename = "returns")]
-    pub return_status: ValueStatus,
-    /// Numbered happy-path steps from the draft's **Flow:** section, stripped of their `N. ` prefix.
-    /// Present when the flow could not be reduced to machine-readable IR (see `body`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub flow: Vec<String>,
-    /// Alternative-path entries from the draft's **Extensions:** section (e.g. `1a. …`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub extensions: Vec<String>,
-    /// Post-condition invariants from the draft's **Guarantee:** section.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub guarantee: Vec<String>,
-    /// Identifiers referenced in flow/extensions/guarantee, classified by kind.
-    /// Populated when `flow` is non-empty to give an implementation agent a bounded dependency list.
+    pub description: String,
+}
+
+// ── Projection types ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuerySpec {
+    pub name: String,
+    pub description: String,
+}
+
+// ── Shared types ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioSpec {
+    pub name: String,
+    pub given: String,
+    pub when: String,
+    pub then: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SynthesisedTest {
+    /// `"scenario"` or `"invariant"`.
+    pub source: String,
+    pub given: String,
+    pub when: String,
+    pub then: String,
+    /// Location in the draft that motivated this test.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub references: Option<MethodReferences>,
+    pub citation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VocabularyBinding {
+    pub name: String,
+    /// One of: `role_player`, `role`, `role_method`, `data`, `projection`, `prop`,
+    /// `primitive`, `ambiguous`.
+    pub resolution: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<Body>,
-}
-
-/// Identifiers referenced in a method's behavioral description, classified by their kind in the
-/// DCI vocabulary of the owning draft.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct MethodReferences {
-    /// Role field names (e.g. `board`, `stdin_source`) mentioned in the flow text.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub roles: Vec<String>,
-    /// Prop names (e.g. `max_length`) mentioned in the flow text.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub props: Vec<String>,
-    /// Type names (PascalCase identifiers, e.g. `KeyPress`, `Direction`) mentioned in the flow text.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub types: Vec<String>,
-    /// Role method names as they appear on the context (`<role>_<method>`, e.g. `board_at`,
-    /// `stdin_source_read_keys`) inferred from backtick identifiers that match a known role prefix.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub role_methods: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ParameterSpec {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub type_status: ValueStatus,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Body {
-    pub steps: Vec<Statement>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum Statement {
-    Let {
-        name: String,
-        expr: Expression,
-    },
-    AssignLocal {
-        name: String,
-        expr: Expression,
-    },
-    Call {
-        expr: Expression,
-    },
-    If {
-        condition: Expression,
-        then_steps: Vec<Statement>,
-        else_steps: Vec<Statement>,
-    },
-    Match {
-        expr: Expression,
-        arms: Vec<MatchArm>,
-    },
-    ForEach {
-        binding: String,
-        collection: Expression,
-        body: Vec<Statement>,
-    },
-    Return {
-        expr: Option<Expression>,
-    },
-    SleepMs {
-        expr: Expression,
-    },
-    ReadUtcNowMs {
-        name: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MatchArm {
-    pub pattern: String,
-    pub steps: Vec<Statement>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum Expression {
-    Literal {
-        kind: String,
-        value: String,
-    },
-    Var {
-        name: String,
-    },
-    Field {
-        base: String,
-        name: String,
-    },
-    ConstructStruct {
-        type_name: String,
-        fields: Vec<StructFieldValue>,
-    },
-    ConstructEnum {
-        type_name: String,
-        variant: String,
-    },
-    CallRoleMethod {
-        role: String,
-        method: String,
-        args: Vec<Expression>,
-    },
-    CallLocalMethod {
-        name: String,
-        args: Vec<Expression>,
-    },
-    CallInstanceMethod {
-        receiver: Box<Expression>,
-        method: String,
-        args: Vec<Expression>,
-    },
-    BinaryOp {
-        operator: String,
-        left: Box<Expression>,
-        right: Box<Expression>,
-    },
-    UnaryOp {
-        operator: String,
-        expr: Box<Expression>,
-    },
-    CollectionLiteral {
-        kind: String,
-        items: Vec<Expression>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        entries: Vec<CollectionEntry>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StructFieldValue {
-    pub name: String,
-    pub expr: Expression,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CollectionEntry {
-    pub key: Expression,
-    pub value: Expression,
+    pub resolved_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Ambiguity {
-    pub path: String,
-    pub severity: String,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_line: Option<usize>,
 }
 
+// ── Construction helpers ──────────────────────────────────────────
+
 impl PreparedArtifact {
-    pub fn empty(
-        kind: &str,
-        path: String,
-        title: String,
-        export_name: String,
-        mutable: bool,
-    ) -> Self {
+    pub fn new(kind: ArtifactKind, path: String, title: String, export_name: String) -> Self {
+        let kind_str = match &kind {
+            ArtifactKind::Data => "data",
+            ArtifactKind::Projection => "projection",
+            ArtifactKind::Context => "context",
+        };
         Self {
             schema: PREPARED_SCHEMA_VERSION.to_string(),
             source: SourceInfo {
                 path,
-                kind: kind.to_string(),
+                kind: kind_str.to_string(),
                 title,
             },
+            kind,
             export: ExportInfo { name: export_name },
-            mutable,
-            fields: Vec::new(),
-            variants: Vec::new(),
-            roles: Vec::new(),
+            role_players: Vec::new(),
+            role_methods: Vec::new(),
             props: Vec::new(),
-            collaborators: Vec::new(),
             functionalities: Vec::new(),
-            getters: Vec::new(),
-            constructor: None,
+            attributes: Vec::new(),
             invariants: Vec::new(),
-            derives: Vec::new(),
+            operations: Vec::new(),
+            source_data: None,
+            queries: Vec::new(),
+            scenarios: Vec::new(),
+            synthesised_tests: Vec::new(),
+            vocabulary_bindings: Vec::new(),
             ambiguities: Vec::new(),
-        }
-    }
-
-    pub fn refresh_ambiguity_index(&mut self) {
-        self.normalize_method_signatures();
-        let mut ambiguities = Vec::new();
-        let mut scanned_paths = BTreeSet::new();
-        for (idx, field) in self.fields.iter().enumerate() {
-            collect_value_ambiguity(
-                &mut ambiguities,
-                &mut scanned_paths,
-                format!("fields[{idx}].type"),
-                &field.type_status,
-                &format!("field `{}` type is unresolved", field.name),
-            );
-        }
-        for (idx, role) in self.roles.iter().enumerate() {
-            collect_value_ambiguity(
-                &mut ambiguities,
-                &mut scanned_paths,
-                format!("roles[{idx}].type"),
-                &role.type_status,
-                &format!("role `{}` type is unresolved", role.name),
-            );
-            for (method_idx, method) in role.methods.iter().enumerate() {
-                let base_path = format!("roles[{idx}].methods[{method_idx}]");
-                method.collect_ambiguities(&mut ambiguities, &mut scanned_paths, base_path.clone());
-            }
-        }
-        for (idx, prop) in self.props.iter().enumerate() {
-            collect_value_ambiguity(
-                &mut ambiguities,
-                &mut scanned_paths,
-                format!("props[{idx}].type"),
-                &prop.type_status,
-                &format!("prop `{}` type is unresolved", prop.name),
-            );
-        }
-        for (idx, collaborator) in self.collaborators.iter().enumerate() {
-            collect_value_ambiguity(
-                &mut ambiguities,
-                &mut scanned_paths,
-                format!("collaborators[{idx}].type"),
-                &collaborator.type_status,
-                &format!("collaborator `{}` type is unresolved", collaborator.name),
-            );
-        }
-        for (idx, method) in self.functionalities.iter().enumerate() {
-            let base_path = format!("functionalities[{idx}]");
-            method.collect_ambiguities(&mut ambiguities, &mut scanned_paths, base_path.clone());
-        }
-        // Preserve manually-added blocking ambiguities (structural issues from prepare_document),
-        // but NOT stale entries for paths the value scan already covers.
-        ambiguities.extend(
-            self.ambiguities
-                .iter()
-                .filter(|ambiguity| {
-                    ambiguity.severity.eq_ignore_ascii_case("blocking")
-                        && !scanned_paths.contains(&ambiguity.path)
-                })
-                .cloned(),
-        );
-        ambiguities.sort_by(|left, right| {
-            (left.path.as_str(), left.message.as_str())
-                .cmp(&(right.path.as_str(), right.message.as_str()))
-        });
-        ambiguities
-            .dedup_by(|left, right| left.path == right.path && left.message == right.message);
-        self.ambiguities = ambiguities;
-    }
-
-    /// Propagate resolved role/prop types to downstream dependents:
-    /// - Role method `<role>_` parameters pick up the role's resolved type.
-    /// - Role method signatures are rebuilt to include the role player parameter.
-    /// - The auto-constructor signature is rebuilt from current parameter types.
-    ///
-    /// Idempotent — safe to call after initial prepare and again after fix-agent patches.
-    pub fn propagate_resolved_types(&mut self) {
-        for role in &mut self.roles {
-            let role_param_name = format!("{}_", role.name);
-
-            for method in &mut role.methods {
-                method.receiver = Some("&self".to_string());
-                if method
-                    .parameters
-                    .iter()
-                    .all(|parameter| parameter.name != role_param_name)
-                {
-                    method.parameters.insert(
-                        0,
-                        ParameterSpec {
-                            name: role_param_name.clone(),
-                            type_status: ValueStatus::missing(
-                                format!(
-                                    "role method `{}` is waiting for role `{}` to resolve",
-                                    method.name, role.name
-                                ),
-                                Vec::new(),
-                            ),
-                        },
-                    );
-                }
-                if let Some(param) = method
-                    .parameters
-                    .iter_mut()
-                    .find(|p| p.name == role_param_name)
-                    && let Some(ty) = role.type_status.rust().map(|s| s.to_string())
-                    && !param.type_status.is_resolved()
-                {
-                    param.type_status =
-                        ValueStatus::resolved(format!("&{ty}"), "prepare.role_player");
-                }
-                method.sync_signature_from_structure();
-            }
-        }
-
-        if let Some(ctor) = self
-            .functionalities
-            .iter_mut()
-            .find(|m| m.name == "new" && m.receiver.is_none())
-        {
-            ctor.sync_signature_from_structure();
-        }
-    }
-
-    fn normalize_method_signatures(&mut self) {
-        for method in &mut self.functionalities {
-            method.normalize_signature_state();
-        }
-        for role in &mut self.roles {
-            for method in &mut role.methods {
-                method.normalize_signature_state();
-            }
-        }
-    }
-
-    /// Re-assert the invariant that every role method's first explicit parameter (the
-    /// `<role>_` role-player slot) is a reference (`&T`, or `&mut T` when the method body
-    /// needs mutation) rather than an owned value.
-    ///
-    /// This runs after every `apply_fix_at_path_with_candidates` call so that a fix-agent
-    /// that writes `roles[i].methods[j].parameters[0].type = "Stdin"` (owned) can't leak
-    /// through and compile-break the scaffold with "cannot move out of self.<role>" errors.
-    ///
-    /// The receiver mutability on the role method itself is left untouched — role methods
-    /// are `&self` by reen convention unless the originating spec explicitly asks for
-    /// `&mut self`, and we do not infer that here.
-    pub(crate) fn normalize_role_method_parameters(&mut self) {
-        for role in &mut self.roles {
-            let role_param_name = format!("{}_", role.name);
-            for method in &mut role.methods {
-                let Some(param) = method
-                    .parameters
-                    .iter_mut()
-                    .find(|p| p.name == role_param_name)
-                else {
-                    continue;
-                };
-                let Some(rust) = param.type_status.rust().map(str::to_string) else {
-                    continue;
-                };
-                let normalized = ensure_role_player_param_reference(&rust);
-                if normalized != rust {
-                    let source = param
-                        .type_status
-                        .source
-                        .clone()
-                        .unwrap_or_else(|| "prepare.role_player".to_string());
-                    param.type_status = ValueStatus::resolved(normalized, source);
-                }
-                method.sync_signature_from_structure();
-            }
         }
     }
 
     pub fn blocking_ambiguities(&self) -> impl Iterator<Item = &Ambiguity> {
         self.ambiguities
             .iter()
-            .filter(|ambiguity| ambiguity.severity.eq_ignore_ascii_case("blocking"))
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.schema != PREPARED_SCHEMA_VERSION {
-            bail!(
-                "Unsupported prepared schema `{}` in {}",
-                self.schema,
-                self.source.path
-            );
-        }
-        validate_methods(&self.functionalities)?;
-        for role in &self.roles {
-            validate_methods(&role.methods)?;
-        }
-        Ok(())
-    }
-
-    pub fn apply_fix_at_path(&mut self, path: &str, value: &str) -> bool {
-        self.apply_fix_at_path_with_candidates(path, value, None)
-    }
-
-    pub fn apply_fix_at_path_with_candidates(
-        &mut self,
-        path: &str,
-        value: &str,
-        candidates: Option<&[String]>,
-    ) -> bool {
-        if let Some((role_idx, method_idx)) =
-            parse_double_index(path, "roles", "methods", "signature")
-        {
-            let Some(role) = self.roles.get_mut(role_idx) else {
-                return false;
-            };
-            let Some(role_ty) = role.type_status.rust().map(|ty| ty.to_string()) else {
-                return false;
-            };
-            let Some(method) = role.methods.get_mut(method_idx) else {
-                return false;
-            };
-            let Ok(parsed) = parse_method_signature(value, &method.name) else {
-                return false;
-            };
-            method.receiver = Some("&self".to_string());
-            method.parameters = vec![ParameterSpec {
-                name: format!("{}_", role.name),
-                type_status: ValueStatus::resolved(format!("&{role_ty}"), "prepare.role_player"),
-            }];
-            method
-                .parameters
-                .extend(
-                    parsed
-                        .parameters
-                        .into_iter()
-                        .map(|parameter| ParameterSpec {
-                            name: parameter.0,
-                            type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
-                        }),
-                );
-            method.return_status = ValueStatus::resolved(parsed.return_type, "fix.agent");
-            method.signature.apply_fix(value);
-            method.sync_signature_from_structure();
-            mark_fixed_ambiguities(&mut self.ambiguities, path);
-            self.normalize_role_method_parameters();
-            return true;
-        }
-        if let Some(idx) = parse_single_index(path, "functionalities", "signature") {
-            let Some(method) = self.functionalities.get_mut(idx) else {
-                return false;
-            };
-            let Ok(parsed) = parse_method_signature(value, &method.name) else {
-                return false;
-            };
-            method.receiver = parsed.receiver;
-            method.parameters = parsed
-                .parameters
-                .into_iter()
-                .map(|parameter| ParameterSpec {
-                    name: parameter.0,
-                    type_status: ValueStatus::resolved(parameter.1, "fix.agent"),
-                })
-                .collect();
-            method.return_status = ValueStatus::resolved(parsed.return_type, "fix.agent");
-            method.signature.apply_fix(value);
-            method.sync_signature_from_structure();
-            mark_fixed_ambiguities(&mut self.ambiguities, path);
-            self.normalize_role_method_parameters();
-            return true;
-        }
-        if let Some(vs) = self.resolve_value_status_mut(path) {
-            vs.apply_fix_with_candidates(value, candidates);
-            if path.ends_with(".returns") || path.ends_with(".type") {
-                self.sync_signature_for_path(path);
-            }
-            for amb in &mut self.ambiguities {
-                if amb.path == path && amb.severity == "blocking" {
-                    amb.severity = "fixed".to_string();
-                }
-            }
-            self.normalize_role_method_parameters();
-            return true;
-        }
-        false
-    }
-
-    fn sync_signature_for_path(&mut self, path: &str) {
-        if let Some((role_idx, method_idx)) =
-            parse_double_index(path, "roles", "methods", "returns")
-        {
-            if let Some(method) = self
-                .roles
-                .get_mut(role_idx)
-                .and_then(|role| role.methods.get_mut(method_idx))
-            {
-                method.sync_signature_from_structure();
-            }
-            return;
-        }
-        if let Some((role_idx, method_idx)) = parse_role_method_parameter_path(path) {
-            if let Some(method) = self
-                .roles
-                .get_mut(role_idx)
-                .and_then(|role| role.methods.get_mut(method_idx))
-            {
-                method.sync_signature_from_structure();
-            }
-            return;
-        }
-        if let Some(idx) = parse_single_index(path, "functionalities", "returns") {
-            if let Some(method) = self.functionalities.get_mut(idx) {
-                method.sync_signature_from_structure();
-            }
-            return;
-        }
-        if let Some((method_idx, _param_idx)) =
-            parse_double_index(path, "functionalities", "parameters", "type")
-            && let Some(method) = self.functionalities.get_mut(method_idx)
-        {
-            method.sync_signature_from_structure();
-        }
-    }
-
-    fn resolve_value_status_mut(&mut self, path: &str) -> Option<&mut ValueStatus> {
-        if let Some((collection, rest)) = parse_indexed_path(path) {
-            match collection {
-                "fields" => {
-                    let (idx, field) = rest?;
-                    let item = self.fields.get_mut(idx)?;
-                    match field {
-                        "type" => return Some(&mut item.type_status),
-                        _ => return None,
-                    }
-                }
-                "roles" => {
-                    let (idx, field) = rest?;
-                    let role = self.roles.get_mut(idx)?;
-                    if field == "type" {
-                        return Some(&mut role.type_status);
-                    }
-                    if let Some(sub) = field.strip_prefix("methods") {
-                        if let Some((sub_coll, sub_rest)) =
-                            parse_indexed_path(sub.trim_start_matches('.'))
-                        {
-                            let _ = sub_coll;
-                            if let Some((midx, mfield)) = sub_rest {
-                                let method = role.methods.get_mut(midx)?;
-                                return resolve_method_field(method, mfield);
-                            }
-                        }
-                        let trimmed = sub.trim_start_matches('.');
-                        if let Some((sub_coll2, sub_rest2)) = parse_indexed_path(trimmed) {
-                            let _ = sub_coll2;
-                            if let Some((midx, mfield)) = sub_rest2 {
-                                let method = role.methods.get_mut(midx)?;
-                                return resolve_method_field(method, mfield);
-                            }
-                        }
-                    }
-                }
-                "props" => {
-                    let (idx, field) = rest?;
-                    let item = self.props.get_mut(idx)?;
-                    match field {
-                        "type" => return Some(&mut item.type_status),
-                        _ => return None,
-                    }
-                }
-                "collaborators" => {
-                    let (idx, field) = rest?;
-                    let item = self.collaborators.get_mut(idx)?;
-                    match field {
-                        "type" => return Some(&mut item.type_status),
-                        _ => return None,
-                    }
-                }
-                "functionalities" => {
-                    let (idx, field) = rest?;
-                    let method = self.functionalities.get_mut(idx)?;
-                    return resolve_method_field(method, field);
-                }
-                _ => {}
-            }
-        }
-        None
-    }
-
-    pub fn referenced_type_names(&self) -> BTreeSet<String> {
-        let mut types = BTreeSet::new();
-        for field in &self.fields {
-            field.type_status.collect_type_names(&mut types);
-        }
-        for variant in &self.variants {
-            for payload_type in &variant.payload_types {
-                for name in extract_type_names(payload_type) {
-                    types.insert(name);
-                }
-            }
-        }
-        for role in &self.roles {
-            role.type_status.collect_type_names(&mut types);
-            for method in &role.methods {
-                method.collect_type_names(&mut types);
-            }
-        }
-        for prop in &self.props {
-            prop.type_status.collect_type_names(&mut types);
-        }
-        for collaborator in &self.collaborators {
-            collaborator.type_status.collect_type_names(&mut types);
-        }
-        for method in &self.functionalities {
-            method.collect_type_names(&mut types);
-        }
-        types.remove(&self.export.name);
-        types.remove("Self");
-        types
-    }
-}
-
-impl MethodSpec {
-    fn normalize_signature_state(&mut self) {
-        let has_structured_shape = self.receiver.is_some()
-            || !self.parameters.is_empty()
-            || self.return_status.is_resolved();
-        if !has_structured_shape {
-            if let Some(signature) = self.signature.rust.as_deref()
-                && let Ok(parsed) = parse_method_signature(signature, &self.name)
-            {
-                self.receiver = parsed.receiver;
-                self.parameters = parsed
-                    .parameters
-                    .into_iter()
-                    .map(|parameter| ParameterSpec {
-                        name: parameter.0,
-                        type_status: ValueStatus::resolved(parameter.1, "prepare.signature"),
-                    })
-                    .collect();
-                if !self.return_status.is_resolved() {
-                    self.return_status =
-                        ValueStatus::resolved(parsed.return_type, "prepare.signature");
-                }
-            }
-        }
-        self.sync_signature_from_structure();
-    }
-
-    fn sync_signature_from_structure(&mut self) {
-        let Some(signature) = render_method_signature(
-            &self.name,
-            self.receiver.as_deref(),
-            &self.parameters,
-            self.return_status.rust(),
-        ) else {
-            return;
-        };
-        if self.signature.status.is_empty() || !self.signature.is_resolved() {
-            self.signature.status = "resolved".to_string();
-        }
-        self.signature.rust = Some(signature);
-        if self.signature.source.is_none() {
-            self.signature.source = Some("prepare.canonical".to_string());
-        }
-    }
-
-    fn collect_ambiguities(
-        &self,
-        out: &mut Vec<Ambiguity>,
-        scanned: &mut BTreeSet<String>,
-        base_path: String,
-    ) {
-        collect_value_ambiguity(
-            out,
-            scanned,
-            format!("{base_path}.signature"),
-            &self.signature,
-            &format!("method `{}` signature is unresolved", self.name),
-        );
-        collect_value_ambiguity(
-            out,
-            scanned,
-            format!("{base_path}.returns"),
-            &self.return_status,
-            &format!("method `{}` return type is unresolved", self.name),
-        );
-        for (idx, parameter) in self.parameters.iter().enumerate() {
-            collect_value_ambiguity(
-                out,
-                scanned,
-                format!("{base_path}.parameters[{idx}].type"),
-                &parameter.type_status,
-                &format!("parameter `{}` type is unresolved", parameter.name),
-            );
-        }
-    }
-
-    fn collect_type_names(&self, types: &mut BTreeSet<String>) {
-        self.signature.collect_type_names(types);
-        self.return_status.collect_type_names(types);
-        for parameter in &self.parameters {
-            parameter.type_status.collect_type_names(types);
-        }
-        if let Some(body) = &self.body {
-            body.collect_type_names(types);
-        }
-    }
-}
-
-impl Body {
-    fn collect_type_names(&self, types: &mut BTreeSet<String>) {
-        for step in &self.steps {
-            step.collect_type_names(types);
-        }
-    }
-}
-
-impl Statement {
-    fn collect_type_names(&self, types: &mut BTreeSet<String>) {
-        match self {
-            Statement::Let { expr, .. }
-            | Statement::AssignLocal { expr, .. }
-            | Statement::Call { expr }
-            | Statement::SleepMs { expr } => expr.collect_type_names(types),
-            Statement::If {
-                condition,
-                then_steps,
-                else_steps,
-            } => {
-                condition.collect_type_names(types);
-                for step in then_steps {
-                    step.collect_type_names(types);
-                }
-                for step in else_steps {
-                    step.collect_type_names(types);
-                }
-            }
-            Statement::Match { expr, arms } => {
-                expr.collect_type_names(types);
-                for arm in arms {
-                    for step in &arm.steps {
-                        step.collect_type_names(types);
-                    }
-                }
-            }
-            Statement::ForEach {
-                collection, body, ..
-            } => {
-                collection.collect_type_names(types);
-                for step in body {
-                    step.collect_type_names(types);
-                }
-            }
-            Statement::Return { expr } => {
-                if let Some(expr) = expr {
-                    expr.collect_type_names(types);
-                }
-            }
-            Statement::ReadUtcNowMs { .. } => {}
-        }
-    }
-}
-
-impl Expression {
-    fn collect_type_names(&self, types: &mut BTreeSet<String>) {
-        match self {
-            Expression::ConstructStruct { type_name, fields } => {
-                types.insert(type_name.clone());
-                for field in fields {
-                    field.expr.collect_type_names(types);
-                }
-            }
-            Expression::ConstructEnum { type_name, .. } => {
-                types.insert(type_name.clone());
-            }
-            Expression::CallRoleMethod { args, .. } | Expression::CallLocalMethod { args, .. } => {
-                for arg in args {
-                    arg.collect_type_names(types);
-                }
-            }
-            Expression::CallInstanceMethod { receiver, args, .. } => {
-                receiver.collect_type_names(types);
-                for arg in args {
-                    arg.collect_type_names(types);
-                }
-            }
-            Expression::BinaryOp { left, right, .. } => {
-                left.collect_type_names(types);
-                right.collect_type_names(types);
-            }
-            Expression::UnaryOp { expr, .. } => expr.collect_type_names(types),
-            Expression::CollectionLiteral { items, entries, .. } => {
-                for item in items {
-                    item.collect_type_names(types);
-                }
-                for entry in entries {
-                    entry.key.collect_type_names(types);
-                    entry.value.collect_type_names(types);
-                }
-            }
-            Expression::Literal { .. } | Expression::Var { .. } | Expression::Field { .. } => {}
-        }
-    }
-}
-
-impl ValueStatus {
-    pub fn resolved(rust: impl Into<String>, source: impl Into<String>) -> Self {
-        Self {
-            status: "resolved".to_string(),
-            rust: Some(rust.into()),
-            source: Some(source.into()),
-            candidates: Vec::new(),
-            reason: None,
-            evidence: Vec::new(),
-        }
-    }
-
-    pub fn defaulted(rust: impl Into<String>, source: impl Into<String>) -> Self {
-        Self {
-            status: "defaulted".to_string(),
-            rust: Some(rust.into()),
-            source: Some(source.into()),
-            candidates: Vec::new(),
-            reason: None,
-            evidence: Vec::new(),
-        }
-    }
-
-    pub fn ambiguous(
-        candidates: Vec<String>,
-        reason: impl Into<String>,
-        evidence: Vec<Evidence>,
-    ) -> Self {
-        Self {
-            status: "ambiguous".to_string(),
-            rust: None,
-            source: None,
-            candidates,
-            reason: Some(reason.into()),
-            evidence,
-        }
-    }
-
-    pub fn missing(reason: impl Into<String>, evidence: Vec<Evidence>) -> Self {
-        Self {
-            status: "missing".to_string(),
-            rust: None,
-            source: None,
-            candidates: Vec::new(),
-            reason: Some(reason.into()),
-            evidence,
-        }
-    }
-
-    pub fn is_resolved(&self) -> bool {
-        matches!(self.status.as_str(), "resolved" | "defaulted" | "fixed")
-    }
-
-    pub fn apply_fix(&mut self, value: impl Into<String>) {
-        self.apply_fix_with_candidates(value, None::<Vec<String>>);
-    }
-
-    pub fn apply_fix_with_candidates<I, S>(
-        &mut self,
-        value: impl Into<String>,
-        candidates: Option<I>,
-    ) where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let chosen = value.into();
-        self.status = "fixed".to_string();
-        self.rust = Some(chosen.clone());
-        self.source = Some("fix.agent".to_string());
-        let mut preserved = Vec::new();
-        if let Some(candidates) = candidates {
-            for candidate in candidates {
-                let candidate = candidate.as_ref().trim();
-                if candidate.is_empty() || candidate == chosen {
-                    continue;
-                }
-                if !preserved.iter().any(|existing| existing == candidate) {
-                    preserved.push(candidate.to_string());
-                }
-            }
-        } else {
-            for candidate in &self.candidates {
-                if candidate != &chosen && !preserved.iter().any(|existing| existing == candidate) {
-                    preserved.push(candidate.clone());
-                }
-            }
-        }
-        self.candidates = preserved;
-    }
-
-    pub fn rust(&self) -> Option<&str> {
-        self.rust.as_deref()
-    }
-
-    fn collect_type_names(&self, types: &mut BTreeSet<String>) {
-        if let Some(rust) = &self.rust {
-            for name in extract_type_names(rust) {
-                types.insert(name);
-            }
-        }
-    }
-}
-
-fn collect_value_ambiguity(
-    out: &mut Vec<Ambiguity>,
-    scanned: &mut BTreeSet<String>,
-    path: String,
-    value: &ValueStatus,
-    default_message: &str,
-) {
-    scanned.insert(path.clone());
-    if value.is_resolved() {
-        return;
-    }
-    let reason = value.reason.as_deref().unwrap_or(default_message);
-    out.push(Ambiguity {
-        path,
-        severity: "blocking".to_string(),
-        message: reason.to_string(),
-        source_line: None,
-    });
-}
-
-fn validate_methods(methods: &[MethodSpec]) -> Result<()> {
-    for method in methods {
-        if method.name.trim().is_empty() {
-            bail!("Prepared methods must have a name");
-        }
-        if !method.signature.is_resolved() && method.body.is_none() {
-            continue;
-        }
-        if let Some(body) = &method.body {
-            validate_body(body)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_body(body: &Body) -> Result<()> {
-    for step in &body.steps {
-        validate_statement(step)?;
-    }
-    Ok(())
-}
-
-fn validate_statement(step: &Statement) -> Result<()> {
-    match step {
-        Statement::Let { expr, .. }
-        | Statement::AssignLocal { expr, .. }
-        | Statement::Call { expr }
-        | Statement::SleepMs { expr } => validate_expression(expr),
-        Statement::If {
-            condition,
-            then_steps,
-            else_steps,
-        } => {
-            validate_expression(condition)?;
-            for step in then_steps {
-                validate_statement(step)?;
-            }
-            for step in else_steps {
-                validate_statement(step)?;
-            }
-            Ok(())
-        }
-        Statement::Match { expr, arms } => {
-            validate_expression(expr)?;
-            for arm in arms {
-                for step in &arm.steps {
-                    validate_statement(step)?;
-                }
-            }
-            Ok(())
-        }
-        Statement::ForEach {
-            collection, body, ..
-        } => {
-            validate_expression(collection)?;
-            for step in body {
-                validate_statement(step)?;
-            }
-            Ok(())
-        }
-        Statement::Return { expr } => {
-            if let Some(expr) = expr {
-                validate_expression(expr)?;
-            }
-            Ok(())
-        }
-        Statement::ReadUtcNowMs { .. } => Ok(()),
-    }
-}
-
-fn validate_expression(expr: &Expression) -> Result<()> {
-    match expr {
-        Expression::Literal { kind, .. } => match kind.as_str() {
-            "string" | "integer" | "bool" | "char" | "path" => Ok(()),
-            other => bail!("Unsupported literal kind `{other}`"),
-        },
-        Expression::Var { .. } | Expression::Field { .. } | Expression::ConstructEnum { .. } => {
-            Ok(())
-        }
-        Expression::ConstructStruct { fields, .. } => {
-            for field in fields {
-                validate_expression(&field.expr)?;
-            }
-            Ok(())
-        }
-        Expression::CallRoleMethod { args, .. } | Expression::CallLocalMethod { args, .. } => {
-            for arg in args {
-                validate_expression(arg)?;
-            }
-            Ok(())
-        }
-        Expression::CallInstanceMethod { receiver, args, .. } => {
-            validate_expression(receiver)?;
-            for arg in args {
-                validate_expression(arg)?;
-            }
-            Ok(())
-        }
-        Expression::BinaryOp { left, right, .. } => {
-            validate_expression(left)?;
-            validate_expression(right)
-        }
-        Expression::UnaryOp { expr, .. } => validate_expression(expr),
-        Expression::CollectionLiteral { items, entries, .. } => {
-            for item in items {
-                validate_expression(item)?;
-            }
-            for entry in entries {
-                validate_expression(&entry.key)?;
-                validate_expression(&entry.value)?;
-            }
-            Ok(())
-        }
-    }
-}
-
-fn extract_type_names(rust: &str) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    let mut current = String::new();
-    let mut prev_sep = '\0';
-    for ch in rust.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch);
-            continue;
-        }
-        // Skip names that follow `::` — they are part of a qualified path
-        // (e.g. `std::collections::VecDeque`) and not project-local types.
-        if prev_sep != ':' {
-            push_type_name(&mut names, &mut current);
-        } else {
-            current.clear();
-        }
-        prev_sep = ch;
-    }
-    if prev_sep != ':' {
-        push_type_name(&mut names, &mut current);
-    } else {
-        current.clear();
-    }
-    names
-}
-
-fn push_type_name(names: &mut BTreeSet<String>, current: &mut String) {
-    if current.is_empty() {
-        return;
-    }
-    if current
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_uppercase())
-    {
-        let excluded = [
-            "String", "Vec", "Option", "Result", "HashMap", "BTreeMap", "HashSet", "BTreeSet",
-            "VecDeque", "Box", "Rc", "Arc", "Cow", "Pin", "Self", "None", "Some", "Ok", "Err",
-        ];
-        if !excluded.contains(&current.as_str()) {
-            names.insert(current.clone());
-        }
-    }
-    current.clear();
-}
-
-fn resolve_method_field<'a>(
-    method: &'a mut MethodSpec,
-    field: &str,
-) -> Option<&'a mut ValueStatus> {
-    match field {
-        "signature" => Some(&mut method.signature),
-        "returns" => Some(&mut method.return_status),
-        _ => {
-            if let Some(rest) = field.strip_prefix("parameters") {
-                let rest = rest.trim_start_matches('.');
-                if let Some((_, inner)) = parse_indexed_path(rest) {
-                    let (pidx, pfield) = inner?;
-                    let param = method.parameters.get_mut(pidx)?;
-                    if pfield == "type" {
-                        return Some(&mut param.type_status);
-                    }
-                }
-            }
-            None
-        }
-    }
-}
-
-fn render_method_signature(
-    name: &str,
-    receiver: Option<&str>,
-    parameters: &[ParameterSpec],
-    return_type: Option<&str>,
-) -> Option<String> {
-    let return_type = return_type?;
-    if parameters
-        .iter()
-        .any(|parameter| !parameter.type_status.is_resolved())
-    {
-        return None;
-    }
-    let mut parts = Vec::new();
-    if let Some(receiver) = receiver {
-        parts.push(receiver.to_string());
-    }
-    parts.extend(parameters.iter().map(|parameter| {
-        format!(
-            "{}: {}",
-            parameter.name,
-            parameter.type_status.rust().unwrap_or("Unknown")
-        )
-    }));
-    Some(format!("{name}({}) -> {return_type}", parts.join(", ")))
-}
-
-/// Turn a raw role-player parameter type into a reference form.
-///
-/// Rules:
-/// - Leave `&T`, `&mut T`, and `&'a T` alone — the caller already picked a reference shape.
-/// - Prepend `&` to any other resolved type.
-/// - Leave empty / `Unknown` alone — an unresolved type isn't actionable.
-///
-/// We deliberately default to immutable reference. Mutable receivers for role-method bodies
-/// are driven by whether the body calls a `&mut` method on the player, which is computed
-/// elsewhere; this normalizer is strictly a safety net against owned types sneaking in.
-fn ensure_role_player_param_reference(raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "Unknown" {
-        return raw.to_string();
-    }
-    if trimmed.starts_with('&') {
-        return trimmed.to_string();
-    }
-    format!("&{trimmed}")
-}
-
-#[derive(Debug, Clone)]
-struct ParsedMethodSignature {
-    receiver: Option<String>,
-    parameters: Vec<(String, String)>,
-    return_type: String,
-}
-
-fn parse_method_signature(signature: &str, expected_name: &str) -> Result<ParsedMethodSignature> {
-    let trimmed = signature.trim().trim_matches('`');
-    let Some((left, right)) = trimmed.split_once("->") else {
-        bail!("signature `{trimmed}` is missing `->`");
-    };
-    let left = left.trim();
-    let return_type = right.trim().to_string();
-    let Some(open) = left.find('(') else {
-        bail!("signature `{trimmed}` is missing `(`");
-    };
-    let Some(close) = left.rfind(')') else {
-        bail!("signature `{trimmed}` is missing `)`");
-    };
-    let name = left[..open].trim();
-    if name != expected_name {
-        bail!("signature `{trimmed}` describes `{name}` but expected `{expected_name}`");
-    }
-    let inner = left[open + 1..close].trim();
-    let mut receiver = None;
-    let mut parameters = Vec::new();
-    for part in split_signature_params(inner) {
-        if part.is_empty() {
-            continue;
-        }
-        if matches!(part.as_str(), "&self" | "&mut self" | "self") {
-            receiver = Some(part);
-            continue;
-        }
-        let Some((param_name, param_type)) = part.split_once(':') else {
-            bail!("signature parameter `{part}` is missing `:`");
-        };
-        parameters.push((param_name.trim().to_string(), param_type.trim().to_string()));
-    }
-    Ok(ParsedMethodSignature {
-        receiver,
-        parameters,
-        return_type,
-    })
-}
-
-fn split_signature_params(value: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut depth = 0i32;
-    let mut start = 0usize;
-    for (idx, ch) in value.char_indices() {
-        match ch {
-            '(' | '{' | '[' | '<' => depth += 1,
-            ')' | '}' | ']' | '>' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(value[start..idx].trim().to_string());
-                start = idx + 1;
-            }
-            _ => {}
-        }
-    }
-    let tail = value[start..].trim();
-    if !tail.is_empty() {
-        parts.push(tail.to_string());
-    }
-    parts
-}
-
-fn mark_fixed_ambiguities(ambiguities: &mut [Ambiguity], path: &str) {
-    for ambiguity in ambiguities {
-        if ambiguity.path == path && ambiguity.severity == "blocking" {
-            ambiguity.severity = "fixed".to_string();
-        }
-    }
-}
-
-fn parse_indexed_path(path: &str) -> Option<(&str, Option<(usize, &str)>)> {
-    let open = path.find('[')?;
-    let close = path.find(']')?;
-    let collection = &path[..open];
-    let idx: usize = path[open + 1..close].parse().ok()?;
-    let rest = path[close + 1..].trim_start_matches('.');
-    if rest.is_empty() {
-        Some((collection, Some((idx, ""))))
-    } else {
-        Some((collection, Some((idx, rest))))
-    }
-}
-
-fn parse_single_index(path: &str, collection: &str, field: &str) -> Option<usize> {
-    let prefix = format!("{collection}[");
-    let suffix = format!("].{field}");
-    let rest = path.strip_prefix(&prefix)?;
-    let rest = rest.strip_suffix(&suffix)?;
-    rest.parse().ok()
-}
-
-fn parse_double_index(path: &str, outer: &str, inner: &str, field: &str) -> Option<(usize, usize)> {
-    let prefix = format!("{outer}[");
-    let rest = path.strip_prefix(&prefix)?;
-    let close = rest.find(']')?;
-    let outer_idx: usize = rest[..close].parse().ok()?;
-    let mid = format!("].{inner}[");
-    let rest = rest[close..].strip_prefix(&mid)?;
-    let close2 = rest.find(']')?;
-    let inner_idx: usize = rest[..close2].parse().ok()?;
-    let expected_tail = format!("].{field}");
-    rest[close2..].strip_prefix(&expected_tail)?;
-    Some((outer_idx, inner_idx))
-}
-
-fn parse_role_method_parameter_path(path: &str) -> Option<(usize, usize)> {
-    let prefix = "roles[";
-    let rest = path.strip_prefix(prefix)?;
-    let close = rest.find(']')?;
-    let role_idx: usize = rest[..close].parse().ok()?;
-    let rest = rest[close..].strip_prefix("].methods[")?;
-    let close2 = rest.find(']')?;
-    let method_idx: usize = rest[..close2].parse().ok()?;
-    rest[close2..].strip_prefix("].parameters[")?;
-    Some((role_idx, method_idx))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn missing_method(name: &str) -> MethodSpec {
-        MethodSpec {
-            name: name.to_string(),
-            signature: ValueStatus::missing("missing signature".to_string(), Vec::new()),
-            receiver: Some("&self".to_string()),
-            parameters: Vec::new(),
-            return_status: ValueStatus::missing("missing return".to_string(), Vec::new()),
-            flow: Vec::new(),
-            extensions: Vec::new(),
-            guarantee: Vec::new(),
-            references: None,
-            body: None,
-        }
-    }
-
-    #[test]
-    fn apply_signature_fix_updates_structured_method_fields() {
-        let mut prepared = PreparedArtifact::empty(
-            "context",
-            "x.md".to_string(),
-            "X".to_string(),
-            "X".to_string(),
-            true,
-        );
-        prepared.functionalities.push(missing_method("next_action"));
-
-        assert!(prepared.apply_fix_at_path(
-            "functionalities[0].signature",
-            "next_action(&mut self, buffer: VecDeque<KeyPress>) -> Option<UserAction>"
-        ));
-
-        let method = &prepared.functionalities[0];
-        assert_eq!(method.receiver.as_deref(), Some("&mut self"));
-        assert_eq!(method.parameters.len(), 1);
-        assert_eq!(method.parameters[0].name, "buffer");
-        assert_eq!(
-            method.parameters[0].type_status.rust.as_deref(),
-            Some("VecDeque<KeyPress>")
-        );
-        assert_eq!(
-            method.return_status.rust.as_deref(),
-            Some("Option<UserAction>")
-        );
-        assert_eq!(
-            method.signature.rust.as_deref(),
-            Some("next_action(&mut self, buffer: VecDeque<KeyPress>) -> Option<UserAction>")
-        );
-    }
-
-    #[test]
-    fn role_method_signature_fix_injects_role_player_parameter() {
-        let mut prepared = PreparedArtifact::empty(
-            "context",
-            "x.md".to_string(),
-            "X".to_string(),
-            "X".to_string(),
-            true,
-        );
-        prepared.roles.push(RoleSpec {
-            name: "game_state".to_string(),
-            purpose: "state".to_string(),
-            expected_behavior: "supports getters".to_string(),
-            type_status: ValueStatus::resolved("GameState", "test"),
-            methods: vec![missing_method("food")],
-        });
-
-        assert!(prepared.apply_fix_at_path(
-            "roles[0].methods[0].signature",
-            "food(&self) -> Option<Food>"
-        ));
-
-        let method = &prepared.roles[0].methods[0];
-        assert_eq!(method.receiver.as_deref(), Some("&self"));
-        assert_eq!(method.parameters.len(), 1);
-        assert_eq!(method.parameters[0].name, "game_state_");
-        assert_eq!(
-            method.parameters[0].type_status.rust.as_deref(),
-            Some("&GameState")
-        );
-        assert_eq!(method.return_status.rust.as_deref(), Some("Option<Food>"));
-        assert_eq!(
-            method.signature.rust.as_deref(),
-            Some("food(&self, game_state_: &GameState) -> Option<Food>")
-        );
-    }
-
-    #[test]
-    fn apply_type_fix_preserves_remaining_candidates() {
-        let mut prepared = PreparedArtifact::empty(
-            "context",
-            "x.md".to_string(),
-            "X".to_string(),
-            "X".to_string(),
-            true,
-        );
-        prepared.roles.push(RoleSpec {
-            name: "food_dropper".to_string(),
-            purpose: "randomness".to_string(),
-            expected_behavior: "drops food".to_string(),
-            type_status: ValueStatus::ambiguous(
-                vec![
-                    "rand::rngs::ThreadRng".to_string(),
-                    "rand::rngs::StdRng".to_string(),
-                    "rand::rngs::SmallRng".to_string(),
-                ],
-                "multiple RNG candidates".to_string(),
-                Vec::new(),
-            ),
-            methods: Vec::new(),
-        });
-
-        assert!(prepared.apply_fix_at_path_with_candidates(
-            "roles[0].type",
-            "rand::rngs::ThreadRng",
-            Some(&[
-                "rand::rngs::ThreadRng".to_string(),
-                "rand::rngs::StdRng".to_string(),
-                "rand::rngs::SmallRng".to_string(),
-            ])
-        ));
-
-        let status = &prepared.roles[0].type_status;
-        assert_eq!(status.status, "fixed");
-        assert_eq!(status.rust.as_deref(), Some("rand::rngs::ThreadRng"));
-        assert_eq!(
-            status.candidates,
-            vec![
-                "rand::rngs::StdRng".to_string(),
-                "rand::rngs::SmallRng".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn role_player_parameter_type_fix_normalizes_to_reference() {
-        // Regression for the `cannot move out of self.stdin_source` class of errors.
-        // When the fix-agent writes `roles[0].methods[0].parameters[0].type = "Stdin"` (owned),
-        // the prepare layer must rewrite it to `&Stdin` so the generated role method signature
-        // borrows the role player rather than taking ownership.
-        let mut prepared = PreparedArtifact::empty(
-            "context",
-            "x.md".to_string(),
-            "X".to_string(),
-            "X".to_string(),
-            true,
-        );
-        let mut method = missing_method("read_available");
-        method.receiver = Some("&self".to_string());
-        method.parameters = vec![ParameterSpec {
-            name: "stdin_source_".to_string(),
-            type_status: ValueStatus::missing("missing".to_string(), Vec::new()),
-        }];
-        method.return_status = ValueStatus::resolved("Vec<KeyEvent>".to_string(), "test");
-        prepared.roles.push(RoleSpec {
-            name: "stdin_source".to_string(),
-            purpose: "input".to_string(),
-            expected_behavior: "polls stdin".to_string(),
-            type_status: ValueStatus::resolved("std::io::Stdin", "test"),
-            methods: vec![method],
-        });
-
-        assert!(
-            prepared.apply_fix_at_path("roles[0].methods[0].parameters[0].type", "std::io::Stdin")
-        );
-
-        let param = &prepared.roles[0].methods[0].parameters[0];
-        assert_eq!(
-            param.type_status.rust.as_deref(),
-            Some("&std::io::Stdin"),
-            "role-player parameter should be normalized to a reference"
-        );
-        let sig = prepared.roles[0].methods[0]
-            .signature
-            .rust
-            .as_deref()
-            .unwrap_or("");
-        assert!(
-            sig.contains("stdin_source_: &std::io::Stdin"),
-            "rendered signature should show `&std::io::Stdin`, got {sig}"
-        );
-    }
-
-    #[test]
-    fn role_player_parameter_type_fix_leaves_existing_reference_alone() {
-        let mut prepared = PreparedArtifact::empty(
-            "context",
-            "x.md".to_string(),
-            "X".to_string(),
-            "X".to_string(),
-            true,
-        );
-        let mut method = missing_method("read");
-        method.receiver = Some("&self".to_string());
-        method.parameters = vec![ParameterSpec {
-            name: "board_".to_string(),
-            type_status: ValueStatus::missing("missing".to_string(), Vec::new()),
-        }];
-        method.return_status = ValueStatus::resolved("u8".to_string(), "test");
-        prepared.roles.push(RoleSpec {
-            name: "board".to_string(),
-            purpose: "board".to_string(),
-            expected_behavior: "reads".to_string(),
-            type_status: ValueStatus::resolved("Board", "test"),
-            methods: vec![method],
-        });
-
-        assert!(prepared.apply_fix_at_path("roles[0].methods[0].parameters[0].type", "&mut Board"));
-
-        let param = &prepared.roles[0].methods[0].parameters[0];
-        assert_eq!(param.type_status.rust.as_deref(), Some("&mut Board"));
+            .filter(|a| a.severity.eq_ignore_ascii_case("blocking"))
     }
 }
