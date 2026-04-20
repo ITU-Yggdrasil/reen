@@ -21,6 +21,7 @@ pub struct PrepareOptions {
     pub verbose: bool,
     pub debug: bool,
     pub dry_run: bool,
+    pub allow_code_tokens: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -33,6 +34,50 @@ pub struct RefineOptions {
 
 pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Result<()> {
     let selected_paths = workspace.raw_draft_paths(&options.selection)?;
+
+    // ── Code-token lint (blocking unless --allow-code-tokens) ────
+    {
+        let review = review_raw_drafts(workspace, &selected_paths)?;
+        let code_token_findings: Vec<_> = review
+            .findings
+            .iter()
+            .filter(|f| {
+                f.category == crate::draft_refine::DraftReviewCategory::Concreteness
+                    && f.message.starts_with("code token")
+            })
+            .collect();
+
+        if !code_token_findings.is_empty() {
+            let label = if options.allow_code_tokens {
+                "warning"
+            } else {
+                "error"
+            };
+            for finding in &code_token_findings {
+                let location = match finding.source_line {
+                    Some(line) => format!("{}:{}", finding.draft_path, line),
+                    None => finding.draft_path.clone(),
+                };
+                eprintln!("{}[concreteness]: {}", label, finding.message);
+                eprintln!("  --> {}", location);
+            }
+            if !options.allow_code_tokens {
+                anyhow::bail!(
+                    "prepare blocked: {} code-token finding{} in draft(s); \
+                     rewrite in business vocabulary or pass --allow-code-tokens to downgrade to warnings",
+                    code_token_findings.len(),
+                    if code_token_findings.len() == 1 { "" } else { "s" }
+                );
+            } else if options.verbose {
+                eprintln!(
+                    "warning: {} code-token finding{} (--allow-code-tokens active, continuing)",
+                    code_token_findings.len(),
+                    if code_token_findings.len() == 1 { "" } else { "s" }
+                );
+            }
+        }
+    }
+
     let vocabulary = DciVocabulary::load(workspace)?;
 
     let mut wrote = 0usize;

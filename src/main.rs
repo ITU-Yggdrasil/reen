@@ -152,6 +152,12 @@ struct PrepareArgs {
     #[arg(long, help = "Reserved for future prepare profiles")]
     profile: Option<String>,
 
+    #[arg(
+        long,
+        help = "Downgrade code-token lint from blocking error to visible warning"
+    )]
+    allow_code_tokens: bool,
+
     #[arg(help = "Optional list of draft names without file extension")]
     names: Vec<String>,
 }
@@ -321,6 +327,7 @@ fn run_prepare(
         verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
         debug: bool_setting(globals.debug, section.debug, config.debug),
         dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
+        allow_code_tokens: args.allow_code_tokens,
     };
     prepare_workspace(workspace, &options)
 }
