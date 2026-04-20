@@ -16,13 +16,21 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "Brand Metadata",
     "Color Tokens",
     "Typography",
-    "Spacing System",
     "Iconography",
     "Motion",
-    "Layout Principles",
     "Token Reference Rules",
 ];
-const OPTIONAL_SECTIONS: &[&str] = &["Blocking Ambiguities", "Implementation Choices Left Open"];
+const OPTIONAL_SECTIONS: &[&str] = &[
+    "Brand Essence",
+    "Audience and Positioning",
+    "Verbal Identity",
+    "Logo System",
+    "Imagery",
+    "Composition Principles",
+    "Layout Principles",
+    "Blocking Ambiguities",
+    "Implementation Choices Left Open",
+];
 
 const COLOR_SUBSECTIONS: &[&str] = &[
     "Primary",
@@ -38,15 +46,28 @@ const TYPOGRAPHY_SUBSECTIONS: &[&str] = &[
     "Line Heights",
     "Named Text Styles",
 ];
-const SPACING_SUBSECTIONS: &[&str] = &[
-    "Base Unit",
-    "Scale",
-    "Layout Margins",
-    "Gutters and Container Spacing",
-];
 const ICONOGRAPHY_SUBSECTIONS: &[&str] = &["Style", "Size Set", "Usage Constraints"];
 const MOTION_SUBSECTIONS: &[&str] = &["Durations", "Easing", "Usage Principles"];
-const LAYOUT_SUBSECTIONS: &[&str] = &["Grid", "Breakpoints", "Container Widths and Padding"];
+const BRAND_ESSENCE_SUBSECTIONS: &[&str] = &["Mission", "Vision", "Values"];
+const AUDIENCE_SUBSECTIONS: &[&str] = &["Audience", "Positioning"];
+const VERBAL_IDENTITY_SUBSECTIONS: &[&str] = &[
+    "Personality Attributes",
+    "Tone Guidelines",
+    "Messaging Do/Don't",
+];
+const LOGO_SYSTEM_SUBSECTIONS: &[&str] = &[
+    "Mark Description",
+    "Clear Space and Sizing",
+    "Usage Rules",
+];
+const IMAGERY_SUBSECTIONS: &[&str] = &["Style Attributes", "Subject Guidance", "Avoid"];
+const COMPOSITION_SUBSECTIONS: &[&str] = &["Hierarchy", "Density", "Emphasis"];
+const LAYOUT_SUBSECTIONS: &[&str] = &[
+    "Grid",
+    "Breakpoints",
+    "Container Widths and Padding",
+    "Shape Geometry",
+];
 
 #[derive(Clone, Debug, Default)]
 struct Section {
@@ -238,7 +259,7 @@ fn validate_required_section_order(section_order: &[String]) -> Result<()> {
         }
     }
 
-        let mut positions = HashMap::new();
+    let mut positions = HashMap::new();
     for (idx, section) in section_order.iter().enumerate() {
         positions.insert(section.as_str(), idx);
     }
@@ -257,6 +278,20 @@ fn validate_required_section_order(section_order: &[String]) -> Result<()> {
                 pair[1]
             );
         }
+    }
+
+    let mut previous_rank: Option<usize> = None;
+    for section in section_order {
+        let rank = section_rank(section)?;
+        if let Some(previous) = previous_rank {
+            if rank < previous {
+                bail!(
+                    "brand specification sections must appear in canonical order; '{}' is out of place",
+                    section
+                );
+            }
+        }
+        previous_rank = Some(rank);
     }
 
     if let Some(blocking) = positions.get("Blocking Ambiguities") {
@@ -291,14 +326,34 @@ fn validate_required_section_order(section_order: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn section_rank(section_name: &str) -> Result<usize> {
+    match section_name {
+        "Description" => Ok(0),
+        "Brand Metadata" => Ok(1),
+        "Brand Essence" => Ok(2),
+        "Audience and Positioning" => Ok(3),
+        "Verbal Identity" => Ok(4),
+        "Logo System" => Ok(5),
+        "Color Tokens" => Ok(6),
+        "Typography" => Ok(7),
+        "Imagery" => Ok(8),
+        "Iconography" => Ok(9),
+        "Motion" => Ok(10),
+        "Composition Principles" => Ok(11),
+        "Layout Principles" => Ok(12),
+        "Token Reference Rules" => Ok(13),
+        "Blocking Ambiguities" => Ok(14),
+        "Implementation Choices Left Open" => Ok(15),
+        _ => bail!("brand specification has unexpected section '{}'", section_name),
+    }
+}
+
 fn validate_required_subsections(sections: &BTreeMap<String, Section>) -> Result<()> {
     for (section_name, required) in [
         ("Color Tokens", COLOR_SUBSECTIONS),
         ("Typography", TYPOGRAPHY_SUBSECTIONS),
-        ("Spacing System", SPACING_SUBSECTIONS),
         ("Iconography", ICONOGRAPHY_SUBSECTIONS),
         ("Motion", MOTION_SUBSECTIONS),
-        ("Layout Principles", LAYOUT_SUBSECTIONS),
     ] {
         let section = sections
             .get(section_name)
@@ -319,11 +374,16 @@ fn validate_required_subsections(sections: &BTreeMap<String, Section>) -> Result
 
 fn required_subsections_for(section_name: &str) -> &'static [&'static str] {
     match section_name {
+        "Brand Essence" => BRAND_ESSENCE_SUBSECTIONS,
+        "Audience and Positioning" => AUDIENCE_SUBSECTIONS,
+        "Verbal Identity" => VERBAL_IDENTITY_SUBSECTIONS,
+        "Logo System" => LOGO_SYSTEM_SUBSECTIONS,
         "Color Tokens" => COLOR_SUBSECTIONS,
         "Typography" => TYPOGRAPHY_SUBSECTIONS,
-        "Spacing System" => SPACING_SUBSECTIONS,
+        "Imagery" => IMAGERY_SUBSECTIONS,
         "Iconography" => ICONOGRAPHY_SUBSECTIONS,
         "Motion" => MOTION_SUBSECTIONS,
+        "Composition Principles" => COMPOSITION_SUBSECTIONS,
         "Layout Principles" => LAYOUT_SUBSECTIONS,
         _ => &[],
     }
@@ -401,11 +461,16 @@ fn collect_defined_tokens(sections: &BTreeMap<String, Section>) -> BTreeSet<Stri
     let mut defined_tokens = BTreeSet::new();
 
     for section_name in [
+        "Brand Essence",
+        "Audience and Positioning",
+        "Verbal Identity",
+        "Logo System",
         "Color Tokens",
         "Typography",
-        "Spacing System",
+        "Imagery",
         "Iconography",
         "Motion",
+        "Composition Principles",
         "Layout Principles",
     ] {
         if let Some(section) = sections.get(section_name) {
@@ -521,6 +586,45 @@ Structured visual identity for Acme.
 - Brand name: Acme
 - Version: 1.0
 
+## Brand Essence
+### Mission
+- Deliver clear, usable digital experiences.
+
+### Vision
+- Be recognized for calm, accessible product expression.
+
+### Values
+- Clarity over novelty.
+
+## Audience and Positioning
+### Audience
+- Teams that value readability and low-friction workflows.
+
+### Positioning
+- Reliable, modern, and approachable.
+
+## Verbal Identity
+### Personality Attributes
+- Calm
+- Direct
+
+### Tone Guidelines
+- Prefer concise, literal wording over decorative copy.
+
+### Messaging Do/Don't
+- Do: Explain the interface plainly.
+- Don't: Use hype language.
+
+## Logo System
+### Mark Description
+- Primary mark: Circular monogram built from the letterform `T`.
+
+### Clear Space and Sizing
+- `brand.logo.clear_space.default`: `16px`
+
+### Usage Rules
+- Use the icon alone only in compact contexts.
+
 ## Color Tokens
 ### Primary
 - `brand.colors.primary.default`: `#112233`
@@ -555,18 +659,16 @@ Structured visual identity for Acme.
 ### Named Text Styles
 - `brand.typography.text_styles.body.medium`: Uses `brand.typography.scales.body.medium.size`
 
-## Spacing System
-### Base Unit
-- `brand.spacing.base_unit`: `8px`
+## Imagery
+### Style Attributes
+- Clean
+- Natural
 
-### Scale
-- `brand.spacing.scale.4`: `16px`
+### Subject Guidance
+- Use scenes that reinforce clarity and focus.
 
-### Layout Margins
-- `brand.spacing.layout_margins.desktop`: `64px`
-
-### Gutters and Container Spacing
-- `brand.spacing.gutters.default`: `16px`
+### Avoid
+- Avoid decorative or overly abstract imagery.
 
 ## Iconography
 ### Style
@@ -588,15 +690,15 @@ Structured visual identity for Acme.
 ### Usage Principles
 - `brand.motion.usage.state_changes`: Use motion to indicate state changes.
 
-## Layout Principles
-### Grid
-- `brand.layout.grid.columns`: `12`
+## Composition Principles
+### Hierarchy
+- Prioritize strong contrast and obvious reading order.
 
-### Breakpoints
-- `brand.layout.breakpoints.md`: `768px`
+### Density
+- Prefer generous whitespace over dense packing.
 
-### Container Widths and Padding
-- `brand.layout.container.max_width`: `1200px`
+### Emphasis
+- Use accent color sparingly for focal points.
 
 ## Token Reference Rules
 - Downstream specifications must reference tokens by stable dotted token names such as `brand.colors.primary.default`.
@@ -638,17 +740,18 @@ Structured visual identity for Acme.
     }
 
     #[test]
+    fn accepts_identity_first_optional_sections_in_canonical_order() {
+        let validation = validate_brand_spec_content(valid_brand_spec()).expect("valid brand spec");
+        assert!(validation
+            .defined_tokens
+            .contains("brand.logo.clear_space.default"));
+    }
+
+    #[test]
     fn collects_references_from_markdown() {
-        let refs = collect_brand_token_references(
-            "Use `brand.colors.primary.default` and brand.spacing.scale.4 in the layout.",
-        );
-        assert_eq!(
-            refs,
-            vec![
-                "brand.colors.primary.default".to_string(),
-                "brand.spacing.scale.4".to_string()
-            ]
-        );
+        let refs =
+            collect_brand_token_references("Use `brand.colors.primary.default` in the layout.");
+        assert_eq!(refs, vec!["brand.colors.primary.default".to_string()]);
     }
 
     #[test]

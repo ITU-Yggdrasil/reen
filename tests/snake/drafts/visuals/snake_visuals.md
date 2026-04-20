@@ -1,110 +1,108 @@
-The visual identity of TestCompany is defined with the following visual styles:
-    Colors:
-        Primary color of TestCompany is black (#000000).
-        Secondary color of TestCompany is red (#FF0000).
-        Foreground color is white (#FFFFFF).
-        Background color is white (#FFFFFF).
-        Semantic colors:
-            Success color is green (#00A651).
-            Error color is red (#D32F2F).
-            Warning color is orange (#F57C00).
-            Info color is blue (#1976D2).
-        Surface colors:
-            Default surface color is white (#FFFFFF).
-            Elevated surface color is light gray (#F2F2F2).
-            Overlay surface color is rgba(0, 0, 0, 0.6).
+## TestCompany â€” Brand Identity
 
-    Typography:
-        Primary font:
-            TestCompany seeks an inclusive style, with its primary font set to Inter.
-            Fallback font families for Inter are Arial, Helvetica, and sans-serif.
-        Typography scales:
-            Smallest font size is 16px.
-            Heading font size is 32px.
-            Body font size is 16px.
-            Caption font size is 14px.
-        Font weights:
-            300 light
-            400 standard
-            700 bold
-        Typography line heights:
-            Body line height is 24px.
-            Heading line height is 40px.
-            Caption line height is 20px.
-        Named text styles:
-            Heading style:
-                Font family is Inter.
-                Font size is 32px.
-                Font weight is 700.
-                Line height is 40px.
-            Body style:
-                Font family is Inter.
-                Font size is 16px.
-                Font weight is 400.
-                Line height is 24px.
-            Caption style:
-                Font family is Inter.
-                Font size is 14px.
-                Font weight is 400.
-                Line height is 20px.
+### Brand Overview
 
-    Spacing:
-        The base unit of spacing is 8px, meaning 8px of space between components.
-        The scale steps are increments of 8px: 8, 16, 24, 32, and so on.
-        Outer margins:
-            32px or an increment of 16px from there.
-        Inner margins:
-            16px or an increment of 16px from there.
-        Gutters:
-            Grid gutters are 16px on small screens.
-            Grid gutters are 24px on medium screens.
-            Grid gutters are 32px on large screens.
-        Container spacing:
-            Vertical spacing between major containers is 24px.
-            Vertical spacing between related containers is 16px.
-            Horizontal spacing between sibling containers is 16px.
+TestCompany is defined by clarity, simplicity, and confidence. Its visual and verbal expression prioritizes ease of understanding, strong contrast, and a modern, approachable presence.
 
-    Iconography:
-        The icon of TestCompany is a simple stylized T inside a circle.
-        The icon size is 24px for standard use.
-        Rules of using the icon:
-            Clear space around the icon is 16px.
-            Do not distort, rotate, animate, or otherwise transform the icon unless a specific brand guideline specifies it.
-            Minimum icon size is 16px.
-            Use the icon only in primary, secondary, foreground, or white colors defined in this draft.
-            The icon must be placed on backgrounds with sufficient contrast for legibility.
-            Do not add outlines, shadows, glows, or decorative effects to the icon.
-            Use the icon by itself only for compact navigation or branding marks; otherwise pair it with the TestCompany name.
-            Keep icon stroke and shape proportions consistent across all sizes.
+The brand avoids unnecessary complexity and focuses on delivering a clean and consistent experience across all touchpoints.
 
-    General Layout:
-        The general layout of the webpage is grid-based, with each component arranged in a consistent column structure.
-        The top of the webpage includes a navigation bar for accessing different sections of the site.
-        Breakpoints:
-            Small breakpoint is 640px.
-            Medium breakpoint is 768px.
-            Large breakpoint is 1024px.
-            Extra large breakpoint is 1280px.
-        Container widths and padding:
-            Maximum container width is 1200px.
-            Container horizontal padding is 16px on small screens.
-            Container horizontal padding is 24px on medium screens.
-            Container horizontal padding is 32px on large screens.
-    
-    Motion and Animation:
-        Keep motion to a minimum; animation should be used only for important transitions or feedback.
-        Do not assume motion or animation by default.
-        Motion durations:
-            Fast duration is 150ms.
-            Standard duration is 250ms.
-            Slow duration is 400ms.
-        Easing curves:
-            Standard easing is cubic-bezier(0.4, 0, 0.2, 1).
-            Emphasized easing is cubic-bezier(0.2, 0, 0, 1).
-    
-    Shapes:
-        Buttons are circular with a border radius of 9999px.
-        Containers are rounded rectangles with a border radius of 12px.
-        These shape geometry values are required and must be used consistently.
-        The button and container border-radius values apply universally to all buttons and containers unless an explicit exception is defined in a future brand guideline.
-    
+---
+
+### Audience and Positioning
+
+TestCompany speaks to a broad, modern audience that values simplicity, efficiency, and clarity. The brand is positioned as reliable, accessible, and forward-thinking.
+
+It avoids overly technical, decorative, or exclusive expressions, instead focusing on being easy to understand and approachable to a wide range of users.
+
+---
+
+### Personality and Tone of Voice
+
+The personality of TestCompany is calm, confident, and straightforward.
+
+Communication should be:
+
+* Clear and concise
+* Neutral but approachable
+* Professional without being rigid
+
+Avoid overly playful, exaggerated, or complex language. The tone should feel natural and easy to understand, with a focus on helping users quickly grasp information.
+
+---
+
+### Logo and Color System
+
+**Logo**
+The TestCompany icon is a simple, stylized â€œTâ€ contained within a circle. It should be used consistently and without alteration.
+
+* Maintain clear space around the logo to ensure visibility
+* Do not distort, rotate, or decorate the mark
+* Ensure strong contrast between the logo and its background
+* Use the icon alone only in compact contexts; otherwise pair it with the company name
+
+**Color**
+The visual identity is built on a minimal, high-contrast palette.
+
+Black and white form the foundation, creating clarity and strong visual structure. Red is used as a distinctive accent to introduce emphasis and energy.
+
+Additional colors such as green, orange, and blue may be used sparingly to support communication (for example, to indicate different states or highlight information), but should never dominate the overall expression.
+
+Color usage should always prioritize legibility and balance, with generous use of white space.
+
+---
+
+### Typography and Imagery
+
+**Typography**
+Inter is the primary typeface used across all communications. It reflects a modern, inclusive, and highly readable style.
+
+* Headings should be bold and clearly defined
+* Body text should prioritize readability
+* Typography should remain consistent and structured
+
+Fallback fonts include Arial, Helvetica, and sans-serif system fonts.
+
+**Imagery**
+Imagery should align with the overall brand principles of clarity and simplicity.
+
+Visuals should feel:
+
+* Clean and uncluttered
+* Modern and natural
+* Easy to understand
+
+Avoid overly busy, decorative, or abstract imagery that distracts from the message.
+
+---
+
+### Optional: Usage Guidelines and Examples
+
+The TestCompany identity should always be applied with consistency and restraint.
+
+* Maintain clear hierarchy and spacing in all layouts
+* Ensure strong contrast and readability in all uses
+* Avoid adding unnecessary decorative elements
+* Use motion sparingly and only when it supports understanding or feedback
+
+All applications of the brand should reflect its core principles: simplicity, clarity, and purpose.
+
+Examples of correct usage should demonstrate clean layouts, balanced compositions, and consistent application of typography, color, and logo.
+
+Incorrect usage includes cluttered layouts, low contrast, excessive decoration, or inconsistent typography.
+
+---
+
+### Optional: Mission, Vision, Values
+
+**Mission**
+To deliver clear, accessible, and effective solutions through thoughtful design and communication.
+
+**Vision**
+To be recognized as a brand that stands for simplicity, clarity, and modern usability.
+
+**Values**
+
+* Clarity over complexity
+* Consistency across experiences
+* Accessibility and inclusivity
+* Purposeful design
