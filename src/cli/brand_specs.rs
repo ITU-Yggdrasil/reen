@@ -55,19 +55,10 @@ const VERBAL_IDENTITY_SUBSECTIONS: &[&str] = &[
     "Tone Guidelines",
     "Messaging Do/Don't",
 ];
-const LOGO_SYSTEM_SUBSECTIONS: &[&str] = &[
-    "Mark Description",
-    "Clear Space and Sizing",
-    "Usage Rules",
-];
+const LOGO_SYSTEM_SUBSECTIONS: &[&str] =
+    &["Mark Description", "Clear Space and Sizing", "Usage Rules"];
 const IMAGERY_SUBSECTIONS: &[&str] = &["Style Attributes", "Subject Guidance", "Avoid"];
 const COMPOSITION_SUBSECTIONS: &[&str] = &["Hierarchy", "Density", "Emphasis"];
-const LAYOUT_SUBSECTIONS: &[&str] = &[
-    "Grid",
-    "Breakpoints",
-    "Container Widths and Padding",
-    "Shape Geometry",
-];
 
 #[derive(Clone, Debug, Default)]
 struct Section {
@@ -109,6 +100,92 @@ pub fn validate_brand_spec_content(spec_content: &str) -> Result<BrandSpecValida
         blocking_ambiguities,
         defined_tokens,
     })
+}
+
+/// Returns a list of missing required brand specification sections/subsections.
+///
+/// This helper is intentionally non-bailing: it is used by CLI flows that should
+/// continue processing other items and report all missing requirements at the end.
+pub fn missing_required_brand_spec_parts(spec_content: &str) -> Vec<String> {
+    let mut missing = Vec::new();
+
+    let mut saw_title = false;
+    let mut saw_wrong_title: Option<String> = None;
+    let mut sections_seen: BTreeSet<String> = BTreeSet::new();
+    let mut subsections_seen: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut current_section: Option<String> = None;
+
+    for line in spec_content.lines() {
+        let Some((level, heading)) = parse_heading(line) else {
+            continue;
+        };
+
+        match level {
+            1 => {
+                if heading == TITLE {
+                    saw_title = true;
+                } else if saw_wrong_title.is_none() {
+                    saw_wrong_title = Some(heading);
+                }
+                current_section = None;
+            }
+            2 => {
+                sections_seen.insert(heading.clone());
+                current_section = Some(heading);
+            }
+            3 => {
+                if let Some(section) = current_section.as_ref() {
+                    subsections_seen
+                        .entry(section.clone())
+                        .or_default()
+                        .insert(heading);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_title {
+        if let Some(found) = saw_wrong_title {
+            missing.push(format!(
+                "Missing title '# {}' (found '# {}')",
+                TITLE, found
+            ));
+        } else {
+            missing.push(format!("Missing title '# {}'", TITLE));
+        }
+    }
+
+    for required in REQUIRED_SECTIONS {
+        if !sections_seen.iter().any(|s| s == required) {
+            missing.push(format!("Missing section '## {}'", required));
+        }
+    }
+
+    for (section_name, required) in [
+        ("Color Tokens", COLOR_SUBSECTIONS),
+        ("Typography", TYPOGRAPHY_SUBSECTIONS),
+        ("Iconography", ICONOGRAPHY_SUBSECTIONS),
+        ("Motion", MOTION_SUBSECTIONS),
+    ] {
+        if !sections_seen.iter().any(|s| s == section_name) {
+            continue;
+        }
+        let seen = subsections_seen.get(section_name);
+        for subsection in required {
+            let has = seen
+                .map(|set| set.iter().any(|s| s == *subsection))
+                .unwrap_or(false);
+            if !has {
+                missing.push(format!(
+                    "Missing subsection '### {}' under '## {}'",
+                    subsection, section_name
+                ));
+            }
+        }
+    }
+
+    missing
 }
 
 pub fn collect_brand_token_references(content: &str) -> Vec<String> {
@@ -344,7 +421,10 @@ fn section_rank(section_name: &str) -> Result<usize> {
         "Token Reference Rules" => Ok(13),
         "Blocking Ambiguities" => Ok(14),
         "Implementation Choices Left Open" => Ok(15),
-        _ => bail!("brand specification has unexpected section '{}'", section_name),
+        _ => bail!(
+            "brand specification has unexpected section '{}'",
+            section_name
+        ),
     }
 }
 
@@ -384,7 +464,6 @@ fn required_subsections_for(section_name: &str) -> &'static [&'static str] {
         "Iconography" => ICONOGRAPHY_SUBSECTIONS,
         "Motion" => MOTION_SUBSECTIONS,
         "Composition Principles" => COMPOSITION_SUBSECTIONS,
-        "Layout Principles" => LAYOUT_SUBSECTIONS,
         _ => &[],
     }
 }
@@ -562,7 +641,7 @@ struct ParsedBrandSpec {
 mod tests {
     use super::{
         collect_brand_token_references, is_brand_draft_path, is_brand_spec_path,
-        unresolved_brand_token_references,
+        missing_required_brand_spec_parts, unresolved_brand_token_references,
         validate_brand_spec_content,
     };
     use std::fs;
@@ -700,6 +779,9 @@ Structured visual identity for Acme.
 ### Emphasis
 - Use accent color sparingly for focal points.
 
+## Layout Principles
+- Prefer generous whitespace over dense packing.
+
 ## Token Reference Rules
 - Downstream specifications must reference tokens by stable dotted token names such as `brand.colors.primary.default`.
 
@@ -724,6 +806,57 @@ Structured visual identity for Acme.
         let spec = valid_brand_spec().replace("## Token Reference Rules", "## Token Rules");
         let err = validate_brand_spec_content(&spec).expect_err("expected failure");
         assert!(err.to_string().contains("unexpected section 'Token Rules'"));
+    }
+
+    #[test]
+    fn accepts_layout_principles_as_body_only_section() {
+        let spec = valid_brand_spec();
+        validate_brand_spec_content(spec).expect("layout principles should be accepted");
+    }
+
+    #[test]
+    fn missing_required_brand_parts_reports_multiple_missing_items() {
+        let spec = r#"# Wrong Title
+
+## Description
+Ok.
+
+## Color Tokens
+### Primary
+- `brand.colors.primary.default`: `#112233`
+
+## Typography
+### Families
+- `brand.typography.families.primary`: `Inter`
+
+## Iconography
+### Style
+- `brand.iconography.style.default`: `outlined`
+
+## Motion
+### Durations
+- `brand.motion.durations.fast`: `150ms`
+
+## Token Reference Rules
+- Use dotted tokens."#;
+
+        let missing = missing_required_brand_spec_parts(spec);
+        assert!(missing.iter().any(|m| m.contains("Missing title '# Brand Identity Specification'")));
+        assert!(missing
+            .iter()
+            .any(|m| m == "Missing section '## Brand Metadata'"));
+        assert!(missing
+            .iter()
+            .any(|m| m == "Missing subsection '### Secondary' under '## Color Tokens'"));
+        assert!(missing
+            .iter()
+            .any(|m| m == "Missing subsection '### Scales' under '## Typography'"));
+        assert!(missing
+            .iter()
+            .any(|m| m == "Missing subsection '### Size Set' under '## Iconography'"));
+        assert!(missing
+            .iter()
+            .any(|m| m == "Missing subsection '### Easing' under '## Motion'"));
     }
 
     #[test]

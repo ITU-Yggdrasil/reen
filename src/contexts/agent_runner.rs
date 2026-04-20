@@ -422,44 +422,7 @@ where
     /// The cache key is a hash of agent_instructions + input_json, ensuring that
     /// changes to either the instructions or input will result in a cache miss.
     fn generate_cache_key(&self, agent_instructions: &str) -> String {
-        fn canonicalize_json_value(v: serde_json::Value) -> serde_json::Value {
-            match v {
-                serde_json::Value::Array(items) => serde_json::Value::Array(
-                    items
-                        .into_iter()
-                        .map(canonicalize_json_value)
-                        .collect::<Vec<_>>(),
-                ),
-                serde_json::Value::Object(map) => {
-                    let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
-                    entries.sort_by(|a, b| a.0.cmp(&b.0));
-                    let mut out = serde_json::Map::new();
-                    for (k, val) in entries {
-                        out.insert(k, canonicalize_json_value(val));
-                    }
-                    serde_json::Value::Object(out)
-                }
-                other => other,
-            }
-        }
-
-        // Serialize the input to JSON in a stable way (sorted object keys), so cache keys
-        // do not depend on HashMap iteration order.
-        let input_json = serde_json::to_value(&self.input)
-            .map(canonicalize_json_value)
-            .and_then(|v| serde_json::to_string(&v))
-            .unwrap_or_else(|_| "{}".to_string());
-
-        // Create a composite key from agent instructions and input
-        let composite = format!("{}:{}", agent_instructions, input_json);
-
-        // Hash the composite key to get a fixed-size key
-        let mut hasher = Sha256::new();
-        hasher.update(composite.as_bytes());
-        let result = hasher.finalize();
-
-        // Return hex-encoded hash
-        hex::encode(result)
+        crate::execution::cache_key_for_input(agent_instructions, &self.input)
     }
 
     /// Returns true if this agent+input combination already exists in the on-disk cache.

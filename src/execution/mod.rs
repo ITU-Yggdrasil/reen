@@ -3,6 +3,7 @@ mod agent_input;
 mod agent_runner;
 #[path = "../data/cache.rs"]
 mod cache;
+mod cache_key;
 #[path = "../contexts/file_cache.rs"]
 mod file_cache;
 #[path = "../contexts/native_runner.rs"]
@@ -17,6 +18,7 @@ pub use agent_runner::{
     PreparedExecution, PreparedExecutionState,
 };
 pub use cache::Cache;
+pub use cache_key::{cache_key_for_input, canonical_json_string, canonicalize_json_value};
 pub use file_cache::FileCache;
 pub use native_runner::{
     execute_request as execute_native_request,

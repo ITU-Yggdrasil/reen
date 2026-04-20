@@ -477,7 +477,7 @@ fix_draft_blockers:
         let model = registry
             .get_model("create_implementation")
             .expect("embedded default registry should resolve model");
-        assert_eq!(model.name, "openai/gpt-5");
+        assert_eq!(model.name, "mistral/codestral-latest");
     }
 
     #[test]
@@ -589,7 +589,7 @@ create_specifications_data:
             .expect_err("missing profile should error early");
 
         std::env::set_current_dir(&original_dir).expect("restore cwd");
-        fs::remove_dir_all(&test_dir).expect("cleanup");
+        let _ = fs::remove_dir_all(&test_dir);
 
         assert!(err.to_string().contains("agent_model_registry.missing.yml"));
     }
