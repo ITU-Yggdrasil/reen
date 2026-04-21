@@ -1,0 +1,16 @@
+schema: reen.manifest/v1
+
+# DCI vocabulary manifest — the single source of domain names for this project.
+#
+# Data and projection names are auto-discovered from draft filenames under
+# drafts/data/ and drafts/projections/. Add entries here only for names that
+# don't have their own draft (external infrastructure, shared types).
+
+vocabulary: []
+
+# External type prefixes allowed in prepared artifacts.
+types:
+  allowed_prefixes: []
+
+# Capability providers (external crates and their namespaces).
+capabilities: []

@@ -1,0 +1,76 @@
+{
+  "hooks": [
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Write",
+        "path": "drafts/**/*.md"
+      },
+      "command": "reen prepare --verbose 2>&1 || true",
+      "description": "Auto-prepare after draft edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Edit",
+        "path": "drafts/**/*.md"
+      },
+      "command": "reen prepare --verbose 2>&1 || true",
+      "description": "Auto-prepare after draft edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Write",
+        "path": "drafts/apis/**/*.md"
+      },
+      "command": "reen apis ingest $(basename \"$CLAUDE_TOOL_ARG_FILE_PATH\" .md) 2>&1 || true",
+      "description": "Auto-ingest API after boundary draft edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Edit",
+        "path": "drafts/apis/**/*.md"
+      },
+      "command": "reen apis ingest $(basename \"$CLAUDE_TOOL_ARG_FILE_PATH\" .md) 2>&1 || true",
+      "description": "Auto-ingest API after boundary draft edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Write",
+        "path": "drafts/apis/**/*.yaml"
+      },
+      "command": "reen apis ingest $(basename \"$CLAUDE_TOOL_ARG_FILE_PATH\" .yaml) 2>&1 || true",
+      "description": "Auto-ingest API after OpenAPI snapshot edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Edit",
+        "path": "drafts/apis/**/*.yaml"
+      },
+      "command": "reen apis ingest $(basename \"$CLAUDE_TOOL_ARG_FILE_PATH\" .yaml) 2>&1 || true",
+      "description": "Auto-ingest API after OpenAPI snapshot edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Write",
+        "path": "src/**/*.rs"
+      },
+      "command": "reen verify \"$CLAUDE_TOOL_ARG_FILE_PATH\" 2>&1 && cargo check -q 2>&1 || true",
+      "description": "Verify spec alignment and type-check after Rust edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Edit",
+        "path": "src/**/*.rs"
+      },
+      "command": "reen verify \"$CLAUDE_TOOL_ARG_FILE_PATH\" 2>&1 && cargo check -q 2>&1 || true",
+      "description": "Verify spec alignment and type-check after Rust edits"
+    }
+  ]
+}

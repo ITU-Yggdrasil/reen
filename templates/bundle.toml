@@ -1,0 +1,27 @@
+# Bundle classification index — the single source of truth for managed vs seed.
+#
+# managed: reen owns this file; overwritten on `reen init --upgrade`
+#          unless the user has edited it (sha256 differs from install hash).
+# seed:    reen drops this file once on `reen init`; never touched on upgrade.
+
+[files]
+".claude/hooks.json" = "managed"
+".claude/commands/prepare.md" = "managed"
+".claude/commands/refine.md" = "managed"
+".claude/commands/scaffold.md" = "managed"
+".claude/commands/implement.md" = "managed"
+".claude/commands/audit.md" = "managed"
+".claude/agents/reen-refiner.md" = "managed"
+".claude/agents/reen-auditor.md" = "managed"
+".claude/skills/reen-dci-authoring/SKILL.md" = "managed"
+".claude/skills/reen-draft-format/SKILL.md" = "managed"
+".claude/skills/reen-dci-code/SKILL.md" = "managed"
+"DCI.md" = "managed"
+"DRAFT_FORMAT.md" = "managed"
+"CLAUDE.md" = "seed"
+"reen.manifest.yml" = "seed"
+"drafts/.gitkeep" = "seed"
+"drafts/data/.gitkeep" = "seed"
+"drafts/projections/.gitkeep" = "seed"
+"drafts/contexts/.gitkeep" = "seed"
+"drafts/apis/.gitkeep" = "seed"
