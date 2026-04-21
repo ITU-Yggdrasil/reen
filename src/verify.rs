@@ -114,12 +114,15 @@ pub fn verify_source(source: &str, artifact: &PreparedArtifact) -> Result<Verify
             message: format!("{} `{}` is missing from the struct", label, name),
         });
     }
-    // Extra fields are only flagged on contexts and data with expected attributes.
-    // Projections need internal bookkeeping fields beyond `source`.
-    // Data types with no attributes in the YAML (e.g. enum-style drafts whose
-    // variants are described in prose) are allowed to carry their own fields.
+    // Extra fields are allowed on all artifact kinds:
+    // - Contexts need internal bookkeeping (event buffers, caches, counters)
+    //   beyond the DCI-specified role players and props.
+    // - Projections need internal state beyond `source`.
+    // - Data types with no YAML attributes may carry their own fields.
+    // The verifier checks ⊇ (all expected fields present), not = (exact match).
+    // This mirrors the private-method ⊇ treatment already in place.
     let check_extra = match artifact.kind {
-        ArtifactKind::Context => true,
+        ArtifactKind::Context => false,
         ArtifactKind::Data => !expected_fields.is_empty(),
         ArtifactKind::Projection => false,
     };
@@ -399,13 +402,39 @@ impl MoneyTransfer {
     }
 
     #[test]
-    fn verify_rejects_extra_field() {
+    fn verify_rejects_extra_field_on_data() {
+        // Extra fields are checked on data artifacts (not contexts/projections,
+        // which need internal bookkeeping).
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
+        );
+        a.attributes = vec![
+            AttributeSpec { name: "value".into(), description: "cents".into() },
+        ];
+
+        let source = r#"
+pub struct Amount {
+    pub value: u64,
+    pub extra_field: String,
+}
+"#;
+        let result = verify_source(source, &a).unwrap();
+        assert!(!result.is_ok());
+        assert!(result.discrepancies.iter().any(|d|
+            d.kind == DiscrepancyKind::ExtraField && d.message.contains("extra_field")
+        ), "{}", result.render());
+    }
+
+    #[test]
+    fn verify_allows_extra_fields_on_contexts() {
+        // Contexts may carry internal bookkeeping fields (caches, counters)
+        // beyond role players and props.
         let source = r#"
 pub struct MoneyTransfer {
     source: Account,
     sink: Account,
     amount: (),
-    extra_field: String,
+    extra_bookkeeping: Vec<u8>,
 }
 
 impl MoneyTransfer {
@@ -415,10 +444,7 @@ impl MoneyTransfer {
 }
 "#;
         let result = verify_source(source, &money_transfer_artifact()).unwrap();
-        assert!(!result.is_ok());
-        assert!(result.discrepancies.iter().any(|d|
-            d.kind == DiscrepancyKind::ExtraField && d.message.contains("extra_field")
-        ), "{}", result.render());
+        assert!(result.is_ok(), "extra context fields should be allowed: {}", result.render());
     }
 
     #[test]
