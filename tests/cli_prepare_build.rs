@@ -313,6 +313,7 @@ fn help_lists_expected_subcommands() {
     assert!(out.contains("scaffold"), "should list scaffold");
     assert!(out.contains("manifest"), "should list manifest");
     assert!(out.contains("clear"), "should list clear");
+    assert!(out.contains("init"), "should list init");
     assert!(!out.contains(" build"), "should not list build (removed)");
     assert!(!out.contains(" fix"), "should not list fix (removed)");
     // "compile" as a subcommand should not appear (it's fine in the description)
@@ -321,11 +322,13 @@ fn help_lists_expected_subcommands() {
 }
 
 #[test]
-fn legacy_init_command_is_removed() {
-    let root = temp_project_dir("legacy_init");
+fn init_installs_bundle_in_empty_directory() {
+    let root = temp_project_dir("init_fresh");
     fs::create_dir_all(&root).unwrap();
     let output = run_reen(&root, &["init"]);
-    assert!(!output.status.success());
+    assert!(output.status.success(), "reen init should succeed in empty dir");
+    assert!(root.join(".claude/hooks.json").exists());
+    assert!(root.join(".reen-bundle.yml").exists());
     let _ = fs::remove_dir_all(root);
 }
 

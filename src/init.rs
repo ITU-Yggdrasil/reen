@@ -42,7 +42,7 @@ pub fn run_init(options: &InitOptions) -> Result<i32> {
     let has_manifest = manifest_path.is_file();
 
     if options.upgrade || options.check {
-        if !has_manifest {
+        if !has_manifest && options.check {
             bail!(
                 "No .reen-bundle.yml found in {}. Run `reen init` first to install the bundle.",
                 options.target_dir.display()
@@ -51,6 +51,8 @@ pub fn run_init(options: &InitOptions) -> Result<i32> {
         if options.check {
             return run_check(&bundle, &options.target_dir, &manifest_path);
         }
+        // --upgrade works even without an existing manifest (bootstrap case:
+        // adopting bundle management for a project with manually-copied files).
         return run_upgrade(&bundle, &options.target_dir, &manifest_path, options.force);
     }
 
@@ -124,7 +126,18 @@ fn run_fresh_install(bundle: &Bundle, target: &Path) -> Result<i32> {
 }
 
 fn run_upgrade(bundle: &Bundle, target: &Path, manifest_path: &Path, force: bool) -> Result<i32> {
-    let existing = read_bundle_manifest(manifest_path)?;
+    let existing = if manifest_path.is_file() {
+        read_bundle_manifest(manifest_path)?
+    } else {
+        // Bootstrap: no prior manifest. Treat as if all managed files are clean
+        // (empty stored_hashes means every existing file will be overwritten).
+        BundleManifest {
+            schema: "reen.bundle/v1".to_string(),
+            reen_version: String::new(),
+            installed_at: String::new(),
+            managed_files: Vec::new(),
+        }
+    };
 
     // Build a map of stored managed files: path → sha256
     let stored_hashes: BTreeMap<String, String> = existing
@@ -207,6 +220,16 @@ fn run_upgrade(bundle: &Bundle, target: &Path, manifest_path: &Path, force: bool
             path: path.clone(),
             sha256: bundle_file.sha256(),
         });
+    }
+
+    // Write seed files that don't exist yet (relevant for bootstrap/upgrade).
+    for file in bundle.seed_files() {
+        let dest = target.join(&file.path);
+        if !dest.exists() {
+            ensure_parent_dir(&dest)?;
+            write_file(&dest, file.contents)?;
+            added += 1;
+        }
     }
 
     // Delete managed files present in stored manifest but absent from new bundle.

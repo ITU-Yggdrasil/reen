@@ -13,3 +13,8 @@ errors.txt
 plans/
 prepare/
 drafts/.apis/
+drafts/prepare/
+.reen-bundle.yml
+reen.manifest.yml
+drafts/.gitkeep
+drafts/*/.gitkeep

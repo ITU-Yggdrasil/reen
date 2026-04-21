@@ -22,5 +22,8 @@ sha2 = "0.10"
 syn = { version = "2", features = ["full", "parsing"] }
 toml = "0.8"
 
+[dev-dependencies]
+tempfile = "3"
+
 [lib]
 path = "src/lib.rs"

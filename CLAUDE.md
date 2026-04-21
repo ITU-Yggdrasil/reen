@@ -45,6 +45,10 @@ See `DCI.md` for the conceptual reference and `DRAFT_FORMAT.md` for templates.
 
 PostToolUse hooks auto-run `reen prepare` on draft edits and `reen verify && cargo check` on Rust edits.
 
+## Bundle (contributors)
+
+`templates/` is the source of truth for `.claude/`, `DCI.md`, `DRAFT_FORMAT.md`, and this file's seed content. Edit files in `templates/` first, then run `reen init --upgrade` to regenerate the repo-root copies. PRs that edit repo-root copies without updating templates/ will fail the dogfood check.
+
 ## CLI
 
 ```
