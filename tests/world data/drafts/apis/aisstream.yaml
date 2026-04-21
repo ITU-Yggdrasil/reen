@@ -1,0 +1,90 @@
+openapi: 3.1.0
+info:
+  title: AISStream Local Snapshot
+  version: "1.0.0"
+paths: {}
+components:
+  schemas:
+    AisMessageTypes:
+      type: string
+      enum:
+        - PositionReport
+        - StandardClassBPositionReport
+        - UnknownMessage
+    PositionReport:
+      type: object
+      properties:
+        UserID:
+          type: integer
+        Latitude:
+          type: number
+        Longitude:
+          type: number
+        Timestamp:
+          type: integer
+      required:
+        - UserID
+        - Latitude
+        - Longitude
+        - Timestamp
+    StandardClassBPositionReport:
+      type: object
+      properties:
+        UserID:
+          type: integer
+        Latitude:
+          type: number
+        Longitude:
+          type: number
+        Timestamp:
+          type: integer
+      required:
+        - UserID
+        - Latitude
+        - Longitude
+        - Timestamp
+    AisStreamMessage:
+      type: object
+      properties:
+        MessageType:
+          $ref: "#/components/schemas/AisMessageTypes"
+        Message:
+          oneOf:
+            - $ref: "#/components/schemas/PositionReport"
+            - $ref: "#/components/schemas/StandardClassBPositionReport"
+        MetaData:
+          type: object
+          additionalProperties: true
+    BoundingBox:
+      type: object
+      properties:
+        min_latitude:
+          type: number
+        max_latitude:
+          type: number
+        min_longitude:
+          type: number
+        max_longitude:
+          type: number
+    SubscriptionFilters:
+      type: object
+      properties:
+        MessageTypes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AisMessageTypes"
+        BoundingBoxes:
+          type: array
+          items:
+            $ref: "#/components/schemas/BoundingBox"
+    SubscriptionMessage:
+      type: object
+      properties:
+        APIKey:
+          type: string
+        BoundingBoxes:
+          type: array
+          items:
+            $ref: "#/components/schemas/BoundingBox"
+        Filters:
+          $ref: "#/components/schemas/SubscriptionFilters"

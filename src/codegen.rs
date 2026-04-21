@@ -264,9 +264,9 @@ fn sanitize_rust_type(data_type: &str) -> &str {
         return "()";
     }
     // A valid Rust type is either a simple identifier (ascii-alphanumeric + _),
-    // a path with `::`, or a generic with `<>`. If it contains spaces and
-    // isn't a recognised Rust construct, it's prose.
-    if trimmed.contains(' ') {
+    // a path with `::`, or a generic with `<>`. If it contains spaces,
+    // `@` (API refs), or `/` it's not a Rust type.
+    if trimmed.contains(' ') || trimmed.contains('@') || trimmed.contains('/') {
         return "()";
     }
     trimmed

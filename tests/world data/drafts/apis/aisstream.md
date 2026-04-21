@@ -1,36 +1,23 @@
-# AISStream - Real-time AIS Vessel Tracking
+# AISStream
 
-## Description
+## Purpose
 
-AISStream provides a real-time global maritime vessel tracking stream via WebSocket.
-Vessels broadcast AIS messages containing position, identity, speed, and heading. The API
-delivers these as JSON messages over a persistent WebSocket connection authenticated by API
-key.
+AISStream provides a real-time global maritime vessel tracking stream via WebSocket. Vessels broadcast AIS messages containing position, identity, speed, and heading. The service delivers these as structured messages over a persistent WebSocket connection authenticated by API key. This boundary covers the subscription and position-report message families needed to plot moving vessel dots on a map.
 
-This draft covers the AISStream boundary types needed to subscribe to vessel-position
-traffic and parse the included position messages used by the world-data fixture.
+## Source
 
-## Authoritative Sources
-
-- OpenAPI Local: ../../../shared/openapi/aisstream.yaml
+- OpenAPI Local: ./aisstream.yaml
 - OpenAPI URL: https://raw.githubusercontent.com/aisstream/ais-message-models/master/type-definition.yaml
 - Documentation URL: https://aisstream.io/documentation
-- Schema Repository URL: https://github.com/aisstream/ais-message-models
 
-## Consumed Surface
-
-- WebSocket Streams: wss://stream.aisstream.io/v0/stream
-- Schema Types: PositionReport, StandardClassBPositionReport
-- Message Families: PositionReport, StandardClassBPositionReport
-
-## Generated Data Specifications
+## Operations
 
 - PositionReport
 - StandardClassBPositionReport
 
 ## Notes
 
-- The included message families are sufficient to plot moving vessel dots on the map.
-- For both included message families, the generated model must make `UserID`, `Latitude`, `Longitude`, and `Timestamp` readable.
-- `Timestamp` in these message bodies is only the AIS-reported second within the current UTC minute and must not be treated as a full UTC instant by downstream code.
-- Fields defined as `object`, or otherwise lacking a stable representable shape in the target language, should be represented as text containing the serialized JSON value.
+- The stream uses WebSocket transport at wss://stream.aisstream.io/v0/stream
+- Authentication is via API key sent in the subscription message body
+- Timestamp in message bodies is only the AIS-reported second within the current UTC minute, not a full UTC instant
+- Fields defined as object or lacking a stable shape should be represented as text containing serialized content
