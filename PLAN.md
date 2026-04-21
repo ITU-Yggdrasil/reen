@@ -65,7 +65,8 @@ Verify runs as a PostToolUse hook after every write. Audit runs on demand after 
 
 ### Test projects
 
-- Keep: `tests/snake`, `tests/money transfer`, `tests/Connor`, `tests/world data`. All four are migrated in Phase 4. Snake and money transfer are the small reference projects; Connor and world data are larger real-world drafts that stress-test the schema and lint.
+- Migrated in Phase 4: `tests/snake`, `tests/money transfer`, `tests/Connor`. Snake and money transfer are the small reference projects; Connor is the larger real-world draft that stress-tests the schema and lint.
+- Retained on disk but out of Phase 4 scope: `tests/world data/`, `tests/snake_gh/`. Both represent distinct use cases that don't fit the current four-artifact-kind pipeline. `tests/world data/` is an external-API-boundary codegen project (generates domain types from an OpenAPI schema). `tests/snake_gh/` is a GitHub-repo ingestion test case. Revisit as future phases if api-boundary or repo-ingestion drafts become part of the schema.
 - All `target/` directories under tests get `.gitignore`'d if not already.
 
 ---
@@ -223,7 +224,7 @@ Schema bumps to `reen.prepare/v2`. Old prepared YAML is not migrated; snake and 
 3. Remove the deleted CLI subcommands from `main.rs`; make the binary compile again with the reduced surface.
 4. Review `draft_refine.rs` line-by-line; strip LLM pathways, keep deterministic review categories.
 5. Delete `DCI Primer.md`. Replace `CLAUDE.md` with a two-line placeholder.
-6. Confirm `tests/Connor` and `tests/world data` can be deleted. Delete.
+6. Keep `tests/Connor` (in scope for Phase 4) and `tests/world data` (retained but deferred out of Phase 4). No test-project deletions at this stage; the Phase 0 strip is Rust-side only.
 7. Ensure `cargo build` passes on the reduced tree.
 
 **Exit criteria:** repo compiles, contains only surviving Rust files, and has no references to removed agents or CLI commands.
@@ -310,9 +311,9 @@ Schema bumps to `reen.prepare/v2`. Old prepared YAML is not migrated; snake and 
 
 ### Phase 4 — migrate test projects
 
-**Goal:** all four test projects — snake, money transfer, Connor, world data — built under the new pipeline from BA-authorable drafts that pass the Phase 3.5 lint.
+**Goal:** three test projects — snake, money transfer, Connor — built under the new pipeline from BA-authorable drafts that pass the Phase 3.5 lint. `tests/world data/` and `tests/snake_gh/` are retained on disk but out of Phase 4 scope (distinct use cases — external-API-boundary codegen and repo ingestion — that don't fit the current four-artifact-kind pipeline).
 
-**Ordering.** The first pass on snake and money transfer (before Phase 3.5 existed) reshaped the schema but left code-level content in the snake drafts. Redo snake first so it becomes the clean reference for the larger migrations, then re-check money transfer against the lint, then migrate Connor, then world data. Each project is its own Claude Code session with `/clear` before it starts.
+**Ordering.** The first pass on snake and money transfer (before Phase 3.5 existed) reshaped the schema but left code-level content in the snake drafts. Redo snake first so it becomes the clean reference for the larger migrations, then re-check money transfer against the lint, then migrate Connor. Each project is its own Claude Code session with `/clear` before it starts.
 
 **Draft acceptance bar (applies to every project).** Before `reen prepare` is run on any draft, the draft must read as business vocabulary:
 
@@ -325,7 +326,7 @@ Schema bumps to `reen.prepare/v2`. Old prepared YAML is not migrated; snake and 
 
 The lint enforces all of the above mechanically. The bar above is the *reason* the lint exists; the lint is the *mechanism*.
 
-1. Per project, in order — **snake (redo first)**, then **money transfer** (lint sweep), then **Connor**, then **world data**:
+1. Per project, in order — **snake (redo first)**, then **money transfer** (lint sweep), then **Connor**:
    - Rewrite every draft to the new DCI-native schema, using the right template for each kind (data, projection, context). For contexts specifically: recover the role methods that were previously implicit in flow prose and surface them as an explicit Role Methods section grouped by role. Remove all signatures, types, and method body references. Add Scenarios sections with concrete Given/When/Then.
    - Run `reen prepare` purely to exercise the Phase 3.5 lint before touching anything else; fix every code-token finding before proceeding. No `--allow-code-tokens`.
    - Consolidate the manifest so it is the single source of DCI vocabulary for the project.
@@ -342,7 +343,7 @@ The lint enforces all of the above mechanically. The bar above is the *reason* t
    - `planted_drift_caught`: a deliberately-modified `.rs` (extra field) fails `reen verify` with the expected diff.
 3. Add a workspace-level test that runs `reen prepare && reen scaffold && reen verify` across all kept test projects as a smoke test.
 
-**Exit criteria:** `cargo test` at the workspace root is green; all four test projects — snake, money transfer, Connor, world data — can be built end-to-end from their rewritten drafts; every draft in every project passes the Phase 3.5 code-token lint without `--allow-code-tokens`.
+**Exit criteria:** `cargo test` inside each of the three in-scope projects is green; snake, money transfer, and Connor can be built end-to-end from their rewritten drafts; every draft in every in-scope project passes the Phase 3.5 code-token lint without `--allow-code-tokens`.
 
 ### Phase 5 — auditor
 
