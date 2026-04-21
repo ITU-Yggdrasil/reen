@@ -11,7 +11,7 @@ Avoid technical or implementation details.]
 
 ## Personality and Tone of Voice
 
-[Describe the brandâ€™s personality in a few words or a short paragraph.]
+[Describe the brands personality in a few words or a short paragraph.]
 
 ### Tone Guidelines
 
@@ -82,7 +82,7 @@ Consider:
 - [Best practice 2]
 - [Best practice 3]
 
-### Donâ€™t
+### Dont
 
 - [Common mistake 1]
 - [Common mistake 2]
