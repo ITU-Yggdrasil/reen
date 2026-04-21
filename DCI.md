@@ -85,6 +85,18 @@ When `reen prepare` encounters an unresolvable name, it raises a blocking ambigu
 
 ---
 
+## Where Operations Fit in the Reference Graph
+
+When a project consumes an external API, Reen introduces **operations** — specifications of API calls generated from an OpenAPI snapshot. Operations are not DCI artifacts: they describe an external boundary, not a domain concept. They sit in the reference graph under strict scoping rules:
+
+- **Contexts** can reference operations (and data, and projections). A context coordinates the call.
+- **Data** and **projections** cannot reference operations. An operation is a context-level concern, not an intrinsic capability of a domain object.
+- **Operations** reference data types (for their input, output, and error shapes).
+
+In draft prose, reference an ingested type or operation as `@<api>/<Name>` — for example, `@aisstream/Subscribe` or `@aisstream/PositionReport`. The vocabulary manifest resolves these during prepare.
+
+---
+
 ## Worked Example: MoneyTransfer Context
 
 This is the actual context draft from the money-transfer test project. It shows the full DCI decomposition.

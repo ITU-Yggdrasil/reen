@@ -24,6 +24,16 @@ reen scaffold --verbose      # generate Rust stubs
 
 Then in Claude Code: `/implement` fills the `todo!()` bodies, `/audit` checks semantic alignment.
 
+## External APIs
+
+Reen supports consuming external APIs described by OpenAPI specs. The authored surface is small: a **boundary draft** (`drafts/apis/<name>.md`) states purpose, source, and an operations whitelist. The generated surface is machine-owned: data drafts and operation specs under `drafts/.apis/` (gitignored). Generated types and operations are referenceable from DCI drafts as `@<api>/<Name>` — contexts can reference operations, data drafts cannot.
+
+```bash
+reen apis ingest [<api-name>]    # generate from OpenAPI snapshot
+reen scaffold                     # also scaffolds operation clients
+reen verify src/apis/<api>/<op>.rs  # verifies against operation spec
+```
+
 ## CLI
 
 ```
@@ -34,6 +44,7 @@ reen verify <path.rs> [--prepared path.yml]
 reen clear prepared|generated|all
 reen manifest types add-prefix <prefix>
 reen manifest capabilities add <domain> <crate>
+reen apis ingest [<api-name>]
 ```
 
 Global flags: `--verbose`, `--debug`, `--dry-run`.
@@ -78,12 +89,15 @@ drafts/
   contexts/          # Context drafts (DCI scenarios)
   data/              # Data drafts (domain objects)
   projections/       # Projection drafts (read-only views)
+  apis/              # Boundary drafts + OpenAPI snapshots (committed)
+  .apis/             # Generated data drafts + operation specs (gitignored)
   prepare/           # Generated YAML (reen prepare output)
   vocabulary.yml     # Explicit vocabulary entries
 src/
   contexts/          # Generated + implemented context Rust
   data/              # Generated + implemented data Rust
   projections/       # Generated + implemented projection Rust
+  apis/              # Generated operation client stubs
 ```
 
 ## Development
