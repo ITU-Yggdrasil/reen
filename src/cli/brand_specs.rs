@@ -529,11 +529,18 @@ fn extract_bullets(section: &str) -> Vec<String> {
 }
 
 fn is_placeholder_blocker(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     matches!(
-        text.trim().to_ascii_lowercase().as_str(),
+        normalized.as_str(),
         "none" | "no blocking ambiguities" | "n/a"
     )
-}
+} 
 
 fn collect_defined_tokens(sections: &BTreeMap<String, Section>) -> BTreeSet<String> {
     let token_pattern = Regex::new(r"\bbrand(?:\.[A-Za-z0-9_-]+)+\b").expect("brand token regex");
