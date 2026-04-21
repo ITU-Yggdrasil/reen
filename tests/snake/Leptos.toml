@@ -1,0 +1,10 @@
+[package]
+name = "test-company"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
+output-name = "test-company"
+site-root = "public"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
