@@ -5,6 +5,9 @@ bin = { path = "src/main.rs" }
 
 [leptos]
 output-name = "test-company"
-site-root = "public"
+site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001

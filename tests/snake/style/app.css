@@ -1,28 +1,26 @@
 :root {
     --brand-colors-primary-black: #000000;
     --brand-colors-primary-white: #ffffff;
-    --brand-colors-primary-red: #ff0000;
-    --brand-colors-secondary-green: #00ff00;
-    --brand-colors-secondary-orange: #ffa500;
-    --brand-colors-secondary-blue: #0000ff;
+    --brand-colors-secondary-accent: #ff0000;
+    --brand-colors-semantic-green: #00ff00;
+    --brand-colors-semantic-orange: #ffa500;
+    --brand-colors-semantic-blue: #0000ff;
 }
 
 body {
     font-family: 'Inter', Arial, Helvetica, sans-serif;
     color: var(--brand-colors-primary-black);
     background-color: var(--brand-colors-primary-white);
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
 }
 
-.home-page {
-    text-align: center;
-    padding: 2rem;
-}
-
-.home-page h1 {
-    color: var(--brand-colors-primary-red);
+h1 {
     font-weight: bold;
+    color: var(--brand-colors-primary-black);
 }
 
-.home-page p {
+p {
     color: var(--brand-colors-primary-black);
 }

@@ -140,6 +140,19 @@ static_prompt: |
   version = "0.1.0"
   edition = "2021"
 
+  [package.metadata.leptos]
+  output-name = "app-name"
+  site-root = "target/site"
+  site-pkg-dir = "pkg"
+  style-file = "style/app.css"
+  assets-dir = "public"
+  site-addr = "127.0.0.1:3000"
+  reload-port = 3001
+  bin-features = ["ssr"]
+  bin-default-features = false
+  lib-features = ["hydrate"]
+  lib-default-features = false
+
   [lib]
   crate-type = ["cdylib", "rlib"]
 
@@ -159,9 +172,12 @@ static_prompt: |
 
   [leptos]
   output-name = "app-name"
-  site-root = "public"
+  site-root = "target/site"
   site-pkg-dir = "pkg"
   style-file = "style/app.css"
+  assets-dir = "public"
+  site-addr = "127.0.0.1:3000"
+  reload-port = 3001
 
   `src/lib.rs` minimum shape:
 
@@ -274,8 +290,10 @@ static_prompt: |
   - [ ] Output is a single-package project, not a workspace
   - [ ] Axum is the server integration used by the scaffold
   - [ ] `Cargo.toml` is compatible with cargo-leptos single-package conventions
+  - [ ] `Cargo.toml` contains `[package.metadata.leptos]` with all required fields
   - [ ] `Cargo.toml` explicitly includes `leptos_router`
-  - [ ] `Leptos.toml` is present
+  - [ ] `Leptos.toml` is present with `[package]` and `[leptos]` sections
+  - [ ] `Leptos.toml` has matching `output-name`, `site-root`, `site-pkg-dir`, `style-file`, `assets-dir`, `site-addr`, and `reload-port`
   - [ ] `src/main.rs` contains Axum server startup and SSR wiring
   - [ ] `src/lib.rs` contains bootstrap/hydration-facing app wiring
   - [ ] `src/app.rs` defines the root `App` component and routing
