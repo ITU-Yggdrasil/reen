@@ -33,11 +33,13 @@ See `DCI.md` for the conceptual reference and `DRAFT_FORMAT.md` for templates.
 
 ## Implementation contract
 
-- Struct fields match the prepared YAML exactly (role players, props, attributes, source)
+- Struct fields include the prepared YAML's role players, props, attributes, or source. Contexts and projections may carry additional internal bookkeeping fields.
 - Public methods = functionalities (context), operations (data), queries (projection)
 - Private methods ⊇ role methods with `<role>_<method>` canonical names
 - Role methods take `&self` on the context, role player as first explicit `&` parameter
+- Functionalities default to `&self`; upgrade to `&mut self` where mutation is needed
 - `reen verify` runs after every Rust write via PostToolUse hook
+- `/audit` checks semantic alignment after implementation: role method responsibilities, functionality flow, invariant enforcement
 
 ## Hooks
 
@@ -53,5 +55,4 @@ reen verify <path.rs> [--prepared path.yml]
 reen clear prepared|generated|all
 reen manifest types add-prefix <prefix>
 reen manifest capabilities add <domain> <crate>
-reen config [prepare|refine|scaffold|clear|manifest] [flags]
 ```
