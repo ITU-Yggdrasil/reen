@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod codegen;
 pub mod draft_parser;
 pub mod draft_refine;
