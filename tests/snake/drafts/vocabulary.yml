@@ -1,0 +1,5 @@
+schema: reen.vocabulary/v1
+data:
+  - "keyboard input"
+  - "a random number generator"
+projections: []

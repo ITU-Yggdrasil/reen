@@ -1,21 +1,73 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: data
 source:
   path: data/Direction.md
   kind: data
-  title: Direction
+  title: 'Data: Direction'
 export:
   name: Direction
-mutable: false
-variants:
+attributes:
 - name: Up
-  meaning: Moving upward
+  description: moving upward on the screen; the y coordinate decreases by 1
 - name: Down
-  meaning: Moving downward
+  description: moving downward on the screen; the y coordinate increases by 1
 - name: Left
-  meaning: Moving leftward
+  description: moving leftward on the screen; the x coordinate decreases by 1
 - name: Right
-  meaning: Moving rightward
-derives:
-- Clone
-- Copy
-- Debug
+  description: moving rightward on the screen; the x coordinate increases by 1 The board uses screen coordinates where y = 0 is the top row, so "up" decreases y and "down" increases y.
+invariants:
+- Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.
+scenarios:
+- name: up decreases y
+  given: a snake head at (5, 5)
+  when: the direction is Up
+  then: the next head position is (5, 4)
+- name: down increases y
+  given: a snake head at (5, 5)
+  when: the direction is Down
+  then: the next head position is (5, 6)
+synthesised_tests:
+- source: scenario
+  given: a snake head at (5, 5)
+  when: the direction is Up
+  then: the next head position is (5, 4)
+  citation: Scenarios / up decreases y
+- source: scenario
+  given: a snake head at (5, 5)
+  when: the direction is Down
+  then: the next head position is (5, 6)
+  citation: Scenarios / down increases y
+- source: invariant
+  given: 'a Data: Direction that might violate: Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.'
+  when: the invariant is tested
+  then: 'the invariant holds: Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.'
+  citation: Invariants / Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.
+- source: invariant
+  given: a snake head at (10, 20) and a direction Right
+  when: the direction is applied to calculate the next position
+  then: the next head position is (11, 20)
+  citation: 'invariant: mapping from direction to position delta must be applied consistently'
+- source: invariant
+  given: a snake head at (0, 0) and a direction Left
+  when: the direction is applied to calculate the next position
+  then: the next head position is (-1, 0)
+  citation: 'invariant: mapping from direction to position delta must be applied consistently'
+- source: invariant
+  given: two different positions (3, 7) and (15, 2) both with direction Up
+  when: the direction is applied to both positions
+  then: both produce position deltas of (0, -1) demonstrating consistent mapping
+  citation: 'invariant: the mapping from direction to position delta must be applied consistently wherever a direction is turned into a next position'
+- source: invariant
+  given: a Direction object
+  when: queried for coordinate information
+  then: the Direction object contains no coordinate data, only directional intent
+  citation: 'invariant: Direction does not know about coordinates itself'
+vocabulary_bindings:
+- name: Up
+  resolution: attribute
+- name: Down
+  resolution: attribute
+- name: Left
+  resolution: attribute
+- name: Right
+  resolution: attribute

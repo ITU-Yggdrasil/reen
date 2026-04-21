@@ -3,16 +3,16 @@
 ## Application Kind
 `cli_app`
 
-## Description
+## Purpose
 
-This is a terminal Snake application.
+A terminal Snake game. The application manages the game lifecycle — initialising state, running the main loop, rendering the board and score, and restarting after game over.
 
 Depends on:
 
-- `game_loop` (`GameLoopContext`)
-- `command_input` (`CommandInputContext`)
-- `terminal_renderer` (`TerminalRenderer`)
-- `string_renderer` (`StringRenderer`)
+- GameLoop
+- CommandInput
+- TerminalRenderer
+- StringRenderer
 
 The application is responsible for:
 
@@ -20,22 +20,21 @@ The application is responsible for:
 - running the main loop
 - showing the board and score
 - restarting after game over
-- putting the terminal in a mode where single key presses are read immediately
+- putting the terminal into immediate single-keypress mode
 - keeping exactly one shared input stream used by both menus and gameplay
 
-Game progression logic is delegated to `GameLoopContext`.
+Game progression logic is delegated to GameLoop.
 
 ---
 
 ## Runtime Topology
 
-The application runs as one terminal process with one shared input stream for
-the whole session.
+The application runs as one terminal process with one shared input stream for the whole session.
 
 At any point in time it has either:
 
-- no active `GameLoopContext` and is showing a menu or start screen, or
-- one active `GameLoopContext` and is running gameplay
+- no active GameLoop and is showing a menu or start screen, or
+- one active GameLoop and is running gameplay
 
 ---
 
@@ -61,20 +60,19 @@ Not applicable. The application does not serve static pages or assets.
 
 | Collaborator | Responsibility |
 |---|---|
-| `CommandInputContext` | Captures key presses into one shared FIFO stream for the whole session. Provides raw keys for menus and gameplay actions for the game loop. |
-| `GameLoopContext` | Holds the game rules and advances gameplay one tick at a time. Provides the current board picture and score. |
-| `StringRenderer` | Formats a board picture and score into one plain-text frame. |
-| `TerminalRenderer` | Uses `StringRenderer` and shows the latest frame in the terminal. |
-| `food_dropper` | Chooses the next food placement on a free interior non-wall, non-snake cell. |
+| CommandInput | Captures key presses into one shared stream for the whole session. Provides raw keys for menus and gameplay actions for the game loop. |
+| GameLoop | Holds the game rules and advances gameplay one tick at a time. Provides the current board picture and score. |
+| StringRenderer | Formats a board picture and score into one plain-text frame. |
+| TerminalRenderer | Uses the text formatter and shows the latest frame in the terminal. |
+| food_dropper | Chooses the next food placement on a free interior non-wall, non-snake cell. |
 
-The application must not implement movement, collisions, scoring, or food
-placement rules itself.
+The application must not implement movement, collisions, scoring, or food placement rules itself.
 
 It only:
 
 1. collects input
-2. asks `GameLoopContext` to advance
-3. renders the board picture from `current_board` together with the score from `get_score`
+2. asks the game loop to advance
+3. renders the board picture together with the score
 
 ---
 
@@ -86,26 +84,13 @@ On startup, show a message such as:
 
 When a new game is started:
 
-- Create a board from terminal width and height, leaving one line below for the
-  score.
-- Create the initial head position at the center of the board.
-- Create the initial snake as a one-segment snake facing right, i.e. moving right.
-- Create one food dropper (a `rand::rngs::ThreadRng`) for that game session.
-  The application **does not** call the food dropper directly to pick an
-  initial food position — that logic is private to `GameLoopContext` and is
-  invoked from its `new` constructor. See `contexts/game_loop.md` → `new`.
-- Create the initial game state with:
-  - score `0`
-  - `None` for the initial food placement; `GameLoopContext::new` overwrites
-    this with a food position chosen from the food dropper using the current
-    board and snake
-  - the current UTC millisecond time as the round start time
-- Create a `GameLoopContext` using the board, snake, shared command input,
-  food dropper, and game state. The context's `new` constructor is responsible
-  for placing the first food on the board — the application must not try to
-  place it.
-- Prepare a `StringRenderer` and, when terminal output is used, a
-  `TerminalRenderer`.
+- Create a board from terminal width and height, leaving one line below for the score.
+- Create the initial head position at the centre of the board.
+- Create the initial snake as a one-segment snake facing right.
+- Create one food dropper (a random number generator) for that game session. The application does not pick an initial food position — that is the responsibility of the game loop constructor.
+- Create the initial game state with score 0, no food placement, and the current UTC millisecond time as the round start time.
+- Create a GameLoop using the board, snake, shared command input, food dropper, and game state. The game loop constructor is responsible for placing the first food on the board.
+- Prepare a StringRenderer and, when terminal output is used, a TerminalRenderer.
 
 ---
 
@@ -115,141 +100,48 @@ The application runs an outer loop with the following behavior.
 
 ### 0. Terminal mode and startup checks
 
-- Read environment variable `SNAKE_RENDERER`.
-- If `SNAKE_RENDERER=string`, use string-renderer-only output mode.
-- Otherwise use terminal-renderer output mode.
-- if the terminal is resized during game play. Resize the board accordingly. Snake and food doesn't change coordinates and if the snake is outside of the walls the game is over
-- Before entering the main loop, enable raw terminal input mode so single key
-  presses are available immediately and input echo is disabled.
-- Immediately after enabling raw mode, clear the full terminal screen and move
-  the cursor to `(0, 0)` (e.g. with
-  `crossterm::execute!(stdout, crossterm::terminal::Clear(crossterm::terminal::ClearType::All), crossterm::cursor::MoveTo(0, 0))`)
-  so the first start screen is drawn on a clean canvas rather than on top of
-  the previous shell prompt or scrollback.
+- Read environment variable SNAKE_RENDERER. If it is set to "string", use text-only output mode. Otherwise use terminal output mode.
+- If the terminal is resized during gameplay, resize the board accordingly. If the snake or food falls outside the new boundaries, the game is over.
+- Before entering the main loop, enable immediate single-keypress mode so key presses are available without waiting for a newline, and input echo is disabled.
+- Immediately after enabling immediate mode, clear the full terminal screen and position the cursor at the top-left so the first start screen is drawn on a clean canvas.
 - On application exit, restore the previous terminal mode.
-- Create one shared `CommandInputContext` before the loop and keep using the
-  same shared input stream for the process lifetime.
-- If terminal width < 20 or terminal height < 20, print an error to stderr and
-  exit with code `20`.
+- Create one shared CommandInput before the loop and keep using the same shared input stream for the process lifetime.
+- If the terminal width or height is less than 20, print an error to standard error and exit with a non-zero code.
 
-**Integer type boundary.** The underlying terminal API
-(`crossterm::terminal::size`, `crossterm::cursor::MoveTo`, any other crossterm
-call that takes coordinates) operates in `u16`. All in-domain coordinates —
-`Position`, `Board::new`, `Board::width`, `Board::height`, `Board::with_symbol_at`,
-snake body positions, food positions — operate in `u32`. The application must:
+**Terminal-to-board boundary.** The underlying terminal surface uses smaller coordinate values than the board domain. The application is responsible for translating terminal dimensions into board dimensions when constructing domain values, and for translating board coordinates back to terminal coordinates when positioning the cursor. These translations happen only at the boundary — the board and the terminal surface each use their own coordinate space internally.
 
-- Keep the raw terminal width and height obtained from `crossterm::terminal::size`
-  as `u16` and use those `u16` values directly whenever it calls
-  `crossterm::cursor::MoveTo` or similar crossterm functions. Do **not** widen
-  the terminal size to `u32` once and then try to reuse it for cursor
-  positioning — `MoveTo` will not accept a `u32`.
-- Convert the `u16` terminal dimensions to `u32` (e.g. `width as u32`,
-  `height as u32`) **only at the point where a domain value is constructed**,
-  such as computing `board_width`/`board_height` for `Board::new`, or computing
-  head coordinates for `Position::new`.
-- When positioning the cursor to a row derived from a domain coordinate (for
-  example, placing "Game Over" just below the board), convert the `u32` value
-  back to `u16` at the call site with `as u16`.
+### 1. No active GameLoop
 
-This keeps the `u16` terminal surface and the `u32` board domain cleanly
-separated and prevents `mismatched types: expected u16, found u32` errors.
-
-### 1. No active `GameLoopContext`
-
-- Render or update a start screen, including score from the previous game if
-  one exists.
-- In terminal mode, the start screen appears as one stable screen while waiting
-  for input; idle iterations must not visibly flicker.
-- In terminal mode, every line of the start screen must begin at column 0.
-  Because raw mode is enabled, a bare `'\n'` does not return the cursor to
-  column 0, so the implementation must not use plain `println!` for this
-  screen. Instead, for each line of the start screen, position the cursor at
-  column 0 of the intended row (e.g. with `crossterm::cursor::MoveTo(0, row)`)
-  and then write the line's characters.
-- **Leftover-content wipe (required, not optional).** The start screen's lines
-  are short (for example `Press s to start a new game` is far narrower than a
-  typical terminal width). When the application enters the start-screen state
-  after a finished round, the full game board frame from the previous round is
-  still on screen. A short `print!` at `MoveTo(0, row)` overwrites only the
-  first N columns of `row`, leaving the tail of the previous frame's row
-  visibly (`Press s to start a new gamewwwww...`).
-  To prevent this, every start-screen redraw must:
-  1. For each start-screen line, after `crossterm::cursor::MoveTo(0, row)` and
-     **before** `print!`, emit
-     `crossterm::terminal::Clear(crossterm::terminal::ClearType::UntilNewLine)`
-     so the rest of that row (everything from the cursor column to the end of
-     the line) is wiped before the new text is written.
-  2. After writing the last start-screen line, move the cursor to the row
-     immediately below the last written line and emit
-     `crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)`
-     so every row below the start screen (including the entire leftover board
-     and any trailing `"Game Over"` / `"Final Score"` lines) is wiped as well.
-  3. Only then call flush.
-
-  These clears are in-place terminal operations that happen on every idle
-  iteration. Because the text written immediately after the clear is the same
-  from one iteration to the next, the user sees one stable screen without
-  flicker — the clear is invisible on any modern terminal.
-- Call `CommandInputContext.capture`.
-- Poll raw keys via `CommandInputContext.next_key`.
-- If the user presses `"S"` or `"s"`:
-  - recreate the initial state from the startup sequence
-  - create a new `GameLoopContext` using the same shared command input stream
-- If the user presses `"Q"` or `"q"`, exit the program.
+- Render or update a start screen, including the score from the previous game if one exists.
+- In terminal mode, the start screen appears as one stable screen while waiting for input; idle iterations must not visibly flicker.
+- In terminal mode, every line of the start screen must begin at the start of its row. Because immediate mode is enabled, a bare newline does not return the cursor to the start of the row.
+- **Leftover-content cleanup (required).** When the application enters the start-screen state after a finished round, the full game board frame from the previous round is still on screen. Short start-screen lines would only overwrite part of each row, leaving the tail of the previous frame visible. To prevent this, every start-screen redraw must clear the remainder of each row after writing it, and clear all rows below the last start-screen line, before flushing. These clears happen on every idle iteration; because the written text is the same each time, the user sees one stable screen without flicker.
+- Ask the command input to capture pending input and poll for raw keys.
+- If the user presses "S" or "s", recreate the initial state from the startup sequence and create a new GameLoop using the same shared command input stream.
+- If the user presses "Q" or "q", exit the program.
 - Otherwise continue waiting.
 
-### 2. Active `GameLoopContext` exists
+### 2. Active GameLoop exists
 
-- Obtain the current frame data from:
-  - `game_loop_context.current_board()`
-  - `game_loop_context.get_score()`
-- Render using the board picture and the score only:
-  - `StringRenderer.render`
-  - `TerminalRenderer.render`
-- Renderers work from the board picture and the score. They do not decide what
-  belongs in each cell.
-- In terminal mode, `TerminalRenderer` updates the terminal in place so the
-  latest frame is shown as one stable screen without accumulated old frames.
-- In string mode, print the `StringRenderer` output directly with no
-  terminal-clearing behavior.
-- Call `game_loop_context.tick()`.
-- If `tick()` indicates that the round has ended, clear the active context and
-  proceed to game-over behavior.
-- If `tick()` indicates that play should continue, keep the same game context
-  and continue looping.
+- Obtain the current frame data: the board picture from the game loop and the score from the game loop.
+- Render using the board picture and the score only (via StringRenderer and TerminalRenderer). Renderers work from the board picture and the score. They do not decide what belongs in each cell.
+- In terminal mode, the TerminalRenderer updates the terminal in place so the latest frame is shown as one stable screen without accumulated old frames.
+- In text-only mode, print the StringRenderer output directly with no screen-clearing behavior.
+- Advance the game by calling tick on the game loop.
+- If tick indicates that the round has ended, clear the active game loop and proceed to game-over behavior.
+- If tick indicates that play should continue, keep the same game loop and continue looping.
 
 ### 3. Game ends
 
-- Render the final board state again using the current board picture and score,
-  or reuse the last picture already available.
-- Render a `"Game Over"` message and the final score.
-- In terminal mode, every game-over line must begin at column 0. As with the
-  start screen, a bare `'\n'` does not return the cursor to column 0 in raw
-  mode, so the implementation must position the cursor at column 0 of each
-  intended row (e.g. with `crossterm::cursor::MoveTo(0, row)`) before writing
-  the line rather than using plain `println!`.
-- **Leftover-content wipe (required).** The `"Game Over"` and
-  `"Final Score: <n>"` lines are short strings placed immediately below the
-  board (typically at rows `board_height` and `board_height + 1`). The row(s)
-  immediately below the board may contain leftover content from a previous
-  round's game-over output, and the right side of the `"Game Over"` /
-  `"Final Score"` rows themselves may contain leftover board cells. To prevent
-  stale characters from showing to the right of these short strings or in the
-  rows below, the game-over render must, in terminal mode, for each game-over
-  line, do `crossterm::cursor::MoveTo(0, row)` followed by
-  `crossterm::terminal::Clear(crossterm::terminal::ClearType::UntilNewLine)`
-  **before** writing the text, and after the last game-over line, move the
-  cursor to the row immediately below and emit
-  `crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)`.
+- Render the final board state again using the current board picture and score, or reuse the last picture already available.
+- Display a "Game Over" message and the final score.
+- In terminal mode, every game-over line must begin at the start of its row. The same leftover-content cleanup as the start screen applies: clear the remainder of each row and all rows below the last game-over line.
 - Allow the user to start a new game.
-- If `SNAKE_RENDERER=string`, also print
-  `REEN_SNAKE_TEST_RESULT game_over score=<score>` to standard error and then
-  exit with code `0`.
+- In text-only mode, also print a test result line with the final score to standard error and then exit.
 
-The application continues until the user exits with `q` or `Q` while no game is
-active.
+The application continues until the user exits with "q" or "Q" while no game is active.
 
-Normal exit code is `0`.
+Normal exit code is 0.
 
 ---
 
@@ -257,7 +149,7 @@ Normal exit code is `0`.
 
 In case of a runtime error:
 
-- exit with non-zero code `42`
+- exit with a non-zero code
 - print any available error message to standard error
 
 No partial state recovery is required.

@@ -1,19 +1,34 @@
-# Direction
+# Data: Direction
 
-## Description
+## Purpose
 
-The Direction type represents the four cardinal directions of travel for the snake. It is a fieldless enum.
+Direction represents the four cardinal directions of travel for the snake. It is a fieldless enumeration.
 
-## Variants
+## Attributes
 
-| Variant | Meaning | Notes |
-|---|---|---|
-| Up | Moving upward on the screen | In board coordinates (see `Position`, origin top-left, `y` grows downward), `Up` means the `y` component **decreases** by 1. |
-| Down | Moving downward on the screen | `y` component **increases** by 1. |
-| Left | Moving leftward on the screen | `x` component **decreases** by 1. |
-| Right | Moving rightward on the screen | `x` component **increases** by 1. |
+The variants are:
 
-## Notes
+- Up: moving upward on the screen; the y coordinate decreases by 1
+- Down: moving downward on the screen; the y coordinate increases by 1
+- Left: moving leftward on the screen; the x coordinate decreases by 1
+- Right: moving rightward on the screen; the x coordinate increases by 1
 
-- `Direction` derives `Copy` and `Clone`.
-- `Direction` does not know about coordinates itself; the mapping from `Direction` to a `Position` delta is stated above and must be applied consistently wherever a direction is turned into a next position (e.g. `GameLoopContext::tick` when it computes the next head cell). The board uses screen coordinates — `y = 0` is the top row — so "up" decreases `y` and "down" increases `y`. Do not use the mathematical convention where `y` grows upward.
+The board uses screen coordinates where y = 0 is the top row, so "up" decreases y and "down" increases y.
+
+## Invariants
+
+- Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.
+
+## Operations
+
+## Scenarios
+
+### up decreases y
+Given: a snake head at (5, 5)
+When: the direction is Up
+Then: the next head position is (5, 4)
+
+### down increases y
+Given: a snake head at (5, 5)
+When: the direction is Down
+Then: the next head position is (5, 6)

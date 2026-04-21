@@ -1,42 +1,70 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: data
 source:
   path: data/Position.md
   kind: data
-  title: Position
+  title: 'Data: Position'
 export:
   name: Position
-mutable: false
-fields:
+attributes:
 - name: x
-  meaning: Horizontal coordinate
-  type:
-    status: resolved
-    rust: u32
-    source: draft_hint
-  getter_accessible: true
-  notes:
-  - Type `u32`
+  description: horizontal coordinate; 0 is the leftmost column, grows to the right
 - name: y
-  meaning: Vertical coordinate
-  type:
-    status: resolved
-    rust: u32
-    source: draft_hint
-  getter_accessible: true
-  notes:
-  - Type `u32`
-getters:
+  description: vertical coordinate; 0 is the top row, grows downward (screen convention)
+invariants:
+- Both x and y are non-negative whole numbers.
+scenarios:
+- name: top-left corner
+  given: x is 0 and y is 0
+  when: a Position is created
+  then: it represents the top-left cell of the board
+- name: moving down increases y
+  given: a Position at (3, 2)
+  when: y is increased by 1
+  then: the new Position is (3, 3), which is one row below
+synthesised_tests:
+- source: scenario
+  given: x is 0 and y is 0
+  when: a Position is created
+  then: it represents the top-left cell of the board
+  citation: Scenarios / top-left corner
+- source: scenario
+  given: a Position at (3, 2)
+  when: y is increased by 1
+  then: the new Position is (3, 3), which is one row below
+  citation: Scenarios / moving down increases y
+- source: invariant
+  given: 'a Data: Position that might violate: Both x and y are non-negative whole numbers.'
+  when: the invariant is tested
+  then: 'the invariant holds: Both x and y are non-negative whole numbers.'
+  citation: Invariants / Both x and y are non-negative whole numbers.
+- source: invariant
+  given: a Position is created with x = -1 and y = 5
+  when: the invariant is checked
+  then: the invariant is violated because x is negative
+  citation: 'invariant: Both x and y are non-negative whole numbers'
+- source: invariant
+  given: a Position is created with x = 3 and y = -2
+  when: the invariant is checked
+  then: the invariant is violated because y is negative
+  citation: 'invariant: Both x and y are non-negative whole numbers'
+- source: invariant
+  given: a Position is created with x = 2.5 and y = 4
+  when: the invariant is checked
+  then: the invariant is violated because x is not a whole number
+  citation: 'invariant: Both x and y are non-negative whole numbers'
+- source: invariant
+  given: a Position is created with x = 10 and y = 0
+  when: the invariant is checked
+  then: the invariant holds because both x and y are non-negative whole numbers
+  citation: 'invariant: Both x and y are non-negative whole numbers'
+- source: invariant
+  given: a Position is created with x = 0 and y = 100
+  when: the invariant is checked
+  then: the invariant holds because both x and y are non-negative whole numbers
+  citation: 'invariant: Both x and y are non-negative whole numbers'
+vocabulary_bindings:
 - name: x
-  field: x
-  mode: copy
+  resolution: attribute
 - name: y
-  field: y
-  mode: copy
-constructor:
-  kind: all_fields
-derives:
-- Clone
-- Debug
-- Eq
-- Hash
-- PartialEq
+  resolution: attribute

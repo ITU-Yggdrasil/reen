@@ -1,17 +1,38 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: data
 source:
   path: data/PlayerState.md
   kind: data
-  title: PlayerState
+  title: 'Data: PlayerState'
 export:
   name: PlayerState
-mutable: false
-variants:
+attributes:
 - name: Alive
-  meaning: Game continues
+  description: the game continues
 - name: Dead
-  meaning: GameOver
-derives:
-- Clone
-- Copy
-- Debug
+  description: the game is over
+scenarios:
+- name: alive after clear move
+  given: the snake moved to a clear cell
+  when: the tick completes
+  then: the player state is Alive
+- name: dead after wall hit
+  given: the snake moved into a wall
+  when: the tick completes
+  then: the player state is Dead
+synthesised_tests:
+- source: scenario
+  given: the snake moved to a clear cell
+  when: the tick completes
+  then: the player state is Alive
+  citation: Scenarios / alive after clear move
+- source: scenario
+  given: the snake moved into a wall
+  when: the tick completes
+  then: the player state is Dead
+  citation: Scenarios / dead after wall hit
+vocabulary_bindings:
+- name: Alive
+  resolution: attribute
+- name: Dead
+  resolution: attribute

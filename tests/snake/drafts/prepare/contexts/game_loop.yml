@@ -1,450 +1,251 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: context
 source:
   path: contexts/game_loop.md
   kind: context
-  title: GameLoopContext
+  title: 'Context: GameLoop'
 export:
-  name: GameLoopContext
-mutable: true
-roles:
+  name: GameLoop
+role_players:
 - name: snake
-  purpose: Current snake positions and travel direction
-  expected_behavior: Can provide the ordered body and the current direction
-  type:
-    status: resolved
-    rust: Snake
-    source: name_match
-  methods:
-  - name: body
-    signature:
-      status: resolved
-      rust: 'body(&self, snake_: &Snake) -> &Vec<Position>'
-      source: prepare.signature
-    receiver: '&self'
-    parameters:
-    - name: snake_
-      type:
-        status: resolved
-        rust: '&Snake'
-        source: prepare.role_player
-    returns:
-      status: resolved
-      rust: '&Vec<Position>'
-      source: prepare.signature
-    body:
-      steps:
-      - op: return
-        expr:
-          op: call_instance_method
-          receiver:
-            op: var
-            name: snake_
-          method: body
-          args: []
-  - name: direction
-    signature:
-      status: fixed
-      rust: 'direction(&self, snake_: &Snake) -> Direction'
-      source: fix.agent
-      reason: role method `direction` on role `snake` has no explicit signature
-      evidence:
-      - section: Role Methods / snake
-        text: Returns the current travel direction.
-    receiver: '&self'
-    parameters:
-    - name: snake_
-      type:
-        status: resolved
-        rust: '&Snake'
-        source: prepare.role_player
-    returns:
-      status: resolved
-      rust: Direction
-      source: fix.agent
+  data_type: Snake
+  responsibility: the current snake body and travel direction
 - name: command
-  purpose: Shared user input stream
-  expected_behavior: Captures pending input and returns the next gameplay action from the shared queue
-  type:
-    status: fixed
-    rust: CommandInputContext
-    source: fix.agent
-    reason: no nominal concrete Rust type could be inferred for `command`
-    evidence:
-    - section: command
-      text: Shared user input stream
-    - section: command
-      text: Captures pending input and returns the next gameplay action from the shared queue
-  methods:
-  - name: capture
-    signature:
-      status: resolved
-      rust: 'capture(&self, command_: &mut CommandInputContext) -> ()'
-      source: prepare.collab_sync
-    receiver: '&self'
-    parameters:
-    - name: command_
-      type:
-        status: resolved
-        rust: '&mut CommandInputContext'
-        source: prepare.collab_sync
-    returns:
-      status: fixed
-      rust: ()
-      source: fix.agent
-      reason: role method `capture` return type is unknown
-      evidence:
-      - section: Role Methods / command
-        text: Adds newly available key presses to the shared queue without waiting.
-  - name: next_action
-    signature:
-      status: resolved
-      rust: 'next_action(&self, command_: &mut CommandInputContext) -> Option<UserAction>'
-      source: prepare.collab_sync
-    receiver: '&self'
-    parameters:
-    - name: command_
-      type:
-        status: resolved
-        rust: '&mut CommandInputContext'
-        source: prepare.collab_sync
-    returns:
-      status: fixed
-      rust: Option<UserAction>
-      source: fix.agent
-      reason: role method `next_action` return type is unknown
-      evidence:
-      - section: Role Methods / command
-        text: Returns the next gameplay action from the shared queue, if one is available.
+  data_type: CommandInput
+  responsibility: the shared user input stream for capturing and reading gameplay actions
 - name: food_dropper
-  purpose: an RNG used to choose new food positions
-  expected_behavior: Chooses a free interior food position, or no position if none is available
-  type:
-    status: fixed
-    rust: rand::rngs::ThreadRng
-    source: fix.agent
-    reason: no nominal concrete Rust type could be inferred for `food_dropper`
-    evidence:
-    - section: food_dropper
-      text: an RNG used to choose new food positions
-    - section: food_dropper
-      text: Chooses a free interior food position, or no position if none is available
-  methods:
-  - name: drop
-    signature:
-      status: resolved
-      rust: 'drop(&self, food_dropper_: &rand::rngs::ThreadRng) -> Option<Position>'
-      source: prepare.canonical
-      reason: role method `drop` on role `food_dropper` has no explicit signature
-      evidence:
-      - section: Role Methods / food_dropper
-        text: Chooses a food placement using the current board and the current snake. Returns a placement on a free interior cell, or no placement when none is available.
-    receiver: '&self'
-    parameters:
-    - name: food_dropper_
-      type:
-        status: resolved
-        rust: '&rand::rngs::ThreadRng'
-        source: prepare.role_player
-    returns:
-      status: fixed
-      rust: Option<Position>
-      source: fix.agent
-      reason: role method `drop` return type is unknown
-      evidence:
-      - section: Role Methods / food_dropper
-        text: Chooses a food placement using the current board and the current snake. Returns a placement on a free interior cell, or no placement when none is available.
+  data_type: a random number generator
+  responsibility: chooses a free interior food position on the board, or no position if none is available
 - name: game_state
-  purpose: Score, food placement, and round start time
-  expected_behavior: Can provide score, food placement, and round start time, and can return updated copies with changed score or food placement
-  type:
-    status: resolved
-    rust: GameState
-    source: name_match
+  data_type: GameState
+  responsibility: holds the score, food placement, and round start time
+role_methods:
+- role: snake
   methods:
-  - name: score
-    signature:
-      status: resolved
-      rust: 'score(&self, game_state_: &GameState) -> u32'
-      source: prepare.signature
-    receiver: '&self'
-    parameters:
-    - name: game_state_
-      type:
-        status: resolved
-        rust: '&GameState'
-        source: prepare.role_player
-    returns:
-      status: resolved
-      rust: u32
-      source: prepare.signature
-    body:
-      steps:
-      - op: return
-        expr:
-          op: call_instance_method
-          receiver:
-            op: var
-            name: game_state_
-          method: score
-          args: []
-  - name: food
-    signature:
-      status: resolved
-      rust: 'food(&self, game_state_: &GameState) -> Option<Food>'
-      source: prepare.signature
-    receiver: '&self'
-    parameters:
-    - name: game_state_
-      type:
-        status: resolved
-        rust: '&GameState'
-        source: prepare.role_player
-    returns:
-      status: resolved
-      rust: Option<Food>
-      source: prepare.signature
-    body:
-      steps:
-      - op: return
-        expr:
-          op: call_instance_method
-          receiver:
-            op: var
-            name: game_state_
-          method: food
-          args: []
-  - name: game_started_ms
-    signature:
-      status: fixed
-      rust: 'game_started_ms(&self, game_state_: &GameState) -> u64'
-      source: fix.agent
-      reason: role method `game_started_ms` on role `game_state` has no explicit signature
-      evidence:
-      - section: Role Methods / game_state
-        text: Returns the recorded start time of the round.
-    receiver: '&self'
-    parameters:
-    - name: game_state_
-      type:
-        status: resolved
-        rust: '&GameState'
-        source: prepare.role_player
-    returns:
-      status: resolved
-      rust: u64
-      source: fix.agent
-  - name: with_score
-    signature:
-      status: resolved
-      rust: 'with_score(&self, game_state_: &GameState) -> GameState'
-      source: prepare.canonical
-      reason: role method `with_score` on role `game_state` has no explicit signature
-      evidence:
-      - section: Role Methods / game_state
-        text: Returns the same game state with a different score.
-    receiver: '&self'
-    parameters:
-    - name: game_state_
-      type:
-        status: resolved
-        rust: '&GameState'
-        source: prepare.role_player
-    returns:
-      status: fixed
-      rust: GameState
-      source: fix.agent
-      reason: role method `with_score` return type is unknown
-      evidence:
-      - section: Role Methods / game_state
-        text: Returns the same game state with a different score.
-  - name: with_food_placement
-    signature:
-      status: resolved
-      rust: 'with_food_placement(&self, game_state_: &GameState) -> GameState'
-      source: prepare.canonical
-      reason: role method `with_food_placement` on role `game_state` has no explicit signature
-      evidence:
-      - section: Role Methods / game_state
-        text: Returns the same game state with a different food placement.
-    receiver: '&self'
-    parameters:
-    - name: game_state_
-      type:
-        status: resolved
-        rust: '&GameState'
-        source: prepare.role_player
-    returns:
-      status: fixed
-      rust: GameState
-      source: fix.agent
-      reason: role method `with_food_placement` return type is unknown
-      evidence:
-      - section: Role Methods / game_state
-        text: Returns the same game state with a different food placement.
+  - name: read_body
+    canonical_name: snake_read_body
+    citation: provides the ordered body positions, head first
+  - name: read_direction
+    canonical_name: snake_read_direction
+    citation: provides the current travel direction
+- role: command
+  methods:
+  - name: capture_input
+    canonical_name: command_capture_input
+    citation: adds newly available key presses to the shared queue without waiting
+  - name: read_next_action
+    canonical_name: command_read_next_action
+    citation: returns the next gameplay action from the shared queue, if one is available
+- role: food_dropper
+  methods:
+  - name: choose_food_position
+    canonical_name: food_dropper_choose_food_position
+    citation: chooses a food placement on a free interior cell using the current board and snake, or returns no placement when none is available
+- role: game_state
+  methods:
+  - name: read_score
+    canonical_name: game_state_read_score
+    citation: returns the current score
+  - name: read_food
+    canonical_name: game_state_read_food
+    citation: returns the current food placement, if any
+  - name: read_start_time
+    canonical_name: game_state_read_start_time
+    citation: returns the recorded start time of the round
+  - name: update_score
+    canonical_name: game_state_update_score
+    citation: returns the same game state with a different score
+  - name: update_food
+    canonical_name: game_state_update_food
+    citation: returns the same game state with a different food placement
 props:
 - name: board
-  meaning: Base board picture for the current round
-  type:
-    status: resolved
-    rust: Board
-    source: name_match
-  notes:
-  - The outer ring of the board is treated as walls. `board` is the reusable board picture whose walls and empty interior are overlaid with snake and food for the current tick.
+  description: the base board picture for the current round; the outer ring is treated as walls and the interior is overlaid with snake and food each tick
 functionalities:
 - name: new
-  signature:
-    status: resolved
-    rust: 'new(snake: Snake, command: CommandInputContext, food_dropper: rand::rngs::ThreadRng, game_state: GameState, board: Board) -> Self'
-    source: prepare.auto
-  parameters:
-  - name: snake
-    type:
-      status: resolved
-      rust: Snake
-      source: name_match
-  - name: command
-    type:
-      status: fixed
-      rust: CommandInputContext
-      source: fix.agent
-      reason: no nominal concrete Rust type could be inferred for `command`
-      evidence:
-      - section: command
-        text: Shared user input stream
-      - section: command
-        text: Captures pending input and returns the next gameplay action from the shared queue
-  - name: food_dropper
-    type:
-      status: fixed
-      rust: rand::rngs::ThreadRng
-      source: fix.agent
-      reason: no nominal concrete Rust type could be inferred for `food_dropper`
-      evidence:
-      - section: food_dropper
-        text: an RNG used to choose new food positions
-      - section: food_dropper
-        text: Chooses a free interior food position, or no position if none is available
-  - name: game_state
-    type:
-      status: resolved
-      rust: GameState
-      source: name_match
-  - name: board
-    type:
-      status: resolved
-      rust: Board
-      source: name_match
-  returns:
-    status: resolved
-    rust: Self
-    source: prepare.auto
-  body:
-    steps:
-    - op: return
-      expr:
-        op: construct_struct
-        type_name: Self
-        fields:
-        - name: snake
-          expr:
-            op: var
-            name: snake
-        - name: command
-          expr:
-            op: var
-            name: command
-        - name: food_dropper
-          expr:
-            op: var
-            name: food_dropper
-        - name: game_state
-          expr:
-            op: var
-            name: game_state
-        - name: board
-          expr:
-            op: var
-            name: board
+  description: Creates a game loop context from a board, a snake, a shared command input, a food dropper, and a game state. The game state passed in is expected to have no food yet — the caller does not place initial food. The context asks the food dropper to choose an initial food position. If a position is returned, the game state is updated with that food placement. If no position is available (the board has no free interior cell), the game state is left without food. The stored game state always reflects the food dropper's choice, not the caller's.
 - name: current_board
-  signature:
-    status: resolved
-    rust: current_board(&self) -> Board
-    source: prepare.signature
-  receiver: '&self'
-  returns:
-    status: resolved
-    rust: Board
-    source: prepare.signature
-  flow:
-  - 'Signature: `current_board(&self) -> Board`'
-  - Let `board_picture` be a clone of `board`.
-  - For each `Position` in the snake body, reassign `board_picture` to the result of `board_picture.with_symbol_at(position, 's')`. Do not attempt to mutate `board_picture` in place; `Board` is an immutable value and exposes no in-place setter — `with_symbol_at` is the only way to produce an overlaid board picture.
-  - If `game_state.food()` is `Some(food)`, reassign `board_picture` to `board_picture.with_symbol_at(food.position(), 'f')`.
-  - Return `board_picture`.
-  guarantee:
-  - The returned `Board` is the complete rendered board picture for the current tick. It is derived from the base `board` prop together with `snake` and `game_state`, and every snake body cell and food cell in the returned board shows `s` or `f` respectively.
-  references:
-    roles:
-    - game_state
-    - snake
-    props:
-    - board
+  description: Produces the rendered board picture for the current tick. Starts from the base board prop, overlays each snake body position with the snake symbol, then overlays the food position (if any) with the food symbol. The returned board is the complete picture for this tick.
 - name: get_score
-  signature:
-    status: resolved
-    rust: get_score(&self) -> u32
-    source: prepare.signature
-  receiver: '&self'
-  returns:
-    status: resolved
-    rust: u32
-    source: prepare.signature
-  body:
-    steps:
-    - op: return
-      expr:
-        op: call_role_method
-        role: game_state
-        method: score
-        args: []
+  description: Returns the current score from the game state.
 - name: tick
-  signature:
-    status: fixed
-    rust: tick(&mut self) -> PlayerState
-    source: fix.agent
-    reason: functionality `tick` is missing a parseable signature
-    evidence:
-    - section: Functionalities / tick
-      text: Read the current UTC millisecond count into `now_ms`. Let `elapsed_ms` be `now_ms.saturating_sub(game_state.game_started_ms())`. Let `elapsed_s` be `elapsed_ms / 1000` (integer whole seconds). Let `wait_ms` be `max(10_u64, (100.0_f64 / (1.0_f64 + (1.0_f64 + elapsed_s as f64).ln())) as u64)`. Sleep `wait_ms` milliseconds. Call `command.capture()` to collect pending input. Read the next gameplay action via `command.next_action()`. If a movement action was received and it neither repeats nor directly reverses the current direction, update the snake's direction. Compute the next head position from the current head and the current direction. If the next head lands on a wall cell or a snake body cell, return `PlayerState::Dead`. If food exists and the next head matches the food position, grow the snake by one segment, increase the score by 10, and call `food_dropper.drop()` for a replacement food position using the updated snake. Otherwise, advance the snake without growing; leave score and food placement unchanged. Return `PlayerState::Alive`.
-  receiver: '&mut self'
-  returns:
-    status: resolved
-    rust: PlayerState
-    source: fix.agent
-  flow:
-  - Read the current UTC millisecond count into `now_ms`.
-  - Let `elapsed_ms` be `now_ms.saturating_sub(game_state.game_started_ms())`.
-  - Let `elapsed_s` be `elapsed_ms / 1000` (integer whole seconds).
-  - Let `wait_ms` be `max(10_u64, (100.0_f64 / (1.0_f64 + (1.0_f64 + elapsed_s as f64).ln())) as u64)`.
-  - Sleep `wait_ms` milliseconds.
-  - Call `command.capture()` to collect pending input.
-  - Read the next gameplay action via `command.next_action()`.
-  - If a movement action was received and it neither repeats nor directly reverses the current direction, update the snake's direction.
-  - Compute the next head position from the current head and the current direction.
-  - If the next head lands on a wall cell or a snake body cell, return `PlayerState::Dead`.
-  - If food exists and the next head matches the food position, grow the snake by one segment, increase the score by 10, and call `food_dropper.drop()` for a replacement food position using the updated snake.
-  - Otherwise, advance the snake without growing; leave score and food placement unchanged.
-  - Return `PlayerState::Alive`.
-  extensions:
-  - 7a. No action is available → skip direction update; continue from step 9.
-  - 7b. A fire action is received → ignore it; continue from step 9 with the current direction.
-  - 11a. `food_dropper.drop()` returns no position → clear food from `game_state`.
-  guarantee:
-  - Input consumed in one tick is not replayed in the next.
-  references:
-    roles:
-    - command
-    - food_dropper
-    - game_state
-invariants:
-- GameLoopContext owns the game rules for steering, movement, collision
+  description: |-
+    Advances the game by one tick. The steps are:
+
+    1. Read the current UTC millisecond time.
+    2. Compute the elapsed whole seconds since the round started.
+    3. Compute the wait time in milliseconds: 100 divided by (1 plus the base-10 logarithm of (1 plus elapsed seconds)), with a minimum of 10 milliseconds.
+    4. Sleep for the computed wait time.
+    5. Ask the command role to capture pending input.
+    6. Read the next gameplay action from the command role. Only one action is consumed per tick even if multiple are available.
+    7. If a movement action was received and it neither repeats nor reverses the current direction, update the snake's direction.
+    8. Compute the next head position from the current head and the current direction. Up decreases y by 1, Down increases y by 1, Left decreases x by 1, Right increases x by 1.
+    9. If the next head lands on a wall cell, a snake body cell, or a position outside the board, the round ends and the player is dead.
+    10. If food exists and the next head matches the food position, grow the snake by one segment, increase the score by 10, and ask the food dropper for a replacement food position using the updated snake.
+    11. Otherwise, advance the snake without growing; leave score and food unchanged.
+    12. The player is alive.
+
+    Extensions:
+    - If no action is available, skip the direction update and continue from step 8.
+    - If a fire action is received, ignore it and continue from step 8 with the current direction.
+    - If the food dropper returns no replacement position, clear the food from the game state.
+
+    Input consumed in one tick is not replayed in the next.
+scenarios:
+- name: wall collision ends the round
+  given: the next predicted head position is a wall cell
+  when: tick is called
+  then: the round ends and the player is dead
+- name: food collision grows the snake
+  given: the next predicted head position matches the food position
+  when: tick is called
+  then: the snake grows by one segment, the score increases by 10, and new food is placed
+- name: clear move advances the snake
+  given: the next predicted head position is an empty interior cell
+  when: tick is called
+  then: the snake advances without growing and the score is unchanged
+- name: initial food is placed by the food dropper
+  given: a board, a snake, and a game state with no food
+  when: new is called
+  then: the stored game state has a food placement chosen by the food dropper
+synthesised_tests:
+- source: scenario
+  given: the next predicted head position is a wall cell
+  when: tick is called
+  then: the round ends and the player is dead
+  citation: Scenarios / wall collision ends the round
+- source: scenario
+  given: the next predicted head position matches the food position
+  when: tick is called
+  then: the snake grows by one segment, the score increases by 10, and new food is placed
+  citation: Scenarios / food collision grows the snake
+- source: scenario
+  given: the next predicted head position is an empty interior cell
+  when: tick is called
+  then: the snake advances without growing and the score is unchanged
+  citation: Scenarios / clear move advances the snake
+- source: scenario
+  given: a board, a snake, and a game state with no food
+  when: new is called
+  then: the stored game state has a food placement chosen by the food dropper
+  citation: Scenarios / initial food is placed by the food dropper
+- source: invariant
+  given: the next predicted head position is a snake body cell
+  when: tick is called
+  then: the round ends and the player is dead
+  citation: 'tick step 9: If the next head lands on a wall cell, a snake body cell, or a position outside the board, the round ends and the player is dead.'
+- source: invariant
+  given: the next predicted head position is outside the board
+  when: tick is called
+  then: the round ends and the player is dead
+  citation: 'tick step 9: If the next head lands on a wall cell, a snake body cell, or a position outside the board, the round ends and the player is dead.'
+- source: invariant
+  given: a movement action is received that repeats the current direction
+  when: tick is called
+  then: the direction is not updated and the snake continues in the current direction
+  citation: 'tick step 7: If a movement action was received and it neither repeats nor reverses the current direction, update the snake''s direction.'
+- source: invariant
+  given: a movement action is received that reverses the current direction
+  when: tick is called
+  then: the direction is not updated and the snake continues in the current direction
+  citation: 'tick step 7: If a movement action was received and it neither repeats nor reverses the current direction, update the snake''s direction.'
+- source: invariant
+  given: no action is available from the command role
+  when: tick is called
+  then: the direction is not updated and the snake continues in the current direction
+  citation: 'tick extension: If no action is available, skip the direction update and continue from step 8.'
+- source: invariant
+  given: a fire action is received
+  when: tick is called
+  then: the fire action is ignored and the snake continues in the current direction
+  citation: 'tick extension: If a fire action is received, ignore it and continue from step 8 with the current direction.'
+- source: invariant
+  given: food exists and the next head matches the food position, and the food dropper returns no replacement position
+  when: tick is called
+  then: the snake grows, the score increases by 10, and the food is cleared from the game state
+  citation: 'tick step 10 with extension: If the food dropper returns no replacement position, clear the food from the game state.'
+- source: invariant
+  given: a board and a snake with current head and direction
+  when: current_board is called
+  then: the board picture shows the base board with the snake body overlaid at each position and food overlaid at its position if it exists
+  citation: 'current_board: Produces the rendered board picture for the current tick. Starts from the base board prop, overlays each snake body position with the snake symbol, then overlays the food position (if any) with the food symbol.'
+- source: invariant
+  given: the game state contains a current score
+  when: get_score is called
+  then: the current score from the game state is returned
+  citation: 'get_score: Returns the current score from the game state.'
+- source: invariant
+  given: a board with no free interior cells and a food dropper that returns no position
+  when: new is called
+  then: the game state is stored without food
+  citation: 'new: If no position is available (the board has no free interior cell), the game state is left without food.'
+- source: invariant
+  given: a movement action is received that neither repeats nor reverses the current direction
+  when: tick is called
+  then: the snake's direction is updated to the new movement direction
+  citation: 'tick step 7: If a movement action was received and it neither repeats nor reverses the current direction, update the snake''s direction.'
+vocabulary_bindings:
+- name: snake
+  resolution: role_player
+  resolved_to: Snake
+- name: Snake
+  resolution: data
+  resolved_to: Snake
+- name: command
+  resolution: role_player
+  resolved_to: CommandInput
+- name: CommandInput
+  resolution: context
+  resolved_to: CommandInput
+- name: food_dropper
+  resolution: role_player
+  resolved_to: a random number generator
+- name: a random number generator
+  resolution: data
+  resolved_to: a random number generator
+- name: game_state
+  resolution: role_player
+  resolved_to: GameState
+- name: GameState
+  resolution: data
+  resolved_to: GameState
+- name: board
+  resolution: prop
+- name: snake_read_body
+  resolution: role_method
+  resolved_to: snake.read_body
+- name: snake_read_direction
+  resolution: role_method
+  resolved_to: snake.read_direction
+- name: snake
+  resolution: role
+- name: command_capture_input
+  resolution: role_method
+  resolved_to: command.capture_input
+- name: command_read_next_action
+  resolution: role_method
+  resolved_to: command.read_next_action
+- name: command
+  resolution: role
+- name: food_dropper_choose_food_position
+  resolution: role_method
+  resolved_to: food_dropper.choose_food_position
+- name: food_dropper
+  resolution: role
+- name: game_state_read_score
+  resolution: role_method
+  resolved_to: game_state.read_score
+- name: game_state_read_food
+  resolution: role_method
+  resolved_to: game_state.read_food
+- name: game_state_read_start_time
+  resolution: role_method
+  resolved_to: game_state.read_start_time
+- name: game_state_update_score
+  resolution: role_method
+  resolved_to: game_state.update_score
+- name: game_state_update_food
+  resolution: role_method
+  resolved_to: game_state.update_food
+- name: game_state
+  resolution: role

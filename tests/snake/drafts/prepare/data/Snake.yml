@@ -1,59 +1,140 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: data
 source:
   path: data/Snake.md
   kind: data
-  title: Snake
+  title: 'Data: Snake'
 export:
   name: Snake
-mutable: false
-fields:
+attributes:
 - name: body
-  meaning: Ordered list of `Position` values occupied by the snake
-  type:
-    status: fixed
-    rust: Vec<Position>
-    source: fix.agent
-    candidates:
-    - '&[Position]'
-    reason: multiple type candidates were found for `body`
-    evidence:
-    - section: body
-      text: Ordered list of `Position` values occupied by the snake
-    - section: body
-      text: Stored as `Vec<Position>` internally; the head is the first element; `Position` is defined in the Position data type; field is private, exposed only via getter returning `&[Position]`
-  getter_accessible: true
-  notes:
-  - Stored as `Vec<Position>` internally; the head is the first element; `Position` is defined in the Position data type; field is private, exposed only via getter returning `&[Position]`
+  description: an ordered list of positions occupied by the snake; the head is the first element
 - name: direction
-  meaning: Current direction of travel
-  type:
-    status: resolved
-    rust: Direction
-    source: name_match
-  getter_accessible: true
-  notes:
-  - Uses the Direction data type
-getters:
-- name: body
-  field: body
-  mode: ref
-- name: direction
-  field: direction
-  mode: ref
-constructor:
-  kind: all_fields
+  description: the current direction of travel
 invariants:
-- '`body` length is greater than `0`.'
-- All positions in `body` must be unique.
-- The first position in `body` is the head.
-- Every pair of consecutive positions in `body` must be orthogonally adjacent (differ by exactly 1 in `x` or `y`, not both).
-- A single-element `body` is valid; the adjacency rule is vacuously satisfied when there are no consecutive pairs.
-- The `direction` field does not need to be consistent with the head-to-neck orientation; it records the current intended direction of travel independently.
-- Both `body` and `direction` are private fields; they are not publicly accessible directly.
-- The `body` getter returns `&[Position]` (a slice reference into the internal `Vec<Position>`).
-- The `direction` getter returns `Direction` by copy (assuming `Direction` derives `Copy`).
-- Construction failures return an opaque `anyhow::Result` error; no distinct error variants are required.
-derives:
-- Clone
-- Copy
-- Debug
+- The body contains at least one position.
+- All positions in the body are unique (no overlap).
+- The first position is the head.
+- Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).
+- A single-element body is valid; the adjacency rule is satisfied trivially.
+- The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.
+operations:
+- name: new
+  description: Creates a Snake from a full ordered body and a direction. Fails with an error if the body is empty, if the body overlaps itself, or if consecutive positions are not adjacent cells.
+- name: body
+  description: Returns the ordered body as a read-only sequence of positions, head first.
+- name: direction
+  description: Returns the current direction of travel.
+scenarios:
+- name: construct a valid snake
+  given: a body of [(5,5), (4,5), (3,5)] and direction Right
+  when: new is called
+  then: a Snake is returned with head at (5,5) and length 3
+- name: empty body is rejected
+  given: an empty body and direction Right
+  when: new is called
+  then: an error is returned
+- name: overlapping body is rejected
+  given: a body of [(5,5), (4,5), (5,5)] and direction Right
+  when: new is called
+  then: an error is returned
+- name: non-adjacent body is rejected
+  given: a body of [(5,5), (7,5)] and direction Right
+  when: new is called
+  then: an error is returned
+synthesised_tests:
+- source: scenario
+  given: a body of [(5,5), (4,5), (3,5)] and direction Right
+  when: new is called
+  then: a Snake is returned with head at (5,5) and length 3
+  citation: Scenarios / construct a valid snake
+- source: scenario
+  given: an empty body and direction Right
+  when: new is called
+  then: an error is returned
+  citation: Scenarios / empty body is rejected
+- source: scenario
+  given: a body of [(5,5), (4,5), (5,5)] and direction Right
+  when: new is called
+  then: an error is returned
+  citation: Scenarios / overlapping body is rejected
+- source: scenario
+  given: a body of [(5,5), (7,5)] and direction Right
+  when: new is called
+  then: an error is returned
+  citation: Scenarios / non-adjacent body is rejected
+- source: invariant
+  given: 'a Data: Snake that might violate: The body contains at least one position.'
+  when: the invariant is tested
+  then: 'the invariant holds: The body contains at least one position.'
+  citation: Invariants / The body contains at least one position.
+- source: invariant
+  given: 'a Data: Snake that might violate: All positions in the body are unique (no overlap).'
+  when: the invariant is tested
+  then: 'the invariant holds: All positions in the body are unique (no overlap).'
+  citation: Invariants / All positions in the body are unique (no overlap).
+- source: invariant
+  given: 'a Data: Snake that might violate: The first position is the head.'
+  when: the invariant is tested
+  then: 'the invariant holds: The first position is the head.'
+  citation: Invariants / The first position is the head.
+- source: invariant
+  given: 'a Data: Snake that might violate: Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).'
+  when: the invariant is tested
+  then: 'the invariant holds: Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).'
+  citation: Invariants / Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).
+- source: invariant
+  given: 'a Data: Snake that might violate: A single-element body is valid; the adjacency rule is satisfied trivially.'
+  when: the invariant is tested
+  then: 'the invariant holds: A single-element body is valid; the adjacency rule is satisfied trivially.'
+  citation: Invariants / A single-element body is valid; the adjacency rule is satisfied trivially.
+- source: invariant
+  given: 'a Data: Snake that might violate: The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.'
+  when: the invariant is tested
+  then: 'the invariant holds: The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.'
+  citation: Invariants / The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.
+- source: invariant
+  given: a body of [(0,0)] and direction Up
+  when: new is called
+  then: a Snake is returned with head at (0,0) and length 1
+  citation: 'invariant: A single-element body is valid; the adjacency rule is satisfied trivially.'
+- source: invariant
+  given: a Snake with body [(5,5), (4,5), (3,5)] and direction Right
+  when: body is called
+  then: an ordered sequence [(5,5), (4,5), (3,5)] is returned with head first
+  citation: 'operation `body`: Returns the ordered body as a read-only sequence of positions, head first.'
+- source: invariant
+  given: a Snake with body [(5,5), (4,5), (3,5)] and direction Left
+  when: direction is called
+  then: Left is returned
+  citation: 'operation `direction`: Returns the current direction of travel.'
+- source: invariant
+  given: a body of [(2,2), (2,3), (2,4), (2,5)] and direction Down
+  when: new is called
+  then: a Snake is returned with head at (2,2) and all consecutive positions orthogonally adjacent
+  citation: 'invariant: Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).'
+- source: invariant
+  given: a body of [(1,1), (1,1)] and direction Right
+  when: new is called
+  then: an error is returned due to overlapping positions
+  citation: 'invariant: All positions in the body are unique (no overlap).'
+- source: invariant
+  given: a Snake created with body [(3,3)] and direction Up
+  when: body is called
+  then: a sequence containing exactly one position [(3,3)] is returned
+  citation: 'invariant: The body contains at least one position.'
+- source: invariant
+  given: a body of [(0,0), (0,1), (0,2)] and direction Left
+  when: new is called
+  then: a Snake is returned where the direction Left is independent of the head-to-neck orientation
+  citation: 'invariant: The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.'
+- source: invariant
+  given: a Snake with body [(10,10), (9,10), (8,10), (7,10)] and direction Up
+  when: body is called
+  then: the first position in the returned sequence is (10,10)
+  citation: 'invariant: The first position is the head.'
+vocabulary_bindings:
+- name: body
+  resolution: attribute
+- name: direction
+  resolution: attribute

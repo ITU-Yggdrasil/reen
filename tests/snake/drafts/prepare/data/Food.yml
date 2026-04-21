@@ -1,25 +1,25 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: data
 source:
   path: data/Food.md
   kind: data
-  title: Food
+  title: 'Data: Food'
 export:
   name: Food
-mutable: false
-fields:
+attributes:
 - name: position
-  meaning: Position of the food on the board
-  type:
-    status: resolved
-    rust: Position
-    source: name_match
-  getter_accessible: true
-getters:
+  description: the Position of the food on the board
+scenarios:
+- name: food has a position
+  given: a food item placed at position (3, 4)
+  when: the position is queried
+  then: the result is (3, 4)
+synthesised_tests:
+- source: scenario
+  given: a food item placed at position (3, 4)
+  when: the position is queried
+  then: the result is (3, 4)
+  citation: Scenarios / food has a position
+vocabulary_bindings:
 - name: position
-  field: position
-  mode: ref
-constructor:
-  kind: all_fields
-derives:
-- Clone
-- Debug
+  resolution: attribute

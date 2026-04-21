@@ -1,24 +1,51 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: data
 source:
   path: data/CollisionType.md
   kind: data
-  title: CollisionType
+  title: 'Data: CollisionType'
 export:
   name: CollisionType
-mutable: false
-variants:
+attributes:
 - name: Obstacle
-  meaning: The predicted move hits a wall or the snake body
-  notes:
-  - Ends the round
+  description: the predicted move hits a wall or the snake body, ending the round
 - name: Food
-  meaning: The predicted move reaches the current food cell
-  notes:
-  - Triggers growth and a score increase
+  description: the predicted move reaches the current food cell, triggering growth and a score increase
 - name: Clear
-  meaning: No obstacle and no food is on that cell
-  notes:
-  - Move without eating
-derives:
-- Clone
-- Debug
+  description: no obstacle and no food on that cell, allowing the snake to move without eating
+scenarios:
+- name: wall collision
+  given: the next head position is a wall cell
+  when: the collision is classified
+  then: the result is Obstacle
+- name: food collision
+  given: the next head position matches the current food cell
+  when: the collision is classified
+  then: the result is Food
+- name: clear cell
+  given: the next head position is an empty interior cell
+  when: the collision is classified
+  then: the result is Clear
+synthesised_tests:
+- source: scenario
+  given: the next head position is a wall cell
+  when: the collision is classified
+  then: the result is Obstacle
+  citation: Scenarios / wall collision
+- source: scenario
+  given: the next head position matches the current food cell
+  when: the collision is classified
+  then: the result is Food
+  citation: Scenarios / food collision
+- source: scenario
+  given: the next head position is an empty interior cell
+  when: the collision is classified
+  then: the result is Clear
+  citation: Scenarios / clear cell
+vocabulary_bindings:
+- name: Obstacle
+  resolution: attribute
+- name: Food
+  resolution: attribute
+- name: Clear
+  resolution: attribute

@@ -1,136 +1,85 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: context
 source:
   path: contexts/terminal_renderer.md
   kind: context
-  title: Terminal Renderer
+  title: 'Context: TerminalRenderer'
 export:
   name: TerminalRenderer
-mutable: true
-roles:
+role_players:
 - name: string_renderer
-  purpose: Produces the text for the current frame
-  expected_behavior: Returns one complete text frame for the supplied board picture and score
-  type:
-    status: resolved
-    rust: StringRenderer
-    source: name_match
+  data_type: StringRenderer
+  responsibility: produces the text representation of the current frame from a board picture and a score
+role_methods:
+- role: string_renderer
   methods:
-  - name: render
-    signature:
-      status: resolved
-      rust: 'render(&self, string_renderer_: &StringRenderer, board: &Board, score: u32) -> String'
-      source: prepare.signature
-    receiver: '&self'
-    parameters:
-    - name: string_renderer_
-      type:
-        status: resolved
-        rust: '&StringRenderer'
-        source: prepare.role_player
-    - name: board
-      type:
-        status: resolved
-        rust: '&Board'
-        source: prepare.signature
-    - name: score
-      type:
-        status: resolved
-        rust: u32
-        source: prepare.signature
-    returns:
-      status: resolved
-      rust: String
-      source: prepare.signature
-    body:
-      steps:
-      - op: return
-        expr:
-          op: call_instance_method
-          receiver:
-            op: var
-            name: string_renderer_
-          method: render
-          args:
-          - op: var
-            name: board
-          - op: var
-            name: score
+  - name: format_frame
+    canonical_name: string_renderer_format_frame
+    citation: formats the current board picture and score as one complete text frame
 props:
 - name: screen
-  meaning: Visible terminal area where the frame is shown
-  type:
-    status: resolved
-    rust: std::io::Stdout
-    source: draft_hint
-  notes:
-  - Type `std::io::Stdout`; the same screen is updated from one frame to the next
+  description: the visible terminal output where each frame is shown; the same output is updated from one frame to the next
 functionalities:
 - name: new
-  signature:
-    status: resolved
-    rust: 'new(string_renderer: StringRenderer, screen: std::io::Stdout) -> Self'
-    source: prepare.auto
-  parameters:
-  - name: string_renderer
-    type:
-      status: resolved
-      rust: StringRenderer
-      source: name_match
-  - name: screen
-    type:
-      status: resolved
-      rust: std::io::Stdout
-      source: draft_hint
-  returns:
-    status: resolved
-    rust: Self
-    source: prepare.auto
-  body:
-    steps:
-    - op: return
-      expr:
-        op: construct_struct
-        type_name: Self
-        fields:
-        - name: string_renderer
-          expr:
-            op: var
-            name: string_renderer
-        - name: screen
-          expr:
-            op: var
-            name: screen
+  description: Stores the string renderer and the screen as collaborators. The string renderer is used to format each frame; the screen is updated on each render call.
 - name: render
-  signature:
-    status: resolved
-    rust: 'render(&self, board: &Board, score: u32) -> anyhow::Result<()>'
-    source: prepare.signature
-  receiver: '&self'
-  parameters:
-  - name: board
-    type:
-      status: resolved
-      rust: '&Board'
-      source: prepare.signature
-  - name: score
-    type:
-      status: resolved
-      rust: u32
-      source: prepare.signature
-  returns:
-    status: resolved
-    rust: anyhow::Result<()>
-    source: prepare.signature
-  flow:
-  - 'Signature: `render(&self, board: &Board, score: u32) -> anyhow::Result<()>`'
-  - Ask `string_renderer` to format the current board picture and score as one text frame.
-  - Split the frame text into rows on the `'\n'` character. Empty rows (including any trailing one produced by a final `'\n'`) are skipped.
-  - For each row, starting at row index `0` and incrementing per row, position the cursor at column `0` of that row on `screen` using `crossterm::cursor::MoveTo(0, row)` and then write the row's characters. This makes every row begin at column `0` even when the terminal is in raw mode (where a bare `'\n'` does not return the cursor to column `0`).
-  - After all rows have been written, flush `screen` so the frame appears immediately.
-  extensions:
-  - 2a. The terminal supports the home escape sequence → the previously shown frame is overwritten in place without visible flicker.
-  references:
-    roles:
-    - string_renderer
-    props:
-    - screen
+  description: Asks the string renderer to format the current board picture and score as a text frame. Splits the frame into rows. For each row, positions the cursor at the start of that row on the screen and writes the row's text. After all rows are written, flushes the screen so the frame appears immediately. Every row begins at the start of its line so that the frame displays correctly in immediate-input terminal mode.
+scenarios:
+- name: render a frame
+  given: a new frame is ready with a board picture and a score
+  when: render is called
+  then: the terminal shows the new frame in place, every row beginning at the start of the line
+- name: successive frames overwrite in place
+  given: two frames are rendered in sequence
+  when: the second render completes
+  then: the terminal shows only the second frame without leftover content from the first
+synthesised_tests:
+- source: scenario
+  given: a new frame is ready with a board picture and a score
+  when: render is called
+  then: the terminal shows the new frame in place, every row beginning at the start of the line
+  citation: Scenarios / render a frame
+- source: scenario
+  given: two frames are rendered in sequence
+  when: the second render completes
+  then: the terminal shows only the second frame without leftover content from the first
+  citation: Scenarios / successive frames overwrite in place
+- source: invariant
+  given: a TerminalRenderer is instantiated with a string renderer and a screen
+  when: the renderer is created
+  then: it stores both the string renderer and screen as collaborators for later use
+  citation: 'functionality `new`: Stores the string renderer and the screen as collaborators'
+- source: invariant
+  given: a TerminalRenderer with collaborators and a board picture and score to render
+  when: render is called
+  then: the string renderer is asked to format the board picture and score as a text frame
+  citation: 'functionality `render`: Asks the string renderer to format the current board picture and score as a text frame'
+- source: invariant
+  given: a formatted frame with multiple rows from the string renderer
+  when: render processes the frame
+  then: the frame is split into individual rows and each row is positioned at the start of its line on the screen
+  citation: 'functionality `render`: Splits the frame into rows. For each row, positions the cursor at the start of that row on the screen'
+- source: invariant
+  given: all rows have been written to the screen
+  when: render completes row writing
+  then: the screen is flushed so the frame appears immediately
+  citation: 'functionality `render`: After all rows are written, flushes the screen so the frame appears immediately'
+- source: invariant
+  given: a frame with rows of varying lengths
+  when: render writes each row
+  then: each row begins at the start of its line using cursor positioning
+  citation: 'functionality `render`: Every row begins at the start of its line so that the frame displays correctly in immediate-input terminal mode'
+vocabulary_bindings:
+- name: string_renderer
+  resolution: role_player
+  resolved_to: StringRenderer
+- name: StringRenderer
+  resolution: projection
+  resolved_to: StringRenderer
+- name: screen
+  resolution: prop
+- name: string_renderer_format_frame
+  resolution: role_method
+  resolved_to: string_renderer.format_frame
+- name: string_renderer
+  resolution: role

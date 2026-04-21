@@ -1,102 +1,54 @@
-# CommandInputContext
+# Context: CommandInput
 
 ## Purpose
 
-CommandInputContext defines how key presses are collected and read for the whole
-application session.
-
-The important behavior is that input is handled as one shared first-in-first-out
-stream. The same stream is used for the start menu and for gameplay, without
-resetting or replacing it.
+CommandInput defines how key presses are collected and read for the whole application session. Input is handled as one shared first-in-first-out stream — the same stream is used for the start menu and for gameplay, without resetting or replacing it.
 
 ## Role Players
 
-| Role player | Why involved | Expected behaviour |
-|---|---|---|
-| stdin_source | Supplies keyboard input from stdin | Supports non-blocking reads from standard input |
+- stdin_source: keyboard input — supplies key presses from standard input using non-blocking reads
+
+## Props
+
+- buffer: a queue of captured key presses, shared for the whole application session
 
 ## Role Methods
 
 ### stdin_source
-
-- **read_available**
-  Returns all currently available key presses in arrival order without waiting.
-
-## Props
-
-| Prop | Meaning | Notes |
-|---|---|---|
-| buffer | Queue of captured key presses | Shared for the whole application session |
+- read_available: returns all currently available key presses in arrival order without waiting
 
 ## Functionalities
 
 ### new
-
-| Started by | Uses | Result |
-|---|---|---|
-| application startup | stdin_source, buffer | empty buffer, ready to capture |
-
-**Flow:**
-1. Initialise `buffer` as an empty queue.
-2. Store `stdin_source` and `buffer` as collaborators.
-
-**Guarantee:** One shared buffer is used for the whole application session; menus and gameplay read from the same queue.
-
-| Given | When | Then |
-|---|---|---|
-| the application starts | new is called | a command input context with an empty shared buffer is created |
+Initialises the buffer as an empty queue and stores the stdin source and buffer as collaborators. One shared buffer is used for the whole application session; menus and gameplay read from the same queue.
 
 ### capture
-
-| Started by | Uses | Result |
-|---|---|---|
-| game loop or menu | stdin_source, buffer | available keys appended |
-
-**Flow:**
-1. Ask `stdin_source` for all currently available key presses without waiting.
-2. Append each returned key press to the end of `buffer` in arrival order.
-
-**Extensions:**
-- 1a. No key presses are available → flow ends; `buffer` is unchanged.
-
-**Guarantee:** Keys already in `buffer` before this call remain in place; new keys follow them.
-
-| Given | When | Then |
-|---|---|---|
-| key presses are waiting in standard input | capture is called | those key presses are appended to the shared buffer in arrival order |
+Asks the stdin source for all currently available key presses without waiting, then appends each to the end of the buffer in arrival order. If no key presses are available, the buffer is unchanged. Keys already in the buffer before this call remain in place; new keys follow them.
 
 ### next_key
-
-| Started by | Uses | Result |
-|---|---|---|
-| caller that needs raw keys | buffer | oldest key removed and returned, or no key |
-
-**Flow:**
-1. If `buffer` is non-empty, remove and return the oldest key event.
-2. If `buffer` is empty, return no key.
-
-| Given | When | Then |
-|---|---|---|
-| the shared buffer starts with `q` | next_key is called | `q` is returned and removed from the buffer |
+If the buffer is non-empty, removes and returns the oldest key event. If the buffer is empty, returns no key.
 
 ### next_action
+Removes the oldest key from the buffer and maps it to a gameplay action using case-insensitive matching: w maps to move up, a maps to move left, s maps to move down, d maps to move right, and space maps to fire. If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted. If no valid action is found, returns no action.
 
-| Started by | Uses | Result |
-|---|---|---|
-| gameplay logic | buffer | next gameplay action, or no action |
+## Scenarios
 
-**Flow:**
-1. Remove the oldest key from `buffer` via the same queue as `next_key`.
-2. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire.
-3. If the key maps to an action, return it.
-4. If the key has no gameplay meaning, repeat until a valid key is found or the `buffer` is empty.
-5. If `buffer` is exhausted with no valid action found, return no action.
+### capture appends in arrival order
+Given: key presses are waiting in standard input
+When: capture is called
+Then: those key presses are appended to the shared buffer in arrival order
 
-| Given | When | Then |
-|---|---|---|
-| the shared buffer starts with `x`, then `d` | next_action is called | the invalid key is discarded and a movement-right action is returned |
+### next_key returns oldest
+Given: the shared buffer starts with "q"
+When: next_key is called
+Then: "q" is returned and removed from the buffer
 
-## Notes
+### next_action skips invalid keys
+Given: the shared buffer starts with "x", then "d"
+When: next_action is called
+Then: the invalid key is discarded and a movement-right action is returned
 
-- `next_action` returns user actions. The game loop decides how a movement
-  action changes direction and how fire is handled.
+### next_action on empty buffer
+Given: the shared buffer is empty
+When: next_action is called
+Then: no action is returned

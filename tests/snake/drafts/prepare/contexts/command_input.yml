@@ -1,189 +1,132 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: context
 source:
   path: contexts/command_input.md
   kind: context
-  title: CommandInputContext
+  title: 'Context: CommandInput'
 export:
-  name: CommandInputContext
-mutable: true
-roles:
+  name: CommandInput
+role_players:
 - name: stdin_source
-  purpose: Supplies keyboard input from stdin
-  expected_behavior: Supports non-blocking reads from standard input
-  type:
-    status: fixed
-    rust: std::io::Stdin
-    source: fix.agent
-    candidates:
-    - crossterm::event::EventStream
-    reason: no nominal concrete Rust type could be inferred for `stdin_source`
-    evidence:
-    - section: stdin_source
-      text: Supplies keyboard input from stdin
-    - section: stdin_source
-      text: Supports non-blocking reads from standard input
+  data_type: keyboard input
+  responsibility: supplies key presses from standard input using non-blocking reads
+role_methods:
+- role: stdin_source
   methods:
   - name: read_available
-    signature:
-      status: resolved
-      rust: 'read_available(&self, stdin_source_: &std::io::Stdin) -> Vec<crossterm::event::KeyEvent>'
-      source: prepare.canonical
-      reason: role method `read_available` on role `stdin_source` has no explicit signature
-      evidence:
-      - section: Role Methods / stdin_source
-        text: Returns all currently available key presses in arrival order without waiting.
-    receiver: '&self'
-    parameters:
-    - name: stdin_source_
-      type:
-        status: resolved
-        rust: '&std::io::Stdin'
-        source: fix.agent
-    returns:
-      status: fixed
-      rust: Vec<crossterm::event::KeyEvent>
-      source: fix.agent
-      reason: role method `read_available` return type is unknown
-      evidence:
-      - section: Role Methods / stdin_source
-        text: Returns all currently available key presses in arrival order without waiting.
+    canonical_name: stdin_source_read_available
+    citation: returns all currently available key presses in arrival order without waiting
 props:
 - name: buffer
-  meaning: Queue of captured key presses
-  type:
-    status: fixed
-    rust: std::collections::VecDeque<crossterm::event::KeyEvent>
-    source: fix.agent
-    reason: no concrete Rust type could be inferred for `buffer`
-    evidence:
-    - section: buffer
-      text: Queue of captured key presses
-    - section: buffer
-      text: Shared for the whole application session
-  notes:
-  - Shared for the whole application session
+  description: a queue of captured key presses, shared for the whole application session
 functionalities:
 - name: new
-  signature:
-    status: resolved
-    rust: 'new(stdin_source: std::io::Stdin, buffer: std::collections::VecDeque<crossterm::event::KeyEvent>) -> Self'
-    source: prepare.auto
-  parameters:
-  - name: stdin_source
-    type:
-      status: fixed
-      rust: std::io::Stdin
-      source: fix.agent
-      candidates:
-      - crossterm::event::EventStream
-      reason: no nominal concrete Rust type could be inferred for `stdin_source`
-      evidence:
-      - section: stdin_source
-        text: Supplies keyboard input from stdin
-      - section: stdin_source
-        text: Supports non-blocking reads from standard input
-  - name: buffer
-    type:
-      status: fixed
-      rust: std::collections::VecDeque<crossterm::event::KeyEvent>
-      source: fix.agent
-      reason: no concrete Rust type could be inferred for `buffer`
-      evidence:
-      - section: buffer
-        text: Queue of captured key presses
-      - section: buffer
-        text: Shared for the whole application session
-  returns:
-    status: resolved
-    rust: Self
-    source: prepare.auto
-  body:
-    steps:
-    - op: return
-      expr:
-        op: construct_struct
-        type_name: Self
-        fields:
-        - name: stdin_source
-          expr:
-            op: var
-            name: stdin_source
-        - name: buffer
-          expr:
-            op: var
-            name: buffer
+  description: Initialises the buffer as an empty queue and stores the stdin source and buffer as collaborators. One shared buffer is used for the whole application session; menus and gameplay read from the same queue.
 - name: capture
-  signature:
-    status: resolved
-    rust: capture(&mut self) -> ()
-    source: prepare.canonical
-    reason: functionality `capture` is missing a parseable signature
-    evidence:
-    - section: Functionalities / capture
-      text: Ask `stdin_source` for all currently available key presses without waiting. Append each returned key press to the end of `buffer` in arrival order.
-  receiver: '&mut self'
-  returns:
-    status: fixed
-    rust: ()
-    source: fix.agent
-    reason: functionality `capture` return type is unknown
-    evidence:
-    - section: Functionalities / capture
-      text: Ask `stdin_source` for all currently available key presses without waiting. Append each returned key press to the end of `buffer` in arrival order.
-  flow:
-  - Ask `stdin_source` for all currently available key presses without waiting.
-  - Append each returned key press to the end of `buffer` in arrival order.
-  extensions:
-  - 1a. No key presses are available → flow ends; `buffer` is unchanged.
-  guarantee:
-  - Keys already in `buffer` before this call remain in place; new keys follow them.
-  references:
-    roles:
-    - stdin_source
-    props:
-    - buffer
+  description: Asks the stdin source for all currently available key presses without waiting, then appends each to the end of the buffer in arrival order. If no key presses are available, the buffer is unchanged. Keys already in the buffer before this call remain in place; new keys follow them.
 - name: next_key
-  signature:
-    status: fixed
-    rust: next_key(&mut self) -> Option<crossterm::event::KeyEvent>
-    source: fix.agent
-    reason: functionality `next_key` is missing a parseable signature
-    evidence:
-    - section: Functionalities / next_key
-      text: If `buffer` is non-empty, remove and return the oldest key event. If `buffer` is empty, return no key.
-  receiver: '&mut self'
-  returns:
-    status: resolved
-    rust: Option<crossterm::event::KeyEvent>
-    source: fix.agent
-  flow:
-  - If `buffer` is non-empty, remove and return the oldest key event.
-  - If `buffer` is empty, return no key.
-  references:
-    props:
-    - buffer
+  description: If the buffer is non-empty, removes and returns the oldest key event. If the buffer is empty, returns no key.
 - name: next_action
-  signature:
-    status: fixed
-    rust: next_action(&mut self) -> Option<UserAction>
-    source: fix.agent
-    reason: functionality `next_action` is missing a parseable signature
-    evidence:
-    - section: Functionalities / next_action
-      text: 'Remove the oldest key from `buffer` via the same queue as `next_key`. Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire. If the key maps to an action, return it. If the key has no gameplay meaning, discard it and repeat from step 1. If `buffer` is exhausted with no valid action found, return no action.'
-  receiver: '&mut self'
-  returns:
-    status: resolved
-    rust: Option<UserAction>
-    source: fix.agent
-  flow:
-  - Remove the oldest key from `buffer` via the same queue as `next_key`.
-  - 'Map the key to a gameplay action using case-insensitive matching: `w` → move up, `a` → move left, `s` → move down, `d` → move right, space → fire.'
-  - If the key maps to an action, return it.
-  - If the key has no gameplay meaning, discard it and repeat from step 1.
-  - If `buffer` is exhausted with no valid action found, return no action.
-  references:
-    props:
-    - buffer
-invariants:
-- '`next_action` returns user actions. The game loop decides how a movement'
+  description: 'Removes the oldest key from the buffer and maps it to a gameplay action using case-insensitive matching: w maps to move up, a maps to move left, s maps to move down, d maps to move right, and space maps to fire. If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted. If no valid action is found, returns no action.'
+scenarios:
+- name: capture appends in arrival order
+  given: key presses are waiting in standard input
+  when: capture is called
+  then: those key presses are appended to the shared buffer in arrival order
+- name: next_key returns oldest
+  given: the shared buffer starts with "q"
+  when: next_key is called
+  then: '"q" is returned and removed from the buffer'
+- name: next_action skips invalid keys
+  given: the shared buffer starts with "x", then "d"
+  when: next_action is called
+  then: the invalid key is discarded and a movement-right action is returned
+- name: next_action on empty buffer
+  given: the shared buffer is empty
+  when: next_action is called
+  then: no action is returned
+synthesised_tests:
+- source: scenario
+  given: key presses are waiting in standard input
+  when: capture is called
+  then: those key presses are appended to the shared buffer in arrival order
+  citation: Scenarios / capture appends in arrival order
+- source: scenario
+  given: the shared buffer starts with "q"
+  when: next_key is called
+  then: '"q" is returned and removed from the buffer'
+  citation: Scenarios / next_key returns oldest
+- source: scenario
+  given: the shared buffer starts with "x", then "d"
+  when: next_action is called
+  then: the invalid key is discarded and a movement-right action is returned
+  citation: Scenarios / next_action skips invalid keys
+- source: scenario
+  given: the shared buffer is empty
+  when: next_action is called
+  then: no action is returned
+  citation: Scenarios / next_action on empty buffer
+- source: invariant
+  given: CommandInput is newly constructed
+  when: the buffer state is inspected
+  then: the buffer is empty and stdin source and buffer are stored as collaborators
+  citation: 'functionality `new`: Initialises the buffer as an empty queue and stores the stdin source and buffer as collaborators'
+- source: invariant
+  given: the shared buffer is empty
+  when: next_key is called
+  then: no key is returned and the buffer remains empty
+  citation: 'functionality `next_key`: If the buffer is empty, returns no key'
+- source: invariant
+  given: the shared buffer contains 'w', 'a', 's'
+  when: next_key is called three times
+  then: the keys are returned in order 'w', 'a', 's' and each is removed from the buffer
+  citation: 'functionality `next_key`: removes and returns the oldest key event'
+- source: invariant
+  given: no key presses are available in stdin
+  when: capture is called
+  then: the buffer remains unchanged
+  citation: 'functionality `capture`: If no key presses are available, the buffer is unchanged'
+- source: invariant
+  given: the shared buffer contains 'q', 'w'
+  when: capture is called while 'a' and 's' are waiting in stdin
+  then: '''a'' and ''s'' are appended to the buffer after ''q'' and ''w'' in arrival order'
+  citation: 'functionality `capture`: appends each to the end of the buffer in arrival order. Keys already in the buffer before this call remain in place; new keys follow them'
+- source: invariant
+  given: the shared buffer contains 'W'
+  when: next_action is called
+  then: a move-up action is returned
+  citation: 'functionality `next_action`: w maps to move up, using case-insensitive matching'
+- source: invariant
+  given: the shared buffer contains 'A', 'S', 'd'
+  when: next_action is called three times
+  then: move-left, move-down, and move-right actions are returned respectively
+  citation: 'functionality `next_action`: a maps to move left, s maps to move down, d maps to move right, using case-insensitive matching'
+- source: invariant
+  given: the shared buffer contains ' ' (space)
+  when: next_action is called
+  then: a fire action is returned
+  citation: 'functionality `next_action`: space maps to fire'
+- source: invariant
+  given: the shared buffer contains 'x', 'y', 'z', 'w'
+  when: next_action is called
+  then: three invalid keys are discarded and a move-up action is returned
+  citation: 'functionality `next_action`: If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted'
+- source: invariant
+  given: the shared buffer is used by both menu and gameplay
+  when: capture adds keys and next_key/next_action retrieve them
+  then: all components read from the same queue in the order keys were captured
+  citation: 'functionality `new`: One shared buffer is used for the whole application session; menus and gameplay read from the same queue'
+vocabulary_bindings:
+- name: stdin_source
+  resolution: role_player
+  resolved_to: keyboard input
+- name: keyboard input
+  resolution: data
+  resolved_to: keyboard input
+- name: buffer
+  resolution: prop
+- name: stdin_source_read_available
+  resolution: role_method
+  resolved_to: stdin_source.read_available
+- name: stdin_source
+  resolution: role

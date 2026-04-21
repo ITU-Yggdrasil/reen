@@ -1,22 +1,38 @@
-schema: reen.prepare/v1
+schema: reen.prepare/v2
+kind: data
 source:
   path: data/UserAction.md
   kind: data
-  title: UserAction
+  title: 'Data: UserAction'
 export:
   name: UserAction
-mutable: false
-variants:
+attributes:
 - name: Movement
-  payload_types:
-  - Direction
-  meaning: A movement command
-  notes:
-  - Carries one movement direction
+  description: a movement command carrying one Direction
 - name: Fire
-  meaning: A separate action
-  notes:
-  - Triggered by the space key
-derives:
-- Clone
-- Debug
+  description: a separate action triggered by the space key
+scenarios:
+- name: movement action
+  given: the user presses the "w" key
+  when: the key is mapped to an action
+  then: the result is a Movement action carrying the Up direction
+- name: fire action
+  given: the user presses the space key
+  when: the key is mapped to an action
+  then: the result is a Fire action
+synthesised_tests:
+- source: scenario
+  given: the user presses the "w" key
+  when: the key is mapped to an action
+  then: the result is a Movement action carrying the Up direction
+  citation: Scenarios / movement action
+- source: scenario
+  given: the user presses the space key
+  when: the key is mapped to an action
+  then: the result is a Fire action
+  citation: Scenarios / fire action
+vocabulary_bindings:
+- name: Movement
+  resolution: attribute
+- name: Fire
+  resolution: attribute
