@@ -102,7 +102,10 @@ mod tests {
     fn test_cache_path_construction() {
         let cache = FileCache::new(Some("/tmp/cache".to_string()), "abc123".to_string());
         let path = cache.get_cache_path("test_key");
-        assert_eq!(path.to_str().unwrap(), "/tmp/cache/abc123/test_key.cache");
+        let expected = std::path::PathBuf::from("/tmp/cache")
+            .join("abc123")
+            .join("test_key.cache");
+        assert_eq!(path, expected);
     }
 
     #[test]

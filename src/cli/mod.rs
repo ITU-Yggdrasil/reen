@@ -26,7 +26,7 @@ mod stage_runner;
 use agent_executor::{AgentExecutor, AgentResponse};
 use brand_specs::{
     collect_brand_token_references, is_brand_draft_path, is_brand_spec_path,
-    unresolved_brand_token_references, validate_brand_spec_content,
+    missing_required_brand_spec_parts, unresolved_brand_token_references, validate_brand_spec_content,
 };
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
@@ -38,7 +38,9 @@ use project_structure::{
     analyze_specifications, generate_cargo_toml, generate_lib_rs, generate_mod_files, ProjectInfo,
 };
 use reen::build_tracker::{BuildTracker, Stage};
-use reen::execution::{AgentModelRegistry, AgentRegistry, NativeExecutionControl};
+use reen::execution::{
+    cache_key_for_input, AgentModelRegistry, AgentRegistry, NativeExecutionControl,
+};
 use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
 use stage_runner::{run_stage_items, CliExecutionControl, ExecutionResources, StageItem};
 
@@ -1006,6 +1008,8 @@ pub async fn create_implementation(
     let mut updated_count = 0;
     let mut updated_in_run: HashSet<String> = HashSet::new();
     let mut had_unspecified = false;
+    let mut brand_missing_requirements: std::collections::BTreeMap<PathBuf, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (level_idx, level_nodes) in execution_levels.into_iter().enumerate() {
         if config.verbose {
             println!(
@@ -1027,6 +1031,17 @@ pub async fn create_implementation(
             let dependency_fingerprint = dependency_fingerprint_for_node(&node, DRAFTS_DIR, None)?;
             let output_path =
                 determine_implementation_output_path(&context_file, SPECIFICATIONS_DIR)?;
+
+            if agent_name == "create_implementation_brand" {
+                let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+                let missing = missing_required_brand_spec_parts(&context_content);
+                if !missing.is_empty() {
+                    brand_missing_requirements.insert(context_file.clone(), missing);
+                    progress.start_item(&context_name, None);
+                    progress.complete_item(&context_name, false);
+                    continue;
+                }
+            }
 
             if has_unfinished_specification(&context_file, &context_name, "implementation")? {
                 had_unspecified = true;
@@ -1061,6 +1076,7 @@ pub async fn create_implementation(
                 dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
             }
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
+
             let executor = if agent_name == "create_implementation_brand" {
                 &brand_executor
             } else {
@@ -1456,6 +1472,21 @@ pub async fn create_implementation(
         }
     }
 
+    progress.finish();
+
+    if !brand_missing_requirements.is_empty() {
+        let mut msg = String::from(
+            "Missing required brand specification data. Brand implementation was skipped for:\n",
+        );
+        for (path, missing) in &brand_missing_requirements {
+            msg.push_str(&format!("\n- {}\n", path.display()));
+            for item in missing {
+                msg.push_str(&format!("  - {}\n", item));
+            }
+        }
+        anyhow::bail!(msg);
+    }
+
     // Always compile after generation. Auto-fix is opt-in via --fix.
     if fix {
         compilation_fix::ensure_compiles_with_auto_fix(
@@ -1473,8 +1504,6 @@ pub async fn create_implementation(
     } else {
         cargo_commands::compile(config).await?;
     }
-
-    progress.finish();
 
     if updated_count == 0 && config.verbose && !had_unspecified {
         println!("All implementations are up to date");
@@ -2356,10 +2385,70 @@ fn clear_tracker_stage(
 
 #[derive(Serialize)]
 struct CacheAgentInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
     draft_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    openapi_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    documentation_urls: Option<Vec<String>>,
     #[serde(flatten)]
     additional: HashMap<String, serde_json::Value>,
+}
+
+fn json_value_to_string(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn json_value_to_string_vec(value: serde_json::Value) -> Option<Vec<String>> {
+    match value {
+        serde_json::Value::Array(items) => {
+            let values = items
+                .into_iter()
+                .filter_map(json_value_to_string)
+                .collect::<Vec<_>>();
+            if values.is_empty() { None } else { Some(values) }
+        }
+        serde_json::Value::String(s) => Some(vec![s]),
+        serde_json::Value::Null => None,
+        other => Some(vec![other.to_string()]),
+    }
+}
+
+impl CacheAgentInput {
+    fn new_spec_input(draft_content: String, mut additional: HashMap<String, serde_json::Value>) -> Self {
+        let openapi_content = additional
+            .remove("openapi_content")
+            .and_then(json_value_to_string);
+        let documentation_urls = additional
+            .remove("documentation_urls")
+            .and_then(json_value_to_string_vec);
+        Self {
+            draft_content: Some(draft_content),
+            context_content: None,
+            openapi_content,
+            documentation_urls,
+            additional,
+        }
+    }
+
+    fn new_context_input(
+        context_content: String,
+        additional: HashMap<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            draft_content: None,
+            context_content: Some(context_content),
+            openapi_content: None,
+            documentation_urls: None,
+            additional,
+        }
+    }
 }
 
 fn clear_agent_response_cache_for_stage(
@@ -2473,11 +2562,7 @@ fn clear_stage_agent_cache_entries_by_name(
                     determine_specification_agent(&node.input_path, DRAFTS_DIR).to_string();
                 candidates.push((
                     agent_name,
-                    CacheAgentInput {
-                        draft_content: Some(draft_content),
-                        context_content: None,
-                        additional,
-                    },
+                    CacheAgentInput::new_spec_input(draft_content, additional),
                 ));
             }
         }
@@ -2505,11 +2590,7 @@ fn clear_stage_agent_cache_entries_by_name(
                 }
                 candidates.push((
                     implementation_agent_name(&context_file).to_string(),
-                    CacheAgentInput {
-                        draft_content: None,
-                        context_content: Some(context_content),
-                        additional,
-                    },
+                    CacheAgentInput::new_context_input(context_content, additional),
                 ));
             }
         }
@@ -2528,11 +2609,7 @@ fn clear_stage_agent_cache_entries_by_name(
                 augment_test_generation_context(&node.input_path, &mut additional)?;
                 candidates.push((
                     "create_test".to_string(),
-                    CacheAgentInput {
-                        draft_content: None,
-                        context_content: Some(context_content),
-                        additional,
-                    },
+                    CacheAgentInput::new_context_input(context_content, additional),
                 ));
             }
         }
@@ -2600,10 +2677,7 @@ fn clear_single_agent_cache_entry(
     };
 
     let folder_hash = instructions_model_hash(&instructions, &model.name);
-    let input_json = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}", instructions, input_json).as_bytes());
-    let cache_key = hex::encode(hasher.finalize());
+    let cache_key = cache_key_for_input(&instructions, input);
     let cache_path = PathBuf::from(".reen")
         .join(folder_hash)
         .join(format!("{}.cache", cache_key));
@@ -4149,24 +4223,32 @@ fn to_snake_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dependency_drafts_from_context, build_dependency_manifest,
+        build_dependency_context, build_dependency_drafts_from_context, build_dependency_manifest,
         build_implementation_execution_plan, build_implemented_dependency_manifest,
-        build_specification_execution_plan, determine_bdd_test_paths, determine_draft_input_path,
-        determine_implementation_output_path, determine_specification_agent,
-        determine_specification_output_path,
+        build_specification_context, build_specification_execution_plan, clear_cache,
+        determine_bdd_test_paths, determine_draft_input_path, determine_implementation_output_path,
+        determine_specification_agent, determine_specification_output_path,
         ensure_dev_dependency_entry, extract_actionable_blocking_bullets,
         extract_compile_error_message, generated_project_structure_paths,
-        implementation_agent_name, parse_generated_files, parse_generated_output_files,
-        resolve_input_files, sync_managed_block, validate_brand_generated_output,
-        validate_implementation_scaffold_ownership, CategoryFilter, BDD_TEST_TARGETS_END,
-        BDD_TEST_TARGETS_START,
+        implementation_agent_name, instructions_model_hash, parse_generated_files,
+        parse_generated_output_files, resolve_input_files, sync_managed_block,
+        validate_brand_generated_output, validate_implementation_scaffold_ownership,
+        CacheAgentInput, CategoryFilter, Config, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
+        create_implementation, DRAFTS_DIR,
     };
+    use crate::cli::agent_executor::AgentExecutor;
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
+    use reen::execution::{
+        build_agent_input, cache_key_for_input, AgentModelRegistry, AgentRegistry,
+    };
+    use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::runtime::Runtime;
 
     fn temp_root(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -4174,6 +4256,29 @@ mod tests {
             .expect("time ok")
             .as_nanos();
         std::env::temp_dir().join(format!("reen_cli_{}_{}", prefix, nanos))
+    }
+
+    fn current_dir_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct CurrentDirGuard {
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn enter(path: &Path) -> Self {
+            let original = std::env::current_dir().expect("current dir");
+            std::env::set_current_dir(path).expect("set current dir");
+            Self { original }
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.original).expect("restore current dir");
+        }
     }
 
     #[test]
@@ -4196,6 +4301,84 @@ Problem:
     fn returns_none_when_compile_error_macro_is_absent() {
         let code = "pub struct Account {}";
         assert!(extract_compile_error_message(code).is_none());
+    }
+
+    #[test]
+    fn brand_implementation_aggregates_missing_required_sections() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_missing_sections");
+        let specifications = root.join("specifications");
+        fs::create_dir_all(specifications.join("visuals")).expect("mkdir visuals");
+        fs::create_dir_all(root.join("drafts")).expect("mkdir drafts");
+
+        // Intentionally missing multiple required sections/subsections:
+        // - Brand Metadata section
+        // - Typography subsections (Scales, Weights, Line Heights, Named Text Styles)
+        // - Iconography subsections (Size Set, Usage Constraints)
+        // - Motion subsections (Easing, Usage Principles)
+        fs::write(
+            specifications.join("visuals/snake_visuals.md"),
+            r#"# Brand Identity Specification
+
+## Description
+- Ok.
+
+## Color Tokens
+### Primary
+- `brand.colors.primary.default`: `#112233`
+### Secondary
+- `brand.colors.secondary.default`: `#445566`
+### Semantic
+- Unspecified from draft.
+### Surface
+- Unspecified from draft.
+### Text and Foreground/Background
+- Unspecified from draft.
+
+## Typography
+### Families
+- `brand.typography.families.primary`: `Inter`
+
+## Iconography
+### Style
+- `brand.iconography.style.default`: `outlined`
+
+## Motion
+### Durations
+- `brand.motion.durations.fast`: `150ms`
+
+## Token Reference Rules
+- Use dotted tokens."#,
+        )
+        .expect("write brand spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let config = Config {
+            verbose: false,
+            dry_run: true,
+        };
+
+        let err = Runtime::new()
+            .expect("runtime")
+            .block_on(create_implementation(
+                Vec::new(),
+                false,
+                0,
+                false,
+                &CategoryFilter::all(),
+                None,
+                None,
+                &config,
+            ))
+            .expect_err("expected aggregated missing requirements error");
+
+        let msg = err.to_string();
+        assert!(msg.contains("Missing required brand specification data"));
+        assert!(msg.contains("snake_visuals.md"));
+        assert!(msg.contains("Missing section '## Brand Metadata'"));
+        assert!(msg.contains("Missing subsection '### Scales' under '## Typography'"));
+        assert!(msg.contains("Missing subsection '### Size Set' under '## Iconography'"));
+        assert!(msg.contains("Missing subsection '### Easing' under '## Motion'"));
     }
 
     #[test]
@@ -4880,6 +5063,92 @@ pub fn app() {}
         assert!(updated.contains(BDD_TEST_TARGETS_START));
         assert!(updated.contains("name = \"bdd_account\""));
         assert!(updated.contains(BDD_TEST_TARGETS_END));
+    }
+
+    #[test]
+    fn targeted_spec_cache_clear_removes_cache_entry_with_canonicalized_input() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("clear_spec_cache");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("visuals")).expect("mkdir");
+        fs::write(
+            drafts.join("visuals/snake_visuals.md"),
+            "Depends on: palette\n# Snake Visuals",
+        )
+        .expect("write visuals");
+        fs::write(drafts.join("palette.md"), "# Palette").expect("write dependency");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let config = Config {
+            verbose: false,
+            dry_run: false,
+        };
+
+        let files = resolve_input_files(
+            DRAFTS_DIR,
+            vec!["snake_visuals".to_string()],
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("draft files");
+        let levels =
+            build_specification_execution_plan(files, DRAFTS_DIR, true, &CategoryFilter::all())
+                .expect("execution plan");
+        let node = levels
+            .into_iter()
+            .flatten()
+            .find(|node| node.input_path.ends_with("visuals/snake_visuals.md"))
+            .expect("snake visuals node");
+        let draft_content = fs::read_to_string(&node.input_path).expect("read draft");
+        let additional = build_specification_context(
+            &node.input_path,
+            &draft_content,
+            build_dependency_context(&node).expect("dependency context"),
+        )
+        .expect("build specification context");
+        let agent_name = determine_specification_agent(&node.input_path, DRAFTS_DIR);
+        let executor = AgentExecutor::new(agent_name, &config).expect("executor");
+
+        let clear_input = CacheAgentInput::new_spec_input(draft_content.clone(), additional.clone());
+        let runner_input = build_agent_input(agent_name, &draft_content, additional.clone());
+
+        let agent_registry = FileAgentRegistry::new(None);
+        let model_registry = FileAgentModelRegistry::new(None, None, None);
+        let instructions = agent_registry
+            .get_specification(agent_name)
+            .expect("specification")
+            .canonical_for_cache();
+        let model = model_registry.get_model(agent_name).expect("model");
+        let folder_hash = instructions_model_hash(&instructions, &model.name);
+        let cache_key = cache_key_for_input(&instructions, &clear_input);
+        let runner_cache_key = cache_key_for_input(&instructions, &runner_input);
+        assert_eq!(cache_key, runner_cache_key);
+
+        let cache_path = PathBuf::from(".reen")
+            .join(folder_hash)
+            .join(format!("{}.cache", cache_key));
+        fs::create_dir_all(cache_path.parent().expect("cache dir")).expect("mkdir cache");
+        fs::write(&cache_path, "cached invalid response").expect("write cache");
+
+        assert!(executor
+            .is_cache_hit(&draft_content, additional.clone())
+            .expect("cache hit before clear"));
+
+        Runtime::new()
+            .expect("runtime")
+            .block_on(clear_cache(
+                "specification",
+                vec!["snake_visuals".to_string()],
+                &config,
+            ))
+            .expect("clear cache");
+
+        assert!(!cache_path.exists());
+        assert!(!executor
+            .is_cache_hit(&draft_content, additional)
+            .expect("cache miss after clear"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
