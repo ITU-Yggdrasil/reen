@@ -8,9 +8,11 @@ name = "reen"
 path = "src/main.rs"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6.0", features = ["derive"] }
 anyhow = "1.0.102"
 dotenvy = "0.15"
+include_dir = "0.7"
 regex = "1.12.3"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -18,6 +20,7 @@ serde_json = "1.0.149"
 serde_yaml = "0.9.33"
 sha2 = "0.10"
 syn = { version = "2", features = ["full", "parsing"] }
+toml = "0.8"
 
 [lib]
 path = "src/lib.rs"

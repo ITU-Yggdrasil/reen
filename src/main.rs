@@ -68,6 +68,9 @@ enum Commands {
 
     #[command(subcommand, about = "External API ingestion and management")]
     Apis(ApisCommand),
+
+    #[command(about = "Install or upgrade the Reen bundle in a project")]
+    Init(InitArgs),
 }
 
 #[derive(Args, Default, Clone)]
@@ -230,6 +233,21 @@ enum ClearCommand {
     All,
 }
 
+#[derive(Args, Clone)]
+struct InitArgs {
+    #[arg(long, help = "Install into this directory instead of the current directory")]
+    path: Option<String>,
+
+    #[arg(long, help = "Refresh managed files to the current bundle version")]
+    upgrade: bool,
+
+    #[arg(long, help = "Dry-run report of what --upgrade would do")]
+    check: bool,
+
+    #[arg(long, help = "Overwrite user-edited managed files on --upgrade")]
+    force: bool,
+}
+
 #[derive(Subcommand, Clone)]
 enum ApisCommand {
     #[command(about = "Ingest OpenAPI snapshots into generated data drafts and operation specs")]
@@ -297,6 +315,16 @@ fn main() -> Result<()> {
         debug: cli.debug,
         dry_run: cli.dry_run,
     };
+
+    // Handle `init` before workspace discovery — it may run in a fresh directory.
+    if let Commands::Init(args) = cli.command {
+        let exit_code = run_init_cmd(args)?;
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return Ok(());
+    }
+
     let workspace = Workspace::discover(std::env::current_dir()?)?;
     let mut config = workspace.load_config()?;
 
@@ -312,6 +340,7 @@ fn main() -> Result<()> {
         Commands::Manifest(cmd) => run_manifest(cmd, globals, &workspace)?,
         Commands::Clear(cmd) => run_clear(cmd, globals, &workspace, &config)?,
         Commands::Apis(cmd) => run_apis(cmd, globals, &workspace)?,
+        Commands::Init(_) => unreachable!("handled above"),
     }
 
     Ok(())
@@ -753,6 +782,20 @@ fn option_setting<T>(
     root_config: Option<T>,
 ) -> Option<T> {
     cli_value.or(command_config).or(root_config)
+}
+
+fn run_init_cmd(args: InitArgs) -> Result<i32> {
+    let target_dir = if let Some(p) = &args.path {
+        std::path::PathBuf::from(p)
+    } else {
+        std::env::current_dir()?
+    };
+    reen::init::run_init(&reen::init::InitOptions {
+        target_dir,
+        upgrade: args.upgrade,
+        check: args.check,
+        force: args.force,
+    })
 }
 
 fn selection_from_flags(
