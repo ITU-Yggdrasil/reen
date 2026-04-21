@@ -1,71 +1,48 @@
-# Money transfer
+# Context: MoneyTransfer
 
 ## Purpose
 
-The money transfer context represents a transfer of an amount from the source account to the sink account.
+MoneyTransfer enacts the transfer of a specific amount from one account to another. It coordinates the source and sink accounts through the ledger, ensuring that the source has sufficient funds and that the resulting ledger entries correctly represent the movement of money.
 
 ## Role Players
 
-| Role player | Why involved | Expected behaviour |
-|---|---|---|
-| source | Provides the funds to be transferred | Exposes an account id and can withdraw through the ledger |
-| sink | Receives the transferred funds | Exposes an account id and can settle a withdrawal into a deposit |
+- source: Account — provides the funds; must have sufficient balance to cover the transfer
+- sink: Account — receives the funds
+
+## Props
+
+- amount: the Amount to transfer between the accounts
+- ledger: the Ledger that records all transactions
 
 ## Role Methods
 
 ### source
+- withdraw: creates an unsettled ledger entry representing a withdrawal of the transfer amount from the source account; the transfer amount must not exceed the source's current balance; returns an error if business rules are violated
 
-- **withdraw**
-  Creates a ledger entry using the ledger prop.
-  The created entry represents a withdrawal from the source account of the amount specified by the amount prop.
-  The transferred amount cannot exceed the present balance of the source account.
-  If the transfer cannot be completed due to violation of business rules, an error is returned.
-  
 ### sink
-
-- **deposit**
-  Uses the ledger prop to settle the ledger entry passed as an argument.
-  The resulting ledger entry now represents a transfer from source to sink of the specified amount.
-
-## Props
-
-| Prop | Meaning | Notes |
-|---|---|---|
-| amount | Amount to transfer between the accounts | |
-| ledger | Ledger of the system | Uses the Ledger type |
+- deposit: settles the unsettled entry created by withdraw, recording the sink as the destination; the resulting entry represents a complete transfer from source to sink
 
 ## Functionalities
 
 ### new
+Constructs the money transfer context. Receives the account identifiers for source and sink, the amount, and the ledger. Constructs Account views for both source and sink. The currency of the amount must match the currency of the source account. Returns an error if account construction fails or if the currency does not match.
 
-| Started by | Uses | Result |
-|---|---|---|
-| caller creating a transfer | source, sink, amount, ledger | money transfer context is created or an error is returned |
+### transfer
+Executes the transfer by calling the source's withdraw role method, then the sink's deposit role method, then committing the resulting entry to the ledger. If any step fails, the operation returns an error immediately. On success, returns the updated ledger.
 
-Rules:
-- Receives the account ids for sink and source and constructs the corresponding account objects.
-- Receives the amount to transfer and the ledger.
-- If business rules are not met, or account construction fails, returns an error.
-- The currency of the amount must match the currency of the source.
+## Scenarios
 
-| Given | When | Then |
-|---|---|---|
-| source and sink accounts exist and amount currency matches the source | new is called | a Money transfer context is returned |
+### successful transfer
+Given: account 123456 has balance 1000.00 DKK, account 654321 has balance 1000.00 DKK, amount is 250.00 DKK
+When: transfer is called
+Then: the returned ledger shows account 123456 with balance 750.00 DKK and account 654321 with balance 1250.00 DKK
 
-### Transfer
+### insufficient funds
+Given: account 123456 has balance 100.00 DKK, amount is 250.00 DKK
+When: transfer is called
+Then: an error is returned indicating insufficient funds
 
-| Started by | Uses | Result |
-|---|---|---|
-| caller executing the transfer | source, sink, ledger | new ledger is returned or an error is returned |
-
-Rules:
-- Executes the transfer by calling withdraw and deposit and then adding the resulting ledger entry to the ledger.
-- If any operation fails, returns an error immediately.
-- Calls `source.withdraw` first.
-- If withdraw succeeds, calls `sink.deposit` with the returned entry.
-- If deposit succeeds, adds the returned entry to the ledger.
-- If the ledger add succeeds, returns the resulting ledger.
-
-| Given | When | Then |
-|---|---|---|
-| withdraw, deposit, and add_entry all succeed | Transfer is called | the resulting updated ledger is returned |
+### currency mismatch on construction
+Given: account 123456 uses DKK, amount is 250.00 EUR
+When: new is called
+Then: an error is returned indicating the currency does not match

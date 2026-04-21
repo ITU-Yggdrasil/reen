@@ -1,0 +1,4 @@
+schema: reen.vocabulary/v1
+data:
+  - "Ledger, filtered by account identifier"
+projections: []

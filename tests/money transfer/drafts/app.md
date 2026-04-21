@@ -3,31 +3,28 @@
 ## Application Kind
 `cli_app`
 
-## Description
-This is a simple test applications, transfering money between two fake accounts
+## Purpose
 
-## Command Interface
-No command-line arguments or subcommands are defined.
+A simple test application that transfers money between two accounts using an immutable ledger.
 
-## Transport Surface
-Not applicable. The application does not expose network routes.
+## Collaborators
 
-## Static Surface
-Not applicable. The application does not serve static pages or assets.
-
-## Collaborators and Wiring
-| Collaborator | Responsibility |
-|---|---|
-| `Money transfer` | Transfers the requested amount from the source account to the sink account. |
-| `Ledger` | Stores the initial entries and the resulting transfer entries. |
+- MoneyTransfer: enacts the transfer of funds from source to sink
+- Ledger: stores all transaction entries
+- Account: provides a read-only view of an account's state on the ledger
 
 ## Startup Sequence
-It should add ledget entries for two accounts. The account ids are 123456 and 654321. The entry for each should be an initial entry. I.e. source is left as none. The amount should be 1000.00 DKK.
 
+Create initial ledger entries for two accounts:
+- Account 123456 receives an initial deposit of 1000.00 DKK (source absent, sink is 123456)
+- Account 654321 receives an initial deposit of 1000.00 DKK (source absent, sink is 654321)
 
 ## Main Flow
-The simple test case is to use the "money transfer context" to transfer 250.00 DKK from account 123456 to account 654321. After completing the transfer it should print the account transactions on each of the accounts to standard output. Each transaction is a ledger entry.
-The exit code should be 0
+
+1. Transfer 250.00 DKK from account 123456 to account 654321 using MoneyTransfer.
+2. After the transfer completes, print the transaction history for each account to standard output. Each transaction is a ledger entry.
+3. Exit with code 0.
 
 ## Error Handling
-In case of a runtime error the application should exit with a non 0 exit code. The exit code should be 42 and if an error message is available it should be printed to standard error
+
+If a runtime error occurs, exit with code 42. If an error message is available, print it to standard error.
