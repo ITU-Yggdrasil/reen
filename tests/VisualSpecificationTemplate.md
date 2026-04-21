@@ -1,8 +1,8 @@
-# [Company Name] â€” Brand Identity
+# [Company Name] - Brand Identity
 
 ## Brand Overview
 
-[Write 2â€“4 sentences describing the overall essence of the brand.  
+[Write 2-4 sentences describing the overall essence of the brand.  
 Focus on how it should feel and what makes it distinct.  
 Avoid technical or implementation details.]
 
@@ -31,12 +31,6 @@ Avoid overly detailed segmentation or marketing jargon.
 - [Guideline 2 â€” e.g., Friendly but professional]
 - [Guideline 3]
 
-### Avoid
-
-- [What the tone should NOT be â€” e.g., overly technical, playful, formal]
-
-[Optional: Add a short example sentence that reflects the tone.]
-
 ---
 
 ## Logo and Color System
@@ -58,7 +52,7 @@ Include general rules such as:
 [Describe the overall color approach.]
 
 Include:
-- Core colors (describe them, avoid naming like â€œprimary/secondaryâ€)  
+- Core colors (describe them, avoid naming like primary/secondary)  
 - How colors should be used (e.g., dominant vs. accent)  
 - Any supporting colors and when to use them  
 
@@ -76,8 +70,6 @@ Include:
 - Primary typeface/font  
 - Fallback options (if relevant)  
 - General guidance (e.g., readability, hierarchy, consistency)  
-
-Avoid exact sizes, spacing, or implementation rules.
 
 ---
 
@@ -134,5 +126,4 @@ Consider:
 ## Notes
 
 - This document defines **brand identity**, not UI components or design system rules  
-- Avoid including exact measurements, code, or implementation details  
 - Focus on consistency, clarity, and intent across all applications  

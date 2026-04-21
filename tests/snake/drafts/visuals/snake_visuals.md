@@ -63,9 +63,6 @@ Visuals should feel:
 * Clean and uncluttered
 * Modern and natural
 * Easy to understand
-
-Avoid overly busy, decorative, or abstract imagery that distracts from the message.
-
 ---
 
 ### Optional: Audience and Positioning
