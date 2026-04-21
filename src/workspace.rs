@@ -305,7 +305,12 @@ fn collect_raw_drafts(
                 .components()
                 .next()
                 .and_then(|component| component.as_os_str().to_str());
-            if matches!(first, Some("prepare")) {
+            // Skip prepare/ output and .apis/ generated directories
+            if matches!(first, Some("prepare") | Some(".apis")) {
+                continue;
+            }
+            // Also skip apis/ directory — boundary drafts are not DCI drafts
+            if matches!(first, Some("apis")) {
                 continue;
             }
             collect_raw_drafts(root, &path, selection, out)?;

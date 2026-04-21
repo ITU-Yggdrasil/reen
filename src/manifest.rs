@@ -13,10 +13,13 @@ use std::path::Path;
 ///
 /// Loaded from `drafts/vocabulary.yml`. Prepare refuses to resolve a name not
 /// present in the manifest or locally introduced in the same draft.
+/// Also loads ingested API types/operations from `drafts/.apis/manifest.yml`.
 #[derive(Debug, Clone, Default)]
 pub struct DciVocabulary {
     /// Maps a name to its kind ("data" or "projection").
     entries: BTreeMap<String, String>,
+    /// Maps `@<api>/<Name>` to its kind ("data" or "operation").
+    api_entries: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +58,9 @@ impl DciVocabulary {
                 vocab.entries.insert(name, "projection".to_string());
             }
         }
+
+        // Load ingested API types and operations from drafts/.apis/manifest.yml
+        vocab.load_api_manifest(&workspace.drafts_dir)?;
 
         Ok(vocab)
     }
@@ -119,8 +125,48 @@ impl DciVocabulary {
         Ok(())
     }
 
+    /// Resolve a namespaced API reference like `@aisstream/PositionReport`.
+    ///
+    /// Returns `Some("data")` or `Some("operation")` if the name is known,
+    /// `None` if it is not in the API manifest.
+    pub fn resolve_api(&self, reference: &str) -> Option<String> {
+        self.api_entries.get(reference).cloned()
+    }
+
+    /// Check if a reference is an API reference (starts with `@`).
+    pub fn is_api_reference(name: &str) -> bool {
+        name.starts_with('@') && name.contains('/')
+    }
+
     pub fn entries(&self) -> &BTreeMap<String, String> {
         &self.entries
+    }
+
+    pub fn api_entries(&self) -> &BTreeMap<String, String> {
+        &self.api_entries
+    }
+
+    /// Load the API manifest from `drafts/.apis/manifest.yml`.
+    fn load_api_manifest(&mut self, drafts_dir: &Path) -> Result<()> {
+        let path = drafts_dir.join(".apis/manifest.yml");
+        if !path.is_file() {
+            return Ok(());
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let manifest: crate::prepared::ApiManifest = serde_yaml::from_str(&raw)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        for api in &manifest.apis {
+            for type_name in &api.data_types {
+                let key = format!("@{}/{}", api.name, type_name);
+                self.api_entries.insert(key, "data".to_string());
+            }
+            for op_name in &api.operations {
+                let key = format!("@{}/{}", api.name, op_name);
+                self.api_entries.insert(key, "operation".to_string());
+            }
+        }
+        Ok(())
     }
 }
 

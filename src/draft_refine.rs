@@ -80,8 +80,12 @@ pub fn review_raw_drafts(workspace: &Workspace, paths: &[PathBuf]) -> Result<Dra
             .replace('\\', "/");
 
         // Code-token lint (runs on raw content, before parsing)
-        let code_token_findings = scan_code_tokens(&content, &relative);
-        report.findings.extend(code_token_findings);
+        // Exempt generated files under drafts/.apis/ — they contain code-level tokens by design
+        let is_generated_api = relative.contains("drafts/.apis/") || relative.contains(".apis/");
+        if !is_generated_api {
+            let code_token_findings = scan_code_tokens(&content, &relative);
+            report.findings.extend(code_token_findings);
+        }
 
         match parse_draft_file(path, &workspace.drafts_dir, &content) {
             Ok(document) => {

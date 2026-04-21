@@ -12,3 +12,4 @@ errors.txt
 .claude/settings.local.json
 plans/
 prepare/
+drafts/.apis/
