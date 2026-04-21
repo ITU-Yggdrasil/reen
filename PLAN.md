@@ -46,7 +46,7 @@ Verify runs as a PostToolUse hook after every write. Audit runs on demand after 
 
 ### Source files (remove LLM pathways, keep deterministic core)
 
-- `src/draft_refine.rs` — keep the deterministic review categories (Completeness, Concreteness, Ambiguity) as they feed prepare's ambiguity list. Remove `BehavioralAmbiguity` and anything LLM-backed. Move surviving logic into `prepare.rs` if thin; otherwise rename to `review.rs`.
+- `src/draft_refine.rs` — keep the deterministic review categories (Completeness, Concreteness, Ambiguity) as they feed prepare's ambiguity list. Remove `BehavioralAmbiguity` and anything LLM-backed. Extend the Concreteness category with a **code-token lint** (see Phase 3.5): a deterministic rejector that refuses drafts carrying Rust syntax or type notation in DCI prose. Move surviving logic into `prepare.rs` if thin; otherwise rename to `review.rs`.
 
 ### CLI subcommands (delete)
 
@@ -65,8 +65,7 @@ Verify runs as a PostToolUse hook after every write. Audit runs on demand after 
 
 ### Test projects
 
-- Keep: `tests/snake`, `tests/money transfer` as living reference projects. Drafts get rewritten to the new schema (Phase 4).
-- Delete: `tests/Connor`, `tests/world data` unless there's a specific reason to retain — both appear to be experimental. Confirm before deletion.
+- Keep: `tests/snake`, `tests/money transfer`, `tests/Connor`, `tests/world data`. All four are migrated in Phase 4. Snake and money transfer are the small reference projects; Connor and world data are larger real-world drafts that stress-test the schema and lint.
 - All `target/` directories under tests get `.gitignore`'d if not already.
 
 ---
@@ -284,17 +283,57 @@ Schema bumps to `reen.prepare/v2`. Old prepared YAML is not migrated; snake and 
 
 **Exit criteria:** in a test project, the user can invoke `/prepare`, `/refine`, `/scaffold`, `/implement` in Claude Code and drive a single draft from empty Rust to a verified, compiling implementation without running any CLI manually.
 
+### Phase 3.5 — concreteness enforcement (code-token lint)
+
+**Goal:** a deterministic gate that refuses drafts carrying code-level content, so the "BA-authorable" bar is enforced by Reen rather than left to migration discipline.
+
+**Why this phase exists.** The first Phase 4 pass on snake and money transfer exposed a real failure mode: drafts were reshaped into the new schema structurally (headings, Role Methods section, scenarios) while still leaking Rust everywhere — explicit `Signature: ...` lines on role methods, full constructor signatures (`fn new(... ) -> Self`), type names (`Vec<Position>`, `&[Position]`, `Option<Food>`, `anyhow::Result`), code idioms (`saturating_sub`, `.log(10)`, `as u64`, `::`), and whole sections discussing integer widening between `u16` and `u32`. The DCI shape was satisfied; the DCI *vocabulary* was not. Prepare and `/refine` had no deterministic mechanism to notice, because `draft_refine.rs` only warned about vague phrases, not about concreteness-in-the-wrong-direction.
+
+1. Extend `src/draft_refine.rs` with a code-token detector. Reject any draft (all three kinds) that contains, in role-method prose, functionality prose, or scenario Given/When/Then prose:
+   - Explicit signature lines beginning with `Signature:` or fenced as `` `fn name(...)` ``.
+   - Rust path syntax: `::` between identifiers (e.g. `Direction::Up`, `crossterm::terminal::Clear`).
+   - Generic-type brackets around type identifiers: `Vec<...>`, `Option<...>`, `Result<...>`, `&[...]`, `HashMap<...>`.
+   - Reference/mutability sigils applied to type names: `&self`, `&mut self`, `&T`, `&mut T`, `Box<...>`, `Arc<...>`, `Rc<...>`.
+   - Turbofish (`::<...>`) and trait-bound syntax (`where`, `impl Trait`).
+   - Primitive type tokens as standalone type annotations (`u8`, `u16`, `u32`, `u64`, `i32`, `i64`, `usize`, `isize`, `f32`, `f64`, `bool`, `char`, `str`, `String`) when appearing in sentences that are clearly type-annotating rather than domain prose ("the body is stored as `Vec<Position>`", "returns a `u32`"). The lint must distinguish "an amount of 250 DKK" (fine) from "amount: u32" (reject).
+   - Method-call syntax on identifiers: `foo.bar()`, `ctx.game_state.score()`, `.unwrap()`, `.clone()`, `.iter()`, etc.
+   - Macro invocations: `println!`, `print!`, `todo!`, `assert!`, `format!` and the broader `<ident>!(...)` shape.
+2. The detector emits findings in the existing `DraftReviewFinding` shape with `category: Concreteness` and a message that names the offending token and quotes the surrounding phrase. Findings point the BA at what to rewrite, in DCI vocabulary ("role method `snake.body` specifies a Rust signature; describe the responsibility instead").
+3. Wire the detector into `reen prepare` as a **blocking** check: if any code-token finding is present, prepare exits non-zero and emits the report. Prepare does not produce v2 YAML while a draft is still carrying code-level content. A `--allow-code-tokens` escape hatch is available for the one case that matters — migrating legacy drafts where the code notation is being preserved on purpose during a transitional commit — and prints a visible warning when used.
+4. The lint lives in `draft_refine.rs` (or its successor `review.rs`) alongside the existing Completeness and Concreteness-vagueness checks. Unit-test it against:
+   - A known-bad snake fragment (must flag `Signature: body(&self) -> &Vec<Position>`, `Direction::Up`, `saturating_sub`, `as u64`).
+   - A known-good money-transfer fragment (must pass cleanly).
+   - Borderline prose cases: "250.00 DKK" must pass; "returns a `u32`" must flag.
+5. Document the lint in the `reen-draft-format` skill: a short "What not to put in a draft" section with the rejected token families and the in-domain alternatives.
+
+**Exit criteria:** `reen prepare` on the pre-redo snake drafts exits non-zero with a concreteness report citing at least the Signature lines and the `::` paths; `reen prepare` on the money-transfer drafts passes the lint without changes; the lint has ≥ 90% line coverage in unit tests.
+
 ### Phase 4 — migrate test projects
 
-**Goal:** snake and money transfer re-built under the new pipeline from rewritten drafts.
+**Goal:** all four test projects — snake, money transfer, Connor, world data — built under the new pipeline from BA-authorable drafts that pass the Phase 3.5 lint.
 
-1. For each kept test project:
+**Ordering.** The first pass on snake and money transfer (before Phase 3.5 existed) reshaped the schema but left code-level content in the snake drafts. Redo snake first so it becomes the clean reference for the larger migrations, then re-check money transfer against the lint, then migrate Connor, then world data. Each project is its own Claude Code session with `/clear` before it starts.
+
+**Draft acceptance bar (applies to every project).** Before `reen prepare` is run on any draft, the draft must read as business vocabulary:
+
+- No `Signature:` lines anywhere. Role methods and functionalities are described as responsibilities, not as function shapes.
+- No Rust type names in role-method, functionality, or scenario prose: no `Vec<T>`, `Option<T>`, `Result<T>`, `&[T]`, `&str`, `String`, `u8`..`u64`, `i32`..`i64`, `f32`/`f64`, `bool`, `usize`, etc., except when referring to a concept already defined in a manifest-bound data or projection draft by its domain name.
+- No `::` path syntax, no turbofish, no `&`/`&mut` sigils, no `impl`/`dyn`/`where` tokens.
+- No method-call prose on identifiers (`foo.bar()`, `.unwrap()`, `.clone()`).
+- No macro invocations (`println!`, `todo!`, `format!`).
+- No integer-widening or FFI-boundary discussion in prose — if an application-level draft needs to describe a boundary, it does so by naming the responsibilities on each side, not by specifying casts.
+
+The lint enforces all of the above mechanically. The bar above is the *reason* the lint exists; the lint is the *mechanism*.
+
+1. Per project, in order — **snake (redo first)**, then **money transfer** (lint sweep), then **Connor**, then **world data**:
    - Rewrite every draft to the new DCI-native schema, using the right template for each kind (data, projection, context). For contexts specifically: recover the role methods that were previously implicit in flow prose and surface them as an explicit Role Methods section grouped by role. Remove all signatures, types, and method body references. Add Scenarios sections with concrete Given/When/Then.
+   - Run `reen prepare` purely to exercise the Phase 3.5 lint before touching anything else; fix every code-token finding before proceeding. No `--allow-code-tokens`.
    - Consolidate the manifest so it is the single source of DCI vocabulary for the project.
    - Delete old `drafts/prepare/` contents.
-   - Run `reen prepare`; resolve any ambiguities through `/refine`.
+   - Run `reen prepare` for real; resolve any remaining ambiguities through `/refine`.
    - Run `reen scaffold`.
    - Implement via Claude Code until `reen verify` and `cargo test` pass.
+   - Commit with a message that names the project and the Phase 4 step (e.g. `phase 4: snake redo under BA-authorable bar`). One project per commit; do not batch.
 2. Rewrite integration tests. Replace the existing `integration_test.rs` with:
    - `prepares_without_ambiguity`: after prepare, `ambiguities[]` with blocking severity is empty.
    - `scaffold_verifies`: scaffold output passes `reen verify`.
@@ -303,7 +342,7 @@ Schema bumps to `reen.prepare/v2`. Old prepared YAML is not migrated; snake and 
    - `planted_drift_caught`: a deliberately-modified `.rs` (extra field) fails `reen verify` with the expected diff.
 3. Add a workspace-level test that runs `reen prepare && reen scaffold && reen verify` across all kept test projects as a smoke test.
 
-**Exit criteria:** `cargo test` at the workspace root is green, and both snake and money transfer can be built end-to-end from their rewritten drafts.
+**Exit criteria:** `cargo test` at the workspace root is green; all four test projects — snake, money transfer, Connor, world data — can be built end-to-end from their rewritten drafts; every draft in every project passes the Phase 3.5 code-token lint without `--allow-code-tokens`.
 
 ### Phase 5 — auditor
 
@@ -356,6 +395,7 @@ Schema bumps to `reen.prepare/v2`. Old prepared YAML is not migrated; snake and 
 - **Auditor false-positive fatigue.** Report ignored. *Mitigation:* severity levels; only `high` discrepancies block close-out; `low` are informational. Tune on real runs before making any part of it blocking.
 - **Claude Code hook failures disrupt authoring flow.** Hooks fire too often or too slowly. *Mitigation:* verify + cargo check run async where possible; hook timeout bounded; a `--skip-verify` escape hatch for in-progress work.
 - **DCI concept drift.** Under pressure a BA (or Claude Code) elides the distinction between role and role player, or puts a use-case-only behaviour on a data type instead of as a role method. *Mitigation:* the `reen-dci-authoring` skill calls out these specific confusions with named examples; prepare refuses drafts where a data artefact exposes operations that read like scenario coordination; refine dialogue surfaces "this looks like a role method on the context, not a data operation" as a suggestion rather than a silent fix.
+- **Structural migration without vocabulary migration.** A draft adopts the new schema — right headings, Role Methods section, scenarios — while still carrying code-level content (Rust signatures, type names, method-call syntax, widening discussion). Schema compliance gives false confidence that the draft is BA-authorable. *Mitigation:* Phase 3.5's code-token lint is a **blocking** gate in `reen prepare`. Structural compliance is necessary but not sufficient; a draft is only acceptable when the lint is clean. The lint is mechanical and deterministic, so the judgment "does this read as business language?" is no longer delegated to the migrating agent.
 
 ## Open questions
 

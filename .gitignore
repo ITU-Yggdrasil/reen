@@ -11,3 +11,4 @@ errors.txt
 .cursor/
 .claude/settings.local.json
 plans/
+prepare/
