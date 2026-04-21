@@ -433,7 +433,41 @@ fn auto_detect_prepared(
     let under_src = relative
         .strip_prefix("src")
         .unwrap_or(relative);
-    Ok(workspace.root.join("drafts/prepare").join(under_src).with_extension("yml"))
+    let candidate = workspace.root.join("drafts/prepare").join(under_src).with_extension("yml");
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    // Fall back: the Rust file is snake_case but the YAML may be PascalCase.
+    // Compare by stripping non-alphanumeric characters and lowercasing.
+    if let Some(parent) = candidate.parent() {
+        if parent.is_dir() {
+            let target_norm = normalize_stem(
+                candidate.file_stem().and_then(|s| s.to_str()).unwrap_or_default(),
+            );
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("yml") {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            if normalize_stem(stem) == target_norm {
+                                return Ok(path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(candidate)
+}
+
+/// Normalize a file stem for case-insensitive matching across naming conventions.
+/// `player_state` and `PlayerState` both normalize to `playerstate`.
+fn normalize_stem(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 fn run_manifest(

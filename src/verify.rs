@@ -63,7 +63,7 @@ pub fn verify_source(source: &str, artifact: &PreparedArtifact) -> Result<Verify
     let export_name = &artifact.export.name;
     let mut discrepancies = Vec::new();
 
-    // Find the struct
+    // Find the struct or enum
     let struct_item = file.items.iter().find_map(|item| {
         if let syn::Item::Struct(s) = item {
             if s.ident == export_name { Some(s) } else { None }
@@ -72,21 +72,36 @@ pub fn verify_source(source: &str, artifact: &PreparedArtifact) -> Result<Verify
         }
     });
 
-    if struct_item.is_none() {
+    let enum_item = file.items.iter().find_map(|item| {
+        if let syn::Item::Enum(e) = item {
+            if e.ident == export_name { Some(e) } else { None }
+        } else {
+            None
+        }
+    });
+
+    if struct_item.is_none() && enum_item.is_none() {
         discrepancies.push(Discrepancy {
             kind: DiscrepancyKind::MissingField,
             message: format!("struct `{}` not found in source", export_name),
         });
         return Ok(VerifyResult { discrepancies });
     }
-    let struct_item = struct_item.unwrap();
 
-    // Collect actual struct fields
-    let actual_fields: BTreeSet<String> = struct_item
-        .fields
-        .iter()
-        .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
-        .collect();
+    // Collect actual fields (from struct fields or enum variants)
+    let actual_fields: BTreeSet<String> = if let Some(s) = struct_item {
+        s.fields
+            .iter()
+            .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+            .collect()
+    } else if let Some(e) = enum_item {
+        e.variants
+            .iter()
+            .map(|v| crate::codegen::to_snake_case(&v.ident.to_string()))
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
 
     // Collect expected fields from artifact
     let expected_fields = expected_fields(artifact);
