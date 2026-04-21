@@ -217,7 +217,12 @@ fn generate_projection(a: &PreparedArtifact) -> String {
     // Struct
     writeln!(out, "pub struct {} {{", name).unwrap();
     if let Some(src) = &a.source_data {
-        writeln!(out, "    source: {}, // projection over this data", src).unwrap();
+        let rust_type = sanitize_rust_type(src);
+        if rust_type == "()" {
+            writeln!(out, "    source: (), // {}", src).unwrap();
+        } else {
+            writeln!(out, "    source: {}, // projection over this data", rust_type).unwrap();
+        }
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -370,6 +375,27 @@ mod tests {
         assert!(code.contains("pub struct AccountBalance"));
         assert!(code.contains("source: Account"));
         assert!(code.contains("pub fn current_balance("));
+    }
+
+    #[test]
+    fn prose_source_data_falls_back_to_unit() {
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Projection, "projections/account.md".into(), "Account".into(), "Account".into(),
+        );
+        a.source_data = Some("Ledger, filtered by account identifier".into());
+        a.queries = vec![QuerySpec { name: "balance".into(), description: "Current balance.".into() }];
+
+        let code = generate_rust(&a);
+        assert!(
+            !code.contains("source: Ledger, filtered"),
+            "prose source_data should not appear as Rust struct field type, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("source: ()"),
+            "prose source_data should fall back to () for struct field, got:\n{}",
+            code
+        );
     }
 
     #[test]
