@@ -1,0 +1,55 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/lightning_strike.md
+  kind: data
+  title: 'Data: LightningStrike'
+export:
+  name: LightningStrike
+attributes:
+- name: latitude
+  description: geographic latitude of the detected strike in decimal degrees
+- name: longitude
+  description: geographic longitude of the detected strike in decimal degrees
+- name: timestamp
+  description: UTC timestamp of the strike, parsed from the raw wire format by the receiver
+- name: station_count
+  description: optional number of contributing detection stations, diagnostic only
+operations:
+- name: new
+  description: Constructs a LightningStrike from the provided field values.
+scenarios:
+- name: create a strike record
+  given: latitude 48.8, longitude 2.3, a UTC timestamp, and station_count of 5
+  when: new is called
+  then: a LightningStrike is returned with those values
+synthesised_tests:
+- source: scenario
+  given: latitude 48.8, longitude 2.3, a UTC timestamp, and station_count of 5
+  when: new is called
+  then: a LightningStrike is returned with those values
+  citation: Scenarios / create a strike record
+- source: invariant
+  given: latitude -33.9, longitude 151.2, a UTC timestamp, and station_count of 12
+  when: new is called
+  then: a LightningStrike is returned with latitude -33.9, longitude 151.2, the provided timestamp, and station_count of 12
+  citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
+- source: invariant
+  given: latitude 0, longitude 0, a UTC timestamp, and station_count of 1
+  when: new is called
+  then: a LightningStrike is returned with latitude 0, longitude 0, the provided timestamp, and station_count of 1
+  citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
+- source: invariant
+  given: latitude 90, longitude -180, a UTC timestamp, and station_count of 99
+  when: new is called
+  then: a LightningStrike is returned with latitude 90, longitude -180, the provided timestamp, and station_count of 99
+  citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
+vocabulary_bindings:
+- name: latitude
+  resolution: attribute
+- name: longitude
+  resolution: attribute
+- name: timestamp
+  resolution: attribute
+- name: station_count
+  resolution: attribute

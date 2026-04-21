@@ -1,0 +1,45 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/earthquake_event.md
+  kind: data
+  title: 'Data: EarthquakeEvent'
+export:
+  name: EarthquakeEvent
+attributes:
+- name: latitude
+  description: 'epicentre latitude in decimal degrees, extracted from the GeoJSON coordinates (note: GeoJSON coordinate order is longitude, latitude, depth)'
+- name: longitude
+  description: epicentre longitude in decimal degrees, extracted from the GeoJSON coordinates
+- name: depth
+  description: depth in kilometres below the surface, informational only
+- name: timestamp
+  description: UTC origin time of the earthquake, converted from milliseconds since epoch by the receiver
+- name: magnitude
+  description: optional preferred magnitude, used when forming the event label
+- name: place
+  description: optional human-readable location description, used when forming the event label
+scenarios:
+- name: earthquake with magnitude and place
+  given: latitude 35.6, longitude -117.5, depth 10.0, a UTC timestamp, magnitude 4.2, and place "20km NW of Ridgecrest, CA"
+  when: the receiver maps this record
+  then: the label is formed from magnitude and place
+synthesised_tests:
+- source: scenario
+  given: latitude 35.6, longitude -117.5, depth 10.0, a UTC timestamp, magnitude 4.2, and place "20km NW of Ridgecrest, CA"
+  when: the receiver maps this record
+  then: the label is formed from magnitude and place
+  citation: Scenarios / earthquake with magnitude and place
+vocabulary_bindings:
+- name: latitude
+  resolution: attribute
+- name: longitude
+  resolution: attribute
+- name: depth
+  resolution: attribute
+- name: timestamp
+  resolution: attribute
+- name: magnitude
+  resolution: attribute
+- name: place
+  resolution: attribute

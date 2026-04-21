@@ -1,0 +1,54 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/wiki_edit.md
+  kind: data
+  title: 'Data: WikiEdit'
+export:
+  name: WikiEdit
+attributes:
+- name: wiki
+  description: Wikimedia project identifier such as "enwiki", used for project filtering and GeoData URL construction
+- name: namespace
+  description: MediaWiki namespace of the edited page; namespace 0 is the article namespace
+- name: title
+  description: title of the edited page, used for GeoData lookup and as the PositionEvent label
+- name: user
+  description: username or IP address of the editor, diagnostic only
+- name: timestamp
+  description: UTC timestamp for when the edit was recorded, converted from the wire format by the receiver
+- name: bot
+  description: whether the edit was flagged as a bot edit, used for optional bot filtering
+scenarios:
+- name: edit to a geotagged article
+  given: wiki "enwiki", namespace 0, title "Eiffel Tower", timestamp as UTC, bot is false
+  when: the receiver resolves coordinates for "Eiffel Tower"
+  then: a PositionEvent is produced at the coordinates of Paris
+- name: edit outside article namespace
+  given: wiki "enwiki", namespace 1 (talk page)
+  when: the receiver processes this edit
+  then: the edit is discarded because only namespace 0 is eligible
+synthesised_tests:
+- source: scenario
+  given: wiki "enwiki", namespace 0, title "Eiffel Tower", timestamp as UTC, bot is false
+  when: the receiver resolves coordinates for "Eiffel Tower"
+  then: a PositionEvent is produced at the coordinates of Paris
+  citation: Scenarios / edit to a geotagged article
+- source: scenario
+  given: wiki "enwiki", namespace 1 (talk page)
+  when: the receiver processes this edit
+  then: the edit is discarded because only namespace 0 is eligible
+  citation: Scenarios / edit outside article namespace
+vocabulary_bindings:
+- name: wiki
+  resolution: attribute
+- name: namespace
+  resolution: attribute
+- name: title
+  resolution: attribute
+- name: user
+  resolution: attribute
+- name: timestamp
+  resolution: attribute
+- name: bot
+  resolution: attribute

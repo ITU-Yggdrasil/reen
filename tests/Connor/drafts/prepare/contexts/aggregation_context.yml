@@ -1,0 +1,131 @@
+schema: reen.prepare/v2
+kind: context
+source:
+  path: contexts/aggregation_context.md
+  kind: context
+  title: 'Context: AggregationContext'
+export:
+  name: AggregationContext
+role_players:
+- name: buffer
+  data_type: EventBufferContext
+  responsibility: supplies the current population of recent PositionEvents and the active TimeWindow
+- name: grid
+  data_type: GridContext
+  responsibility: maps coordinates to cells and enumerates all cells
+role_methods:
+- role: buffer
+  methods:
+  - name: current_events
+    canonical_name: buffer_current_events
+    citation: returns all PositionEvents currently within the configured time window
+  - name: window
+    canonical_name: buffer_window
+    citation: returns the active TimeWindow used to stamp counts and derive rates
+- role: grid
+  methods:
+  - name: cell_for
+    canonical_name: grid_cell_for
+    citation: returns the GeographicCell that contains a given latitude and longitude
+  - name: all_cells
+    canonical_name: grid_all_cells
+    citation: returns the complete list of GeographicCells in the grid
+functionalities:
+- name: new
+  description: Stores the provided buffer and grid role players. Performs no computation at construction time.
+- name: produce_counts
+  description: Asks the buffer for the active TimeWindow and the current event population. For each event, asks the grid which cell it belongs to, then tallies the number of events per cell. Returns one EventCount per grid cell. Cells with no matching events receive a count of zero. Each EventCount carries the TimeWindow obtained from the buffer.
+  role_method_refs:
+  - buffer_window
+- name: produce_rates
+  description: Calls produce_counts internally. Divides each EventCount by the window's duration in minutes to derive the rate. Because the TimeWindow is always at least one minute, valid inputs do not divide by zero. Returns one EventRate per cell in the same exhaustive fashion as produce_counts, carrying the same TimeWindow.
+  role_method_refs:
+  - buffer_window
+scenarios:
+- name: three events in one cell
+  given: the buffer holds three events in one cell
+  when: produce_counts is called
+  then: that cell has a count of three and all other cells have zero
+- name: rate from count and window
+  given: a window of five minutes and a cell count of ten
+  when: produce_rates is called
+  then: that cell has an events_per_minute value of two
+- name: empty buffer produces zero counts
+  given: the buffer holds no events
+  when: produce_counts is called
+  then: every cell has a count of zero
+synthesised_tests:
+- source: scenario
+  given: the buffer holds three events in one cell
+  when: produce_counts is called
+  then: that cell has a count of three and all other cells have zero
+  citation: Scenarios / three events in one cell
+- source: scenario
+  given: a window of five minutes and a cell count of ten
+  when: produce_rates is called
+  then: that cell has an events_per_minute value of two
+  citation: Scenarios / rate from count and window
+- source: scenario
+  given: the buffer holds no events
+  when: produce_counts is called
+  then: every cell has a count of zero
+  citation: Scenarios / empty buffer produces zero counts
+- source: invariant
+  given: AggregationContext is constructed with a buffer and grid
+  when: the context is created
+  then: no computation occurs and the buffer and grid role players are stored
+  citation: 'functionality `new`: Stores the provided buffer and grid role players. Performs no computation at construction time.'
+- source: invariant
+  given: the buffer holds events distributed across multiple cells
+  when: produce_counts is called
+  then: each cell receives a count matching its event population and all grid cells are represented in the result
+  citation: 'functionality `produce_counts`: Returns one EventCount per grid cell. Cells with no matching events receive a count of zero.'
+- source: invariant
+  given: the buffer provides a TimeWindow
+  when: produce_counts is called
+  then: each returned EventCount carries the same TimeWindow obtained from the buffer
+  citation: 'functionality `produce_counts`: Each EventCount carries the TimeWindow obtained from the buffer.'
+- source: invariant
+  given: the buffer holds events and a TimeWindow of two minutes exists
+  when: produce_rates is called
+  then: each EventRate is derived by dividing the count by two and all grid cells are represented
+  citation: 'functionality `produce_rates`: Divides each EventCount by the window''s duration in minutes to derive the rate. Returns one EventRate per cell in the same exhaustive fashion as produce_counts.'
+- source: invariant
+  given: the buffer provides a one-minute TimeWindow
+  when: produce_rates is called
+  then: no division by zero occurs and rates equal the counts
+  citation: 'functionality `produce_rates`: Because the TimeWindow is always at least one minute, valid inputs do not divide by zero.'
+- source: invariant
+  given: the buffer holds events and produce_rates is called
+  when: the rates are computed
+  then: each returned EventRate carries the same TimeWindow as returned by produce_counts
+  citation: 'functionality `produce_rates`: Returns one EventRate per cell in the same exhaustive fashion as produce_counts, carrying the same TimeWindow.'
+vocabulary_bindings:
+- name: buffer
+  resolution: role_player
+  resolved_to: EventBufferContext
+- name: EventBufferContext
+  resolution: data
+  resolved_to: EventBufferContext
+- name: grid
+  resolution: role_player
+  resolved_to: GridContext
+- name: GridContext
+  resolution: data
+  resolved_to: GridContext
+- name: buffer_current_events
+  resolution: role_method
+  resolved_to: buffer.current_events
+- name: buffer_window
+  resolution: role_method
+  resolved_to: buffer.window
+- name: buffer
+  resolution: role
+- name: grid_cell_for
+  resolution: role_method
+  resolved_to: grid.cell_for
+- name: grid_all_cells
+  resolution: role_method
+  resolved_to: grid.all_cells
+- name: grid
+  resolution: role

@@ -1,0 +1,110 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/aisstream_position_message.md
+  kind: data
+  title: 'Data: AISStreamPositionMessage'
+export:
+  name: AISStreamPositionMessage
+attributes:
+- name: message_type
+  description: the AISStream message family that produced this record; allowed values are "PositionReport" and "StandardClassBPositionReport"
+- name: mmsi
+  description: vessel MMSI taken from the upstream user identifier, used as fallback label
+- name: vessel_name
+  description: optional vessel name from metadata, preferred label when present
+- name: latitude
+  description: optional normalized latitude in decimal degrees; the invalid sentinel value 91.0 indicates absence
+- name: longitude
+  description: optional normalized longitude in decimal degrees; the invalid sentinel value 181.0 indicates absence
+- name: observed_at
+  description: full UTC instant for the message observation, used as the PositionEvent timestamp
+- name: metadata_json
+  description: optional serialized metadata payload stored as text because the upstream shape is not stable
+invariants:
+- Only PositionReport and StandardClassBPositionReport message families may be represented.
+- The record is normalized into one consistent shape before the receiver reads it.
+- observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).
+operations:
+- name: new
+  description: Constructs an AISStreamPositionMessage from normalized boundary values.
+scenarios:
+- name: valid position message
+  given: message_type "PositionReport", mmsi "123456789", vessel_name "CARGO SHIP", latitude 51.5, longitude -0.1, observed_at as a UTC timestamp
+  when: new is called
+  then: an AISStreamPositionMessage is returned
+- name: invalid latitude sentinel
+  given: latitude 91.0
+  when: the receiver processes this record
+  then: the record is discarded because 91.0 is the AIS invalid-coordinate sentinel
+synthesised_tests:
+- source: scenario
+  given: message_type "PositionReport", mmsi "123456789", vessel_name "CARGO SHIP", latitude 51.5, longitude -0.1, observed_at as a UTC timestamp
+  when: new is called
+  then: an AISStreamPositionMessage is returned
+  citation: Scenarios / valid position message
+- source: scenario
+  given: latitude 91.0
+  when: the receiver processes this record
+  then: the record is discarded because 91.0 is the AIS invalid-coordinate sentinel
+  citation: Scenarios / invalid latitude sentinel
+- source: invariant
+  given: 'a Data: AISStreamPositionMessage that might violate: Only PositionReport and StandardClassBPositionReport message families may be represented.'
+  when: the invariant is tested
+  then: 'the invariant holds: Only PositionReport and StandardClassBPositionReport message families may be represented.'
+  citation: Invariants / Only PositionReport and StandardClassBPositionReport message families may be represented.
+- source: invariant
+  given: 'a Data: AISStreamPositionMessage that might violate: The record is normalized into one consistent shape before the receiver reads it.'
+  when: the invariant is tested
+  then: 'the invariant holds: The record is normalized into one consistent shape before the receiver reads it.'
+  citation: Invariants / The record is normalized into one consistent shape before the receiver reads it.
+- source: invariant
+  given: 'a Data: AISStreamPositionMessage that might violate: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).'
+  when: the invariant is tested
+  then: 'the invariant holds: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).'
+  citation: Invariants / observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).
+- source: invariant
+  given: message_type "StandardClassBPositionReport", mmsi "987654321", vessel_name "TANKER", latitude 45.3, longitude 10.5, observed_at as a UTC timestamp
+  when: new is called
+  then: an AISStreamPositionMessage is returned
+  citation: 'operation `new`: Constructs an AISStreamPositionMessage from normalized boundary values; invariant: Only PositionReport and StandardClassBPositionReport message families may be represented'
+- source: invariant
+  given: message_type "SafetyAcknowledgement" (not PositionReport or StandardClassBPositionReport)
+  when: new is called
+  then: an error is raised or the construction fails because SafetyAcknowledgement violates the message family invariant
+  citation: 'invariant: Only PositionReport and StandardClassBPositionReport message families may be represented'
+- source: invariant
+  given: a PositionReport message with AIS Timestamp field set to 45 (seconds within minute) and a raw event time of 2024-01-15T10:30:45Z
+  when: normalized into an AISStreamPositionMessage
+  then: the observed_at field is set to the full UTC timestamp 2024-01-15T10:30:45Z, not derived from the AIS Timestamp field alone
+  citation: 'invariant: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp)'
+- source: invariant
+  given: a StandardClassBPositionReport with longitude -180.0
+  when: new is called with this boundary value
+  then: an AISStreamPositionMessage is returned with longitude normalized to -180.0
+  citation: 'operation `new`: Constructs an AISStreamPositionMessage from normalized boundary values'
+- source: invariant
+  given: a PositionReport message with latitude 0.0 and longitude 0.0
+  when: new is called
+  then: an AISStreamPositionMessage is returned with the coordinates preserved as valid (neither coordinate is the AIS invalid-coordinate sentinel)
+  citation: 'operation `new`: Constructs an AISStreamPositionMessage from normalized boundary values; invariant: observed_at is a full UTC timestamp'
+- source: invariant
+  given: an AISStreamPositionMessage after normalization
+  when: the receiver inspects the record structure
+  then: the record presents a single consistent shape regardless of whether it originated from PositionReport or StandardClassBPositionReport
+  citation: 'invariant: The record is normalized into one consistent shape before the receiver reads it'
+vocabulary_bindings:
+- name: message_type
+  resolution: attribute
+- name: mmsi
+  resolution: attribute
+- name: vessel_name
+  resolution: attribute
+- name: latitude
+  resolution: attribute
+- name: longitude
+  resolution: attribute
+- name: observed_at
+  resolution: attribute
+- name: metadata_json
+  resolution: attribute

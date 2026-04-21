@@ -1,0 +1,94 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/time_window.md
+  kind: data
+  title: 'Data: TimeWindow'
+export:
+  name: TimeWindow
+attributes:
+- name: duration
+  description: human-readable label such as "5 minutes", used for display and logging
+- name: minutes
+  description: numeric duration in whole minutes, used by the buffer and aggregator
+invariants:
+- The minutes value must be a whole number greater than or equal to 1.
+- Zero, negative, and fractional minute values are invalid.
+- The leading integer in the duration label must exactly equal the minutes value.
+operations:
+- name: new
+  description: Constructs a TimeWindow from the human-readable label and the numeric minute value. Returns an error if the minutes value is invalid or if the duration label does not match.
+scenarios:
+- name: valid five-minute window
+  given: duration "5 minutes" and minutes 5
+  when: new is called
+  then: a TimeWindow is returned
+- name: zero minutes is rejected
+  given: duration "0 minutes" and minutes 0
+  when: new is called
+  then: an error is returned
+- name: mismatched duration is rejected
+  given: duration "10 minutes" and minutes 5
+  when: new is called
+  then: an error is returned because the leading integer does not match
+synthesised_tests:
+- source: scenario
+  given: duration "5 minutes" and minutes 5
+  when: new is called
+  then: a TimeWindow is returned
+  citation: Scenarios / valid five-minute window
+- source: scenario
+  given: duration "0 minutes" and minutes 0
+  when: new is called
+  then: an error is returned
+  citation: Scenarios / zero minutes is rejected
+- source: scenario
+  given: duration "10 minutes" and minutes 5
+  when: new is called
+  then: an error is returned because the leading integer does not match
+  citation: Scenarios / mismatched duration is rejected
+- source: invariant
+  given: 'a Data: TimeWindow that might violate: The minutes value must be a whole number greater than or equal to 1.'
+  when: the invariant is tested
+  then: 'the invariant holds: The minutes value must be a whole number greater than or equal to 1.'
+  citation: Invariants / The minutes value must be a whole number greater than or equal to 1.
+- source: invariant
+  given: 'a Data: TimeWindow that might violate: Zero, negative, and fractional minute values are invalid.'
+  when: the invariant is tested
+  then: 'the invariant holds: Zero, negative, and fractional minute values are invalid.'
+  citation: Invariants / Zero, negative, and fractional minute values are invalid.
+- source: invariant
+  given: 'a Data: TimeWindow that might violate: The leading integer in the duration label must exactly equal the minutes value.'
+  when: the invariant is tested
+  then: 'the invariant holds: The leading integer in the duration label must exactly equal the minutes value.'
+  citation: Invariants / The leading integer in the duration label must exactly equal the minutes value.
+- source: invariant
+  given: duration "3 minutes" and minutes -5
+  when: new is called
+  then: an error is returned because negative minute values are invalid
+  citation: 'invariant: Zero, negative, and fractional minute values are invalid.'
+- source: invariant
+  given: duration "2.5 minutes" and minutes 2.5
+  when: new is called
+  then: an error is returned because fractional minute values are invalid
+  citation: 'invariant: Zero, negative, and fractional minute values are invalid.'
+- source: invariant
+  given: duration "1 minute" and minutes 1
+  when: new is called
+  then: a TimeWindow is returned because 1 is the minimum valid minute value
+  citation: 'invariant: The minutes value must be a whole number greater than or equal to 1.'
+- source: invariant
+  given: duration "100 minutes" and minutes 100
+  when: new is called
+  then: a TimeWindow is returned because the leading integer matches the minutes value
+  citation: 'invariant: The leading integer in the duration label must exactly equal the minutes value.'
+- source: invariant
+  given: duration "7 minutes" and minutes 8
+  when: new is called
+  then: an error is returned because the leading integer does not match the minutes value
+  citation: 'invariant: The leading integer in the duration label must exactly equal the minutes value.'
+vocabulary_bindings:
+- name: duration
+  resolution: attribute
+- name: minutes
+  resolution: attribute

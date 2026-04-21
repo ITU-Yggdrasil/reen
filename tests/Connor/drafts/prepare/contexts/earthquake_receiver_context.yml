@@ -1,0 +1,81 @@
+schema: reen.prepare/v2
+kind: context
+source:
+  path: contexts/earthquake_receiver_context.md
+  kind: context
+  title: 'Context: EarthquakeReceiverContext'
+export:
+  name: EarthquakeReceiverContext
+role_players:
+- name: event_sink
+  data_type: EventBufferContext
+  responsibility: receives each successfully mapped and deduplicated earthquake event as a PositionEvent
+role_methods:
+- role: event_sink
+  methods:
+  - name: receive_event
+    canonical_name: event_sink_receive_event
+    citation: accepts a single PositionEvent and stores it for later querying
+props:
+- name: api_url
+  description: URL of the USGS GeoJSON feed to poll
+- name: poll_interval
+  description: how frequently the feed is fetched; once per minute is a sensible default
+- name: min_magnitude
+  description: optional lower bound on magnitude; events below this threshold are silently dropped
+functionalities:
+- name: new
+  description: Stores the event sink, API URL, poll interval, and optional minimum magnitude. Initializes an empty set of seen event IDs for deduplication. Does not start polling during construction.
+- name: start
+  description: Begins a continuous background loop. Waits for the poll interval to elapse before each fetch cycle. Retains the same configuration and deduplication state across iterations.
+- name: fetch_events
+  description: Issues a GET request to the configured API URL. On a successful response, parses the GeoJSON feature collection and processes each feature. On failure, records a diagnostic error count and waits until the next interval.
+- name: on_event_received
+  description: Attempts to parse the raw feature as an EarthquakeEvent. If the event ID has already been seen, discards it silently. Records each newly seen event ID for future deduplication. If a minimum magnitude is configured and the event's magnitude is below the threshold, discards the event silently. Maps latitude and longitude from the epicentre coordinates. Uses the event timestamp as occurred_at. Sets source to "earthquake". Forms the label from magnitude and place when both are available, using whichever is present otherwise. Delivers the resulting PositionEvent to the event sink.
+scenarios:
+- name: duplicate event is deduplicated
+  given: an already-seen earthquake event arrives a second time
+  when: on_event_received runs
+  then: no PositionEvent is emitted and the duplicate is silently discarded
+- name: magnitude below threshold is dropped
+  given: a minimum magnitude of 3.0 and an event with magnitude 2.5
+  when: on_event_received runs
+  then: the event is discarded
+- name: successful poll with unique events
+  given: a successful feed response containing five unique events with valid coordinates
+  when: fetch_events runs
+  then: five PositionEvents with source "earthquake" can be delivered
+synthesised_tests:
+- source: scenario
+  given: an already-seen earthquake event arrives a second time
+  when: on_event_received runs
+  then: no PositionEvent is emitted and the duplicate is silently discarded
+  citation: Scenarios / duplicate event is deduplicated
+- source: scenario
+  given: a minimum magnitude of 3.0 and an event with magnitude 2.5
+  when: on_event_received runs
+  then: the event is discarded
+  citation: Scenarios / magnitude below threshold is dropped
+- source: scenario
+  given: a successful feed response containing five unique events with valid coordinates
+  when: fetch_events runs
+  then: five PositionEvents with source "earthquake" can be delivered
+  citation: Scenarios / successful poll with unique events
+vocabulary_bindings:
+- name: event_sink
+  resolution: role_player
+  resolved_to: EventBufferContext
+- name: EventBufferContext
+  resolution: data
+  resolved_to: EventBufferContext
+- name: api_url
+  resolution: prop
+- name: poll_interval
+  resolution: prop
+- name: min_magnitude
+  resolution: prop
+- name: event_sink_receive_event
+  resolution: role_method
+  resolved_to: event_sink.receive_event
+- name: event_sink
+  resolution: role

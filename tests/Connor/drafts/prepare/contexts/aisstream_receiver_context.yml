@@ -1,0 +1,125 @@
+schema: reen.prepare/v2
+kind: context
+source:
+  path: contexts/aisstream_receiver_context.md
+  kind: context
+  title: 'Context: AISStreamReceiverContext'
+export:
+  name: AISStreamReceiverContext
+role_players:
+- name: aisstream
+  data_type: AISStreamTransport
+  responsibility: owns the upstream communication and subscription lifecycle, delivering only subscribed messages
+- name: event_sink
+  data_type: EventBufferContext
+  responsibility: receives each successfully mapped vessel event as a PositionEvent
+role_methods:
+- role: aisstream
+  methods:
+  - name: start_position_subscription
+    canonical_name: aisstream_start_position_subscription
+    citation: starts or refreshes an AISStream subscription and delivers matching raw messages; the positive filter for this receiver is exactly PositionReport and StandardClassBPositionReport
+- role: event_sink
+  methods:
+  - name: receive_event
+    canonical_name: event_sink_receive_event
+    citation: accepts a single PositionEvent and stores it for later querying
+props:
+- name: bounding_box
+  description: optional geographic restriction for the AISStream subscription (min_latitude, max_latitude, min_longitude, max_longitude)
+functionalities:
+- name: new
+  description: Stores the aisstream collaborator, event sink, and optional bounding box. Does not start the upstream subscription during construction.
+- name: start
+  description: Asks the aisstream collaborator to start a position subscription using the configured bounding box and the fixed positive filter of PositionReport and StandardClassBPositionReport. Does not accept upstream message families outside those two types.
+- name: receive_aisstream_message
+  description: Attempts to parse the raw message as an AISStreamPositionMessage. If parsing fails, discards the message silently and records a parse-failure count for diagnostics. If latitude or longitude is absent, discards the record silently. If latitude is 91.0 or longitude is 181.0, discards the record silently because those are AIS invalid-coordinate sentinels. Maps latitude and longitude directly from the position message when valid. Uses the boundary record's observed_at as occurred_at. Sets source to "aisstream". Uses the vessel name as label when present and non-blank. Falls back to the MMSI rendered as text when the vessel name is absent or blank. Delivers the resulting PositionEvent to the event sink.
+scenarios:
+- name: valid message without vessel name
+  given: a subscribed position message with valid coordinates but no vessel name
+  when: receive_aisstream_message runs
+  then: a PositionEvent is delivered with source "aisstream" and the MMSI text as its label
+- name: invalid coordinate sentinel is discarded
+  given: a message with latitude 91.0
+  when: receive_aisstream_message runs
+  then: the record is discarded
+- name: subscription uses narrow filter
+  given: a configured receiver with a bounding box
+  when: start is called
+  then: the aisstream collaborator is asked to subscribe only to PositionReport and StandardClassBPositionReport for that region
+synthesised_tests:
+- source: scenario
+  given: a subscribed position message with valid coordinates but no vessel name
+  when: receive_aisstream_message runs
+  then: a PositionEvent is delivered with source "aisstream" and the MMSI text as its label
+  citation: Scenarios / valid message without vessel name
+- source: scenario
+  given: a message with latitude 91.0
+  when: receive_aisstream_message runs
+  then: the record is discarded
+  citation: Scenarios / invalid coordinate sentinel is discarded
+- source: scenario
+  given: a configured receiver with a bounding box
+  when: start is called
+  then: the aisstream collaborator is asked to subscribe only to PositionReport and StandardClassBPositionReport for that region
+  citation: Scenarios / subscription uses narrow filter
+- source: invariant
+  given: a new AISStreamReceiverContext constructed with aisstream collaborator, event sink, and bounding box
+  when: the context is created
+  then: the aisstream collaborator and event sink are stored, and no upstream subscription is started
+  citation: 'functionality `new`: Does not start the upstream subscription during construction'
+- source: invariant
+  given: a subscribed position message with valid coordinates and a non-blank vessel name
+  when: receive_aisstream_message runs
+  then: a PositionEvent is delivered with source "aisstream" and the vessel name as its label
+  citation: 'functionality `receive_aisstream_message`: Uses the vessel name as label when present and non-blank'
+- source: invariant
+  given: a subscribed position message with longitude 181.0
+  when: receive_aisstream_message runs
+  then: the record is discarded silently because 181.0 is an AIS invalid-coordinate sentinel
+  citation: 'functionality `receive_aisstream_message`: If longitude is 181.0, discards the record silently'
+- source: invariant
+  given: a subscribed position message with missing latitude
+  when: receive_aisstream_message runs
+  then: the record is discarded silently
+  citation: 'functionality `receive_aisstream_message`: If latitude or longitude is absent, discards the record silently'
+- source: invariant
+  given: a raw message that cannot be parsed as an AISStreamPositionMessage
+  when: receive_aisstream_message runs
+  then: the message is discarded silently and a parse-failure count is recorded for diagnostics
+  citation: 'functionality `receive_aisstream_message`: If parsing fails, discards the message silently and records a parse-failure count'
+- source: invariant
+  given: a subscribed position message with valid coordinates
+  when: receive_aisstream_message runs
+  then: the resulting PositionEvent uses the boundary record's observed_at as its occurred_at timestamp
+  citation: 'functionality `receive_aisstream_message`: Uses the boundary record''s observed_at as occurred_at'
+- source: invariant
+  given: a subscribed position message with valid latitude and longitude
+  when: receive_aisstream_message runs
+  then: latitude and longitude are mapped directly from the position message into the PositionEvent
+  citation: 'functionality `receive_aisstream_message`: Maps latitude and longitude directly from the position message when valid'
+vocabulary_bindings:
+- name: aisstream
+  resolution: role_player
+  resolved_to: AISStreamTransport
+- name: AISStreamTransport
+  resolution: data
+  resolved_to: AISStreamTransport
+- name: event_sink
+  resolution: role_player
+  resolved_to: EventBufferContext
+- name: EventBufferContext
+  resolution: data
+  resolved_to: EventBufferContext
+- name: bounding_box
+  resolution: prop
+- name: aisstream_start_position_subscription
+  resolution: role_method
+  resolved_to: aisstream.start_position_subscription
+- name: aisstream
+  resolution: role
+- name: event_sink_receive_event
+  resolution: role_method
+  resolved_to: event_sink.receive_event
+- name: event_sink
+  resolution: role

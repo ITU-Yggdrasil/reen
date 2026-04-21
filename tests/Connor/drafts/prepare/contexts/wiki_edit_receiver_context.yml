@@ -1,0 +1,96 @@
+schema: reen.prepare/v2
+kind: context
+source:
+  path: contexts/wiki_edit_receiver_context.md
+  kind: context
+  title: 'Context: WikiEditReceiverContext'
+export:
+  name: WikiEditReceiverContext
+role_players:
+- name: event_sink
+  data_type: EventBufferContext
+  responsibility: receives each edit that resolves to a geographic coordinate as a PositionEvent
+role_methods:
+- role: event_sink
+  methods:
+  - name: receive_event
+    canonical_name: event_sink_receive_event
+    citation: accepts a single PositionEvent and stores it for later querying
+props:
+- name: stream_url
+  description: URL of the Wikimedia RecentChange SSE endpoint
+- name: geodata_api_url
+  description: base URL of the MediaWiki API used to resolve article coordinates; a per-wiki URL is derived from this base and the target wiki
+- name: reconnect_delay
+  description: how long to wait before reconnecting after the stream drops
+- name: include_bot_edits
+  description: whether bot edits should emit PositionEvents; defaults to false
+functionalities:
+- name: new
+  description: Stores the event sink, stream URL, GeoData API URL, reconnect delay, and bot-edit inclusion rule. Initializes an empty coordinate cache. Does not open the stream connection during construction.
+- name: start
+  description: Opens the SSE connection to the configured stream URL. Begins reading events continuously in the background. Reconnects automatically after any disconnection. Retains the same coordinate cache and configuration across reconnects.
+- name: on_event_received
+  description: Parses the raw SSE message as a WikiEdit. Discards the event silently if the wiki is not a Wikipedia project (matching wikis ending in "wiki" other than "wikimedia"). Discards the event silently if the namespace is not 0 (the article namespace). Discards the event silently if bot-edit inclusion is disabled and the bot flag is set. For events that survive filtering, resolves geographic coordinates for the wiki and article title. If coordinates are returned, maps them to the PositionEvent latitude and longitude. Uses the edit timestamp as occurred_at. Sets source to "wiki". Sets label to the article title. Delivers the resulting PositionEvent to the event sink.
+- name: resolve_coordinates
+  description: Checks the coordinate cache for an entry matching the wiki and title. If a cached entry exists and has not expired, returns it without making an API call. Otherwise, issues a GET request to the GeoData API for the given wiki and title. If the API response includes coordinates, stores them in the cache and returns them. If the response indicates the article has no coordinates, stores a negative cache entry and returns absent. If the API call fails, returns absent without caching the failure so a later edit can retry. Cache entries expire after several hours.
+- name: on_stream_disconnected
+  description: Runs when the SSE connection drops or the server closes it. Waits for the configured reconnect delay. Reconnects by calling start again. Retains the existing event sink, coordinate cache, and configuration.
+scenarios:
+- name: geotagged article produces event
+  given: an edit to "Eiffel Tower" on "enwiki" and a successful coordinate lookup
+  when: on_event_received runs
+  then: a PositionEvent labelled "Eiffel Tower" is delivered at the resolved coordinates
+- name: cached coordinates avoid API call
+  given: the same article is edited twice in quick succession
+  when: resolve_coordinates runs for the second edit
+  then: the cached coordinates are returned and no GeoData API call is made
+- name: non-Wikipedia wiki is discarded
+  given: an edit on "wikimedia" (not a Wikipedia project)
+  when: on_event_received runs
+  then: the event is discarded
+- name: bot edit is discarded when excluded
+  given: an edit flagged as a bot edit and include_bot_edits is false
+  when: on_event_received runs
+  then: the event is discarded
+synthesised_tests:
+- source: scenario
+  given: an edit to "Eiffel Tower" on "enwiki" and a successful coordinate lookup
+  when: on_event_received runs
+  then: a PositionEvent labelled "Eiffel Tower" is delivered at the resolved coordinates
+  citation: Scenarios / geotagged article produces event
+- source: scenario
+  given: the same article is edited twice in quick succession
+  when: resolve_coordinates runs for the second edit
+  then: the cached coordinates are returned and no GeoData API call is made
+  citation: Scenarios / cached coordinates avoid API call
+- source: scenario
+  given: an edit on "wikimedia" (not a Wikipedia project)
+  when: on_event_received runs
+  then: the event is discarded
+  citation: Scenarios / non-Wikipedia wiki is discarded
+- source: scenario
+  given: an edit flagged as a bot edit and include_bot_edits is false
+  when: on_event_received runs
+  then: the event is discarded
+  citation: Scenarios / bot edit is discarded when excluded
+vocabulary_bindings:
+- name: event_sink
+  resolution: role_player
+  resolved_to: EventBufferContext
+- name: EventBufferContext
+  resolution: data
+  resolved_to: EventBufferContext
+- name: stream_url
+  resolution: prop
+- name: geodata_api_url
+  resolution: prop
+- name: reconnect_delay
+  resolution: prop
+- name: include_bot_edits
+  resolution: prop
+- name: event_sink_receive_event
+  resolution: role_method
+  resolved_to: event_sink.receive_event
+- name: event_sink
+  resolution: role

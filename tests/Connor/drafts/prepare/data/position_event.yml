@@ -1,0 +1,92 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/position_event.md
+  kind: data
+  title: 'Data: PositionEvent'
+export:
+  name: PositionEvent
+attributes:
+- name: latitude
+  description: north-south coordinate in decimal degrees, used for grid cell lookup
+- name: longitude
+  description: east-west coordinate in decimal degrees, used for grid cell lookup
+- name: occurred_at
+  description: UTC timestamp for when the event occurred, used for buffer staleness checks
+- name: source
+  description: canonical event source identifier; allowed values are "lightning", "flight", "earthquake", "aisstream", "adsb", "wiki"
+- name: label
+  description: optional human-readable tag for diagnostic and display purposes
+invariants:
+- Every PositionEvent includes a source.
+- The source is part of the event's data model, not an inferred property.
+- Filtering by source uses the source field, not the label.
+operations:
+- name: new
+  description: Constructs a PositionEvent from latitude, longitude, occurred_at, source, and label.
+scenarios:
+- name: create a lightning event
+  given: latitude 51.5, longitude -0.1, a UTC timestamp, source "lightning", and label "lightning"
+  when: new is called
+  then: a PositionEvent is returned with those values
+- name: source identifies the upstream feed
+  given: two events, one with source "flight" and one with source "earthquake"
+  when: events are filtered by source "flight"
+  then: only the flight event is included
+synthesised_tests:
+- source: scenario
+  given: latitude 51.5, longitude -0.1, a UTC timestamp, source "lightning", and label "lightning"
+  when: new is called
+  then: a PositionEvent is returned with those values
+  citation: Scenarios / create a lightning event
+- source: scenario
+  given: two events, one with source "flight" and one with source "earthquake"
+  when: events are filtered by source "flight"
+  then: only the flight event is included
+  citation: Scenarios / source identifies the upstream feed
+- source: invariant
+  given: 'a Data: PositionEvent that might violate: Every PositionEvent includes a source.'
+  when: the invariant is tested
+  then: 'the invariant holds: Every PositionEvent includes a source.'
+  citation: Invariants / Every PositionEvent includes a source.
+- source: invariant
+  given: 'a Data: PositionEvent that might violate: The source is part of the event''s data model, not an inferred property.'
+  when: the invariant is tested
+  then: 'the invariant holds: The source is part of the event''s data model, not an inferred property.'
+  citation: Invariants / The source is part of the event's data model, not an inferred property.
+- source: invariant
+  given: 'a Data: PositionEvent that might violate: Filtering by source uses the source field, not the label.'
+  when: the invariant is tested
+  then: 'the invariant holds: Filtering by source uses the source field, not the label.'
+  citation: Invariants / Filtering by source uses the source field, not the label.
+- source: invariant
+  given: latitude 40.7, longitude -74.0, a UTC timestamp, source "seismic", and label "earthquake"
+  when: new is called
+  then: a PositionEvent is returned with source field set to "seismic" (not "earthquake")
+  citation: 'operation `new`: Constructs a PositionEvent from latitude, longitude, occurred_at, source, and label'
+- source: invariant
+  given: a PositionEvent constructed with source "weather" and label "storm"
+  when: the source field is accessed directly
+  then: it returns "weather", confirming source is stored as explicit data, not derived from label
+  citation: 'invariant: The source is part of the event''s data model, not an inferred property'
+- source: invariant
+  given: three events with sources "lightning", "lightning", and "wind", but the first two have different labels "strike" and "flash"
+  when: events are filtered by source "lightning"
+  then: both events with source "lightning" are included, regardless of their labels
+  citation: 'invariant: Filtering by source uses the source field, not the label'
+- source: invariant
+  given: a PositionEvent attempted to be constructed without a source parameter
+  when: new is called
+  then: construction fails or source is required, enforcing the invariant
+  citation: 'invariant: Every PositionEvent includes a source'
+vocabulary_bindings:
+- name: latitude
+  resolution: attribute
+- name: longitude
+  resolution: attribute
+- name: occurred_at
+  resolution: attribute
+- name: source
+  resolution: attribute
+- name: label
+  resolution: attribute

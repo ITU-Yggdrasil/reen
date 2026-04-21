@@ -1,0 +1,68 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/flight_position.md
+  kind: data
+  title: 'Data: FlightPosition'
+export:
+  name: FlightPosition
+attributes:
+- name: callsign
+  description: optional identifying callsign of the aircraft, used as the event label when present
+- name: latitude
+  description: optional last known latitude in decimal degrees; if absent, no PositionEvent is produced
+- name: longitude
+  description: optional last known longitude in decimal degrees; if absent, no PositionEvent is produced
+- name: altitude
+  description: optional altitude in metres above sea level, informational only
+- name: timestamp
+  description: UTC observation timestamp, converted from the OpenSky wire format by the receiver
+operations:
+- name: new
+  description: Constructs a FlightPosition from the supplied field values.
+scenarios:
+- name: create a flight record with position
+  given: callsign "SAS1234", latitude 55.6, longitude 12.6, altitude 10000, and a UTC timestamp
+  when: new is called
+  then: a FlightPosition is returned with those values
+- name: missing coordinates
+  given: callsign "SAS1234", latitude absent, longitude absent
+  when: the receiver processes this record
+  then: no PositionEvent is produced
+synthesised_tests:
+- source: scenario
+  given: callsign "SAS1234", latitude 55.6, longitude 12.6, altitude 10000, and a UTC timestamp
+  when: new is called
+  then: a FlightPosition is returned with those values
+  citation: Scenarios / create a flight record with position
+- source: scenario
+  given: callsign "SAS1234", latitude absent, longitude absent
+  when: the receiver processes this record
+  then: no PositionEvent is produced
+  citation: Scenarios / missing coordinates
+- source: invariant
+  given: callsign "BA747", latitude 51.5, longitude -0.1, altitude 35000, and a UTC timestamp
+  when: new is called with all required fields populated
+  then: a FlightPosition is constructed and returned with callsign "BA747", latitude 51.5, longitude -0.1, and altitude 35000
+  citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
+- source: invariant
+  given: callsign "UA456", latitude 40.6, longitude -73.8, altitude 28000, timestamp, and additional metadata fields
+  when: new is called with all field values including optional metadata
+  then: a FlightPosition is returned with all supplied field values correctly assigned
+  citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
+- source: invariant
+  given: callsign "LH123", latitude null, longitude -8.5, altitude 15000, and a UTC timestamp
+  when: new is called with latitude absent but other positional fields present
+  then: a FlightPosition is constructed, though it may lack complete positional integrity
+  citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
+vocabulary_bindings:
+- name: callsign
+  resolution: attribute
+- name: latitude
+  resolution: attribute
+- name: longitude
+  resolution: attribute
+- name: altitude
+  resolution: attribute
+- name: timestamp
+  resolution: attribute

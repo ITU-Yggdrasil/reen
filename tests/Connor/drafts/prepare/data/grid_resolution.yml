@@ -1,0 +1,90 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/grid_resolution.md
+  kind: data
+  title: 'Data: GridResolution'
+export:
+  name: GridResolution
+attributes:
+- name: degrees_latitude
+  description: height of each cell in decimal degrees of latitude; default is ten degrees
+- name: degrees_longitude
+  description: width of each cell in decimal degrees of longitude; default is ten degrees
+invariants:
+- Both values must be positive.
+- 180 divided by degrees_latitude must be a whole number (the latitude extent divides evenly).
+- 360 divided by degrees_longitude must be a whole number (the longitude extent divides evenly).
+operations:
+- name: new
+  description: Constructs a GridResolution from the provided axis sizes.
+scenarios:
+- name: default resolution
+  given: degrees_latitude is 10 and degrees_longitude is 10
+  when: new is called
+  then: a GridResolution is returned that produces 648 cells globally
+- name: uneven division is rejected
+  given: degrees_latitude is 7
+  when: new is called
+  then: construction fails because 180 divided by 7 is not a whole number
+synthesised_tests:
+- source: scenario
+  given: degrees_latitude is 10 and degrees_longitude is 10
+  when: new is called
+  then: a GridResolution is returned that produces 648 cells globally
+  citation: Scenarios / default resolution
+- source: scenario
+  given: degrees_latitude is 7
+  when: new is called
+  then: construction fails because 180 divided by 7 is not a whole number
+  citation: Scenarios / uneven division is rejected
+- source: invariant
+  given: 'a Data: GridResolution that might violate: Both values must be positive.'
+  when: the invariant is tested
+  then: 'the invariant holds: Both values must be positive.'
+  citation: Invariants / Both values must be positive.
+- source: invariant
+  given: 'a Data: GridResolution that might violate: 180 divided by degrees_latitude must be a whole number (the latitude extent divides evenly).'
+  when: the invariant is tested
+  then: 'the invariant holds: 180 divided by degrees_latitude must be a whole number (the latitude extent divides evenly).'
+  citation: Invariants / 180 divided by degrees_latitude must be a whole number (the latitude extent divides evenly).
+- source: invariant
+  given: 'a Data: GridResolution that might violate: 360 divided by degrees_longitude must be a whole number (the longitude extent divides evenly).'
+  when: the invariant is tested
+  then: 'the invariant holds: 360 divided by degrees_longitude must be a whole number (the longitude extent divides evenly).'
+  citation: Invariants / 360 divided by degrees_longitude must be a whole number (the longitude extent divides evenly).
+- source: invariant
+  given: degrees_latitude is 0 and degrees_longitude is 10
+  when: new is called
+  then: construction fails because degrees_latitude is not positive
+  citation: 'invariant: Both values must be positive.'
+- source: invariant
+  given: degrees_latitude is 10 and degrees_longitude is -5
+  when: new is called
+  then: construction fails because degrees_longitude is not positive
+  citation: 'invariant: Both values must be positive.'
+- source: invariant
+  given: degrees_latitude is 36 and degrees_longitude is 45
+  when: new is called
+  then: a GridResolution is returned because 180/36=5 and 360/45=8 are whole numbers
+  citation: 'invariant: 180 divided by degrees_latitude must be a whole number (the latitude extent divides evenly).'
+- source: invariant
+  given: degrees_latitude is 15 and degrees_longitude is 360
+  when: new is called
+  then: construction fails because 360 divided by 360 is valid but 180 divided by 15 is not a whole number
+  citation: 'invariant: 180 divided by degrees_latitude must be a whole number (the latitude extent divides evenly).'
+- source: invariant
+  given: degrees_latitude is 20 and degrees_longitude is 7
+  when: new is called
+  then: construction fails because 360 divided by 7 is not a whole number
+  citation: 'invariant: 360 divided by degrees_longitude must be a whole number (the longitude extent divides evenly).'
+- source: invariant
+  given: degrees_latitude is 6 and degrees_longitude is 12
+  when: new is called
+  then: a GridResolution is returned because 180/6=30 and 360/12=30 are whole numbers
+  citation: 'operation `new`: Constructs a GridResolution from the provided axis sizes.'
+vocabulary_bindings:
+- name: degrees_latitude
+  resolution: attribute
+- name: degrees_longitude
+  resolution: attribute

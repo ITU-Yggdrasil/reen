@@ -1,0 +1,111 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/event_rate.md
+  kind: data
+  title: 'Data: EventRate'
+export:
+  name: EventRate
+attributes:
+- name: cell
+  description: the GeographicCell the rate applies to
+- name: events_per_minute
+  description: average events per minute for the cell, as a non-negative finite decimal number
+- name: window
+  description: the TimeWindow the rate was derived from
+invariants:
+- events_per_minute must be finite and non-negative.
+- Negative values, not-a-number, and infinity are invalid.
+- The rate is computed as event count divided by window minutes using decimal division.
+- Because the window is always at least one minute, division by zero does not occur.
+- EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.
+operations:
+- name: new
+  description: Constructs an EventRate from the cell, events_per_minute, and window. Returns an error if the value is not finite or is negative.
+scenarios:
+- name: rate from count and window
+  given: an EventCount of 10 over a five-minute window
+  when: the rate is derived
+  then: events_per_minute is 2.0
+- name: zero-count cell
+  given: an EventCount of 0
+  when: the rate is derived
+  then: events_per_minute is 0.0
+synthesised_tests:
+- source: scenario
+  given: an EventCount of 10 over a five-minute window
+  when: the rate is derived
+  then: events_per_minute is 2.0
+  citation: Scenarios / rate from count and window
+- source: scenario
+  given: an EventCount of 0
+  when: the rate is derived
+  then: events_per_minute is 0.0
+  citation: Scenarios / zero-count cell
+- source: invariant
+  given: 'a Data: EventRate that might violate: events_per_minute must be finite and non-negative.'
+  when: the invariant is tested
+  then: 'the invariant holds: events_per_minute must be finite and non-negative.'
+  citation: Invariants / events_per_minute must be finite and non-negative.
+- source: invariant
+  given: 'a Data: EventRate that might violate: Negative values, not-a-number, and infinity are invalid.'
+  when: the invariant is tested
+  then: 'the invariant holds: Negative values, not-a-number, and infinity are invalid.'
+  citation: Invariants / Negative values, not-a-number, and infinity are invalid.
+- source: invariant
+  given: 'a Data: EventRate that might violate: The rate is computed as event count divided by window minutes using decimal division.'
+  when: the invariant is tested
+  then: 'the invariant holds: The rate is computed as event count divided by window minutes using decimal division.'
+  citation: Invariants / The rate is computed as event count divided by window minutes using decimal division.
+- source: invariant
+  given: 'a Data: EventRate that might violate: Because the window is always at least one minute, division by zero does not occur.'
+  when: the invariant is tested
+  then: 'the invariant holds: Because the window is always at least one minute, division by zero does not occur.'
+  citation: Invariants / Because the window is always at least one minute, division by zero does not occur.
+- source: invariant
+  given: 'a Data: EventRate that might violate: EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.'
+  when: the invariant is tested
+  then: 'the invariant holds: EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.'
+  citation: Invariants / EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.
+- source: invariant
+  given: an EventCount of 100 over a 1-minute window
+  when: the rate is derived
+  then: events_per_minute is 100.0
+  citation: 'invariant: The rate is computed as event count divided by window minutes using decimal division.'
+- source: invariant
+  given: an EventCount of 1 over a 3-minute window
+  when: the rate is derived
+  then: events_per_minute is approximately 0.333... (decimal division result)
+  citation: 'invariant: The rate is computed as event count divided by window minutes using decimal division.'
+- source: invariant
+  given: a negative events_per_minute value
+  when: constructing a new EventRate with the operation new
+  then: an error is returned
+  citation: 'operation new: Returns an error if the value is not finite or is negative.'
+- source: invariant
+  given: a not-a-number events_per_minute value
+  when: constructing a new EventRate with the operation new
+  then: an error is returned
+  citation: 'operation new: Returns an error if the value is not finite or is negative.'
+- source: invariant
+  given: an infinity events_per_minute value
+  when: constructing a new EventRate with the operation new
+  then: an error is returned
+  citation: 'operation new: Returns an error if the value is not finite or is negative.'
+- source: invariant
+  given: a valid EventRate with events_per_minute of 42.123456789
+  when: the EventRate is serialized
+  then: the full decimal precision is preserved without rounding by EventRate
+  citation: 'invariant: EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.'
+- source: invariant
+  given: an EventCount of 7 over a 2-minute window
+  when: the rate is derived
+  then: events_per_minute is 3.5
+  citation: 'invariant: The rate is computed as event count divided by window minutes using decimal division.'
+vocabulary_bindings:
+- name: cell
+  resolution: attribute
+- name: events_per_minute
+  resolution: attribute
+- name: window
+  resolution: attribute

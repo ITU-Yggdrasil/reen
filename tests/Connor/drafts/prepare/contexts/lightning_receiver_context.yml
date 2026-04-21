@@ -1,0 +1,119 @@
+schema: reen.prepare/v2
+kind: context
+source:
+  path: contexts/lightning_receiver_context.md
+  kind: context
+  title: 'Context: LightningReceiverContext'
+export:
+  name: LightningReceiverContext
+role_players:
+- name: event_sink
+  data_type: EventBufferContext
+  responsibility: receives each successfully mapped lightning event as a PositionEvent
+role_methods:
+- role: event_sink
+  methods:
+  - name: receive_event
+    canonical_name: event_sink_receive_event
+    citation: accepts a single PositionEvent and stores it for later querying
+props:
+- name: websocket_url
+  description: URL of the Blitzortung websocket endpoint, connected when the receiver starts
+- name: reconnect_delay
+  description: how long to wait before reconnecting after a dropped connection
+functionalities:
+- name: new
+  description: Stores the event sink, websocket URL, and reconnect delay. Does not open the websocket connection during construction.
+- name: start
+  description: Opens the websocket connection to the configured URL and begins reading messages continuously in the background. After a successful handshake, sends the required Blitzortung subscription frame. Continues processing messages until the connection is lost.
+- name: on_message_received
+  description: Normalizes the incoming payload before parsing. If the payload is already valid JSON, uses it unchanged. Otherwise, if the payload matches the Blitzortung obfuscated websocket format, decodes it into JSON first. Attempts to parse the normalized JSON as a LightningStrike. If parsing succeeds, maps latitude and longitude directly from the strike, uses the strike timestamp as occurred_at, sets source to "lightning" and label to "lightning", and delivers the resulting PositionEvent to the event sink. If parsing fails, discards the message, increments a parse-failure count, and logs the error together with the payload.
+- name: on_connection_lost
+  description: Runs when the websocket connection drops. Waits for the configured reconnect delay, then allows the outer receive loop to establish a fresh connection. Retains the same event sink and configuration across reconnects.
+- name: on_connection_established
+  description: Runs immediately after the websocket handshake completes successfully. Serves as the successful-connection hook for the receiver lifecycle. Does not reset retained configuration or event sink state.
+scenarios:
+- name: obfuscated payload produces event
+  given: an obfuscated Blitzortung payload containing a valid strike
+  when: on_message_received runs
+  then: the payload is decoded, parsed, and a PositionEvent with source "lightning" is delivered
+- name: reconnect after disconnect
+  given: the websocket connection drops
+  when: on_connection_lost runs
+  then: a reconnect attempt is made after the reconnect delay has elapsed
+- name: unparseable message is discarded
+  given: a payload that cannot be parsed as a LightningStrike
+  when: on_message_received runs
+  then: the message is discarded and a parse-failure count is incremented
+synthesised_tests:
+- source: scenario
+  given: an obfuscated Blitzortung payload containing a valid strike
+  when: on_message_received runs
+  then: the payload is decoded, parsed, and a PositionEvent with source "lightning" is delivered
+  citation: Scenarios / obfuscated payload produces event
+- source: scenario
+  given: the websocket connection drops
+  when: on_connection_lost runs
+  then: a reconnect attempt is made after the reconnect delay has elapsed
+  citation: Scenarios / reconnect after disconnect
+- source: scenario
+  given: a payload that cannot be parsed as a LightningStrike
+  when: on_message_received runs
+  then: the message is discarded and a parse-failure count is incremented
+  citation: Scenarios / unparseable message is discarded
+- source: invariant
+  given: a LightningReceiverContext is constructed with an event sink, websocket URL, and reconnect delay
+  when: the constructor completes
+  then: the websocket connection is not opened and no messages are read
+  citation: 'functionality `new`: Does not open the websocket connection during construction'
+- source: invariant
+  given: a LightningReceiverContext with stored configuration
+  when: start is called
+  then: the websocket connection opens to the configured URL and the receiver begins reading messages continuously in the background
+  citation: 'functionality `start`: Opens the websocket connection to the configured URL and begins reading messages continuously in the background'
+- source: invariant
+  given: a websocket connection has been established to Blitzortung
+  when: the handshake completes successfully
+  then: the required Blitzortung subscription frame is sent
+  citation: 'functionality `start`: After a successful handshake, sends the required Blitzortung subscription frame'
+- source: invariant
+  given: a valid JSON payload representing a LightningStrike
+  when: on_message_received normalizes and parses it
+  then: the payload is used unchanged and mapped to a PositionEvent with occurred_at set to the strike timestamp
+  citation: 'functionality `on_message_received`: If the payload is already valid JSON, uses it unchanged'
+- source: invariant
+  given: an incoming message has been parsed as a valid LightningStrike
+  when: on_message_received delivers the event
+  then: the resulting PositionEvent has source set to 'lightning' and label set to 'lightning'
+  citation: 'functionality `on_message_received`: sets source to ''lightning'' and label to ''lightning'''
+- source: invariant
+  given: a message payload that fails to parse as a LightningStrike
+  when: on_message_received attempts to parse it
+  then: the error is logged together with the payload
+  citation: 'functionality `on_message_received`: logs the error together with the payload'
+- source: invariant
+  given: the websocket connection has dropped and reconnect_delay has elapsed
+  when: on_connection_lost completes
+  then: the outer receive loop is allowed to establish a fresh connection while retaining the same event sink and configuration
+  citation: 'functionality `on_connection_lost`: Retains the same event sink and configuration across reconnects'
+- source: invariant
+  given: a websocket handshake has completed successfully
+  when: on_connection_established runs
+  then: no retained configuration or event sink state is reset
+  citation: 'functionality `on_connection_established`: Does not reset retained configuration or event sink state'
+vocabulary_bindings:
+- name: event_sink
+  resolution: role_player
+  resolved_to: EventBufferContext
+- name: EventBufferContext
+  resolution: data
+  resolved_to: EventBufferContext
+- name: websocket_url
+  resolution: prop
+- name: reconnect_delay
+  resolution: prop
+- name: event_sink_receive_event
+  resolution: role_method
+  resolved_to: event_sink.receive_event
+- name: event_sink
+  resolution: role

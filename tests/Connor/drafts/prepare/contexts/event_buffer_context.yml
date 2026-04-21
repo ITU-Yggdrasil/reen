@@ -1,0 +1,145 @@
+schema: reen.prepare/v2
+kind: context
+source:
+  path: contexts/event_buffer_context.md
+  kind: context
+  title: 'Context: EventBufferContext'
+export:
+  name: EventBufferContext
+role_players:
+- name: clock
+  data_type: Clock
+  responsibility: supplies the current moment in time as a UTC timestamp for staleness checks
+role_methods:
+- role: clock
+  methods:
+  - name: now
+    canonical_name: clock_now
+    citation: returns the current moment in time as a UTC timestamp
+props:
+- name: window
+  description: the TimeWindow defining how long an event is retained; future-dated events are still retained
+functionalities:
+- name: new
+  description: Constructs the buffer with the provided clock and TimeWindow. Starts with an empty internal event collection.
+- name: window
+  description: Returns the TimeWindow currently configured on the buffer. Does not modify the event collection.
+- name: receive_event
+  description: Accepts an incoming PositionEvent and adds it to the buffer. Does not evict stale events on every insert; eviction is driven by queries or explicit eviction.
+- name: current_events
+  description: Returns all PositionEvents whose occurred_at is within the configured TimeWindow relative to the current moment. Computes the staleness boundary as the current time minus the window's duration in minutes. Does not impose an upper freshness bound at the current time — future-dated events are included as long as they are not stale. Evicts stale events before returning the result.
+- name: current_events_for_source
+  description: Performs the same stale-event eviction as current_events. If the source filter is absent, returns the same result as current_events. If the source is "lightning", "flight", "earthquake", "aisstream", "adsb", or "wiki", returns only events whose source matches that value. Filtering is based on the event source, not the label.
+- name: evict_stale
+  description: Removes all events whose occurred_at is older than the current time minus the window's duration in minutes. Does not remove future-dated events. After eviction, the buffer contains only events that would currently be returned by current_events.
+scenarios:
+- name: buffer starts empty
+  given: a clock and a five-minute window
+  when: new is called
+  then: the buffer starts empty
+- name: recent event is included
+  given: an event from five seconds ago and a five-minute window
+  when: current_events is called
+  then: the event is included
+- name: stale event is evicted
+  given: the buffer contains one stale event and one fresh event
+  when: evict_stale runs
+  then: only the fresh event remains
+- name: source filter returns only matching events
+  given: the buffer contains lightning, flight, earthquake, AISStream, ADS-B, and wiki events
+  when: current_events_for_source is called with source "lightning"
+  then: only lightning events are returned
+- name: receive adds event to buffer
+  given: a fresh PositionEvent
+  when: receive_event is called
+  then: the event becomes part of the buffer
+synthesised_tests:
+- source: scenario
+  given: a clock and a five-minute window
+  when: new is called
+  then: the buffer starts empty
+  citation: Scenarios / buffer starts empty
+- source: scenario
+  given: an event from five seconds ago and a five-minute window
+  when: current_events is called
+  then: the event is included
+  citation: Scenarios / recent event is included
+- source: scenario
+  given: the buffer contains one stale event and one fresh event
+  when: evict_stale runs
+  then: only the fresh event remains
+  citation: Scenarios / stale event is evicted
+- source: scenario
+  given: the buffer contains lightning, flight, earthquake, AISStream, ADS-B, and wiki events
+  when: current_events_for_source is called with source "lightning"
+  then: only lightning events are returned
+  citation: Scenarios / source filter returns only matching events
+- source: scenario
+  given: a fresh PositionEvent
+  when: receive_event is called
+  then: the event becomes part of the buffer
+  citation: Scenarios / receive adds event to buffer
+- source: invariant
+  given: a clock and a TimeWindow of ten minutes
+  when: window is called
+  then: the configured TimeWindow of ten minutes is returned
+  citation: 'functionality `window`: Returns the TimeWindow currently configured on the buffer.'
+- source: invariant
+  given: the buffer contains an event from eleven minutes ago and a five-minute window
+  when: current_events is called
+  then: the stale event is evicted and not included in the returned collection
+  citation: 'functionality `current_events`: Computes the staleness boundary as the current time minus the window''s duration in minutes. Evicts stale events before returning the result.'
+- source: invariant
+  given: the buffer contains an event dated two minutes in the future and a five-minute window
+  when: current_events is called
+  then: the future-dated event is included in the result
+  citation: 'functionality `current_events`: Does not impose an upper freshness bound at the current time — future-dated events are included as long as they are not stale.'
+- source: invariant
+  given: the buffer contains lightning, flight, and earthquake events
+  when: current_events_for_source is called with no source filter
+  then: all three events are returned
+  citation: 'functionality `current_events_for_source`: If the source filter is absent, returns the same result as current_events.'
+- source: invariant
+  given: the buffer contains flight and aisstream events, with a five-minute window
+  when: current_events_for_source is called with source 'aisstream'
+  then: only aisstream events are returned
+  citation: 'functionality `current_events_for_source`: If the source is ''lightning'', ''flight'', ''earthquake'', ''aisstream'', ''adsb'', or ''wiki'', returns only events whose source matches that value.'
+- source: invariant
+  given: the buffer contains a stale adsb event and a fresh wiki event with a five-minute window
+  when: current_events_for_source is called with source 'wiki'
+  then: the stale adsb event is evicted and only the fresh wiki event is returned
+  citation: 'functionality `current_events_for_source`: Performs the same stale-event eviction as current_events.'
+- source: invariant
+  given: the buffer contains multiple events where one is from six minutes ago and another is from four minutes ago, with a five-minute window
+  when: evict_stale is called
+  then: only the event from four minutes ago remains in the buffer
+  citation: 'functionality `evict_stale`: Removes all events whose occurred_at is older than the current time minus the window''s duration in minutes.'
+- source: invariant
+  given: the buffer contains an event dated five minutes in the future and a five-minute window
+  when: evict_stale is called
+  then: the future-dated event is not removed
+  citation: 'functionality `evict_stale`: Does not remove future-dated events.'
+- source: invariant
+  given: the buffer contains a stale event and a fresh event, with a five-minute window
+  when: evict_stale is called
+  then: the buffer state matches what current_events would return
+  citation: 'functionality `evict_stale`: After eviction, the buffer contains only events that would currently be returned by current_events.'
+- source: invariant
+  given: multiple fresh events are in the buffer
+  when: receive_event is called with a new fresh event
+  then: the new event is added without triggering automatic eviction of existing events
+  citation: 'functionality `receive_event`: Does not evict stale events on every insert; eviction is driven by queries or explicit eviction.'
+vocabulary_bindings:
+- name: clock
+  resolution: role_player
+  resolved_to: Clock
+- name: Clock
+  resolution: data
+  resolved_to: Clock
+- name: window
+  resolution: prop
+- name: clock_now
+  resolution: role_method
+  resolved_to: clock.now
+- name: clock
+  resolution: role

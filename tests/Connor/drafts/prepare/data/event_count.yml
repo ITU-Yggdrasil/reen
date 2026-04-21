@@ -1,0 +1,79 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/event_count.md
+  kind: data
+  title: 'Data: EventCount'
+export:
+  name: EventCount
+attributes:
+- name: cell
+  description: the GeographicCell the count applies to
+- name: count
+  description: the number of matching PositionEvents in the cell, as a non-negative whole number
+- name: window
+  description: the TimeWindow the count was computed over
+invariants:
+- The count must be greater than or equal to zero.
+- Fractional counts are invalid.
+- Each matching PositionEvent contributes exactly one to the total for its cell.
+operations:
+- name: new
+  description: Constructs an EventCount from the cell, count, and window.
+scenarios:
+- name: cell with three events
+  given: a GeographicCell, a count of 3, and a five-minute TimeWindow
+  when: new is called
+  then: an EventCount with count 3 is returned
+- name: empty cell has zero count
+  given: a GeographicCell with no matching events
+  when: the count is computed
+  then: the count is zero
+synthesised_tests:
+- source: scenario
+  given: a GeographicCell, a count of 3, and a five-minute TimeWindow
+  when: new is called
+  then: an EventCount with count 3 is returned
+  citation: Scenarios / cell with three events
+- source: scenario
+  given: a GeographicCell with no matching events
+  when: the count is computed
+  then: the count is zero
+  citation: Scenarios / empty cell has zero count
+- source: invariant
+  given: 'a Data: EventCount that might violate: The count must be greater than or equal to zero.'
+  when: the invariant is tested
+  then: 'the invariant holds: The count must be greater than or equal to zero.'
+  citation: Invariants / The count must be greater than or equal to zero.
+- source: invariant
+  given: 'a Data: EventCount that might violate: Fractional counts are invalid.'
+  when: the invariant is tested
+  then: 'the invariant holds: Fractional counts are invalid.'
+  citation: Invariants / Fractional counts are invalid.
+- source: invariant
+  given: 'a Data: EventCount that might violate: Each matching PositionEvent contributes exactly one to the total for its cell.'
+  when: the invariant is tested
+  then: 'the invariant holds: Each matching PositionEvent contributes exactly one to the total for its cell.'
+  citation: Invariants / Each matching PositionEvent contributes exactly one to the total for its cell.
+- source: invariant
+  given: a GeographicCell and a TimeWindow with five matching PositionEvents
+  when: an EventCount is constructed from the cell and window
+  then: the EventCount has a count of exactly five
+  citation: 'invariant: Each matching PositionEvent contributes exactly one to the total for its cell.'
+- source: invariant
+  given: a GeographicCell, a count of zero, and a TimeWindow
+  when: new is called
+  then: an EventCount with count zero is returned and the non-negative invariant holds
+  citation: 'invariant: The count must be greater than or equal to zero.'
+- source: invariant
+  given: a GeographicCell and a TimeWindow with two matching PositionEvents and three non-matching PositionEvents
+  when: an EventCount is constructed from the cell and window
+  then: the EventCount has a count of exactly two
+  citation: 'invariant: Each matching PositionEvent contributes exactly one to the total for its cell.'
+vocabulary_bindings:
+- name: cell
+  resolution: attribute
+- name: count
+  resolution: attribute
+- name: window
+  resolution: attribute

@@ -1,0 +1,89 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/geographic_cell.md
+  kind: data
+  title: 'Data: GeographicCell'
+export:
+  name: GeographicCell
+attributes:
+- name: min_latitude
+  description: southern edge of the cell in decimal degrees
+- name: max_latitude
+  description: northern edge of the cell in decimal degrees
+- name: min_longitude
+  description: western edge of the cell in decimal degrees
+- name: max_longitude
+  description: eastern edge of the cell in decimal degrees
+invariants:
+- min_latitude is less than max_latitude.
+- min_longitude is less than max_longitude.
+- Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude.
+operations:
+- name: new
+  description: Constructs a GeographicCell from the four boundary values.
+scenarios:
+- name: cell covering London
+  given: min_latitude 50, max_latitude 60, min_longitude -10, max_longitude 0
+  when: new is called
+  then: a GeographicCell covering that region is returned
+synthesised_tests:
+- source: scenario
+  given: min_latitude 50, max_latitude 60, min_longitude -10, max_longitude 0
+  when: new is called
+  then: a GeographicCell covering that region is returned
+  citation: Scenarios / cell covering London
+- source: invariant
+  given: 'a Data: GeographicCell that might violate: min_latitude is less than max_latitude.'
+  when: the invariant is tested
+  then: 'the invariant holds: min_latitude is less than max_latitude.'
+  citation: Invariants / min_latitude is less than max_latitude.
+- source: invariant
+  given: 'a Data: GeographicCell that might violate: min_longitude is less than max_longitude.'
+  when: the invariant is tested
+  then: 'the invariant holds: min_longitude is less than max_longitude.'
+  citation: Invariants / min_longitude is less than max_longitude.
+- source: invariant
+  given: 'a Data: GeographicCell that might violate: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude.'
+  when: the invariant is tested
+  then: 'the invariant holds: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude.'
+  citation: Invariants / Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude.
+- source: invariant
+  given: min_latitude equals max_latitude at 45 degrees
+  when: new is called with min_latitude 45, max_latitude 45, min_longitude -10, max_longitude 0
+  then: construction fails or the invariant min_latitude is less than max_latitude is violated
+  citation: 'invariant: min_latitude is less than max_latitude'
+- source: invariant
+  given: min_longitude equals max_longitude at -90 degrees
+  when: new is called with min_latitude 50, max_latitude 60, min_longitude -90, max_longitude -90
+  then: construction fails or the invariant min_longitude is less than max_longitude is violated
+  citation: 'invariant: min_longitude is less than max_longitude'
+- source: invariant
+  given: min_latitude is greater than max_latitude (50 > 40)
+  when: new is called with min_latitude 50, max_latitude 40, min_longitude -10, max_longitude 0
+  then: construction fails or the invariant min_latitude is less than max_latitude is violated
+  citation: 'invariant: min_latitude is less than max_latitude'
+- source: invariant
+  given: min_longitude is greater than max_longitude (10 > -10)
+  when: new is called with min_latitude 50, max_latitude 60, min_longitude 10, max_longitude -10
+  then: construction fails or the invariant min_longitude is less than max_longitude is violated
+  citation: 'invariant: min_longitude is less than max_longitude'
+- source: invariant
+  given: 'boundaries at global lattice origins: min_latitude -90, max_latitude -85, min_longitude -180, max_longitude -175'
+  when: new is called with these aligned lattice boundaries
+  then: a GeographicCell is constructed and all boundaries are aligned to the fixed global lattice
+  citation: 'invariant: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude; operation new'
+- source: invariant
+  given: 'boundaries at non-lattice-aligned values: min_latitude 45.5, max_latitude 50.7, min_longitude -20.3, max_longitude -10.8'
+  when: new is called with these non-aligned values
+  then: construction fails or the invariant Cell boundaries align to the fixed global lattice is violated
+  citation: 'invariant: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude'
+vocabulary_bindings:
+- name: min_latitude
+  resolution: attribute
+- name: max_latitude
+  resolution: attribute
+- name: min_longitude
+  resolution: attribute
+- name: max_longitude
+  resolution: attribute

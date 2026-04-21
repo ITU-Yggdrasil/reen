@@ -1,0 +1,125 @@
+schema: reen.prepare/v2
+kind: context
+source:
+  path: contexts/metrics_context.md
+  kind: context
+  title: 'Context: MetricsContext'
+export:
+  name: MetricsContext
+role_players:
+- name: aggregator
+  data_type: AggregationContext
+  responsibility: supplies on-demand aggregation results as EventRate values for every cell
+- name: buffer
+  data_type: EventBufferContext
+  responsibility: supplies current live PositionEvents, optionally filtered by source
+role_methods:
+- role: aggregator
+  methods:
+  - name: produce_rates
+    canonical_name: aggregator_produce_rates
+    citation: returns one EventRate per cell, covering all cells in the grid
+- role: buffer
+  methods:
+  - name: current_events_for_source
+    canonical_name: buffer_current_events_for_source
+    citation: returns the current live PositionEvents, optionally filtered by source
+functionalities:
+- name: new
+  description: Stores the provided aggregator and buffer. Does not bind a socket or start an HTTP server at construction time.
+- name: handle_metrics_request
+  description: Asks the aggregator for the current rates. Encodes each EventRate as a Prometheus gauge metric named "geospatial_event_rate". Each metric line carries labels min_lat, max_lat, min_lon, and max_lon. Uses events_per_minute as the gauge value. Includes zero-valued cells in the output. Returns the full metric text with a 200 status and the Prometheus content type.
+- name: handle_query_request
+  description: Asks the buffer for the current events, optionally filtered by source. Treats absent source as all sources. Accepts "flight", "lightning", "earthquake", "aisstream", "adsb", and "wiki" as explicit filters. Treats any other source value the same as absent. Returns a JSON array of objects, each containing latitude, longitude, occurred_at (as RFC 3339 text), source, and label (as absent when not present). Returns the JSON payload with a 200 status and an appropriate content type.
+scenarios:
+- name: prometheus scrape with non-zero rate
+  given: the aggregator returns a non-zero rate for one cell
+  when: handle_metrics_request is called
+  then: the response body contains a geospatial_event_rate line with the correct labels and value
+- name: query filtered by source
+  given: a request arrives with source "lightning"
+  when: handle_query_request is called
+  then: only lightning events are included in the returned JSON array
+- name: query without source filter
+  given: a request arrives without a source parameter
+  when: handle_query_request is called
+  then: events from all sources are included
+synthesised_tests:
+- source: scenario
+  given: the aggregator returns a non-zero rate for one cell
+  when: handle_metrics_request is called
+  then: the response body contains a geospatial_event_rate line with the correct labels and value
+  citation: Scenarios / prometheus scrape with non-zero rate
+- source: scenario
+  given: a request arrives with source "lightning"
+  when: handle_query_request is called
+  then: only lightning events are included in the returned JSON array
+  citation: Scenarios / query filtered by source
+- source: scenario
+  given: a request arrives without a source parameter
+  when: handle_query_request is called
+  then: events from all sources are included
+  citation: Scenarios / query without source filter
+- source: invariant
+  given: MetricsContext is constructed with an aggregator and buffer
+  when: the constructor completes
+  then: the aggregator and buffer are stored without binding a socket or starting an HTTP server
+  citation: 'functionality `new`: Stores the provided aggregator and buffer. Does not bind a socket or start an HTTP server at construction time.'
+- source: invariant
+  given: the aggregator returns rates for multiple cells with varying values
+  when: handle_metrics_request is called
+  then: the response includes geospatial_event_rate lines for all cells with correct min_lat, max_lat, min_lon, max_lon labels and events_per_minute values
+  citation: 'functionality `handle_metrics_request`: Asks the aggregator for the current rates. Encodes each EventRate as a Prometheus gauge metric named ''geospatial_event_rate''. Each metric line carries labels min_lat, max_lat, min_lon, and max_lon. Uses events_per_minute as the gauge value.'
+- source: invariant
+  given: the aggregator returns rates including zero-valued cells
+  when: handle_metrics_request is called
+  then: the response includes geospatial_event_rate lines for zero-valued cells
+  citation: 'functionality `handle_metrics_request`: Includes zero-valued cells in the output.'
+- source: invariant
+  given: handle_metrics_request is called
+  when: the response is generated
+  then: the response has a 200 status code and Content-Type of Prometheus metrics format
+  citation: 'functionality `handle_metrics_request`: Returns the full metric text with a 200 status and the Prometheus content type.'
+- source: invariant
+  given: the buffer contains events from multiple sources including flight, lightning, earthquake, aisstream, adsb, and wiki
+  when: handle_query_request is called with source 'flight'
+  then: only flight events are included in the returned JSON array
+  citation: 'functionality `handle_query_request`: Asks the buffer for the current events, optionally filtered by source. Accepts ''flight'', ''lightning'', ''earthquake'', ''aisstream'', ''adsb'', and ''wiki'' as explicit filters.'
+- source: invariant
+  given: the buffer contains events with and without labels
+  when: handle_query_request is called
+  then: each returned JSON object contains latitude, longitude, occurred_at as RFC 3339 text, source, and label as absent when not present
+  citation: 'functionality `handle_query_request`: Returns a JSON array of objects, each containing latitude, longitude, occurred_at (as RFC 3339 text), source, and label (as absent when not present).'
+- source: invariant
+  given: a request arrives with an unrecognized source value not in the accepted list
+  when: handle_query_request is called
+  then: the request is treated as absent source and events from all sources are returned
+  citation: 'functionality `handle_query_request`: Treats any other source value the same as absent.'
+- source: invariant
+  given: handle_query_request is called with any valid source filter or no source
+  when: the response is generated
+  then: the response has a 200 status code and appropriate JSON content type
+  citation: 'functionality `handle_query_request`: Returns the JSON payload with a 200 status and an appropriate content type.'
+vocabulary_bindings:
+- name: aggregator
+  resolution: role_player
+  resolved_to: AggregationContext
+- name: AggregationContext
+  resolution: data
+  resolved_to: AggregationContext
+- name: buffer
+  resolution: role_player
+  resolved_to: EventBufferContext
+- name: EventBufferContext
+  resolution: data
+  resolved_to: EventBufferContext
+- name: aggregator_produce_rates
+  resolution: role_method
+  resolved_to: aggregator.produce_rates
+- name: aggregator
+  resolution: role
+- name: buffer_current_events_for_source
+  resolution: role_method
+  resolved_to: buffer.current_events_for_source
+- name: buffer
+  resolution: role

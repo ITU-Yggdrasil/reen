@@ -1,0 +1,76 @@
+schema: reen.prepare/v2
+kind: data
+source:
+  path: data/aircraft_state.md
+  kind: data
+  title: 'Data: AircraftState'
+export:
+  name: AircraftState
+attributes:
+- name: icao
+  description: ICAO transponder address expressed as hexadecimal text, used as fallback label when callsign is absent
+- name: callsign
+  description: optional flight identifier broadcast by the aircraft, preferred label when present
+- name: latitude
+  description: optional latitude in decimal degrees; if absent, no PositionEvent is produced
+- name: longitude
+  description: optional longitude in decimal degrees; if absent, no PositionEvent is produced
+- name: altitude
+  description: altitude in feet or the special value "ground", informational only
+- name: squawk
+  description: optional four-digit octal squawk code, informational only
+- name: timestamp
+  description: UTC timestamp for the observed position, converted from wire format by the receiver
+operations:
+- name: new
+  description: Constructs an AircraftState from normalized boundary values.
+scenarios:
+- name: aircraft with callsign
+  given: icao "A1B2C3", callsign "UAL123", latitude 40.6, longitude -73.8, altitude 35000, and a UTC timestamp
+  when: new is called
+  then: an AircraftState is returned; the receiver will use "UAL123" as the event label
+- name: aircraft without callsign
+  given: icao "A1B2C3", callsign absent, latitude 40.6, longitude -73.8
+  when: the receiver maps this record
+  then: the ICAO hex code "A1B2C3" is used as the event label
+synthesised_tests:
+- source: scenario
+  given: icao "A1B2C3", callsign "UAL123", latitude 40.6, longitude -73.8, altitude 35000, and a UTC timestamp
+  when: new is called
+  then: an AircraftState is returned; the receiver will use "UAL123" as the event label
+  citation: Scenarios / aircraft with callsign
+- source: scenario
+  given: icao "A1B2C3", callsign absent, latitude 40.6, longitude -73.8
+  when: the receiver maps this record
+  then: the ICAO hex code "A1B2C3" is used as the event label
+  citation: Scenarios / aircraft without callsign
+- source: invariant
+  given: icao "ABCDEF", callsign "AAL456", latitude -33.95, longitude 151.18, altitude 0, and a UTC timestamp
+  when: new is called with boundary values including minimum altitude and southern hemisphere coordinates
+  then: an AircraftState is returned with normalized values; latitude -33.95 and longitude 151.18 are preserved
+  citation: operation `new` constructs AircraftState from normalized boundary values
+- source: invariant
+  given: icao "123456", callsign "SWR789", latitude 90.0, longitude 180.0, altitude 43000, and a UTC timestamp
+  when: new is called with extreme boundary values (pole and antimeridian)
+  then: an AircraftState is returned with latitude 90.0 and longitude 180.0 normalized and preserved
+  citation: operation `new` constructs AircraftState from normalized boundary values
+- source: invariant
+  given: icao "FEDCBA", callsign "DAL999", latitude 0.0, longitude 0.0, altitude 15000, and a UTC timestamp
+  when: new is called with equatorial prime meridian coordinates
+  then: an AircraftState is returned; the receiver will use "DAL999" as the event label; latitude 0.0 and longitude 0.0 are normalized and preserved
+  citation: operation `new` constructs AircraftState from normalized boundary values
+vocabulary_bindings:
+- name: icao
+  resolution: attribute
+- name: callsign
+  resolution: attribute
+- name: latitude
+  resolution: attribute
+- name: longitude
+  resolution: attribute
+- name: altitude
+  resolution: attribute
+- name: squawk
+  resolution: attribute
+- name: timestamp
+  resolution: attribute
