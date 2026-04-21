@@ -1,23 +1,26 @@
-# LightningStrike
+# Data: LightningStrike
 
-## Description
+## Purpose
 
-LightningStrike is the raw record as received from the Blitzortung websocket before any
-mapping has taken place. It belongs only at the boundary of the LightningReceiverContext
-and must not flow further into the system.
+LightningStrike is the raw record received from the Blitzortung websocket before any mapping has taken place. It belongs only at the boundary of the LightningReceiver context and must not flow further into the system. Once the receiver produces a PositionEvent from it, the LightningStrike is discarded.
 
-The LightningReceiverContext is solely responsible for reading this record and producing
-a PositionEvent from it. Once that mapping is done, the LightningStrike is discarded.
+## Attributes
 
-## Fields
+- latitude: geographic latitude of the detected strike in decimal degrees
+- longitude: geographic longitude of the detected strike in decimal degrees
+- timestamp: UTC timestamp of the strike, parsed from the raw wire format by the receiver
+- station_count: optional number of contributing detection stations, diagnostic only
 
-| Field | Meaning | Accessible | Notes |
-|---|---|---|---|
-| latitude | Geographic latitude of the detected strike | X | Used for PositionEvent latitude |
-| longitude | Geographic longitude of the detected strike | X | Used for PositionEvent longitude |
-| timestamp | UTC timestamp of the strike | X | Receiver parses from raw wire format |
-| station_count | Optional number of contributing stations |  | Diagnostic only |
+## Invariants
 
-## Functionalities
+## Operations
 
-- **new(latitude, longitude, timestamp, station_count)** Constructs a LightningStrike from the provided field values.
+### new
+Constructs a LightningStrike from the provided field values.
+
+## Scenarios
+
+### create a strike record
+Given: latitude 48.8, longitude 2.3, a UTC timestamp, and station_count of 5
+When: new is called
+Then: a LightningStrike is returned with those values

@@ -1,24 +1,25 @@
-# EarthquakeEvent
+# Data: EarthquakeEvent
 
-## Description
+## Purpose
 
-EarthquakeEvent is the raw record as received from the USGS Earthquake Hazards GeoJSON
-feed before any mapping has taken place. It belongs only at the boundary of the
-EarthquakeReceiverContext and must not flow further into the system.
+EarthquakeEvent is the raw record received from the USGS Earthquake Hazards GeoJSON feed before any mapping has taken place. It belongs only at the boundary of the EarthquakeReceiver context and must not flow further into the system. Each record represents one seismic event as detected and catalogued by the USGS network.
 
-The EarthquakeReceiverContext is solely responsible for reading this record and producing
-a PositionEvent from it. Once that mapping is done, the EarthquakeEvent is discarded.
+## Attributes
 
-Each record represents one seismic event as detected and catalogued by the USGS network.
-The feed is updated approximately once per minute and covers events worldwide.
+- latitude: epicentre latitude in decimal degrees, extracted from the GeoJSON coordinates (note: GeoJSON coordinate order is longitude, latitude, depth)
+- longitude: epicentre longitude in decimal degrees, extracted from the GeoJSON coordinates
+- depth: depth in kilometres below the surface, informational only
+- timestamp: UTC origin time of the earthquake, converted from milliseconds since epoch by the receiver
+- magnitude: optional preferred magnitude, used when forming the event label
+- place: optional human-readable location description, used when forming the event label
 
-## Fields
+## Invariants
 
-| Field | Meaning | Accessible | Notes |
-|---|---|---|---|
-| latitude | Epicentre latitude in decimal degrees | X | Extracted from the second GeoJSON coordinate value |
-| longitude | Epicentre longitude in decimal degrees | X | Extracted from the first GeoJSON coordinate value |
-| depth | Depth in kilometres below the surface |  | Informational only |
-| timestamp | UTC origin time of the earthquake | X | Receiver converts from milliseconds since epoch |
-| magnitude | Optional preferred magnitude | X | Used when forming the event label |
-| place | Optional human-readable location description | X | Used when forming the event label |
+## Operations
+
+## Scenarios
+
+### earthquake with magnitude and place
+Given: latitude 35.6, longitude -117.5, depth 10.0, a UTC timestamp, magnitude 4.2, and place "20km NW of Ridgecrest, CA"
+When: the receiver maps this record
+Then: the label is formed from magnitude and place

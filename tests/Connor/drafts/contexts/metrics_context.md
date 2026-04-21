@@ -1,90 +1,48 @@
-# MetricsContext
+# Context: MetricsContext
 
 ## Purpose
 
-MetricsContext owns the HTTP server and is responsible for serving two kinds of responses:
-
-1. A Prometheus scrape endpoint that renders the current aggregation data as gauge metrics.
-2. A JSON query endpoint that returns the current live events in a form suitable for
-   the map-based test visualisation.
-
-On each Prometheus scrape the context asks the aggregator for current rates, then encodes
-them in the Prometheus text exposition format with geographic labels. The JSON endpoint
-reads the current buffered events and serialises them as dashboard event objects.
-
-MetricsContext has no knowledge of events, geography, or feeds — it only knows how to
-ask its collaborators for a result and serialise it into the appropriate wire format.
+Metrics owns the HTTP server and is responsible for serving two kinds of responses: a Prometheus scrape endpoint that renders the current aggregation data as gauge metrics, and a JSON query endpoint that returns the current live events for the map-based visualisation. Metrics has no knowledge of events, geography, or feeds — it only knows how to ask its collaborators for a result and serialise it into the appropriate wire format.
 
 ## Role Players
 
-| Role player | Why involved | Expected behaviour |
-|---|---|---|
-| aggregator | Supplies on-demand aggregation results | Returns EventRate values for every cell |
-| buffer | Supplies current live PositionEvents | Returns current events, optionally filtered by source |
+- aggregator: AggregationContext — supplies on-demand aggregation results as EventRate values for every cell
+- buffer: EventBufferContext — supplies current live PositionEvents, optionally filtered by source
+
+## Props
 
 ## Role Methods
 
 ### aggregator
-
-- **produce_rates** Returns one EventRate per cell, covering all cells in the grid.
+- produce_rates: returns one EventRate per cell, covering all cells in the grid
 
 ### buffer
-
-- **current_events_for_source(source)** Returns the current live PositionEvents, optionally filtered by source.
-
-## Props
+- current_events_for_source: returns the current live PositionEvents, optionally filtered by source
 
 ## Functionalities
 
 ### new
-
-| Started by | Uses | Result |
-|---|---|---|
-| application startup | aggregator, buffer | metrics context is constructed |
-
-Rules:
-- Stores the provided aggregator and buffer.
-- Does not bind a socket or start an HTTP server at construction time.
-
-| Given | When | Then |
-|---|---|---|
-| an aggregator and buffer are available | new is called | a MetricsContext is returned |
+Stores the provided aggregator and buffer. Does not bind a socket or start an HTTP server at construction time.
 
 ### handle_metrics_request
-
-| Started by | Uses | Result |
-|---|---|---|
-| HTTP GET to metrics_path | aggregator | Prometheus response is returned |
-
-Rules:
-- Calls `aggregator.produce_rates`.
-- Encodes each EventRate as a Prometheus gauge metric named `geospatial_event_rate`.
-- Each metric line carries labels `min_lat`, `max_lat`, `min_lon`, and `max_lon`.
-- Uses `events_per_minute` as the gauge value.
-- Includes zero-valued cells in the output.
-- Returns the full metric text with a 200 status and the Prometheus content type.
-
-| Given | When | Then |
-|---|---|---|
-| the aggregator returns a non-zero rate for one cell | handle_metrics_request runs | the response body contains a `geospatial_event_rate` line with the correct labels and value |
+Asks the aggregator for the current rates. Encodes each EventRate as a Prometheus gauge metric named "geospatial_event_rate". Each metric line carries labels min_lat, max_lat, min_lon, and max_lon. Uses events_per_minute as the gauge value. Includes zero-valued cells in the output. Returns the full metric text with a 200 status and the Prometheus content type.
 
 ### handle_query_request
+Asks the buffer for the current events, optionally filtered by source. Treats absent source as all sources. Accepts "flight", "lightning", "earthquake", "aisstream", "adsb", and "wiki" as explicit filters. Treats any other source value the same as absent. Returns a JSON array of objects, each containing latitude, longitude, occurred_at (as RFC 3339 text), source, and label (as absent when not present). Returns the JSON payload with a 200 status and an appropriate content type.
 
-| Started by | Uses | Result |
-|---|---|---|
-| HTTP GET to query_path | buffer, optional source filter | JSON event array is returned |
+## Scenarios
 
-Rules:
-- Calls `buffer.current_events_for_source(source)`.
-- Treats absent source as all sources.
-- Accepts `flight`, `lightning`, `earthquake`, `aisstream`, `adsb`, and `wiki` as explicit filters.
-- Treats any other source query value the same as absent.
-- Returns a JSON array of objects.
-- Each object contains `latitude`, `longitude`, `occurred_at`, `source`, and `label`.
-- Encodes `occurred_at` as RFC 3339 text.
-- Encodes `label` as `null` when absent.
-- Returns the JSON payload with a 200 status and an appropriate content type.
+### prometheus scrape with non-zero rate
+Given: the aggregator returns a non-zero rate for one cell
+When: handle_metrics_request is called
+Then: the response body contains a geospatial_event_rate line with the correct labels and value
 
-| Given | When | Then |
-|---|---|---|
-| a GET request arrives at query_path with `source=lightning` | handle_query_request runs | only lightning events are included in the returned JSON array |
+### query filtered by source
+Given: a request arrives with source "lightning"
+When: handle_query_request is called
+Then: only lightning events are included in the returned JSON array
+
+### query without source filter
+Given: a request arrives without a source parameter
+When: handle_query_request is called
+Then: events from all sources are included

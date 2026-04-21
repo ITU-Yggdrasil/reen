@@ -1,35 +1,36 @@
-# EventRate
+# Data: EventRate
 
-## Description
+## Purpose
 
-EventRate expresses how frequently PositionEvents are arriving within a GeographicCell,
-stated as a number of events per minute.
+EventRate expresses how frequently PositionEvents are arriving within a GeographicCell, stated as a number of events per minute. It is derived from an EventCount by dividing the count by the TimeWindow length in minutes. A cell with no recent events has a rate of zero.
 
-It is derived from an EventCount: the count is divided by the length of the time window
-expressed in minutes. Like EventCount, it is a snapshot value computed on demand.
+## Attributes
 
-A cell with no recent events has a rate of zero. Rate is never negative.
+- cell: the GeographicCell the rate applies to
+- events_per_minute: average events per minute for the cell, as a non-negative finite decimal number
+- window: the TimeWindow the rate was derived from
 
-## Fields
+## Invariants
 
-| Field | Meaning | Accessible | Notes |
-|---|---|---|---|
-| cell | Geographic region the rate applies to | X | Used in metrics labels and JSON output |
-| events_per_minute | Average events per minute for the cell | X | Stored as `f64` without presentation rounding |
-| window | Time window the rate was derived from | X | Carried alongside the computed rate |
+- events_per_minute must be finite and non-negative.
+- Negative values, not-a-number, and infinity are invalid.
+- The rate is computed as event count divided by window minutes using decimal division.
+- Because the window is always at least one minute, division by zero does not occur.
+- EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.
 
-## Functionalities
+## Operations
 
-- **new(cell, events_per_minute, window)** Constructs an EventRate from the supplied field values.
+### new
+Constructs an EventRate from the cell, events_per_minute, and window. Returns an error if the value is not finite or is negative.
 
-## Rules
+## Scenarios
 
-- `events_per_minute` is an `f64`.
-- The value is computed as `event_count / window_minutes` using floating-point division.
-- `window_minutes` must be greater than or equal to `1`; therefore division by zero does
-  not occur in a valid EventRate.
-- A zero-count cell has `events_per_minute = 0.0`.
-- `events_per_minute` must be finite.
-- Negative values, `NaN`, and positive or negative infinity are invalid and must not be constructed.
-- EventRate defines no presentation rounding. Any rounding or string formatting for
-  wire output is the responsibility of the serialising context, not EventRate itself.
+### rate from count and window
+Given: an EventCount of 10 over a five-minute window
+When: the rate is derived
+Then: events_per_minute is 2.0
+
+### zero-count cell
+Given: an EventCount of 0
+When: the rate is derived
+Then: events_per_minute is 0.0

@@ -1,25 +1,30 @@
-# GeographicCell
+# Data: GeographicCell
 
-## Description
+## Purpose
 
-GeographicCell is the unit of geographic aggregation.
-It represents a rectangular region of the Earth's surface defined by a pair of latitude bounds
-and a pair of longitude bounds.
+GeographicCell is the unit of geographic aggregation. It represents a rectangular region of the Earth's surface defined by latitude and longitude bounds. The grid divides the entire world into non-overlapping cells whose size is determined by the configured GridResolution. Every point on Earth belongs to exactly one cell.
 
-The grid divides the entire world into a fixed number of non-overlapping cells whose size is
-determined by the configured GridResolution. Every point on Earth belongs to exactly one cell.
-Cells are identified by their south-west corner, which serves as their canonical coordinate
-within the grid.
+## Attributes
 
-## Fields
+- min_latitude: southern edge of the cell in decimal degrees
+- max_latitude: northern edge of the cell in decimal degrees
+- min_longitude: western edge of the cell in decimal degrees
+- max_longitude: eastern edge of the cell in decimal degrees
 
-| Field | Meaning | Accessible | Notes |
-|---|---|---|---|
-| min_latitude | Southern edge of the cell | X | Used in metrics labels and grid calculations |
-| max_latitude | Northern edge of the cell | X | Used in metrics labels and grid calculations |
-| min_longitude | Western edge of the cell | X | Used in metrics labels and grid calculations |
-| max_longitude | Eastern edge of the cell | X | Used in metrics labels and grid calculations |
+## Invariants
 
-## Functionalities
+- min_latitude is less than max_latitude.
+- min_longitude is less than max_longitude.
+- Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude.
 
-- **new(min_latitude, max_latitude, min_longitude, max_longitude)** Constructs a GeographicCell from the four boundary values.
+## Operations
+
+### new
+Constructs a GeographicCell from the four boundary values.
+
+## Scenarios
+
+### cell covering London
+Given: min_latitude 50, max_latitude 60, min_longitude -10, max_longitude 0
+When: new is called
+Then: a GeographicCell covering that region is returned

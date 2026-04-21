@@ -1,0 +1,26 @@
+schema: "reen.vocabulary/v1"
+
+# Data types auto-discovered from drafts/data/ file stems, but contexts
+# reference PascalCase export names. List them explicitly here.
+data:
+  - PositionEvent
+  - GeographicCell
+  - GridResolution
+  - TimeWindow
+  - EventCount
+  - EventRate
+  - LightningStrike
+  - FlightPosition
+  - EarthquakeEvent
+  - AircraftState
+  - AISStreamPositionMessage
+  - WikiEdit
+  - GridContext
+  - Clock
+  - AISStreamTransport
+
+# Context types used as role players by other contexts
+  - EventBufferContext
+  - AggregationContext
+
+projections: []

@@ -1,41 +1,38 @@
-# AISStreamPositionMessage
+# Data: AISStreamPositionMessage
 
-## Description
+## Purpose
 
-AISStreamPositionMessage is the boundary-only record delivered from AISStream into
-AISStreamReceiverContext after subscription filtering has already been applied.
+AISStreamPositionMessage is the boundary-only record delivered from the AISStream transport into the AISStreamReceiver context after subscription filtering has already been applied. It represents exactly one upstream message from the included message families: PositionReport and StandardClassBPositionReport. Once the receiver produces a PositionEvent from it, the record is discarded.
 
-It represents exactly one upstream AISStream message from the included message families:
-- `PositionReport`
-- `StandardClassBPositionReport`
+## Attributes
 
-This record must not flow further into the system. AISStreamReceiverContext is solely
-responsible for reading it and producing a PositionEvent. Once that mapping is done, the
-AISStreamPositionMessage is discarded.
+- message_type: the AISStream message family that produced this record; allowed values are "PositionReport" and "StandardClassBPositionReport"
+- mmsi: vessel MMSI taken from the upstream user identifier, used as fallback label
+- vessel_name: optional vessel name from metadata, preferred label when present
+- latitude: optional normalized latitude in decimal degrees; the invalid sentinel value 91.0 indicates absence
+- longitude: optional normalized longitude in decimal degrees; the invalid sentinel value 181.0 indicates absence
+- observed_at: full UTC instant for the message observation, used as the PositionEvent timestamp
+- metadata_json: optional serialized metadata payload stored as text because the upstream shape is not stable
 
-The AISStream message envelope contains an untyped `MetaData` object and a typed message
-body selected by `MessageType`. The receiver only relies on the normalized fields defined
-here so that downstream code does not depend on provider-specific JSON layout details.
+## Invariants
 
-## Fields
-
-| Field | Meaning | Accessible | Notes |
-|---|---|---|---|
-| message_type | AISStream message family that produced this record | X | Allowed values are `PositionReport` and `StandardClassBPositionReport` |
-| mmsi | Vessel MMSI taken from upstream `UserID` | X | Used as fallback label |
-| vessel_name | Optional vessel name from metadata | X | Preferred label when present |
-| latitude | Optional normalized latitude in decimal degrees | X | Invalid default is `91.0` |
-| longitude | Optional normalized longitude in decimal degrees | X | Invalid default is `181.0` |
-| observed_at | Full UTC instant for the message observation | X | Used as PositionEvent timestamp |
-| metadata_json | Optional serialized `MetaData` payload | X | Stored as text because upstream shape is not stable |
-
-## Construction Rules
-
-- Only `PositionReport` and `StandardClassBPositionReport` may be represented by this type.
+- Only PositionReport and StandardClassBPositionReport message families may be represented.
 - The record is normalized into one consistent shape before the receiver reads it.
-- `observed_at` is a full UTC timestamp.
-- Any provider metadata preserved on the record is serialized as text.
+- observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).
 
-## Functionalities
+## Operations
 
-- **new(message_type, mmsi, vessel_name, latitude, longitude, observed_at, metadata_json)** Constructs an AISStreamPositionMessage from normalized boundary values.
+### new
+Constructs an AISStreamPositionMessage from normalized boundary values.
+
+## Scenarios
+
+### valid position message
+Given: message_type "PositionReport", mmsi "123456789", vessel_name "CARGO SHIP", latitude 51.5, longitude -0.1, observed_at as a UTC timestamp
+When: new is called
+Then: an AISStreamPositionMessage is returned
+
+### invalid latitude sentinel
+Given: latitude 91.0
+When: the receiver processes this record
+Then: the record is discarded because 91.0 is the AIS invalid-coordinate sentinel
