@@ -134,7 +134,12 @@ fn generate_context(a: &PreparedArtifact) -> String {
     // Struct
     writeln!(out, "pub struct {} {{", name).unwrap();
     for rp in &a.role_players {
-        writeln!(out, "    {}: {},", to_snake_case(&rp.name), &rp.data_type).unwrap();
+        let rust_type = sanitize_rust_type(&rp.data_type);
+        if rust_type == "()" {
+            writeln!(out, "    {}: (), // {}", to_snake_case(&rp.name), rp.data_type).unwrap();
+        } else {
+            writeln!(out, "    {}: {},", to_snake_case(&rp.name), rust_type).unwrap();
+        }
     }
     for prop in &a.props {
         // Props are scalar config — we don't know the type, so use a placeholder
@@ -146,10 +151,10 @@ fn generate_context(a: &PreparedArtifact) -> String {
     // Impl
     writeln!(out, "impl {} {{", name).unwrap();
 
-    // Public methods = functionalities
+    // Public methods = functionalities (default to &self; implementer upgrades to &mut self)
     for func in &a.functionalities {
         writeln!(out, "    /// {}", func.description.lines().next().unwrap_or("")).unwrap();
-        writeln!(out, "    pub fn {}(&mut self) {{", to_snake_case(&func.name)).unwrap();
+        writeln!(out, "    pub fn {}(&self) {{", to_snake_case(&func.name)).unwrap();
         writeln!(out, "        todo!()").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -240,8 +245,24 @@ fn role_player_type<'a>(artifact: &'a PreparedArtifact, role_name: &str) -> &'a 
         .role_players
         .iter()
         .find(|rp| rp.name == role_name)
-        .map(|rp| rp.data_type.as_str())
+        .map(|rp| sanitize_rust_type(&rp.data_type))
         .unwrap_or("()")
+}
+
+/// Return the data_type as-is if it looks like a valid Rust type identifier
+/// (PascalCase name or path like `rand::rngs::ThreadRng`), otherwise return `()`.
+fn sanitize_rust_type(data_type: &str) -> &str {
+    let trimmed = data_type.trim();
+    if trimmed.is_empty() {
+        return "()";
+    }
+    // A valid Rust type is either a simple identifier (ascii-alphanumeric + _),
+    // a path with `::`, or a generic with `<>`. If it contains spaces and
+    // isn't a recognised Rust construct, it's prose.
+    if trimmed.contains(' ') {
+        return "()";
+    }
+    trimmed
 }
 
 pub fn to_snake_case(s: &str) -> String {
@@ -356,5 +377,66 @@ mod tests {
         assert_eq!(to_snake_case("MoneyTransfer"), "money_transfer");
         assert_eq!(to_snake_case("Account"), "account");
         assert_eq!(to_snake_case("current_balance"), "current_balance");
+    }
+
+    #[test]
+    fn functionality_receiver_defaults_to_immutable() {
+        let code = generate_rust(&test_context());
+        // Functionalities should use &self by default, not &mut self
+        assert!(
+            code.contains("pub fn transfer(&self)"),
+            "functionality should default to &self, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn prose_data_type_falls_back_to_unit() {
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Context,
+            "contexts/game.md".into(),
+            "Game".into(),
+            "Game".into(),
+        );
+        a.role_players = vec![
+            RolePlayerSpec {
+                name: "rng".into(),
+                data_type: "a random number generator".into(),
+                responsibility: "picks random positions".into(),
+            },
+        ];
+        a.role_methods = vec![RoleMethodGroupSpec {
+            role: "rng".into(),
+            methods: vec![RoleMethodSpec {
+                name: "pick".into(),
+                canonical_name: "rng_pick".into(),
+                signature_hint: None,
+                citation: "picks a position".into(),
+            }],
+        }];
+        a.functionalities = vec![FunctionalitySpec {
+            name: "play".into(),
+            description: "Play the game.".into(),
+            role_method_refs: vec![],
+        }];
+
+        let code = generate_rust(&a);
+        // Prose data_type with spaces must not appear as a raw Rust type in
+        // struct fields or method parameters. It may appear in comments.
+        assert!(
+            !code.contains("rng: a random number generator"),
+            "prose data_type should not appear as Rust struct field type, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("rng: ()"),
+            "prose data_type should fall back to () for struct field, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("rng_: &()"),
+            "prose data_type should fall back to &() for role method param, got:\n{}",
+            code
+        );
     }
 }

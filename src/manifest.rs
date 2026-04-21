@@ -77,35 +77,41 @@ impl DciVocabulary {
         self.entries.get(name).cloned()
     }
 
-    /// Auto-discover data and projection names from the drafts directory.
+    /// Auto-discover data, projection, and context names from the drafts directory.
+    ///
+    /// For each `.md` file, reads the first line to extract the export name from
+    /// `# Kind: Name` headers. Falls back to the file stem when no header is found.
+    /// This ensures PascalCase export names (e.g. `StringRenderer` from
+    /// `string_renderer.md`) are in the vocabulary, not just file stems.
     fn discover_from_drafts(&mut self, drafts_dir: &Path) -> Result<()> {
-        let data_dir = drafts_dir.join("data");
-        if data_dir.is_dir() {
-            for entry in fs::read_dir(&data_dir)
-                .with_context(|| format!("read_dir {}", data_dir.display()))?
-            {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        self.entries.insert(stem.to_string(), "data".to_string());
-                    }
-                }
-            }
-        }
+        let dirs: &[(&str, &str)] = &[
+            ("data", "data"),
+            ("projections", "projection"),
+            ("contexts", "context"),
+        ];
 
-        let proj_dir = drafts_dir.join("projections");
-        if proj_dir.is_dir() {
-            for entry in fs::read_dir(&proj_dir)
-                .with_context(|| format!("read_dir {}", proj_dir.display()))?
+        for &(subdir, kind) in dirs {
+            let dir = drafts_dir.join(subdir);
+            if !dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&dir)
+                .with_context(|| format!("read_dir {}", dir.display()))?
             {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        self.entries
-                            .insert(stem.to_string(), "projection".to_string());
-                    }
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let name = extract_draft_export_name(&path)
+                    .unwrap_or_else(|| {
+                        path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    });
+                if !name.is_empty() {
+                    self.entries.insert(name, kind.to_string());
                 }
             }
         }
@@ -606,6 +612,28 @@ fn normalize_nonempty(label: &str, value: &str) -> Result<String> {
 fn dedupe_strings(values: &mut Vec<String>) {
     values.sort();
     values.dedup();
+}
+
+/// Extract the export name from a draft file's `# Kind: Name` header.
+///
+/// Reads only the first line and looks for `# Data: Foo`, `# Context: Bar`,
+/// or `# Projection: Baz`. Returns `None` when no matching header is found.
+fn extract_draft_export_name(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let first_line = content.lines().next()?.trim();
+    if !first_line.starts_with('#') {
+        return None;
+    }
+    let after_hash = first_line.trim_start_matches('#').trim();
+    for prefix in &["Data:", "Context:", "Projection:"] {
+        if let Some(rest) = after_hash.strip_prefix(prefix) {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
