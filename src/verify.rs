@@ -296,6 +296,110 @@ fn pub_method_label(artifact: &PreparedArtifact, _name: &str) -> &'static str {
     }
 }
 
+// ── Operation verification ───────────────────────────────────────
+
+/// Verify a Rust source file against an operation spec.
+pub fn verify_operation_source(
+    source: &str,
+    spec: &crate::prepared::ApiOperationSpec,
+) -> Result<VerifyResult> {
+    let file: syn::File = syn::parse_str(source)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Rust source: {}", e))?;
+
+    let struct_name = &spec.name;
+    let mut discrepancies = Vec::new();
+
+    // Find the struct
+    let struct_item = file.items.iter().find_map(|item| {
+        if let syn::Item::Struct(s) = item {
+            if s.ident == struct_name {
+                Some(s)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    if struct_item.is_none() {
+        discrepancies.push(Discrepancy {
+            kind: DiscrepancyKind::MissingField,
+            message: format!(
+                "the `{}` operation on the {} api is missing its struct definition",
+                struct_name, spec.api
+            ),
+        });
+        return Ok(VerifyResult { discrepancies });
+    }
+
+    let actual_fields: BTreeSet<String> = struct_item
+        .unwrap()
+        .fields
+        .iter()
+        .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+        .collect();
+
+    // Expected fields
+    let expected = crate::apis_codegen::expected_operation_fields(spec);
+    for name in &expected {
+        if !actual_fields.contains(name) {
+            discrepancies.push(Discrepancy {
+                kind: DiscrepancyKind::MissingField,
+                message: format!(
+                    "the `{}` operation on the {} api is missing the `{}` field",
+                    struct_name, spec.api, name
+                ),
+            });
+        }
+    }
+
+    // Find impl blocks
+    let impl_blocks: Vec<&syn::ItemImpl> = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let syn::Item::Impl(imp) = item {
+                if imp.trait_.is_none() {
+                    if let syn::Type::Path(tp) = imp.self_ty.as_ref() {
+                        if tp.path.is_ident(struct_name) {
+                            return Some(imp);
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    let mut actual_pub_methods = BTreeSet::new();
+    for imp in &impl_blocks {
+        for item in &imp.items {
+            if let syn::ImplItem::Fn(method) = item {
+                if matches!(method.vis, syn::Visibility::Public(_)) {
+                    actual_pub_methods.insert(method.sig.ident.to_string());
+                }
+            }
+        }
+    }
+
+    // Expected methods
+    let expected_methods = crate::apis_codegen::expected_operation_methods(spec);
+    for name in &expected_methods {
+        if !actual_pub_methods.contains(name) {
+            discrepancies.push(Discrepancy {
+                kind: DiscrepancyKind::MissingMethod,
+                message: format!(
+                    "the `{}` operation on the {} api is missing the `{}` method",
+                    struct_name, spec.api, name
+                ),
+            });
+        }
+    }
+
+    Ok(VerifyResult { discrepancies })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
