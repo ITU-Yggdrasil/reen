@@ -65,6 +65,9 @@ enum Commands {
         about = "Clear prepared artifacts, generated outputs, or both"
     )]
     Clear(ClearCommand),
+
+    #[command(subcommand, about = "External API ingestion and management")]
+    Apis(ApisCommand),
 }
 
 #[derive(Args, Default, Clone)]
@@ -228,6 +231,15 @@ enum ClearCommand {
 }
 
 #[derive(Subcommand, Clone)]
+enum ApisCommand {
+    #[command(about = "Ingest OpenAPI snapshots into generated data drafts and operation specs")]
+    Ingest {
+        #[arg(help = "API name (matches drafts/apis/<name>.md); omit to ingest all")]
+        api_name: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 enum ManifestCommand {
     #[command(subcommand)]
     Types(TypesManifestCommand),
@@ -299,6 +311,7 @@ fn main() -> Result<()> {
         Commands::Verify(args) => run_verify(args, &workspace)?,
         Commands::Manifest(cmd) => run_manifest(cmd, globals, &workspace)?,
         Commands::Clear(cmd) => run_clear(cmd, globals, &workspace, &config)?,
+        Commands::Apis(cmd) => run_apis(cmd, globals, &workspace)?,
     }
 
     Ok(())
@@ -498,6 +511,22 @@ fn run_manifest(
             },
             globals.dry_run,
         ),
+    }
+}
+
+fn run_apis(
+    cmd: ApisCommand,
+    globals: GlobalCliOptions,
+    workspace: &Workspace,
+) -> Result<()> {
+    match cmd {
+        ApisCommand::Ingest { api_name } => {
+            reen::apis_ingest::ingest_apis(
+                workspace,
+                api_name.as_deref(),
+                globals.verbose,
+            )
+        }
     }
 }
 

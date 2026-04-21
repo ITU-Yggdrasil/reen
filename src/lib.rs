@@ -1,3 +1,4 @@
+pub mod apis_ingest;
 pub mod audit;
 pub mod codegen;
 pub mod draft_parser;
