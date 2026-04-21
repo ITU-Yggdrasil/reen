@@ -114,11 +114,22 @@ pub fn verify_source(source: &str, artifact: &PreparedArtifact) -> Result<Verify
             message: format!("{} `{}` is missing from the struct", label, name),
         });
     }
-    for name in actual_fields.difference(&expected_fields) {
-        discrepancies.push(Discrepancy {
-            kind: DiscrepancyKind::ExtraField,
-            message: format!("field `{}` is in the struct but not in the specification", name),
-        });
+    // Extra fields are only flagged on contexts and data with expected attributes.
+    // Projections need internal bookkeeping fields beyond `source`.
+    // Data types with no attributes in the YAML (e.g. enum-style drafts whose
+    // variants are described in prose) are allowed to carry their own fields.
+    let check_extra = match artifact.kind {
+        ArtifactKind::Context => true,
+        ArtifactKind::Data => !expected_fields.is_empty(),
+        ArtifactKind::Projection => false,
+    };
+    if check_extra {
+        for name in actual_fields.difference(&expected_fields) {
+            discrepancies.push(Discrepancy {
+                kind: DiscrepancyKind::ExtraField,
+                message: format!("field `{}` is in the struct but not in the specification", name),
+            });
+        }
     }
 
     // Find impl blocks for the export type
