@@ -8,6 +8,7 @@ pub enum ArtifactKind {
     Data,
     Projection,
     Context,
+    Operation,
 }
 
 impl ArtifactKind {
@@ -16,6 +17,7 @@ impl ArtifactKind {
             ArtifactKind::Data => "data",
             ArtifactKind::Projection => "projection",
             ArtifactKind::Context => "context",
+            ArtifactKind::Operation => "operation",
         }
     }
 
@@ -33,6 +35,7 @@ impl ArtifactKind {
             "data" => Some(Self::Data),
             "projections" => Some(Self::Projection),
             "contexts" => Some(Self::Context),
+            "operations" => Some(Self::Operation),
             _ => None,
         }
     }
@@ -142,6 +145,25 @@ pub struct ProjectionDraft {
     pub scenarios: Vec<ScenarioDraft>,
 }
 
+// ── Boundary draft (API) ─────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryDraft {
+    pub api_name: String,
+    pub purpose: String,
+    pub source: BoundarySource,
+    /// Operation names to whitelist; empty means "all operations".
+    pub operations_whitelist: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundarySource {
+    pub openapi_local: Option<String>,
+    pub openapi_url: Option<String>,
+    pub documentation_url: Option<String>,
+}
+
 // ── Top-level enum ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +200,9 @@ pub fn parse_draft_file(path: &Path, drafts_root: &Path, content: &str) -> Resul
             parse_projection_draft(info, content).map(DraftDocument::Projection)
         }
         ArtifactKind::Context => parse_context_draft(info, content).map(DraftDocument::Context),
+        ArtifactKind::Operation => {
+            bail!("Operation artifacts are YAML, not markdown drafts: {}", info.relative_path)
+        }
     }
 }
 
@@ -485,6 +510,143 @@ fn extract_labeled_line(body: &str, label: &str) -> String {
         }
     }
     String::new()
+}
+
+// ── Boundary draft parser ────────────────────────────────────────
+
+/// Parse a boundary draft (`drafts/apis/<name>.md`).
+///
+/// Boundary drafts are not DCI artifacts — they describe an external API boundary.
+/// Sections: Purpose (or Description), Source, Operations, Notes.
+pub fn parse_boundary_draft(api_name: &str, content: &str) -> Result<BoundaryDraft> {
+    let sections = parse_sections(content);
+
+    let purpose = find_section(&sections, "Purpose")
+        .or_else(|| find_section(&sections, "Description"))
+        .map(|s| s.body.trim().to_string())
+        .unwrap_or_default();
+    if purpose.is_empty() {
+        bail!(
+            "Boundary draft for `{}` must have a ## Purpose or ## Description section",
+            api_name
+        );
+    }
+
+    // Source section — may be called "Source" or "Authoritative Sources"
+    let source_section = find_section(&sections, "Source")
+        .or_else(|| find_section(&sections, "Authoritative Sources"));
+    let source = if let Some(s) = source_section {
+        parse_boundary_source(&s.body)
+    } else {
+        BoundarySource {
+            openapi_local: None,
+            openapi_url: None,
+            documentation_url: None,
+        }
+    };
+
+    // Operations whitelist — may be called "Operations" or "Consumed Surface"
+    let ops_section = find_section(&sections, "Operations")
+        .or_else(|| find_section(&sections, "Consumed Surface"));
+    let operations_whitelist = if let Some(s) = ops_section {
+        parse_boundary_operations(&s.body)
+    } else {
+        Vec::new()
+    };
+
+    let notes = find_section(&sections, "Notes")
+        .map(|s| bullet_lines(Some(&s.body)))
+        .unwrap_or_default();
+
+    Ok(BoundaryDraft {
+        api_name: api_name.to_string(),
+        purpose,
+        source,
+        operations_whitelist,
+        notes,
+    })
+}
+
+fn parse_boundary_source(body: &str) -> BoundarySource {
+    let mut openapi_local = None;
+    let mut openapi_url = None;
+    let mut documentation_url = None;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .unwrap_or(trimmed);
+        if let Some(v) = strip_label(rest, "OpenAPI Local") {
+            openapi_local = Some(v.to_string());
+        } else if let Some(v) = strip_label(rest, "OpenAPI URL") {
+            openapi_url = Some(v.to_string());
+        } else if let Some(v) = strip_label(rest, "Documentation URL") {
+            documentation_url = Some(v.to_string());
+        } else if let Some(v) = strip_label(rest, "Documentation") {
+            documentation_url = Some(v.to_string());
+        }
+    }
+    BoundarySource {
+        openapi_local,
+        openapi_url,
+        documentation_url,
+    }
+}
+
+fn strip_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
+    let lower = line.to_ascii_lowercase();
+    let label_lower = label.to_ascii_lowercase();
+    if lower.starts_with(&label_lower) {
+        let rest = &line[label.len()..];
+        let rest = rest.trim_start_matches(':').trim();
+        if rest.is_empty() { None } else { Some(rest) }
+    } else {
+        None
+    }
+}
+
+fn parse_boundary_operations(body: &str) -> Vec<String> {
+    // Accept bullet lists where items may be just names or "name: description"
+    // Also look for known labels like "Schema Types:" or "Message Families:"
+    let mut ops = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "));
+        if let Some(rest) = rest {
+            let lower = rest.to_ascii_lowercase();
+            // Skip non-operation labels (URLs, stream endpoints, etc.)
+            if lower.starts_with("websocket") {
+                continue;
+            }
+            // Extract comma-separated names from label-style bullets
+            if lower.starts_with("schema types")
+                || lower.starts_with("message families")
+            {
+                if let Some((_label, values)) = rest.split_once(':') {
+                    for name in values.split(',') {
+                        let name = name.trim();
+                        if !name.is_empty() {
+                            ops.push(name.to_string());
+                        }
+                    }
+                }
+                continue;
+            }
+            // Simple name or "name: description"
+            let name = if let Some((n, _)) = rest.split_once(':') {
+                n.trim()
+            } else {
+                rest.trim()
+            };
+            if !name.is_empty() {
+                ops.push(name.to_string());
+            }
+        }
+    }
+    ops
 }
 
 // ── Markdown helpers ──────────────────────────────────────────────
@@ -825,5 +987,70 @@ Then: z
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("mutation-shaped prose"));
+    }
+
+    #[test]
+    fn parse_boundary_draft_aisstream() {
+        let content = r#"# AISStream - Real-time AIS Vessel Tracking
+
+## Purpose
+AISStream provides real-time global maritime vessel tracking via WebSocket.
+
+## Source
+- OpenAPI Local: ../../../shared/openapi/aisstream.yaml
+- OpenAPI URL: https://example.com/aisstream.yaml
+- Documentation URL: https://aisstream.io/documentation
+
+## Operations
+- Subscribe: send a subscription message to begin receiving data
+- Receive: receive AIS messages from the stream
+
+## Notes
+- The stream uses WebSocket transport
+- Authentication is via API key in the subscription message
+"#;
+        let draft = parse_boundary_draft("aisstream", content).unwrap();
+        assert_eq!(draft.api_name, "aisstream");
+        assert!(draft.purpose.contains("real-time"));
+        assert_eq!(
+            draft.source.openapi_local.as_deref(),
+            Some("../../../shared/openapi/aisstream.yaml")
+        );
+        assert!(draft.source.openapi_url.is_some());
+        assert!(draft.source.documentation_url.is_some());
+        assert_eq!(draft.operations_whitelist, vec!["Subscribe", "Receive"]);
+        assert_eq!(draft.notes.len(), 2);
+    }
+
+    #[test]
+    fn parse_boundary_draft_with_consumed_surface() {
+        let content = r#"# AISStream
+
+## Description
+Vessel tracking.
+
+## Authoritative Sources
+- OpenAPI Local: ./aisstream.yaml
+
+## Consumed Surface
+- WebSocket Streams: wss://stream.aisstream.io/v0/stream
+- Schema Types: PositionReport, StandardClassBPositionReport
+
+## Notes
+- Uses WebSocket
+"#;
+        let draft = parse_boundary_draft("aisstream", content).unwrap();
+        assert!(draft.purpose.contains("Vessel tracking"));
+        assert_eq!(
+            draft.operations_whitelist,
+            vec!["PositionReport", "StandardClassBPositionReport"]
+        );
+    }
+
+    #[test]
+    fn boundary_draft_requires_purpose() {
+        let content = "# API\n\n## Notes\n- nothing\n";
+        let result = parse_boundary_draft("test", content);
+        assert!(result.is_err());
     }
 }

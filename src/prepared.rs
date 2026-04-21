@@ -2,13 +2,14 @@ use serde::{Deserialize, Serialize};
 
 pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v2";
 
-/// The three DCI artifact kinds.
+/// DCI artifact kinds plus the operation kind for external API consumption.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Data,
     Projection,
     Context,
+    Operation,
 }
 
 /// A fully-resolved, prepared artifact in the v2 schema.
@@ -179,6 +180,74 @@ pub struct Ambiguity {
     pub source_line: Option<usize>,
 }
 
+// ── Operation spec (reen.operation/v1) ───────────────────────────
+
+pub const OPERATION_SCHEMA_VERSION: &str = "reen.operation/v1";
+
+/// A typed operation specification for an external API operation.
+/// Deserialized directly from YAML — no prose parsing needed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiOperationSpec {
+    pub schema: String,
+    pub api: String,
+    pub name: String,
+    pub transport: TransportSpec,
+    pub auth: AuthSpec,
+    pub input: IoSpec,
+    pub output: IoSpec,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<ErrorSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportSpec {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthSpec {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IoSpec {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ErrorSpec {
+    pub data_type: String,
+}
+
+/// The generated API manifest (`drafts/.apis/manifest.yml`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiManifest {
+    pub schema: String,
+    pub apis: Vec<ApiManifestEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiManifestEntry {
+    pub name: String,
+    pub openapi_hash: String,
+    pub data_types: Vec<String>,
+    pub operations: Vec<String>,
+}
+
+pub const API_MANIFEST_SCHEMA: &str = "reen.api-manifest/v1";
+
 // ── Construction helpers ──────────────────────────────────────────
 
 impl PreparedArtifact {
@@ -187,6 +256,7 @@ impl PreparedArtifact {
             ArtifactKind::Data => "data",
             ArtifactKind::Projection => "projection",
             ArtifactKind::Context => "context",
+            ArtifactKind::Operation => "operation",
         };
         Self {
             schema: PREPARED_SCHEMA_VERSION.to_string(),

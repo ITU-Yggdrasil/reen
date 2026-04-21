@@ -169,6 +169,7 @@ impl Selection {
             ArtifactKind::Context => self.contexts,
             ArtifactKind::Projection => self.projections,
             ArtifactKind::Data => self.data,
+            ArtifactKind::Operation => true, // operations always included when present
         }
     }
 

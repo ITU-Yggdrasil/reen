@@ -125,6 +125,7 @@ pub fn verify_source(source: &str, artifact: &PreparedArtifact) -> Result<Verify
         ArtifactKind::Context => false,
         ArtifactKind::Data => !expected_fields.is_empty(),
         ArtifactKind::Projection => false,
+        ArtifactKind::Operation => false,
     };
     if check_extra {
         for name in actual_fields.difference(&expected_fields) {
@@ -230,6 +231,9 @@ fn expected_fields(artifact: &PreparedArtifact) -> BTreeSet<String> {
                 fields.insert("source".to_string());
             }
         }
+        ArtifactKind::Operation => {
+            // Operation fields are verified by verify_operation_source, not here
+        }
     }
     fields
 }
@@ -260,6 +264,9 @@ fn expected_methods(artifact: &PreparedArtifact) -> (BTreeSet<String>, BTreeSet<
                 pub_methods.insert(crate::codegen::to_snake_case(&query.name));
             }
         }
+        ArtifactKind::Operation => {
+            // Operation methods verified by verify_operation_source, not here
+        }
     }
 
     (pub_methods, priv_methods)
@@ -276,6 +283,7 @@ fn field_label(artifact: &PreparedArtifact, name: &str) -> &'static str {
         }
         ArtifactKind::Data => "attribute",
         ArtifactKind::Projection => "source field",
+        ArtifactKind::Operation => "operation field",
     }
 }
 
@@ -284,6 +292,7 @@ fn pub_method_label(artifact: &PreparedArtifact, _name: &str) -> &'static str {
         ArtifactKind::Context => "functionality",
         ArtifactKind::Data => "operation",
         ArtifactKind::Projection => "query",
+        ArtifactKind::Operation => "api operation method",
     }
 }
 
