@@ -6,13 +6,6 @@ TestCompany is defined by clarity, simplicity, and confidence. Its visual and ve
 
 The brand avoids unnecessary complexity and focuses on delivering a clean and consistent experience across all touchpoints.
 
----
-
-### Audience and Positioning
-
-TestCompany speaks to a broad, modern audience that values simplicity, efficiency, and clarity. The brand is positioned as reliable, accessible, and forward-thinking.
-
-It avoids overly technical, decorative, or exclusive expressions, instead focusing on being easy to understand and approachable to a wide range of users.
 
 ---
 
@@ -33,7 +26,7 @@ Avoid overly playful, exaggerated, or complex language. The tone should feel nat
 ### Logo and Color System
 
 **Logo**
-The TestCompany icon is a simple, stylized â€œTâ€ contained within a circle. It should be used consistently and without alteration.
+The TestCompany icon is a simple, stylized contained within a circle. It should be used consistently and without alteration.
 
 * Maintain clear space around the logo to ensure visibility
 * Do not distort, rotate, or decorate the mark
@@ -70,8 +63,13 @@ Visuals should feel:
 * Clean and uncluttered
 * Modern and natural
 * Easy to understand
+---
 
-Avoid overly busy, decorative, or abstract imagery that distracts from the message.
+### Optional: Audience and Positioning
+
+TestCompany speaks to a broad, modern audience that values simplicity, efficiency, and clarity. The brand is positioned as reliable, accessible, and forward-thinking.
+
+It avoids overly technical, decorative, or exclusive expressions, instead focusing on being easy to understand and approachable to a wide range of users.
 
 ---
 

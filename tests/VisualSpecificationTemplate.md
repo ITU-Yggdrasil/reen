@@ -19,12 +19,6 @@ Avoid technical or implementation details.]
 - [Guideline 2 e.g., Friendly but professional]
 - [Guideline 3]
 
-### Avoid
-
-- [What the tone should NOT be e.g., overly technical, playful, formal]
-
-[Optional: Add a short example sentence that reflects the tone.]
-
 ---
 
 ## Logo and Color System
@@ -64,8 +58,6 @@ Include:
 - Primary typeface/font  
 - Fallback options (if relevant)  
 - General guidance (e.g., readability, hierarchy, consistency)  
-
-Avoid exact sizes, spacing, or implementation rules.
 
 ---
 
@@ -135,5 +127,4 @@ Avoid overly detailed segmentation or marketing jargon.
 ## Notes
 
 - This document defines **brand identity**, not UI components or design system rules  
-- Avoid including exact measurements, code, or implementation details  
 - Focus on consistency, clarity, and intent across all applications  
