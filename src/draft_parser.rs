@@ -864,6 +864,10 @@ fn parse_route_bullets(relative_path: &str, sections: &[Section]) -> Result<Vec<
     let section = require_section(relative_path, sections, "Routes")?;
     let body = section.body.trim();
 
+    // Detect map-form attempts: first non-blank line starts with a path token
+    // followed by `:` (e.g. `/:` or `/login:` or `/products/<id>:`)
+    detect_map_form_routes(body)?;
+
     // The routing table format is:
     // - path: /foo
     //   component: Bar
@@ -939,6 +943,29 @@ fn parse_route_bullets(relative_path: &str, sections: &[Section]) -> Result<Vec<
     }
 
     Ok(routes)
+}
+
+/// Detect if the routing-table body uses the map form (path-as-key) instead
+/// of the required list form. Fails with a targeted error message.
+fn detect_map_form_routes(body: &str) -> Result<()> {
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Map form: first non-blank line starts with `/` and contains `:`
+        // e.g. `/:`, `/login:`, `/products/<id>:`
+        if trimmed.starts_with('/') && trimmed.contains(':') {
+            bail!(
+                "Routes must be a list of entries, each starting with `- path: <url>`. \
+                 The map form (`/: {{ component: ... }}`) is not supported — \
+                 see the reen-draft-format skill for the routing-table template."
+            );
+        }
+        // Only check the first non-blank line
+        break;
+    }
+    Ok(())
 }
 
 // ── Boundary draft parser ────────────────────────────────────────
