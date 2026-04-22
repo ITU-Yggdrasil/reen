@@ -62,22 +62,22 @@ synthesised_tests:
 - source: invariant
   given: latitude 40.7, longitude -74.0, a UTC timestamp, source "seismic", and label "earthquake"
   when: new is called
-  then: a PositionEvent is returned with source field set to "seismic" (not "earthquake")
+  then: a PositionEvent is returned with source field set to "seismic" (not the label "earthquake")
   citation: 'operation `new`: Constructs a PositionEvent from latitude, longitude, occurred_at, source, and label'
 - source: invariant
-  given: a PositionEvent constructed with source "weather" and label "storm"
-  when: the source field is accessed directly
-  then: it returns "weather", confirming source is stored as explicit data, not derived from label
-  citation: 'invariant: The source is part of the event''s data model, not an inferred property'
-- source: invariant
-  given: three events with sources "lightning", "lightning", and "wind", but the first two have different labels "strike" and "flash"
-  when: events are filtered by source "lightning"
-  then: both events with source "lightning" are included, regardless of their labels
+  given: three events with sources "weather", "weather", and "radar", where two have the same source but different labels
+  when: events are filtered by source "weather"
+  then: exactly two events are returned, both with source field equal to "weather", regardless of their label values
   citation: 'invariant: Filtering by source uses the source field, not the label'
 - source: invariant
-  given: a PositionEvent attempted to be constructed without a source parameter
-  when: new is called
-  then: construction fails or source is required, enforcing the invariant
+  given: a PositionEvent constructed with source "manual" and label "observer"
+  when: the source property is accessed
+  then: the source "manual" is directly accessible from the event's data model, not computed from the label
+  citation: 'invariant: The source is part of the event''s data model, not an inferred property'
+- source: invariant
+  given: 'parameters for new: latitude, longitude, occurred_at, source null, and label "unknown"'
+  when: new is called with a null source
+  then: construction fails or the event violates the invariant that every PositionEvent includes a source
   citation: 'invariant: Every PositionEvent includes a source'
 vocabulary_bindings:
 - name: latitude

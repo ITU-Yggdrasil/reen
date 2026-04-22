@@ -68,40 +68,35 @@ synthesised_tests:
   then: 'the invariant holds: EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.'
   citation: Invariants / EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.
 - source: invariant
-  given: an EventCount of 100 over a 1-minute window
-  when: the rate is derived
-  then: events_per_minute is 100.0
+  given: an attempt to construct an EventRate with a negative events_per_minute value
+  when: the new operation is invoked
+  then: an error is returned
+  citation: 'operation `new`: Returns an error if the value is not finite or is negative.'
+- source: invariant
+  given: an attempt to construct an EventRate with infinity as events_per_minute
+  when: the new operation is invoked
+  then: an error is returned
+  citation: 'operation `new`: Returns an error if the value is not finite or is negative.'
+- source: invariant
+  given: an attempt to construct an EventRate with NaN (not-a-number) as events_per_minute
+  when: the new operation is invoked
+  then: an error is returned
+  citation: 'operation `new`: Returns an error if the value is not finite or is negative.'
+- source: invariant
+  given: an EventCount of 7 events over a 2-minute window
+  when: the rate is computed using decimal division
+  then: events_per_minute equals 3.5 (7 / 2)
   citation: 'invariant: The rate is computed as event count divided by window minutes using decimal division.'
 - source: invariant
-  given: an EventCount of 1 over a 3-minute window
+  given: an EventCount of 1 event over a 1-minute window
   when: the rate is derived
-  then: events_per_minute is approximately 0.333... (decimal division result)
-  citation: 'invariant: The rate is computed as event count divided by window minutes using decimal division.'
+  then: events_per_minute is 1.0 and no division by zero occurs
+  citation: 'invariant: Because the window is always at least one minute, division by zero does not occur.'
 - source: invariant
-  given: a negative events_per_minute value
-  when: constructing a new EventRate with the operation new
-  then: an error is returned
-  citation: 'operation new: Returns an error if the value is not finite or is negative.'
-- source: invariant
-  given: a not-a-number events_per_minute value
-  when: constructing a new EventRate with the operation new
-  then: an error is returned
-  citation: 'operation new: Returns an error if the value is not finite or is negative.'
-- source: invariant
-  given: an infinity events_per_minute value
-  when: constructing a new EventRate with the operation new
-  then: an error is returned
-  citation: 'operation new: Returns an error if the value is not finite or is negative.'
-- source: invariant
-  given: a valid EventRate with events_per_minute of 42.123456789
-  when: the EventRate is serialized
-  then: the full decimal precision is preserved without rounding by EventRate
+  given: an EventRate with a precisely computed events_per_minute value
+  when: the rate is serialized without rounding
+  then: the full precision is preserved in the internal representation
   citation: 'invariant: EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.'
-- source: invariant
-  given: an EventCount of 7 over a 2-minute window
-  when: the rate is derived
-  then: events_per_minute is 3.5
-  citation: 'invariant: The rate is computed as event count divided by window minutes using decimal division.'
 vocabulary_bindings:
 - name: cell
   resolution: attribute

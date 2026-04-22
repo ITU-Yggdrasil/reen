@@ -79,56 +79,6 @@ synthesised_tests:
   when: receive_event is called
   then: the event becomes part of the buffer
   citation: Scenarios / receive adds event to buffer
-- source: invariant
-  given: a clock and a TimeWindow of ten minutes
-  when: window is called
-  then: the configured TimeWindow of ten minutes is returned
-  citation: 'functionality `window`: Returns the TimeWindow currently configured on the buffer.'
-- source: invariant
-  given: the buffer contains an event from eleven minutes ago and a five-minute window
-  when: current_events is called
-  then: the stale event is evicted and not included in the returned collection
-  citation: 'functionality `current_events`: Computes the staleness boundary as the current time minus the window''s duration in minutes. Evicts stale events before returning the result.'
-- source: invariant
-  given: the buffer contains an event dated two minutes in the future and a five-minute window
-  when: current_events is called
-  then: the future-dated event is included in the result
-  citation: 'functionality `current_events`: Does not impose an upper freshness bound at the current time — future-dated events are included as long as they are not stale.'
-- source: invariant
-  given: the buffer contains lightning, flight, and earthquake events
-  when: current_events_for_source is called with no source filter
-  then: all three events are returned
-  citation: 'functionality `current_events_for_source`: If the source filter is absent, returns the same result as current_events.'
-- source: invariant
-  given: the buffer contains flight and aisstream events, with a five-minute window
-  when: current_events_for_source is called with source 'aisstream'
-  then: only aisstream events are returned
-  citation: 'functionality `current_events_for_source`: If the source is ''lightning'', ''flight'', ''earthquake'', ''aisstream'', ''adsb'', or ''wiki'', returns only events whose source matches that value.'
-- source: invariant
-  given: the buffer contains a stale adsb event and a fresh wiki event with a five-minute window
-  when: current_events_for_source is called with source 'wiki'
-  then: the stale adsb event is evicted and only the fresh wiki event is returned
-  citation: 'functionality `current_events_for_source`: Performs the same stale-event eviction as current_events.'
-- source: invariant
-  given: the buffer contains multiple events where one is from six minutes ago and another is from four minutes ago, with a five-minute window
-  when: evict_stale is called
-  then: only the event from four minutes ago remains in the buffer
-  citation: 'functionality `evict_stale`: Removes all events whose occurred_at is older than the current time minus the window''s duration in minutes.'
-- source: invariant
-  given: the buffer contains an event dated five minutes in the future and a five-minute window
-  when: evict_stale is called
-  then: the future-dated event is not removed
-  citation: 'functionality `evict_stale`: Does not remove future-dated events.'
-- source: invariant
-  given: the buffer contains a stale event and a fresh event, with a five-minute window
-  when: evict_stale is called
-  then: the buffer state matches what current_events would return
-  citation: 'functionality `evict_stale`: After eviction, the buffer contains only events that would currently be returned by current_events.'
-- source: invariant
-  given: multiple fresh events are in the buffer
-  when: receive_event is called with a new fresh event
-  then: the new event is added without triggering automatic eviction of existing events
-  citation: 'functionality `receive_event`: Does not evict stale events on every insert; eviction is driven by queries or explicit eviction.'
 vocabulary_bindings:
 - name: clock
   resolution: role_player

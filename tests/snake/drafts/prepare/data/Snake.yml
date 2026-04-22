@@ -99,40 +99,30 @@ synthesised_tests:
   then: a Snake is returned with head at (0,0) and length 1
   citation: 'invariant: A single-element body is valid; the adjacency rule is satisfied trivially.'
 - source: invariant
-  given: a Snake with body [(5,5), (4,5), (3,5)] and direction Right
+  given: a Snake with body [(2,3), (2,2), (2,1)] created with direction Down
   when: body is called
-  then: an ordered sequence [(5,5), (4,5), (3,5)] is returned with head first
+  then: an ordered sequence [(2,3), (2,2), (2,1)] is returned with head first
   citation: 'operation `body`: Returns the ordered body as a read-only sequence of positions, head first.'
 - source: invariant
-  given: a Snake with body [(5,5), (4,5), (3,5)] and direction Left
+  given: a Snake with body [(1,1), (1,2)] created with direction Left
   when: direction is called
   then: Left is returned
   citation: 'operation `direction`: Returns the current direction of travel.'
 - source: invariant
-  given: a body of [(2,2), (2,3), (2,4), (2,5)] and direction Down
+  given: a body of [(0,0), (1,0), (2,0), (2,1), (2,2)] and direction Right
   when: new is called
-  then: a Snake is returned with head at (2,2) and all consecutive positions orthogonally adjacent
+  then: a Snake is returned with head at (0,0) and all consecutive positions are orthogonally adjacent
   citation: 'invariant: Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).'
 - source: invariant
-  given: a body of [(1,1), (1,1)] and direction Right
+  given: a body of [(5,5), (4,5), (3,5)] and direction Up
   when: new is called
-  then: an error is returned due to overlapping positions
-  citation: 'invariant: All positions in the body are unique (no overlap).'
-- source: invariant
-  given: a Snake created with body [(3,3)] and direction Up
-  when: body is called
-  then: a sequence containing exactly one position [(3,3)] is returned
-  citation: 'invariant: The body contains at least one position.'
-- source: invariant
-  given: a body of [(0,0), (0,1), (0,2)] and direction Left
-  when: new is called
-  then: a Snake is returned where the direction Left is independent of the head-to-neck orientation
+  then: a Snake is returned where direction is Up, independent of the head-to-neck orientation pointing left
   citation: 'invariant: The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.'
 - source: invariant
-  given: a Snake with body [(10,10), (9,10), (8,10), (7,10)] and direction Up
-  when: body is called
-  then: the first position in the returned sequence is (10,10)
-  citation: 'invariant: The first position is the head.'
+  given: a body of [(10,10), (9,10), (8,10), (8,11), (8,12), (8,13)] and direction Down
+  when: new is called
+  then: a Snake is returned with all 6 positions unique and no overlaps
+  citation: 'invariant: All positions in the body are unique (no overlap).'
 vocabulary_bindings:
 - name: body
   resolution: attribute

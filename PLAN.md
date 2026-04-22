@@ -66,7 +66,8 @@ Verify runs as a PostToolUse hook after every write. Audit runs on demand after 
 ### Test projects
 
 - Migrated in Phase 4: `tests/snake`, `tests/money transfer`, `tests/Connor`. Snake and money transfer are the small reference projects; Connor is the larger real-world draft that stress-tests the schema and lint.
-- Retained on disk but out of Phase 4 scope: `tests/world data/`, `tests/snake_gh/`. Both represent distinct use cases that don't fit the current four-artifact-kind pipeline. `tests/world data/` is an external-API-boundary codegen project (generates domain types from an OpenAPI schema). `tests/snake_gh/` is a GitHub-repo ingestion test case. Revisit as future phases if api-boundary or repo-ingestion drafts become part of the schema.
+- In scope for Phase 7 as the external-API ingestion test case: `tests/world data/`. Retained but deferred out of Phase 4 because it is a distinct use case — consumption of an external API described by an OpenAPI schema — that the Phase 1–4 pipeline did not cover.
+- Retained on disk but currently out of scope: `tests/snake_gh/`. GitHub-repo ingestion is another distinct use case; revisit as a future phase if repo ingestion becomes part of the schema.
 - All `target/` directories under tests get `.gitignore`'d if not already.
 
 ---
@@ -82,7 +83,7 @@ Verify runs as a PostToolUse hook after every write. Audit runs on demand after 
 | `src/codegen.rs` | Trim: scaffolding only, no agent hooks, no stub-replacement logic. |
 | `src/manifest.rs` | Becomes the vocabulary manifest; central source of domain names. |
 | `src/workspace.rs` | Trim: only the file-layout helpers Reen still needs. |
-| `src/lib.rs`, `src/main.rs` | Trim: CLI shrinks to `prepare`, `scaffold`, `verify`, `clear`, `config`, `manifest`. |
+| `src/lib.rs`, `src/main.rs` | Trim: CLI shrinks to `prepare`, `scaffold`, `verify`, `clear`, `config`, `manifest`. Phase 7 adds `apis`. Phase 8 adds `init`. |
 
 ## What gets added
 
@@ -378,6 +379,196 @@ The lint enforces all of the above mechanically. The bar above is the *reason* t
 
 **Exit criteria:** a new BA can go from zero to a valid context draft using only `DCI.md` and `DRAFT_FORMAT.md`. A new developer can go from `git clone` to running snake end-to-end using only the README and the three skill files.
 
+### Phase 7 — external API consumption (API ingestion)
+
+**Goal:** a deterministic path from an OpenAPI (or equivalent) spec to a usable set of Reen artifacts that describes, constrains, and enables consumption of an external API from inside a Reen project. The authored surface is small and BA-legible (a boundary draft that states *what this API is for*). The generated surface is large, machine-owned, and implementation-optimised. Generated data types and operations are referenceable from DCI drafts under the same scoping rules that govern intra-project references, and the generated set acts as a whitelist — you cannot reference an external type or operation that the API does not expose.
+
+**Why this phase exists.** Phase 1–6 cover domain modelling end-to-end within a project. They do not cover the seam where the project reaches out to an existing, externally specified API. Treating API types as hand-authored data drafts is wrong on two counts: it duplicates the spec (drift), and it asks a BA to transcribe fields that no one intends to change. Treating API types as raw Rust generated into `src/` is also wrong: contexts, projections, and refine dialogue have no way to reference them in DCI vocabulary, and the prepare-time vocabulary manifest cannot see them. Phase 7 places the API between these extremes: one BA-authored boundary document per API captures purpose and scope; everything else is generated into the existing draft vocabulary so the rest of the pipeline treats API artifacts like any other.
+
+**Design.**
+
+*Authored artifacts (committed):*
+
+- `drafts/apis/<name>.md` — boundary draft. Human-authored, BA-legible. One paragraph on purpose, the authoritative upstream source (URL + local-snapshot path), an explicit operations whitelist (names from the OpenAPI spec; if absent, all operations are ingested), any cross-cutting notes (auth mode, rate-limiting, pagination quirks). No types, no field lists, no code tokens. Subject to the Phase 3.5 lint.
+- `drafts/apis/<name>.yaml` — committed OpenAPI snapshot. Verbatim copy of the upstream spec at the version the project consumes. This is the input to ingestion; committing it means ingestion is reproducible without network access and that spec drift is observable in `git diff`.
+
+*Generated artifacts (gitignored under `drafts/.apis/`):*
+
+- `drafts/.apis/data/<api>/<TypeName>.md` — one file per referenced schema in the OpenAPI spec. Uses the existing data-draft markdown template so every downstream consumer (parser, prepare, manifest resolution, lint, refine) works unchanged. The Purpose paragraph cites the OpenAPI `$ref` path; Attributes are derived from OpenAPI properties; Invariants are derived from OpenAPI constraints (`required`, `minLength`, `enum`, etc.); Operations and Scenarios sections are empty for ingested types — ingested data is a vocabulary surface, not a behavioural one.
+- `drafts/.apis/operations/<api>/<OperationName>.yml` — one file per operation. YAML, not markdown: these are not meant to be read or written by BAs, they are implementation specifications for Reen's scaffolder. Schema shown below.
+- `drafts/.apis/manifest.yml` — per-project index of every ingested API: the set of data types, the set of operations, the source OpenAPI hash. Consulted during prepare so the ubiquitous-vocabulary manifest sees ingested types as resolvable names.
+
+*Operation spec schema (`reen.operation/v1`):*
+
+```
+schema: reen.operation/v1
+api: <api name>                          # matches the boundary draft filename
+name: <OperationName>                    # matches the OpenAPI operationId
+transport:
+  kind: rest | websocket | grpc
+  url: <base or exact URL>
+  method: GET | POST | ...               # REST only
+  path: /path/with/{params}              # REST only
+auth:
+  kind: api_key_header | api_key_query | api_key_body | bearer | none
+  field: <header or field name>          # when applicable
+input:
+  kind: none | data                      # "data" means a single ingested type
+  data_type: <TypeName>                  # when kind is "data"
+output:
+  kind: none | single | list | stream_of
+  data_type: <TypeName>                  # when not "none"
+errors:
+  - data_type: <TypeName>                # ingested error types, in priority order
+notes:
+  - <free-form implementation hint>
+```
+
+The schema is intentionally narrow. v1 does not model pagination, batching, retry budgets, or rate-limit metadata. Operations that require those things capture them as `notes[]` so the scaffolder treats the reader (or Claude Code during `/implement`) as the authority on how to realise them. A follow-up phase can promote recurring note shapes to structured fields.
+
+*Reference graph.*
+
+The DCI scoping rules extend to ingested artifacts without special cases:
+
+- data → data (local or ingested)
+- projections → data + projections
+- contexts → data + projections + operations
+- operations → data (ingested or local, to declare input/output/error shapes)
+
+Operations are not referenceable by data or projections. They are a context-level concern — contexts coordinate the operation call, not the data itself.
+
+The ingested set is the whitelist. If an OpenAPI spec does not expose a type or operation, it does not exist for downstream drafts. Prepare refuses to resolve any `@<api>/<Name>` reference that is not in `drafts/.apis/manifest.yml`.
+
+*Manifest binding.*
+
+Ingested types and operations appear in the vocabulary manifest under a namespace that matches the boundary draft name (e.g. `aisstream/AisStreamMessage`, `aisstream/Subscribe`). `manifest.rs` gains a capabilities section for `apis[]`; each entry points at the generated manifest file and is consumed by `prepare` when resolving names prefixed by the api namespace.
+
+*Lint exemption.*
+
+`drafts/.apis/**` is generated; the code-token lint does not scan it. Authored boundary drafts (`drafts/apis/<name>.md`, no dot) are linted normally.
+
+**Steps.**
+
+1. **Model the new artifact.** Add `ArtifactKind::Operation` to `draft_parser.rs`. Operation specs are YAML from the outset, so the parser path for operations deserialises directly via `serde_yaml` into an `OperationSpec` struct; there is no prose layer. Add a minimal parser for boundary drafts (`drafts/apis/<name>.md`) with sections `Purpose`, `Source`, `Operations`, `Notes`.
+2. **Extend the prepared schema.** Operations produce a prepared entry too, so `reen.prepare/v2` gains an operation kind. For operations, prepare's job is simply to validate that every referenced data type exists in the api's generated manifest, and to surface errors in DCI vocabulary. No test synthesis for operations.
+3. **Build ingestion.** New CLI subcommand: `reen apis ingest [<api-name>]`. With no argument, ingests all boundary drafts in `drafts/apis/`. Per boundary draft:
+   - Load `drafts/apis/<name>.yaml` (the committed OpenAPI snapshot).
+   - Validate the OpenAPI version and basic shape.
+   - Filter to the operations whitelist (if present in the boundary draft); otherwise take all.
+   - For every schema referenced transitively by whitelisted operations, emit a generated data draft under `drafts/.apis/data/<name>/<TypeName>.md`.
+   - For every whitelisted operation, emit an operation spec under `drafts/.apis/operations/<name>/<OperationName>.yml`.
+   - Write `drafts/.apis/manifest.yml` with the full set and the OpenAPI snapshot hash.
+   - Ingestion is deterministic: same OpenAPI snapshot → byte-identical output. A change in the `.yaml` snapshot is the only thing that should change the `.apis/` tree; the gitignore keeps the tree out of the working-copy commit, but a CI job (or `reen apis ingest --check`) can assert freshness by re-ingesting and diffing.
+4. **Gitignore and hooks.** Add `drafts/.apis/` to `.gitignore`. Extend `.claude/hooks.json` so PostToolUse Write on `drafts/apis/**.md` or `drafts/apis/**.yaml` runs `reen apis ingest <api>`. The existing PostToolUse on `drafts/**.md` continues to cover the generated data drafts via their existing trigger, but with a lint exemption for `.apis/**` so they never fail the code-token check.
+5. **Wire prepare to the api manifest.** During vocabulary resolution, prepare consults `drafts/.apis/manifest.yml` for every namespaced reference (`@<api>/<Name>`). Unresolved references become ambiguities phrased in DCI terms ("the context references `@aisstream/SubscribeMessage`, which is not in the aisstream API manifest — either add the operation to the whitelist or correct the name").
+6. **Scaffold operations.** `reen scaffold` learns to emit a thin Rust client per operation. The generated file sits under `src/apis/<api>/<operation>.rs` with `todo!()` bodies. Struct fields mirror the operation spec: transport config, auth config, input/output/error types. The scaffold is deliberately minimal — Claude Code fills the body during `/implement`, guided by the operation spec and the notes[].
+7. **Verify operations.** Extend `reen verify` to cover the operations case: struct fields = spec's transport + auth + input/output/error; public method set = `{ call }` for single-response kinds, `{ subscribe, next }` or similar for stream kinds (the naming table is spelled out in a new short section of `reen-dci-code`). Parser and diff messages use DCI-adjacent vocabulary ("the `Subscribe` operation on the aisstream api is missing the auth field `APIKey`").
+8. **Rebuild world-data.** Use `tests/world data/` as the test case. Rewrite its existing `drafts/apis/aisstream.md` under the new boundary-draft template. Commit `drafts/apis/aisstream.yaml` as the OpenAPI snapshot. Run `reen apis ingest aisstream`. Wire a small context that exercises at least one ingested operation end-to-end, to prove the reference graph works from contexts through operations to ingested data.
+9. **Document.** Add a short "External APIs" section to `README.md`, a BA-facing note in `DRAFT_FORMAT.md` that describes only the boundary draft (generated artifacts are off-limits for authoring), and a dev-facing note in `reen-dci-code` covering the scaffold shape and verify expectations for operations. `DCI.md` gains a one-paragraph sidebar explaining where operations sit in the reference graph.
+
+**Exit criteria:** world-data builds end-to-end from the committed boundary draft + OpenAPI yaml. Running `reen apis ingest aisstream` on a fresh clone produces `drafts/.apis/data/aisstream/` and `drafts/.apis/operations/aisstream/` deterministically. A context draft in world-data successfully references `@aisstream/<OperationName>` and `@aisstream/<TypeName>` and prepares without ambiguity. `reen scaffold` emits a compilable operation client; `reen verify` accepts it; the Phase 3.5 lint continues to pass on the authored boundary draft and is not run against `drafts/.apis/**`.
+
+### Phase 8 — packaging and distribution (`reen init`)
+
+**Goal:** one command brings the full Reen authoring and realisation experience into any project. A user who has installed the reen binary can run `reen init` in a fresh or existing Rust project and, without additional steps, get the skills, slash commands, subagents, hooks, canonical docs, starter manifest, and directory layout that Phases 3, 6, and 7 defined. The same command, with `--upgrade`, pulls newer versions of those bundled files when the reen binary is updated, without clobbering the user's drafts or hand-edited local files.
+
+**Why this phase exists.** The value of Phases 3–7 is locked in this repository today. A new project that wants to adopt Reen would have to hand-copy `.claude/`, `DCI.md`, `DRAFT_FORMAT.md`, and assorted scaffolding — and would then drift from upstream as Reen evolves. Packaging the bundle into the reen binary itself makes adoption a one-liner, makes upgrades observable (a diff per managed file), and keeps a single source of truth.
+
+**Design.**
+
+*Bundle layout (source of truth in-repo).*
+
+A new top-level `templates/` directory holds the canonical content that ships inside the reen binary:
+
+```
+templates/
+  .claude/
+    skills/reen-dci-authoring/SKILL.md
+    skills/reen-draft-format/SKILL.md
+    skills/reen-dci-code/SKILL.md
+    commands/prepare.md
+    commands/refine.md
+    commands/scaffold.md
+    commands/implement.md
+    commands/audit.md
+    agents/reen-refiner.md
+    agents/reen-auditor.md
+    hooks.json
+  DCI.md
+  DRAFT_FORMAT.md
+  CLAUDE.md
+  reen.manifest.yml        # starter manifest
+  .gitignore.fragment      # lines to merge into an existing .gitignore
+  drafts/.gitkeep
+  drafts/data/.gitkeep
+  drafts/projections/.gitkeep
+  drafts/contexts/.gitkeep
+  drafts/apis/.gitkeep
+```
+
+Contents are embedded at build time via the `include_dir` crate (or equivalent), so the compiled `reen` binary carries the templates with it. No network access at init time; no parallel template repo to keep in sync; no post-install scripts.
+
+*File classification (drives upgrade behaviour).*
+
+- **Managed** — reen owns these; overwritten on `--upgrade` unless the user has edited them. Everything under `.claude/`, `DCI.md`, `DRAFT_FORMAT.md`.
+- **Seed** — reen drops these once, then never touches them. `CLAUDE.md`, `reen.manifest.yml`, every `drafts/**/.gitkeep`, and the user-level `.gitignore` merge.
+
+The classification is declared explicitly in a `templates/bundle.toml` index so the rule set is data-driven rather than hardcoded in upgrade logic.
+
+*Bundle manifest (on-disk, per project).*
+
+`reen init` writes `.reen-bundle.yml` at the project root:
+
+```
+schema: reen.bundle/v1
+reen_version: <binary version at install>
+installed_at: <UTC timestamp>
+managed_files:
+  - path: .claude/skills/reen-dci-authoring/SKILL.md
+    sha256: <hash at install>
+  - path: DCI.md
+    sha256: <hash at install>
+  # … one entry per managed file actually written
+```
+
+On `--upgrade`, the upgrader consults this manifest to detect (a) managed files removed in the new bundle (delete them), (b) managed files added in the new bundle (write them), (c) managed files changed in the new bundle where the on-disk hash still matches the stored install hash (overwrite), and (d) managed files changed in the new bundle where the on-disk hash differs from the stored install hash (the user has edited them — refuse to overwrite without `--force` and print a clear diff summary).
+
+*CLI surface.*
+
+```
+reen init                     # initial install in the current directory
+reen init --path <dir>        # install into another directory
+reen init --upgrade           # refresh managed files to the current bundle
+reen init --check             # dry-run report of what upgrade would do
+reen init --force             # allow overwriting user-edited managed files on upgrade
+```
+
+`reen init` refuses to run if any managed file already exists and no `.reen-bundle.yml` is present — the user is told to run `--upgrade`. Seed files that already exist are left alone silently.
+
+*Interaction with the rest of reen.*
+
+Templates are authored once and the reen repo itself dogfoods them: running `reen init --upgrade` inside the reen repo regenerates the repo-root `.claude/`, `CLAUDE.md`, `DCI.md`, `DRAFT_FORMAT.md` from `templates/` byte-for-byte. A CI check asserts that after `cargo build` + `reen init --upgrade` inside the repo, `git status` reports no changes. This is the self-consistency gate — the same one that protects spec/code alignment elsewhere in reen, applied to docs and skills.
+
+*What Phase 8 does not install.*
+
+- No Rust source files. Reen is a tool consumed from the user's `PATH`; it does not inject itself as a crate dependency.
+- No `README.md` in target projects. Reen has opinions about drafts, not about how a project documents itself.
+- No starter drafts. The directory structure is scaffolded; authoring is the BA's work, and opinionated seed drafts would mislead.
+
+**Steps.**
+
+1. **Add the templates directory.** Create `templates/` at repo root and populate it by moving the canonical Phase 6/7 assets (`.claude/`, `CLAUDE.md`, `DCI.md`, `DRAFT_FORMAT.md`) into it. Author a starter `templates/reen.manifest.yml` (empty DCI vocabulary) and `templates/.gitignore.fragment` (lines: `drafts/prepare/`, `drafts/.apis/`, `target/`). Author `templates/bundle.toml` as the file classification index.
+2. **Embed the bundle.** Add `include_dir = "0.7"` (or the maintained equivalent) to `Cargo.toml`. Introduce `src/bundle.rs` that exposes a typed view over the embedded directory: iterate files, read contents, read classification from `bundle.toml`, compute hashes.
+3. **Implement `reen init`.** New module `src/init.rs`. Responsibilities: refuse to run on an already-initialised project without `--upgrade`; materialise managed and seed files; merge `.gitignore.fragment` into the project's `.gitignore` (creating one if absent, appending missing lines if present); write `.reen-bundle.yml`; print a summary of what was created.
+4. **Implement `reen init --upgrade`.** Read `.reen-bundle.yml`; diff against the embedded bundle; apply the add/remove/update rules above; refuse to overwrite edited managed files without `--force`. After a successful upgrade, rewrite `.reen-bundle.yml` with the new hashes and binary version.
+5. **Implement `reen init --check`.** Same diff logic as `--upgrade` but writes nothing. Exit code 0 if up to date, 1 if changes are pending, 2 if user edits would be overwritten (the `--force` case).
+6. **Dogfood the bundle.** Run `reen init --upgrade` inside the reen repo itself. Confirm `git status` is clean. Add a `cargo test` integration test — `dogfood_is_clean` — that invokes `reen init --upgrade` in a clone-under-tempdir of the repo's templates vs. the repo root and asserts byte-identity.
+7. **Migrate the test projects.** Running the test projects under `tests/` through `reen init` replaces their hand-maintained `.claude/` copies. Each project keeps its own `drafts/`, `reen.manifest.yml`, and committed implementations; everything else comes from the bundle. A small migration commit per project.
+8. **Documentation.** Update the reen `README.md` with the install + init instructions (`cargo install reen` → `cd project && reen init`). Add a one-paragraph "Upgrading" section covering `reen init --upgrade` and `--check`. Update `SETUP.md` (from Phase 6) to mention that `reen init` replaces the copy-skills steps.
+9. **Publishing prep.** Audit `Cargo.toml` package metadata (description, license, repository, readme, keywords). Run `cargo publish --dry-run`; fix any warnings. Do not publish in this phase — the act of publishing is a separate step the user chooses when ready.
+
+**Exit criteria:** `reen init` in a fresh empty directory produces a ready-to-use project whose `.claude/` matches the bundle and whose `.reen-bundle.yml` reflects the current binary version. `reen init --upgrade` in the reen repo itself leaves the repo byte-identical — the CI check passes. A user who has edited `DCI.md` and runs `reen init --upgrade` sees a clear refusal with a diff summary and can opt into `--force`. All three in-scope test projects (snake, money transfer, Connor) build end-to-end after their migration commit.
+
 ---
 
 ## Testing strategy
@@ -407,4 +598,4 @@ The lint enforces all of the above mechanically. The bar above is the *reason* t
 
 ## Estimated sequencing
 
-Phases 0–2 can run linearly over a focused week each. Phase 3 can start in parallel with late Phase 2 once the CLI surface is frozen. Phase 4 is the longest-running because it forces real use and will kick bugs back into 1–3. Phase 5 needs Phase 4 complete. Phase 6 runs last.
+Phases 0–2 can run linearly over a focused week each. Phase 3 can start in parallel with late Phase 2 once the CLI surface is frozen. Phase 4 is the longest-running because it forces real use and will kick bugs back into 1–3. Phase 5 needs Phase 4 complete. Phase 6 closes the main-use-case pipeline. Phase 7 is additive and independent of Phases 4–6 in principle (it introduces a new artifact kind rather than changing existing ones), but is sequenced after Phase 6 so the core pipeline is stable before the ingestion path is grafted on. Phase 8 is packaging only — no new pipeline behaviour — so it can run in parallel with Phase 7 if desired, but dogfooding the bundle is simplest once Phase 7's additions are already in the canonical `.claude/` tree.

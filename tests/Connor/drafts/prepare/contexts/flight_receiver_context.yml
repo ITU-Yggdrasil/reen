@@ -64,55 +64,40 @@ synthesised_tests:
   then: the PositionEvent label is "flight"
   citation: Scenarios / absent callsign uses fallback label
 - source: invariant
-  given: a FlightReceiverContext is constructed with event sink, API URL, poll interval, and bounding box
-  when: the constructor completes
-  then: no polling has begun and no API requests have been issued
-  citation: 'functionality `new`: Does not start polling during construction'
+  given: a FlightReceiverContext constructed with event sink, API URL, poll interval, and optional token
+  when: the context is initialized
+  then: the configuration is stored and no polling has started
+  citation: 'functionality `new`: Stores the event sink, API URL, optional API token, poll interval, and optional bounding box. Does not start polling during construction.'
 - source: invariant
-  given: a FlightReceiverContext with stored configuration and event sink
+  given: a FlightReceiverContext with stored configuration
   when: start is called
-  then: a continuous background loop begins that waits for the poll interval before each fetch cycle
-  citation: 'functionality `start`: Begins a continuous background loop. Waits for the poll interval to elapse before each fetch cycle'
+  then: a continuous background loop begins and respects the configured poll interval between fetch cycles
+  citation: 'functionality `start`: Begins a continuous background loop. Waits for the poll interval to elapse before each fetch cycle. Retains the same configuration and event sink across iterations.'
 - source: invariant
-  given: a FlightReceiverContext running start across multiple iterations
-  when: successive poll intervals elapse
-  then: the same configuration and event sink are retained across all iterations
-  citation: 'functionality `start`: Retains the same configuration and event sink across iterations'
-- source: invariant
-  given: a configured API URL and bearer token
+  given: a FlightReceiverContext with a configured bearer token
   when: fetch_positions issues a GET request
-  then: the bearer token is included as an authorization header
-  citation: 'functionality `fetch_positions`: Includes the bearer token as an authorization header when present'
+  then: the authorization header includes the bearer token
+  citation: 'functionality `fetch_positions`: Issues a GET request to the configured API URL. Applies the bounding box when configured. Includes the bearer token as an authorization header when present.'
 - source: invariant
-  given: a configured bounding box
+  given: a FlightReceiverContext with a configured bounding box
   when: fetch_positions issues a GET request
   then: the bounding box parameters are applied to the request
-  citation: 'functionality `fetch_positions`: Applies the bounding box when configured'
+  citation: 'functionality `fetch_positions`: Issues a GET request to the configured API URL. Applies the bounding box when configured.'
 - source: invariant
-  given: fetch_positions receives a failed API response
-  when: the failure is processed
-  then: a diagnostic error count is recorded and execution waits until the next poll interval
-  citation: 'functionality `fetch_positions`: On failure, records a diagnostic error count and waits until the next interval'
-- source: invariant
-  given: a position record with a valid latitude, longitude, and timestamp
-  when: on_position_received parses the record
-  then: the latitude and longitude are mapped directly and the timestamp is used as occurred_at
-  citation: 'functionality `on_position_received`: Maps latitude and longitude directly from the flight position when present. Uses the flight position timestamp as occurred_at'
-- source: invariant
-  given: a position record with a callsign
-  when: on_position_received processes the record
-  then: the PositionEvent label is set to the callsign value
-  citation: 'functionality `on_position_received`: Uses the callsign as label when present'
-- source: invariant
-  given: a valid position record
-  when: on_position_received delivers the event
-  then: the PositionEvent source is set to 'flight'
-  citation: 'functionality `on_position_received`: Sets source to ''flight'''
+  given: a failed API response from fetch_positions
+  when: fetch_positions completes
+  then: a diagnostic error count is recorded and polling waits until the next interval
+  citation: 'functionality `fetch_positions`: On failure, records a diagnostic error count and waits until the next interval.'
 - source: invariant
   given: a position record with no longitude
   when: on_position_received runs
   then: no PositionEvent is emitted
-  citation: 'functionality `on_position_received`: If latitude or longitude is absent, discards the record silently'
+  citation: 'functionality `on_position_received`: If latitude or longitude is absent, discards the record silently.'
+- source: invariant
+  given: a valid flight position with latitude, longitude, timestamp, and callsign
+  when: on_position_received processes the record
+  then: the resulting PositionEvent contains the callsign as label, coordinates from the flight position, occurred_at from the flight position timestamp, and source set to 'flight'
+  citation: 'functionality `on_position_received`: Maps latitude and longitude directly from the flight position when present. Uses the flight position timestamp as occurred_at. Sets source to ''flight''. Uses the callsign as label when present.'
 vocabulary_bindings:
 - name: event_sink
   resolution: role_player

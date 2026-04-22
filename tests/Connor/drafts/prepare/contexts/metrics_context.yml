@@ -62,43 +62,38 @@ synthesised_tests:
   citation: Scenarios / query without source filter
 - source: invariant
   given: MetricsContext is constructed with an aggregator and buffer
-  when: the constructor completes
+  when: the context is initialized
   then: the aggregator and buffer are stored without binding a socket or starting an HTTP server
   citation: 'functionality `new`: Stores the provided aggregator and buffer. Does not bind a socket or start an HTTP server at construction time.'
 - source: invariant
-  given: the aggregator returns rates for multiple cells with varying values
+  given: the aggregator returns multiple rates for different cells including zero-valued cells
   when: handle_metrics_request is called
-  then: the response includes geospatial_event_rate lines for all cells with correct min_lat, max_lat, min_lon, max_lon labels and events_per_minute values
-  citation: 'functionality `handle_metrics_request`: Asks the aggregator for the current rates. Encodes each EventRate as a Prometheus gauge metric named ''geospatial_event_rate''. Each metric line carries labels min_lat, max_lat, min_lon, and max_lon. Uses events_per_minute as the gauge value.'
-- source: invariant
-  given: the aggregator returns rates including zero-valued cells
-  when: handle_metrics_request is called
-  then: the response includes geospatial_event_rate lines for zero-valued cells
+  then: the response includes all cells as geospatial_event_rate gauge metrics with min_lat, max_lat, min_lon, max_lon labels and events_per_minute values, including zero-valued cells
   citation: 'functionality `handle_metrics_request`: Includes zero-valued cells in the output.'
 - source: invariant
   given: handle_metrics_request is called
   when: the response is generated
-  then: the response has a 200 status code and Content-Type of Prometheus metrics format
+  then: the response status is 200 and the content type is Prometheus-compatible
   citation: 'functionality `handle_metrics_request`: Returns the full metric text with a 200 status and the Prometheus content type.'
 - source: invariant
-  given: the buffer contains events from multiple sources including flight, lightning, earthquake, aisstream, adsb, and wiki
-  when: handle_query_request is called with source 'flight'
-  then: only flight events are included in the returned JSON array
-  citation: 'functionality `handle_query_request`: Asks the buffer for the current events, optionally filtered by source. Accepts ''flight'', ''lightning'', ''earthquake'', ''aisstream'', ''adsb'', and ''wiki'' as explicit filters.'
+  given: a request arrives with source parameter 'flight'
+  when: handle_query_request is called
+  then: only events with source 'flight' are included in the returned JSON array
+  citation: 'functionality `handle_query_request`: Accepts ''flight'', ''lightning'', ''earthquake'', ''aisstream'', ''adsb'', and ''wiki'' as explicit filters.'
 - source: invariant
   given: the buffer contains events with and without labels
   when: handle_query_request is called
-  then: each returned JSON object contains latitude, longitude, occurred_at as RFC 3339 text, source, and label as absent when not present
+  then: each JSON object in the response includes latitude, longitude, occurred_at as RFC 3339 text, source, and label only when present
   citation: 'functionality `handle_query_request`: Returns a JSON array of objects, each containing latitude, longitude, occurred_at (as RFC 3339 text), source, and label (as absent when not present).'
 - source: invariant
-  given: a request arrives with an unrecognized source value not in the accepted list
+  given: a request arrives with an unrecognized source value not matching 'flight', 'lightning', 'earthquake', 'aisstream', 'adsb', or 'wiki'
   when: handle_query_request is called
-  then: the request is treated as absent source and events from all sources are returned
+  then: the response includes events from all sources, treating the invalid source the same as absent
   citation: 'functionality `handle_query_request`: Treats any other source value the same as absent.'
 - source: invariant
-  given: handle_query_request is called with any valid source filter or no source
+  given: handle_query_request is called with a valid source filter
   when: the response is generated
-  then: the response has a 200 status code and appropriate JSON content type
+  then: the response status is 200 with an appropriate JSON content type
   citation: 'functionality `handle_query_request`: Returns the JSON payload with a 200 status and an appropriate content type.'
 vocabulary_bindings:
 - name: aggregator

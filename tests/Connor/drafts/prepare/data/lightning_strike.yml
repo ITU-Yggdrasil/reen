@@ -30,19 +30,19 @@ synthesised_tests:
   then: a LightningStrike is returned with those values
   citation: Scenarios / create a strike record
 - source: invariant
-  given: latitude -33.9, longitude 151.2, a UTC timestamp, and station_count of 12
+  given: latitude -33.9, longitude 151.2, a UTC timestamp, and station_count of 0
   when: new is called
-  then: a LightningStrike is returned with latitude -33.9, longitude 151.2, the provided timestamp, and station_count of 12
+  then: a LightningStrike is returned with those values including station_count of 0
   citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
 - source: invariant
-  given: latitude 0, longitude 0, a UTC timestamp, and station_count of 1
+  given: latitude 0, longitude 0, a UTC timestamp, and station_count of 12
   when: new is called
-  then: a LightningStrike is returned with latitude 0, longitude 0, the provided timestamp, and station_count of 1
+  then: a LightningStrike is returned with those values at the equator prime meridian
   citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
 - source: invariant
-  given: latitude 90, longitude -180, a UTC timestamp, and station_count of 99
+  given: latitude 90, longitude -180, a UTC timestamp, and station_count of 1
   when: new is called
-  then: a LightningStrike is returned with latitude 90, longitude -180, the provided timestamp, and station_count of 99
+  then: a LightningStrike is returned with those extreme coordinate values
   citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
 vocabulary_bindings:
 - name: latitude

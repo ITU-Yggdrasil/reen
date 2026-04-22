@@ -63,24 +63,24 @@ synthesised_tests:
   then: 'the invariant holds: The leading integer in the duration label must exactly equal the minutes value.'
   citation: Invariants / The leading integer in the duration label must exactly equal the minutes value.
 - source: invariant
-  given: duration "3 minutes" and minutes -5
+  given: duration "3 minutes" and minutes 3.5
   when: new is called
-  then: an error is returned because negative minute values are invalid
+  then: an error is returned because the minutes value is fractional
   citation: 'invariant: Zero, negative, and fractional minute values are invalid.'
 - source: invariant
-  given: duration "2.5 minutes" and minutes 2.5
+  given: duration "-2 minutes" and minutes -2
   when: new is called
-  then: an error is returned because fractional minute values are invalid
+  then: an error is returned because the minutes value is negative
   citation: 'invariant: Zero, negative, and fractional minute values are invalid.'
 - source: invariant
   given: duration "1 minute" and minutes 1
   when: new is called
-  then: a TimeWindow is returned because 1 is the minimum valid minute value
+  then: a TimeWindow is returned
   citation: 'invariant: The minutes value must be a whole number greater than or equal to 1.'
 - source: invariant
   given: duration "100 minutes" and minutes 100
   when: new is called
-  then: a TimeWindow is returned because the leading integer matches the minutes value
+  then: a TimeWindow is returned
   citation: 'invariant: The leading integer in the duration label must exactly equal the minutes value.'
 - source: invariant
   given: duration "7 minutes" and minutes 8

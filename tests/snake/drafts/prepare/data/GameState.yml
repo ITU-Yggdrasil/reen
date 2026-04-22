@@ -85,42 +85,52 @@ synthesised_tests:
   given: a GameState with score 0
   when: increment_score is called with amount 1
   then: the returned GameState has score 1
-  citation: 'invariant: The score only increases during play'
+  citation: 'invariant: The score only increases during play.'
+- source: invariant
+  given: a GameState with score 100
+  when: increment_score is called with amount 50
+  then: the returned GameState has score 150, which is greater than the original score
+  citation: 'invariant: The score only increases during play.'
 - source: invariant
   given: a GameState with score 2,000,000,000
+  when: increment_score is called with amount 1
+  then: the returned GameState has score 2,000,000,000 (saturated, not exceeded)
+  citation: 'invariant: The score never exceeds 2,000,000,000 during normal play; score increases saturate at this cap.'
+- source: invariant
+  given: a GameState with score 1,999,999,999
   when: increment_score is called with amount 5
-  then: the returned GameState has score 2,000,000,000
-  citation: 'invariant: The score never exceeds 2,000,000,000 during normal play; score increases saturate at this cap'
+  then: the returned GameState has score 2,000,000,000 (saturated at cap)
+  citation: 'invariant: The score never exceeds 2,000,000,000 during normal play; score increases saturate at this cap.'
 - source: invariant
-  given: a GameState with score 1,500,000,000
-  when: increment_score is called with amount 600,000,000
-  then: the returned GameState has score 2,000,000,000
-  citation: 'invariant: The score never exceeds 2,000,000,000 during normal play; score increases saturate at this cap'
+  given: a GameState with game_started timestamp 1000000
+  when: game_time is called with current UTC time 1005000
+  then: the returned elapsed time is 5000 milliseconds
+  citation: 'operation `game_time`: Returns the elapsed milliseconds since the game started.'
 - source: invariant
-  given: a GameState with score 100 and food at (10, 20)
-  when: place_food is called with a Food at position (7, 8)
-  then: the returned GameState has food at (7, 8) and score 100
-  citation: 'operation `place_food`: All other fields are unchanged'
-- source: invariant
-  given: a GameState with game_started timestamp 1000
-  when: game_time is called with current UTC milliseconds 5500
-  then: game_time returns 4500
-  citation: 'operation `game_time`: Returns the elapsed milliseconds since the game started'
+  given: a GameState with food at (10, 20)
+  when: food is called
+  then: the returned food placement is at (10, 20)
+  citation: 'operation `food`: Returns the current food placement, or absent if none.'
 - source: invariant
   given: a GameState with no food
   when: food is called
-  then: food returns absent
-  citation: 'operation `food`: Returns the current food placement, or absent if none'
+  then: the returned food placement is absent
+  citation: 'operation `food`: Returns the current food placement, or absent if none.'
 - source: invariant
-  given: a GameState with food at (3, 4)
-  when: food is called
-  then: food returns the Food at (3, 4)
-  citation: 'operation `food`: Returns the current food placement, or absent if none'
-- source: invariant
-  given: a GameState with game_started timestamp 1234567890
+  given: a GameState with game_started timestamp 1500000
   when: game_started is called
-  then: game_started returns 1234567890
-  citation: 'operation `game_started`: Returns the recorded start timestamp in milliseconds'
+  then: the returned timestamp is 1500000 milliseconds
+  citation: 'operation `game_started`: Returns the recorded start timestamp in milliseconds.'
+- source: invariant
+  given: a GameState with score 50 and food at (3, 7)
+  when: place_food is called with a Food at position (9, 2)
+  then: the returned GameState has food at (9, 2) and score 50
+  citation: 'operation `place_food`: All other fields are unchanged.'
+- source: invariant
+  given: a GameState with score 75 and food at (4, 5)
+  when: place_food is called with absent
+  then: the returned GameState has no food and score 75
+  citation: 'operation `place_food`: All other fields are unchanged.'
 vocabulary_bindings:
 - name: score
   resolution: attribute

@@ -87,51 +87,6 @@ synthesised_tests:
   when: the invariant is tested
   then: 'the invariant holds: The grid is immutable after construction.'
   citation: Invariants / The grid is immutable after construction.
-- source: invariant
-  given: a GridResolution of ten degrees on both axes
-  when: all_cells is called
-  then: cells are enumerated from south to north, with the first cell having min_latitude -90 and the last cell having max_latitude 90
-  citation: 'operation `all_cells`: Cells are enumerated from south to north and, within each latitude band, from west to east.'
-- source: invariant
-  given: a GridResolution of ten degrees on both axes
-  when: all_cells is called
-  then: within each latitude band, cells are ordered from west to east, with westernmost cells having min_longitude -180
-  citation: 'operation `all_cells`: Cells are enumerated from south to north and, within each latitude band, from west to east.'
-- source: invariant
-  given: a GridResolution of ten degrees on both axes
-  when: cell_for is called with latitude -90 and longitude -180
-  then: the returned cell is the southwesternmost cell with min_latitude -90, max_latitude -80, min_longitude -180, max_longitude -170
-  citation: 'invariant: The grid uses a fixed origin of -90 degrees latitude and -180 degrees longitude.'
-- source: invariant
-  given: a GridResolution of ten degrees on both axes
-  when: cell_for is called with latitude 90 and longitude 180
-  then: the returned cell is the northeasternmost cell with min_latitude 80, max_latitude 90, min_longitude 170, max_longitude 180
-  citation: 'operation `cell_for`: Latitude 90 maps to the northernmost band. Longitude 180 maps to the easternmost band.'
-- source: invariant
-  given: a GridResolution of ten degrees on both axes
-  when: cell_for is called with latitude 50.0 and longitude -10.0
-  then: the returned cell has min_latitude 50 and min_longitude -10 because interior boundary values belong to the cell for which that boundary is the lower bound
-  citation: 'operation `cell_for`: Interior boundary values belong to the cell for which that boundary is the lower bound.'
-- source: invariant
-  given: a GridResolution of ten degrees on both axes
-  when: cell_for is called with latitude -91 and longitude -181
-  then: both coordinates are clamped to -90 and -180 respectively, mapping to the southwesternmost cell
-  citation: 'operation `cell_for`: Inputs outside those ranges are clamped to the nearest valid bound before assignment.'
-- source: invariant
-  given: a GridResolution of ten degrees on both axes
-  when: cell_for is called multiple times with different valid coordinates
-  then: every coordinate maps to exactly one cell and no two different coordinates map to different cells for the same cell bounds
-  citation: 'operation `cell_for`: Every coordinate after clamping maps to exactly one cell.'
-- source: invariant
-  given: a GridResolution where degrees_latitude is 36 and degrees_longitude is 45
-  when: new is called
-  then: construction succeeds because 180 divided by 36 is 5 and 360 divided by 45 is 8
-  citation: 'invariant: 180 divided by the resolution''s degrees_latitude must be a whole number. invariant: 360 divided by the resolution''s degrees_longitude must be a whole number.'
-- source: invariant
-  given: a GridResolution of ten degrees on both axes and a constructed GridContext
-  when: an attempt is made to modify any property of the grid after construction
-  then: the modification fails or is prevented, demonstrating immutability
-  citation: 'invariant: The grid is immutable after construction.'
 vocabulary_bindings:
 - name: resolution
   resolution: attribute

@@ -36,25 +36,25 @@ synthesised_tests:
   then: the interior rows contain only spaces between the wall symbols
   citation: Scenarios / empty interior shows spaces
 - source: invariant
-  given: a StringRenderer constructed with a board
-  when: the StringRenderer is queried for its source board
-  then: the returned board is the same board that was passed to the constructor
-  citation: 'query `new`: Stores the board as the source to query for on-screen symbols'
-- source: invariant
-  given: a 3 by 3 board with distinct symbols at each coordinate
-  when: render is called with score 0
-  then: 'the output contains exactly 3 rows with symbols in left-to-right order, each row terminated by newline, followed by ''Score: 0'' and newline'
-  citation: 'query `render`: Iterates rows from top to bottom. Within each row, iterates columns from left to right'
-- source: invariant
-  given: a 1 by 1 board with a single symbol and a score of 999
+  given: a board with mixed symbols (walls, spaces, and game pieces) and a score of 0
   when: render is called
-  then: 'the output is the single symbol followed by newline, then ''Score: 999'' and newline'
-  citation: 'query `render`: Each row is followed by a newline. After the last row, a score line in the format ''Score: <score>'' followed by a newline is included'
+  then: the output iterates columns left to right within each row, preserving symbol order exactly
+  citation: Iterates rows from top to bottom. Within each row, iterates columns from left to right, collecting the symbol at each coordinate.
 - source: invariant
-  given: a board where row 0 contains symbols 'A', 'B', 'C' and row 1 contains symbols 'D', 'E', 'F'
+  given: a board instance
+  when: new is called with the board
+  then: the board is stored as the source to query for on-screen symbols and no other collaborators are fetched
+  citation: 'query `new`: Stores the board as the source to query for on-screen symbols. No other collaborators are fetched.'
+- source: invariant
+  given: a single-row board with 3 symbols and a score of 42
   when: render is called
-  then: the output contains 'ABC' on the first line and 'DEF' on the second line
-  citation: 'query `render`: Within each row, iterates columns from left to right, collecting the symbol at each coordinate'
+  then: 'the output contains the row''s symbols, followed by a newline, then ''Score: 42'' and a newline with no additional content after'
+  citation: 'Each row is followed by a newline. After the last row, a score line in the format ''Score: <score>'' followed by a newline is included.'
+- source: invariant
+  given: a board with 3 rows of varying symbol compositions and a score of 999
+  when: render is called
+  then: 'each of the 3 rows is separated by newlines in top-to-bottom order, and the final line is ''Score: 999'' followed by a newline'
+  citation: 'Iterates rows from top to bottom... Each row is followed by a newline. After the last row, a score line in the format ''Score: <score>'' followed by a newline is included.'
 vocabulary_bindings:
 - name: Board
   resolution: data

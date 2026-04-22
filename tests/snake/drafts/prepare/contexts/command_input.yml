@@ -67,55 +67,45 @@ synthesised_tests:
   then: no action is returned
   citation: Scenarios / next_action on empty buffer
 - source: invariant
-  given: CommandInput is newly constructed
-  when: the buffer state is inspected
-  then: the buffer is empty and stdin source and buffer are stored as collaborators
-  citation: 'functionality `new`: Initialises the buffer as an empty queue and stores the stdin source and buffer as collaborators'
+  given: CommandInput is newly initialized
+  when: the buffer is inspected
+  then: it is empty and ready to receive key presses
+  citation: 'functionality `new`: Initialises the buffer as an empty queue'
 - source: invariant
   given: the shared buffer is empty
   when: next_key is called
-  then: no key is returned and the buffer remains empty
+  then: no key is returned
   citation: 'functionality `next_key`: If the buffer is empty, returns no key'
 - source: invariant
-  given: the shared buffer contains 'w', 'a', 's'
-  when: next_key is called three times
-  then: the keys are returned in order 'w', 'a', 's' and each is removed from the buffer
-  citation: 'functionality `next_key`: removes and returns the oldest key event'
+  given: the shared buffer contains 'w', 'a', 's', 'd' in order
+  when: next_action is called four times
+  then: move-up, move-left, move-down, and move-right actions are returned in that order
+  citation: 'functionality `next_action`: w maps to move up, a maps to move left, s maps to move down, d maps to move right'
+- source: invariant
+  given: the shared buffer contains space
+  when: next_action is called
+  then: a fire action is returned
+  citation: 'functionality `next_action`: space maps to fire'
+- source: invariant
+  given: the shared buffer contains 'W' (uppercase)
+  when: next_action is called
+  then: a move-up action is returned
+  citation: 'functionality `next_action`: case-insensitive matching'
 - source: invariant
   given: no key presses are available in stdin
   when: capture is called
   then: the buffer remains unchanged
   citation: 'functionality `capture`: If no key presses are available, the buffer is unchanged'
 - source: invariant
-  given: the shared buffer contains 'q', 'w'
-  when: capture is called while 'a' and 's' are waiting in stdin
-  then: '''a'' and ''s'' are appended to the buffer after ''q'' and ''w'' in arrival order'
-  citation: 'functionality `capture`: appends each to the end of the buffer in arrival order. Keys already in the buffer before this call remain in place; new keys follow them'
+  given: the buffer already contains 'w' and new key presses 'a', 's' are available
+  when: capture is called
+  then: the buffer contains 'w', 'a', 's' in that order with new keys appended at the end
+  citation: 'functionality `capture`: Keys already in the buffer before this call remain in place; new keys follow them'
 - source: invariant
-  given: the shared buffer contains 'W'
+  given: the shared buffer contains 'q', 'x', 'w' in order
   when: next_action is called
-  then: a move-up action is returned
-  citation: 'functionality `next_action`: w maps to move up, using case-insensitive matching'
-- source: invariant
-  given: the shared buffer contains 'A', 'S', 'd'
-  when: next_action is called three times
-  then: move-left, move-down, and move-right actions are returned respectively
-  citation: 'functionality `next_action`: a maps to move left, s maps to move down, d maps to move right, using case-insensitive matching'
-- source: invariant
-  given: the shared buffer contains ' ' (space)
-  when: next_action is called
-  then: a fire action is returned
-  citation: 'functionality `next_action`: space maps to fire'
-- source: invariant
-  given: the shared buffer contains 'x', 'y', 'z', 'w'
-  when: next_action is called
-  then: three invalid keys are discarded and a move-up action is returned
-  citation: 'functionality `next_action`: If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted'
-- source: invariant
-  given: the shared buffer is used by both menu and gameplay
-  when: capture adds keys and next_key/next_action retrieve them
-  then: all components read from the same queue in the order keys were captured
-  citation: 'functionality `new`: One shared buffer is used for the whole application session; menus and gameplay read from the same queue'
+  then: invalid keys 'q' and 'x' are discarded and a move-up action is returned
+  citation: 'functionality `next_action`: If the key has no gameplay meaning, the process repeats until a valid key is found'
 vocabulary_bindings:
 - name: stdin_source
   resolution: role_player

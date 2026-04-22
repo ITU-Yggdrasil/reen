@@ -63,46 +63,6 @@ synthesised_tests:
   when: fetch_aircraft runs
   then: four PositionEvents with source "adsb" are delivered
   citation: Scenarios / successful poll delivers events
-- source: invariant
-  given: AdsbReceiverContext constructed with event sink, API URL, API key, poll interval, and bounding box
-  when: construction completes
-  then: polling has not started and no requests have been issued
-  citation: 'functionality `new`: Does not start polling during construction.'
-- source: invariant
-  given: AdsbReceiverContext with stored configuration and event sink
-  when: start is invoked
-  then: a continuous background loop begins that waits for the poll interval to elapse before each fetch cycle
-  citation: 'functionality `start`: Begins a continuous background loop. Waits for the poll interval to elapse before each fetch cycle.'
-- source: invariant
-  given: AdsbReceiverContext running with initial configuration
-  when: multiple polling iterations complete
-  then: the same configuration and event sink are retained across all iterations
-  citation: 'functionality `start`: Retains the same configuration and event sink across iterations.'
-- source: invariant
-  given: AdsbReceiverContext configured with API URL, API key, and bounding box
-  when: fetch_aircraft executes
-  then: a GET request is issued to the API URL with the API key in request headers and the bounding box applied to the query
-  citation: 'functionality `fetch_aircraft`: Issues a GET request to the configured API URL. Includes the API key as a request header. Applies the bounding box when configured.'
-- source: invariant
-  given: a failed API response from fetch_aircraft
-  when: fetch_aircraft processes the failure
-  then: a diagnostic error count is recorded and the context waits until the next poll interval before retrying
-  citation: 'functionality `fetch_aircraft`: On failure, records a diagnostic error count and waits until the next interval.'
-- source: invariant
-  given: an aircraft record with valid latitude, longitude, timestamp, ICAO hex code, and non-blank callsign
-  when: on_aircraft_received processes the record
-  then: a PositionEvent is emitted with the callsign as label, source set to 'adsb', and timestamp mapped to occurred_at
-  citation: 'functionality `on_aircraft_received`: Uses the callsign as label when present and non-blank. Sets source to ''adsb''. Uses the state''s timestamp as occurred_at.'
-- source: invariant
-  given: an aircraft record with valid latitude, longitude, timestamp, and ICAO hex code but no longitude
-  when: on_aircraft_received runs
-  then: no PositionEvent is emitted
-  citation: 'functionality `on_aircraft_received`: If latitude or longitude is absent, discards the record silently.'
-- source: invariant
-  given: an aircraft record with valid coordinates, timestamp, ICAO hex code, and callsign
-  when: on_aircraft_received processes the record
-  then: latitude and longitude are mapped directly from the aircraft state to the PositionEvent
-  citation: 'functionality `on_aircraft_received`: Maps latitude and longitude directly from the aircraft state when present.'
 vocabulary_bindings:
 - name: event_sink
   resolution: role_player

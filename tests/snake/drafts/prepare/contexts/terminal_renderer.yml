@@ -45,29 +45,34 @@ synthesised_tests:
   then: the terminal shows only the second frame without leftover content from the first
   citation: Scenarios / successive frames overwrite in place
 - source: invariant
-  given: a TerminalRenderer is instantiated with a string renderer and a screen
+  given: TerminalRenderer is initialized with a string renderer and a screen
   when: the renderer is created
-  then: it stores both the string renderer and screen as collaborators for later use
+  then: the string renderer and screen are stored as collaborators for later use
   citation: 'functionality `new`: Stores the string renderer and the screen as collaborators'
 - source: invariant
-  given: a TerminalRenderer with collaborators and a board picture and score to render
+  given: a board picture and score are available for rendering
   when: render is called
-  then: the string renderer is asked to format the board picture and score as a text frame
+  then: the string renderer is asked to format the board picture and score into a text frame
   citation: 'functionality `render`: Asks the string renderer to format the current board picture and score as a text frame'
 - source: invariant
-  given: a formatted frame with multiple rows from the string renderer
+  given: a formatted text frame with multiple rows exists
   when: render processes the frame
-  then: the frame is split into individual rows and each row is positioned at the start of its line on the screen
-  citation: 'functionality `render`: Splits the frame into rows. For each row, positions the cursor at the start of that row on the screen'
+  then: the frame is split into individual rows for line-by-line rendering
+  citation: 'functionality `render`: Splits the frame into rows'
 - source: invariant
-  given: all rows have been written to the screen
-  when: render completes row writing
-  then: the screen is flushed so the frame appears immediately
+  given: a multi-row text frame is being rendered
+  when: each row is written to the screen
+  then: the cursor is positioned at the start of each row before writing that row's text
+  citation: 'functionality `render`: For each row, positions the cursor at the start of that row on the screen and writes the row''s text'
+- source: invariant
+  given: all rows of a frame have been written to the screen
+  when: render completes
+  then: the screen is flushed so the complete frame appears immediately
   citation: 'functionality `render`: After all rows are written, flushes the screen so the frame appears immediately'
 - source: invariant
-  given: a frame with rows of varying lengths
-  when: render writes each row
-  then: each row begins at the start of its line using cursor positioning
+  given: a frame is being rendered in immediate-input terminal mode
+  when: each row is written
+  then: every row begins at the start of its line to ensure correct display
   citation: 'functionality `render`: Every row begins at the start of its line so that the frame displays correctly in immediate-input terminal mode'
 vocabulary_bindings:
 - name: string_renderer

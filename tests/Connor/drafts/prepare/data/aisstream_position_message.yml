@@ -64,35 +64,30 @@ synthesised_tests:
   then: 'the invariant holds: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).'
   citation: Invariants / observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).
 - source: invariant
-  given: message_type "StandardClassBPositionReport", mmsi "987654321", vessel_name "TANKER", latitude 45.3, longitude 10.5, observed_at as a UTC timestamp
+  given: message_type "StandardClassBPositionReport", mmsi "987654321", vessel_name "TANKER", latitude 48.8, longitude 2.3, observed_at as a UTC timestamp
   when: new is called
-  then: an AISStreamPositionMessage is returned
-  citation: 'operation `new`: Constructs an AISStreamPositionMessage from normalized boundary values; invariant: Only PositionReport and StandardClassBPositionReport message families may be represented'
-- source: invariant
-  given: message_type "SafetyAcknowledgement" (not PositionReport or StandardClassBPositionReport)
-  when: new is called
-  then: an error is raised or the construction fails because SafetyAcknowledgement violates the message family invariant
+  then: an AISStreamPositionMessage is returned with StandardClassBPositionReport as the message family
   citation: 'invariant: Only PositionReport and StandardClassBPositionReport message families may be represented'
 - source: invariant
-  given: a PositionReport message with AIS Timestamp field set to 45 (seconds within minute) and a raw event time of 2024-01-15T10:30:45Z
-  when: normalized into an AISStreamPositionMessage
-  then: the observed_at field is set to the full UTC timestamp 2024-01-15T10:30:45Z, not derived from the AIS Timestamp field alone
+  given: message_type "NavigationAid", mmsi "111111111", latitude 40.7, longitude -74.0, observed_at as a UTC timestamp
+  when: new is called
+  then: construction fails or the message is rejected because NavigationAid is not an allowed message family
+  citation: 'invariant: Only PositionReport and StandardClassBPositionReport message families may be represented'
+- source: invariant
+  given: raw AIS PositionReport message with AIS Timestamp field set to 45 (seconds within minute), mmsi "555555555", latitude 35.6, longitude 139.7
+  when: new constructs the AISStreamPositionMessage
+  then: observed_at is set to a full UTC timestamp with minutes and hours, not derived solely from the AIS Timestamp field value of 45
   citation: 'invariant: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp)'
 - source: invariant
-  given: a StandardClassBPositionReport with longitude -180.0
-  when: new is called with this boundary value
-  then: an AISStreamPositionMessage is returned with longitude normalized to -180.0
-  citation: 'operation `new`: Constructs an AISStreamPositionMessage from normalized boundary values'
-- source: invariant
-  given: a PositionReport message with latitude 0.0 and longitude 0.0
-  when: new is called
-  then: an AISStreamPositionMessage is returned with the coordinates preserved as valid (neither coordinate is the AIS invalid-coordinate sentinel)
-  citation: 'operation `new`: Constructs an AISStreamPositionMessage from normalized boundary values; invariant: observed_at is a full UTC timestamp'
-- source: invariant
-  given: an AISStreamPositionMessage after normalization
-  when: the receiver inspects the record structure
-  then: the record presents a single consistent shape regardless of whether it originated from PositionReport or StandardClassBPositionReport
+  given: a raw position record with multiple possible coordinate representations from the AIS message
+  when: new constructs the AISStreamPositionMessage
+  then: the record is normalized to a single consistent coordinate format before being stored
   citation: 'invariant: The record is normalized into one consistent shape before the receiver reads it'
+- source: invariant
+  given: message_type "PositionReport", mmsi "222222222", vessel_name "FISHING VESSEL", latitude -33.8, longitude 151.2, observed_at as a full UTC timestamp with hour, minute, second, and timezone
+  when: new is called
+  then: an AISStreamPositionMessage is returned where observed_at is preserved as the complete UTC timestamp
+  citation: 'invariant: observed_at is a full UTC timestamp'
 vocabulary_bindings:
 - name: message_type
   resolution: attribute

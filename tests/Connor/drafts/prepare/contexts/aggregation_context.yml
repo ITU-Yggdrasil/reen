@@ -72,33 +72,33 @@ synthesised_tests:
   citation: Scenarios / empty buffer produces zero counts
 - source: invariant
   given: AggregationContext is constructed with a buffer and grid
-  when: the context is created
+  when: the context is instantiated
   then: no computation occurs and the buffer and grid role players are stored
   citation: 'functionality `new`: Stores the provided buffer and grid role players. Performs no computation at construction time.'
 - source: invariant
   given: the buffer holds events distributed across multiple cells
   when: produce_counts is called
-  then: each cell receives a count matching its event population and all grid cells are represented in the result
-  citation: 'functionality `produce_counts`: Returns one EventCount per grid cell. Cells with no matching events receive a count of zero.'
-- source: invariant
-  given: the buffer provides a TimeWindow
-  when: produce_counts is called
-  then: each returned EventCount carries the same TimeWindow obtained from the buffer
+  then: each cell receives a count matching its event tally and the TimeWindow from the buffer is attached to each EventCount
   citation: 'functionality `produce_counts`: Each EventCount carries the TimeWindow obtained from the buffer.'
 - source: invariant
-  given: the buffer holds events and a TimeWindow of two minutes exists
-  when: produce_rates is called
-  then: each EventRate is derived by dividing the count by two and all grid cells are represented
-  citation: 'functionality `produce_rates`: Divides each EventCount by the window''s duration in minutes to derive the rate. Returns one EventRate per cell in the same exhaustive fashion as produce_counts.'
+  given: the grid has cells but the buffer holds events in only a subset of them
+  when: produce_counts is called
+  then: cells with no matching events receive a count of zero
+  citation: 'functionality `produce_counts`: Cells with no matching events receive a count of zero.'
 - source: invariant
-  given: the buffer provides a one-minute TimeWindow
+  given: produce_counts returns EventCounts for all grid cells
   when: produce_rates is called
-  then: no division by zero occurs and rates equal the counts
+  then: produce_counts is invoked internally and each EventCount is divided by the window's duration in minutes to derive the rate
+  citation: 'functionality `produce_rates`: Calls produce_counts internally. Divides each EventCount by the window''s duration in minutes to derive the rate.'
+- source: invariant
+  given: a one-minute TimeWindow with events in a cell
+  when: produce_rates is called
+  then: the rate for that cell equals the count (no division by zero occurs)
   citation: 'functionality `produce_rates`: Because the TimeWindow is always at least one minute, valid inputs do not divide by zero.'
 - source: invariant
-  given: the buffer holds events and produce_rates is called
-  when: the rates are computed
-  then: each returned EventRate carries the same TimeWindow as returned by produce_counts
+  given: the grid has multiple cells and the buffer holds no events
+  when: produce_rates is called
+  then: every cell receives an EventRate with a rate of zero and carries the TimeWindow from the buffer
   citation: 'functionality `produce_rates`: Returns one EventRate per cell in the same exhaustive fashion as produce_counts, carrying the same TimeWindow.'
 vocabulary_bindings:
 - name: buffer

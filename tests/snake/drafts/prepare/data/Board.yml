@@ -73,35 +73,50 @@ synthesised_tests:
   then: 'the invariant holds: Interior cells may contain blank space, snake symbols, or food symbols depending on the current frame.'
   citation: Invariants / Interior cells may contain blank space, snake symbols, or food symbols depending on the current frame.
 - source: invariant
-  given: a 10 by 10 board
-  when: symbol_at is called for a coordinate on the outer ring, such as (0, 5)
-  then: the result is a wall symbol
-  citation: 'invariant: Cells on the outer ring (edges of the board) may contain wall symbols.'
+  given: a 1 by 1 board (minimum valid dimensions)
+  when: symbol_at is called for (0, 0)
+  then: a symbol is returned without error
+  citation: 'invariant: Width and height are both greater than zero'
 - source: invariant
-  given: a 10 by 10 board
-  when: symbol_at is called for an interior coordinate, such as (5, 5)
-  then: the result is blank space, a snake symbol, or a food symbol
-  citation: 'invariant: Interior cells may contain blank space, snake symbols, or food symbols depending on the current frame.'
+  given: a 5 by 5 board with interior cell (2, 2) containing a snake symbol 's'
+  when: symbol_at is called for (2, 2)
+  then: the result is 's'
+  citation: 'invariant: Interior cells may contain blank space, snake symbols, or food symbols'
 - source: invariant
-  given: a 5 by 7 board with all cells populated
-  when: symbol_at is called for every coordinate from (0,0) to (4,6)
-  then: exactly 35 cells return valid symbols and no coordinate outside this range is accessible
-  citation: 'invariant: Every coordinate within bounds has exactly one cell entry; no entries exist outside bounds.'
+  given: a 5 by 5 board with interior cell (1, 1) containing a space character
+  when: symbol_at is called for (1, 1)
+  then: the result is a space character
+  citation: 'invariant: Interior cells may contain blank space, snake symbols, or food symbols'
 - source: invariant
-  given: a 10 by 10 board
-  when: with_symbol_at is called with position (-1, 5) and symbol 'x'
-  then: the returned board is identical to the original
-  citation: 'operation `with_symbol_at`: If the position is outside the board bounds, the returned board is an unchanged copy.'
+  given: a 5 by 5 board with interior cell (3, 2) containing a food symbol 'f'
+  when: symbol_at is called for (3, 2)
+  then: the result is 'f'
+  citation: 'invariant: Interior cells may contain blank space, snake symbols, or food symbols'
 - source: invariant
-  given: a 10 by 10 board where (0, 0) contains 'w' and (5, 5) contains ' '
-  when: 'with_symbol_at is chained: first called with (5, 5) and ''s'', then with (7, 7) and ''f'' on the result'
-  then: the final board has 's' at (5, 5), 'f' at (7, 7), 'w' at (0, 0), and all other cells from the original board
-  citation: 'operation `with_symbol_at`: This is the sole way to produce an overlaid board picture — callers that need to render snake or food cells on top of the base board chain calls to with_symbol_at.'
+  given: a 3 by 3 board with edge cell (0, 1) containing a wall symbol 'w'
+  when: symbol_at is called for (0, 1)
+  then: the result is 'w'
+  citation: 'invariant: Cells on the outer ring (edges of the board) may contain wall symbols'
 - source: invariant
-  given: a 1 by 1 board
-  when: the board dimensions are checked
-  then: width and height are both equal to 1, satisfying the greater than zero invariant
-  citation: 'invariant: Width and height are both greater than zero.'
+  given: a 4 by 4 board with edge cell (3, 2) containing a wall symbol 'w'
+  when: symbol_at is called for (3, 2)
+  then: the result is 'w'
+  citation: 'invariant: Cells on the outer ring (edges of the board) may contain wall symbols'
+- source: invariant
+  given: a 6 by 6 board
+  when: with_symbol_at is called for position (1, 1) with symbol 'x', then with_symbol_at is called on the result for position (4, 4) with symbol 'y'
+  then: the final board has 'x' at (1, 1) and 'y' at (4, 4)
+  citation: 'operation with_symbol_at: callers that need to render snake or food cells chain calls to with_symbol_at starting from a base board'
+- source: invariant
+  given: a 5 by 5 board with cell (2, 2) containing a space
+  when: with_symbol_at is called for position (2, 2) with symbol 'f'
+  then: the returned board has 'f' at (2, 2) and the original board is unchanged
+  citation: 'operation with_symbol_at: Returns a new Board identical to this one except that the cell at the given position is replaced'
+- source: invariant
+  given: a 7 by 5 board
+  when: every coordinate (x, y) where 0 <= x < 7 and 0 <= y < 5 is checked with symbol_at
+  then: each coordinate returns exactly one symbol with no gaps or duplicates
+  citation: 'invariant: Every coordinate within bounds has exactly one cell entry; no entries exist outside bounds'
 vocabulary_bindings:
 - name: width
   resolution: attribute

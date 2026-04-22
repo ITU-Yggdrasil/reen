@@ -43,24 +43,24 @@ synthesised_tests:
   then: 'the invariant holds: Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.'
   citation: Invariants / Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.
 - source: invariant
+  given: a snake head at (10, 20) and a direction Left
+  when: the position delta for Left is applied
+  then: the next head position is (9, 20)
+  citation: 'invariant: mapping from direction to position delta must be applied consistently'
+- source: invariant
   given: a snake head at (10, 20) and a direction Right
-  when: the direction is applied to calculate the next position
+  when: the position delta for Right is applied
   then: the next head position is (11, 20)
   citation: 'invariant: mapping from direction to position delta must be applied consistently'
 - source: invariant
-  given: a snake head at (0, 0) and a direction Left
-  when: the direction is applied to calculate the next position
-  then: the next head position is (-1, 0)
-  citation: 'invariant: mapping from direction to position delta must be applied consistently'
+  given: 'the same direction Up applied at two different positions: (0, 0) and (100, 100)'
+  when: the position delta for Up is applied to both
+  then: 'both deltas are identical: (0, -1)'
+  citation: 'invariant: the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position'
 - source: invariant
-  given: two different positions (3, 7) and (15, 2) both with direction Up
-  when: the direction is applied to both positions
-  then: both produce position deltas of (0, -1) demonstrating consistent mapping
-  citation: 'invariant: the mapping from direction to position delta must be applied consistently wherever a direction is turned into a next position'
-- source: invariant
-  given: a Direction object
-  when: queried for coordinate information
-  then: the Direction object contains no coordinate data, only directional intent
+  given: a Direction instance
+  when: queried for coordinate knowledge
+  then: the Direction does not contain or reference any coordinate information
   citation: 'invariant: Direction does not know about coordinates itself'
 vocabulary_bindings:
 - name: Up

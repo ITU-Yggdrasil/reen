@@ -61,6 +61,51 @@ synthesised_tests:
   when: fetch_events runs
   then: five PositionEvents with source "earthquake" can be delivered
   citation: Scenarios / successful poll with unique events
+- source: invariant
+  given: a new EarthquakeReceiverContext with event sink, API URL, poll interval, and optional minimum magnitude
+  when: the context is constructed
+  then: the event sink, API URL, poll interval, and minimum magnitude are stored; the seen event IDs set is empty; no polling loop is started
+  citation: 'functionality `new`: Stores configuration and initializes empty deduplication set without starting polling'
+- source: invariant
+  given: an EarthquakeReceiverContext with configured poll interval and API URL
+  when: start is called
+  then: a continuous background loop begins that waits for the poll interval to elapse before each fetch cycle and retains configuration and deduplication state across iterations
+  citation: 'functionality `start`: Begins continuous loop with interval waits and state retention'
+- source: invariant
+  given: a configured API URL and a failed GET request response
+  when: fetch_events runs
+  then: a diagnostic error count is recorded and the loop waits until the next interval before retrying
+  citation: 'functionality `fetch_events`: Records error on failure and waits for next interval'
+- source: invariant
+  given: a successful GeoJSON feature collection response from the API
+  when: fetch_events runs and parses the response
+  then: each feature in the collection is processed by on_event_received
+  citation: 'functionality `fetch_events`: Parses GeoJSON and processes each feature'
+- source: invariant
+  given: an earthquake event with valid coordinates, timestamp, magnitude 4.5, and place 'San Francisco Bay'
+  when: on_event_received processes the event
+  then: latitude and longitude are mapped from epicentre coordinates; occurred_at is set to the event timestamp; source is set to 'earthquake'; label is formed from magnitude and place; a PositionEvent is delivered to the event sink
+  citation: 'functionality `on_event_received`: Maps coordinates, timestamp, source, and label formation'
+- source: invariant
+  given: an earthquake event with magnitude 4.5 and no place field
+  when: on_event_received processes the event
+  then: the label is formed using only the magnitude value
+  citation: 'functionality `on_event_received`: Uses magnitude alone when place is absent'
+- source: invariant
+  given: an earthquake event with place 'Chile' and no magnitude field
+  when: on_event_received processes the event
+  then: the label is formed using only the place value
+  citation: 'functionality `on_event_received`: Uses place alone when magnitude is absent'
+- source: invariant
+  given: an earthquake event that passes all filters and validations
+  when: on_event_received processes the event
+  then: the event ID is recorded in the seen event IDs set for future deduplication
+  citation: 'functionality `on_event_received`: Records newly seen event ID for deduplication'
+- source: invariant
+  given: a minimum magnitude of 5.0 and an event with magnitude 5.0
+  when: on_event_receive runs
+  then: the event is not discarded and proceeds to be delivered
+  citation: 'functionality `on_event_received`: Threshold comparison at boundary condition'
 vocabulary_bindings:
 - name: event_sink
   resolution: role_player

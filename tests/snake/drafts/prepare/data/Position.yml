@@ -40,28 +40,23 @@ synthesised_tests:
   citation: Invariants / Both x and y are non-negative whole numbers.
 - source: invariant
   given: a Position is created with x = -1 and y = 5
-  when: the invariant is checked
-  then: the invariant is violated because x is negative
+  when: the Position is instantiated
+  then: an error is raised because x violates the non-negative whole number invariant
   citation: 'invariant: Both x and y are non-negative whole numbers'
 - source: invariant
-  given: a Position is created with x = 3 and y = -2
-  when: the invariant is checked
-  then: the invariant is violated because y is negative
+  given: a Position is created with x = 5 and y = -1
+  when: the Position is instantiated
+  then: an error is raised because y violates the non-negative whole number invariant
   citation: 'invariant: Both x and y are non-negative whole numbers'
 - source: invariant
-  given: a Position is created with x = 2.5 and y = 4
-  when: the invariant is checked
-  then: the invariant is violated because x is not a whole number
+  given: a Position is created with x = 3.5 and y = 2
+  when: the Position is instantiated
+  then: an error is raised because x is not a whole number, violating the invariant
   citation: 'invariant: Both x and y are non-negative whole numbers'
 - source: invariant
   given: a Position is created with x = 10 and y = 0
-  when: the invariant is checked
-  then: the invariant holds because both x and y are non-negative whole numbers
-  citation: 'invariant: Both x and y are non-negative whole numbers'
-- source: invariant
-  given: a Position is created with x = 0 and y = 100
-  when: the invariant is checked
-  then: the invariant holds because both x and y are non-negative whole numbers
+  when: the Position is instantiated
+  then: the Position is valid because both x and y are non-negative whole numbers
   citation: 'invariant: Both x and y are non-negative whole numbers'
 vocabulary_bindings:
 - name: x

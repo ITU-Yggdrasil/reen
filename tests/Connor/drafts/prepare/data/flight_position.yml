@@ -42,18 +42,18 @@ synthesised_tests:
   citation: Scenarios / missing coordinates
 - source: invariant
   given: callsign "BA747", latitude 51.5, longitude -0.1, altitude 35000, and a UTC timestamp
-  when: new is called with all required fields populated
-  then: a FlightPosition is constructed and returned with callsign "BA747", latitude 51.5, longitude -0.1, and altitude 35000
+  when: new is called with all required field values
+  then: a FlightPosition is returned with callsign "BA747", latitude 51.5, longitude -0.1, altitude 35000, and the provided timestamp
   citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
 - source: invariant
-  given: callsign "UA456", latitude 40.6, longitude -73.8, altitude 28000, timestamp, and additional metadata fields
-  when: new is called with all field values including optional metadata
-  then: a FlightPosition is returned with all supplied field values correctly assigned
+  given: callsign "UA456", latitude 40.7, longitude -74.0, altitude 0, and a UTC timestamp
+  when: new is called with altitude set to 0
+  then: a FlightPosition is returned with all field values including altitude 0
   citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
 - source: invariant
-  given: callsign "LH123", latitude null, longitude -8.5, altitude 15000, and a UTC timestamp
-  when: new is called with latitude absent but other positional fields present
-  then: a FlightPosition is constructed, though it may lack complete positional integrity
+  given: callsign "LH888", latitude -33.9, longitude 151.2, altitude 8000, and a UTC timestamp
+  when: new is called with negative latitude value
+  then: a FlightPosition is returned with the negative latitude preserved
   citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
 vocabulary_bindings:
 - name: callsign
