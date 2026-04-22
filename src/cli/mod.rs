@@ -25,6 +25,7 @@ mod rate_limiter;
 mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
+use brand_scaffold::render_brand_scaffold_contract;
 use brand_specs::{
     is_brand_draft_path, is_brand_spec_path, missing_required_brand_spec_parts,
     unresolved_brand_token_references, validate_brand_spec_content,
@@ -1068,9 +1069,7 @@ pub async fn create_implementation(
             }
 
             let mut dependency_context = build_dependency_context(&node)?;
-            if let Some(target_type_name) = infer_target_type_name(&context_file)? {
-                dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
-            }
+            augment_implementation_generation_context(&context_file, &mut dependency_context)?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
 
             let executor = if agent_name == "create_implementation_brand" {
@@ -1564,6 +1563,22 @@ fn implementation_agent_name(context_file: &Path) -> &'static str {
     } else {
         "create_implementation"
     }
+}
+
+fn augment_implementation_generation_context(
+    context_file: &Path,
+    additional_context: &mut HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    if let Some(target_type_name) = infer_target_type_name(context_file)? {
+        additional_context.insert("target_type_name".to_string(), json!(target_type_name));
+    }
+    if implementation_agent_name(context_file) == "create_implementation_brand" {
+        additional_context.insert(
+            "brand_scaffold_contract".to_string(),
+            json!(render_brand_scaffold_contract()),
+        );
+    }
+    Ok(())
 }
 
 fn validate_implementation_scaffold_ownership(context_files: &[PathBuf]) -> Result<()> {
@@ -2384,9 +2399,7 @@ fn clear_stage_agent_cache_entries_by_name(
                     )
                 })?;
                 let mut additional = build_dependency_context(&node)?;
-                if let Some(target_type_name) = infer_target_type_name(&context_file)? {
-                    additional.insert("target_type_name".to_string(), json!(target_type_name));
-                }
+                augment_implementation_generation_context(&context_file, &mut additional)?;
                 candidates.push((
                     implementation_agent_name(&context_file).to_string(),
                     CacheAgentInput::new_context_input(context_content, additional),
@@ -4022,7 +4035,8 @@ fn to_snake_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dependency_context, build_dependency_drafts_from_context, build_dependency_manifest,
+        augment_implementation_generation_context, build_dependency_context,
+        build_dependency_drafts_from_context, build_dependency_manifest,
         build_implementation_execution_plan, build_implemented_dependency_manifest,
         build_specification_context, build_specification_execution_plan, clear_cache,
         create_implementation, determine_bdd_test_paths, determine_draft_input_path,
@@ -4035,13 +4049,16 @@ mod tests {
         BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, DRAFTS_DIR,
     };
     use crate::cli::agent_executor::AgentExecutor;
-    use crate::cli::brand_scaffold::{BrandEnvelopeParser, BrandScaffoldValidator};
+    use crate::cli::brand_scaffold::{
+        render_brand_scaffold_contract, BrandEnvelopeParser, BrandScaffoldValidator,
+    };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
     use reen::execution::{
         build_agent_input, cache_key_for_input, AgentModelRegistry, AgentRegistry,
     };
     use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
+    use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -4774,6 +4791,20 @@ oops
             r#"===FILE: Cargo.toml===
 [package]
 name = "acme"
+[package.metadata.leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+[lib]
+crate-type = ["cdylib", "rlib"]
 [features]
 hydrate = []
 ssr = []
@@ -4784,10 +4815,19 @@ leptos_axum = "0.6"
 axum = "0.7"
 ===END_FILE===
 ===FILE: Leptos.toml===
+[package]
+name = "acme"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
 output-name = "acme"
 site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -4843,6 +4883,20 @@ placeholder
             r#"===FILE: Cargo.toml===
 [package]
 name = "acme"
+[package.metadata.leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+[lib]
+crate-type = ["cdylib", "rlib"]
 [features]
 hydrate = []
 ssr = []
@@ -4853,10 +4907,19 @@ leptos_axum = "0.6"
 axum = "0.7"
 ===END_FILE===
 ===FILE: Leptos.toml===
+[package]
+name = "acme"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
 output-name = "acme"
 site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -4896,6 +4959,126 @@ placeholder
                 || err.to_string().contains("root route")
                 || err.to_string().contains("Axum SSR wiring")
         );
+    }
+
+    #[test]
+    fn validate_brand_generated_output_rejects_missing_package_metadata_leptos() {
+        let files = BrandEnvelopeParser::parse(
+            r#"===FILE: Cargo.toml===
+[package]
+name = "acme"
+[features]
+hydrate = []
+ssr = []
+[dependencies]
+leptos = "0.6"
+leptos_router = "0.6"
+leptos_axum = "0.6"
+axum = "0.7"
+===END_FILE===
+===FILE: Leptos.toml===
+[package]
+name = "acme"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+===END_FILE===
+===FILE: src/main.rs===
+#[tokio::main]
+async fn main() {
+    let leptos_options = leptos::get_configuration(None).await.unwrap().leptos_options;
+    let routes = leptos_axum::generate_route_list(|| view! { <App/> });
+    let app = axum::Router::new()
+        .leptos_routes(&leptos_options, routes, || view! { <App/> })
+        .with_state(leptos_options);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    axum::serve(listener, app.into_make_service()).await.unwrap();
+}
+===END_FILE===
+===FILE: src/lib.rs===
+pub mod app;
+pub use app::App;
+===END_FILE===
+===FILE: src/app.rs===
+use leptos::*;
+use leptos_router::components::{Route, Router, Routes};
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <Router>
+            <Routes fallback=|| view! { <main></main> }>
+                <Route path="/" view=|| view! { <main class="shell"></main> }/>
+            </Routes>
+        </Router>
+    }
+}
+===END_FILE===
+===FILE: style/app.css===
+:root { --brand-colors-primary-default: #112233; }
+===END_FILE===
+===FILE: public/favicon.ico===
+placeholder
+===END_FILE==="#,
+        )
+        .expect("parse");
+
+        let err = BrandScaffoldValidator::validate(
+            Path::new("specifications/brands/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect_err("expected missing package metadata failure");
+        assert!(err.to_string().contains("[package.metadata.leptos]"));
+    }
+
+    #[test]
+    fn implementation_context_adds_brand_scaffold_contract_only_for_brand_specs() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_impl_context");
+        fs::create_dir_all(root.join("specifications/brands")).expect("mkdir brands");
+        fs::create_dir_all(root.join("specifications/contexts")).expect("mkdir contexts");
+        fs::write(
+            root.join("specifications/brands/acme.md"),
+            "# Brand Identity Specification\n\n## Description\nplaceholder",
+        )
+        .expect("write brand spec");
+        fs::write(
+            root.join("specifications/contexts/account.md"),
+            "# Account\n\n## Description\nplaceholder",
+        )
+        .expect("write context spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+
+        let mut brand_context = HashMap::new();
+        augment_implementation_generation_context(
+            Path::new("specifications/brands/acme.md"),
+            &mut brand_context,
+        )
+        .expect("augment brand context");
+        assert_eq!(
+            brand_context.get("brand_scaffold_contract"),
+            Some(&json!(render_brand_scaffold_contract()))
+        );
+
+        let mut non_brand_context = HashMap::new();
+        augment_implementation_generation_context(
+            Path::new("specifications/contexts/account.md"),
+            &mut non_brand_context,
+        )
+        .expect("augment non-brand context");
+        assert!(!non_brand_context.contains_key("brand_scaffold_contract"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

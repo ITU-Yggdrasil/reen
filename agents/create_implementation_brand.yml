@@ -131,111 +131,8 @@ static_prompt: |
   - Do not emit multi-package `workspace.metadata.leptos` configuration.
   - Prefer single-package metadata/configuration patterns compatible with `cargo leptos watch`.
 
-  Use the following scaffold shape as the default baseline unless the specification forces a compatible variation:
-
-  `Cargo.toml` minimum shape:
-
-  [package]
-  name = "app-name"
-  version = "0.1.0"
-  edition = "2021"
-
-  [package.metadata.leptos]
-  output-name = "app-name"
-  site-root = "target/site"
-  site-pkg-dir = "pkg"
-  style-file = "style/app.css"
-  assets-dir = "public"
-  site-addr = "127.0.0.1:3000"
-  reload-port = 3001
-  bin-features = ["ssr"]
-  bin-default-features = false
-  lib-features = ["hydrate"]
-  lib-default-features = false
-
-  [lib]
-  crate-type = ["cdylib", "rlib"]
-
-  [dependencies]
-  axum = "..."
-  leptos = { version = "...", features = ["ssr", "hydrate"] }
-  leptos_axum = { version = "..." }
-  leptos_router = { version = "..." }
-  tokio = { version = "...", features = ["full"] }
-
-  `Leptos.toml` minimum shape:
-
-  [package]
-  name = "app-name"
-  lib = { path = "src/lib.rs" }
-  bin = { path = "src/main.rs" }
-
-  [leptos]
-  output-name = "app-name"
-  site-root = "target/site"
-  site-pkg-dir = "pkg"
-  style-file = "style/app.css"
-  assets-dir = "public"
-  site-addr = "127.0.0.1:3000"
-  reload-port = 3001
-
-  `src/lib.rs` minimum shape:
-
-  pub mod app;
-  pub use app::App;
-
-  `src/app.rs` minimum shape:
-
-  use leptos::*;
-  use leptos_router::*;
-
-  #[component]
-  pub fn App() -> impl IntoView {
-      view! {
-          <Router>
-              <Routes>
-                  <Route path="/" view=HomePage/>
-              </Routes>
-          </Router>
-      }
-  }
-
-  Do not redefine the route tree in `src/main.rs` or `src/lib.rs`.
-
-  `src/main.rs` minimum shape:
-
-  use axum::Router;
-  use leptos::*;
-  use leptos_axum::{generate_route_list, LeptosRoutes};
-  use app_name::App;
-
-  #[tokio::main]
-  async fn main() {
-      let conf = get_configuration(None).await.unwrap();
-      let leptos_options = conf.leptos_options;
-      let addr = leptos_options.site_addr;
-      let routes = generate_route_list(|| view! { <App/> });
-
-      let app = Router::new()
-          .leptos_routes(&leptos_options, routes, || view! { <App/> })
-          .with_state(leptos_options);
-
-      let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-      axum::serve(listener, app.into_make_service()).await.unwrap();
-  }
-
-  `style/app.css` minimum shape:
-
-  :root {
-      --brand-colors-primary-black: #000000;
-      --brand-colors-primary-white: #ffffff;
-  }
-
-  body {
-      font-family: 'Inter', Arial, Helvetica, sans-serif;
-      color: var(--brand-colors-primary-black);
-      background-color: var(--brand-colors-primary-white);
-  }
+  The CLI provides the default scaffold baseline through `input.brand_scaffold_contract`.
+  Treat that contract as authoritative unless the specification forces a compatible variation.
 
   ## Brand Token Rules
 
@@ -314,5 +211,8 @@ variable_prompt: |
 
   Implemented dependency source manifest (optional, authoritative for existing APIs):
   {{input.implemented_dependencies?}}
+
+  CLI-owned scaffold contract (authoritative baseline):
+  {{input.brand_scaffold_contract}}
 
   Please complete the task described above. Return only the ===FILE: ...=== blocks.

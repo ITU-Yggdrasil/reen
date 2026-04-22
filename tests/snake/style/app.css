@@ -11,16 +11,37 @@ body {
     font-family: 'Inter', Arial, Helvetica, sans-serif;
     color: var(--brand-colors-primary-black);
     background-color: var(--brand-colors-primary-white);
-    line-height: 1.6;
     margin: 0;
-    padding: 20px;
+    padding: 0;
 }
 
 h1 {
     font-weight: bold;
-    color: var(--brand-colors-primary-black);
 }
 
 p {
-    color: var(--brand-colors-primary-black);
+    font-weight: normal;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+.header {
+    background-color: var(--brand-colors-primary-black);
+    color: var(--brand-colors-primary-white);
+    padding: 10px 0;
+    text-align: center;
+}
+
+.footer {
+    background-color: var(--brand-colors-primary-black);
+    color: var(--brand-colors-primary-white);
+    padding: 10px 0;
+    text-align: center;
+    position: fixed;
+    width: 100%;
+    bottom: 0;
 }
