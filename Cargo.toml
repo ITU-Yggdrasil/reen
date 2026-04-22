@@ -8,6 +8,7 @@ repository = "https://github.com/rune/reen"
 readme = "README.md"
 keywords = ["dci", "specification", "codegen", "verification"]
 categories = ["development-tools", "command-line-utilities"]
+exclude = ["tests/", "PLAN.md", "PROMPT_PHASE_*.md", "v0-archive/"]
 
 [[bin]]
 name = "reen"
