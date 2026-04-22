@@ -2,27 +2,51 @@
 
 Reen is a DCI-native spec compiler and verifier. It turns markdown drafts written in DCI vocabulary (Data, Context, Interaction) into prepared YAML contracts, generates Rust scaffolding with `todo!()` bodies, and verifies structural alignment between spec and implementation. Claude Code handles the conversational parts: ambiguity resolution, body-filling, and post-implementation audit.
 
-## Install and Build
+## Install
 
-Requires Rust (stable). Build with:
+Requires Rust (stable).
+
+```bash
+cargo install reen
+```
+
+Or build from source:
 
 ```bash
 cargo build --release
 ```
 
-Link the binary into a project by running `reen` commands from the project root. Reen discovers `drafts/` in the current directory.
+## Getting Started
 
-## Quick Start
-
-Run on the snake test project:
+In a new or existing Rust project:
 
 ```bash
-cd tests/snake
+cd your-project
+reen init
+```
+
+This installs the full Reen authoring environment: `.claude/` skills, commands, agents, and hooks; `DCI.md` and `DRAFT_FORMAT.md` references; a starter manifest; and the `drafts/` directory structure. No network access needed — everything ships inside the `reen` binary.
+
+Then start authoring drafts under `drafts/` and use the pipeline:
+
+```bash
 reen prepare --verbose       # resolve vocabulary, synthesise tests
 reen scaffold --verbose      # generate Rust stubs
 ```
 
-Then in Claude Code: `/implement` fills the `todo!()` bodies, `/audit` checks semantic alignment.
+In Claude Code: `/implement` fills the `todo!()` bodies, `/audit` checks semantic alignment.
+
+## Upgrading
+
+When you update the `reen` binary, refresh the managed files in your project:
+
+```bash
+reen init --upgrade          # overwrite managed files, preserve user edits
+reen init --check            # dry-run: see what would change
+reen init --upgrade --force  # also overwrite files you've edited
+```
+
+Managed files (`.claude/`, `DCI.md`, `DRAFT_FORMAT.md`) are overwritten on upgrade. Seed files (`CLAUDE.md`, `reen.manifest.yml`, `.gitkeep` scaffolding) are never touched after initial install.
 
 ## External APIs
 
@@ -37,6 +61,7 @@ reen verify src/apis/<api>/<op>.rs  # verifies against operation spec
 ## CLI
 
 ```
+reen init [--path <dir>] [--upgrade] [--check] [--force]
 reen prepare [--contexts|--projections|--data] [names...]
 reen refine [--drafts-only|--prepared-only] [names...]
 reen scaffold [names...]
@@ -108,4 +133,4 @@ cargo test
 cargo run -- --help
 ```
 
-Test projects live under `tests/`: snake, money transfer, Connor.
+Test projects live under `tests/`: snake, money transfer, Connor, world data.

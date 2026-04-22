@@ -2,6 +2,12 @@
 name = "reen"
 version = "0.1.0"
 edition = "2024"
+description = "DCI-native spec compiler and verifier for Claude Code"
+license = "MIT"
+repository = "https://github.com/rune/reen"
+readme = "README.md"
+keywords = ["dci", "specification", "codegen", "verification"]
+categories = ["development-tools", "command-line-utilities"]
 
 [[bin]]
 name = "reen"
