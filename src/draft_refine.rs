@@ -88,6 +88,13 @@ pub fn review_raw_drafts(workspace: &Workspace, paths: &[PathBuf]) -> Result<Dra
             report.findings.extend(code_token_findings);
         }
 
+        // Web-kind specific lint (stricter rules for component/brand/routing-table)
+        let rel_path = std::path::Path::new(&relative);
+        if let Some(kind) = crate::draft_parser::ArtifactKind::from_draft_path(rel_path) {
+            let web_findings = scan_web_kind_tokens(&content, &relative, kind);
+            report.findings.extend(web_findings);
+        }
+
         match parse_draft_file(path, &workspace.drafts_dir, &content) {
             Ok(document) => {
                 review_document(&relative, &content, &document, &mut report.findings);
@@ -369,6 +376,143 @@ static CODE_TOKEN_PATTERNS: LazyLock<Vec<CodeTokenPattern>> = LazyLock::new(|| {
         })
         .collect()
 });
+
+// ── Web-kind lint patterns ──────────────────────────────────────
+
+struct WebLintPattern {
+    regex: Regex,
+    family: &'static str,
+}
+
+/// Framework-specific hook names rejected from component drafts.
+const FRAMEWORK_HOOKS: &[&str] = &[
+    "useState", "useEffect", "useContext", "useReducer", "useMemo", "useCallback",
+    "useRef", "useLayoutEffect", "useImperativeHandle",
+    "createSignal", "createEffect", "createMemo", "createResource",
+    "use_state", "use_signal", "use_effect", "use_memo", "use_context",
+    "onMount", "onCleanup", "onError",
+];
+
+static WEB_COMPONENT_PATTERNS: LazyLock<Vec<WebLintPattern>> = LazyLock::new(|| {
+    let mut patterns: Vec<(&str, &str)> = vec![
+        // HTML tag syntax: <div>, <input />, </span>
+        (r"</?(?:div|span|input|button|a|img|form|table|tr|td|th|thead|tbody|ul|ol|li|p|section|article|nav|header|footer|main|aside|textarea|select|option|label|fieldset|legend|canvas|svg|video|audio|iframe)[\s/>]", "HTML tag"),
+        // Style/class attributes
+        (r#"\b(?:style|class|className|classList)\s*="#, "style/class attribute"),
+        // CSS property syntax: "color: #fff", "margin: 10px", "display: flex"
+        (r"\b(?:color|background|margin|padding|border|display|position|font-size|font-family|width|height|flex|grid|opacity|z-index|overflow|transform)\s*:", "CSS property syntax"),
+        // Tailwind/utility class names: "bg-blue-500", "text-lg", "flex-col", "p-4", "mt-2"
+        (r"\b(?:bg|text|flex|grid|p|m|mt|mb|ml|mr|mx|my|pt|pb|pl|pr|px|py|w|h|min-w|max-w|min-h|max-h|rounded|shadow|border|ring|gap|space)-(?:\d+|xs|sm|md|lg|xl|2xl|3xl|full|auto|none)\b", "Tailwind/utility class name"),
+        // JSX/template syntax: {expression}, {{expression}}, v-if, :prop, @click
+        (r"\{\{[^}]+\}\}", "template expression syntax"),
+        // Raw hex colours: #fff, #3355ff, #rgb
+        (r"#[0-9a-fA-F]{3,8}\b", "raw hex colour value"),
+        // RGB/HSL colour values
+        (r"\b(?:rgb|rgba|hsl|hsla)\s*\(", "rgb/hsl colour value"),
+    ];
+
+    // Framework hooks
+    for hook in FRAMEWORK_HOOKS {
+        patterns.push((
+            // Match as whole word
+            &*Box::leak(format!(r"\b{}\b", regex::escape(hook)).into_boxed_str()),
+            "framework-specific hook name",
+        ));
+    }
+
+    patterns
+        .into_iter()
+        .map(|(pat, family)| WebLintPattern {
+            regex: Regex::new(pat).expect("invalid web-lint regex"),
+            family,
+        })
+        .collect()
+});
+
+static WEB_BRAND_PATTERNS: LazyLock<Vec<WebLintPattern>> = LazyLock::new(|| {
+    let patterns: Vec<(&str, &str)> = vec![
+        // Hex colours
+        (r"#[0-9a-fA-F]{3,8}\b", "raw hex colour value"),
+        // RGB/HSL
+        (r"\b(?:rgb|rgba|hsl|hsla)\s*\(", "rgb/hsl colour value"),
+        // Font stacks: "Helvetica Neue, Arial, sans-serif"
+        (r#"(?:Helvetica|Arial|Times|Georgia|Verdana|Courier|Roboto|Inter|Lato|Open\s+Sans|Segoe\s+UI|system-ui)\s*(?:,|Neue)"#, "specific font stack"),
+        // Measurement units: 14px, 1.5rem, 16em, 100vh, 50vw, 12pt
+        (r"\b\d+(?:\.\d+)?(?:px|em|rem|vh|vw|pt)\b", "measurement value (use role-based tokens instead)"),
+    ];
+    patterns
+        .into_iter()
+        .map(|(pat, family)| WebLintPattern {
+            regex: Regex::new(pat).expect("invalid brand-lint regex"),
+            family,
+        })
+        .collect()
+});
+
+static WEB_ROUTING_PATTERNS: LazyLock<Vec<WebLintPattern>> = LazyLock::new(|| {
+    vec![
+        WebLintPattern {
+            regex: Regex::new(r"\b(?:get|post|put|delete|patch)!\s*[\(\[]").unwrap(),
+            family: "framework-specific route macro",
+        },
+        WebLintPattern {
+            regex: Regex::new(r"Regex\s*\(").unwrap(),
+            family: "regex route pattern",
+        },
+        WebLintPattern {
+            regex: Regex::new(r#"r#?"[^"]+""#).unwrap(),
+            family: "raw string regex literal",
+        },
+        WebLintPattern {
+            regex: Regex::new(r"\b[a-z_][a-z0-9_]*\s*\(").unwrap(),
+            family: "function identifier as handler (use component names)",
+        },
+    ]
+});
+
+/// Scan web-kind draft content for prohibited patterns.
+///
+/// Returns findings for component, brand, or routing-table specific violations.
+/// These are always blocking — no `--allow-code-tokens` escape hatch for web kinds.
+pub fn scan_web_kind_tokens(
+    content: &str,
+    path: &str,
+    kind: crate::draft_parser::ArtifactKind,
+) -> Vec<DraftReviewFinding> {
+    let patterns = match kind {
+        crate::draft_parser::ArtifactKind::Component => &*WEB_COMPONENT_PATTERNS,
+        crate::draft_parser::ArtifactKind::Brand => &*WEB_BRAND_PATTERNS,
+        crate::draft_parser::ArtifactKind::RoutingTable => &*WEB_ROUTING_PATTERNS,
+        _ => return Vec::new(),
+    };
+
+    let mut findings = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        for pattern in patterns {
+            if let Some(m) = pattern.regex.find(line) {
+                let matched = m.as_str();
+                let snippet = context_snippet(line, m.start(), m.end());
+                findings.push(DraftReviewFinding {
+                    draft_path: path.to_string(),
+                    source_line: Some(line_no),
+                    category: DraftReviewCategory::Concreteness,
+                    message: format!(
+                        "web-kind lint ({family}): `{matched}` in \"{snippet}\"",
+                        family = pattern.family,
+                    ),
+                    severity: None,
+                });
+            }
+        }
+    }
+    sort_and_dedup_findings(&mut findings);
+    findings
+}
 
 /// Scan draft content for code-level tokens that violate the BA-authorable bar.
 ///

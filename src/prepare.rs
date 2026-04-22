@@ -50,6 +50,33 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
             })
             .collect();
 
+        // Web-kind lint findings are always blocking (no --allow-code-tokens escape)
+        let web_lint_findings: Vec<_> = review
+            .findings
+            .iter()
+            .filter(|f| {
+                f.category == crate::draft_refine::DraftReviewCategory::Concreteness
+                    && f.message.starts_with("web-kind lint")
+            })
+            .collect();
+
+        if !web_lint_findings.is_empty() {
+            for finding in &web_lint_findings {
+                let location = match finding.source_line {
+                    Some(line) => format!("{}:{}", finding.draft_path, line),
+                    None => finding.draft_path.clone(),
+                };
+                eprintln!("error[concreteness]: {}", finding.message);
+                eprintln!("  --> {}", location);
+            }
+            anyhow::bail!(
+                "prepare blocked: {} web-kind lint finding{} in draft(s); \
+                 rewrite in business vocabulary (no escape hatch for web kinds)",
+                web_lint_findings.len(),
+                if web_lint_findings.len() == 1 { "" } else { "s" }
+            );
+        }
+
         if !code_token_findings.is_empty() {
             let label = if options.allow_code_tokens {
                 "warning"
