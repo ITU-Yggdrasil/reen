@@ -1313,11 +1313,18 @@ fn strip_backtick_spans(line: &str) -> String {
 /// Check if `candidate` is a likely typo of `known` using edit distance.
 /// Returns true if the tokens differ by exactly 1-2 character edits and
 /// are at least 4 characters long (to avoid false positives on short tokens).
+///
+/// Excludes common English morphological variations (plural -s, -es, -ed, -ing)
+/// to avoid flagging "Accounts" when "Account" is in the manifest.
 fn is_likely_typo(known: &str, candidate: &str) -> bool {
     if known == candidate {
         return false;
     }
     if known.len() < 4 || candidate.len() < 4 {
+        return false;
+    }
+    // Exclude morphological variations (plural, past tense, gerund)
+    if is_morphological_variant(known, candidate) {
         return false;
     }
     let len_diff = (known.len() as isize - candidate.len() as isize).unsigned_abs();
@@ -1326,6 +1333,20 @@ fn is_likely_typo(known: &str, candidate: &str) -> bool {
     }
     let distance = levenshtein_distance(known, candidate);
     distance >= 1 && distance <= 2
+}
+
+/// Check if `candidate` is a morphological variant of `known` (plural, past tense, etc.)
+fn is_morphological_variant(known: &str, candidate: &str) -> bool {
+    // candidate is known + "s", "es", "ed", "ing", "er"
+    for suffix in &["s", "es", "ed", "ing", "er"] {
+        if candidate == format!("{}{}", known, suffix) {
+            return true;
+        }
+        if known == format!("{}{}", candidate, suffix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Simple Levenshtein distance implementation.
@@ -2314,6 +2335,8 @@ Then: done
         assert!(!is_likely_typo("Account", "Widget")); // too different
         assert!(!is_likely_typo("Account", "Account")); // same
         assert!(!is_likely_typo("Foo", "Fop")); // too short (< 4 chars)
+        assert!(!is_likely_typo("Account", "Accounts")); // plural, not typo
+        assert!(!is_likely_typo("GeographicCell", "GeographicCells")); // plural
     }
 
     #[test]
