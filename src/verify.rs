@@ -127,7 +127,8 @@ pub fn verify_source(source: &str, artifact: &PreparedArtifact) -> Result<Verify
         ArtifactKind::Projection => false,
         ArtifactKind::Operation => false,
         // Phase 10 will extend verify for web kinds
-        ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => false,
+        ArtifactKind::Component => false, // Components may carry internal bookkeeping
+        ArtifactKind::Brand | ArtifactKind::RoutingTable => false,
         ArtifactKind::App => false, // App verification handled separately
     };
     if check_extra {
@@ -237,8 +238,15 @@ fn expected_fields(artifact: &PreparedArtifact) -> BTreeSet<String> {
         ArtifactKind::Operation => {
             // Operation fields are verified by verify_operation_source, not here
         }
-        // Phase 10 will extend verify for web kinds
-        ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {}
+        ArtifactKind::Component => {
+            for prop in &artifact.props {
+                fields.insert(crate::codegen::to_snake_case(&prop.name));
+            }
+            if !artifact.variants.is_empty() {
+                fields.insert("variant".to_string());
+            }
+        }
+        ArtifactKind::Brand | ArtifactKind::RoutingTable => {}
         ArtifactKind::App => {} // App fields verified separately
     }
     fields
@@ -273,9 +281,17 @@ fn expected_methods(artifact: &PreparedArtifact) -> (BTreeSet<String>, BTreeSet<
         ArtifactKind::Operation => {
             // Operation methods verified by verify_operation_source, not here
         }
-        // Phase 10 will extend verify for web kinds
-        ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {}
-        ArtifactKind::App => {}
+        ArtifactKind::Component => {
+            pub_methods.insert("render".to_string());
+            for event in &artifact.events {
+                pub_methods.insert(format!("on_{}", crate::codegen::to_snake_case(&event.name)));
+            }
+        }
+        ArtifactKind::RoutingTable => {
+            pub_methods.insert("dispatch".to_string());
+            pub_methods.insert("render".to_string());
+        }
+        ArtifactKind::Brand | ArtifactKind::App => {}
     }
 
     (pub_methods, priv_methods)
@@ -293,19 +309,40 @@ fn field_label(artifact: &PreparedArtifact, name: &str) -> &'static str {
         ArtifactKind::Data => "attribute",
         ArtifactKind::Projection => "source field",
         ArtifactKind::Operation => "operation field",
-        ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => "field",
-        ArtifactKind::App => "field",
+        ArtifactKind::Component => {
+            if artifact.props.iter().any(|p| crate::codegen::to_snake_case(&p.name) == name) {
+                "prop"
+            } else {
+                "field"
+            }
+        }
+        ArtifactKind::Brand | ArtifactKind::RoutingTable | ArtifactKind::App => "field",
     }
 }
 
-fn pub_method_label(artifact: &PreparedArtifact, _name: &str) -> &'static str {
+fn pub_method_label(artifact: &PreparedArtifact, name: &str) -> &'static str {
     match artifact.kind {
         ArtifactKind::Context => "functionality",
         ArtifactKind::Data => "operation",
         ArtifactKind::Projection => "query",
         ArtifactKind::Operation => "api operation method",
-        ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => "method",
-        ArtifactKind::App => "method",
+        ArtifactKind::Component => {
+            if name == "render" {
+                "render method"
+            } else if name.starts_with("on_") {
+                "event handler"
+            } else {
+                "method"
+            }
+        }
+        ArtifactKind::RoutingTable => {
+            if name == "dispatch" || name == "render" {
+                "router method"
+            } else {
+                "method"
+            }
+        }
+        ArtifactKind::Brand | ArtifactKind::App => "method",
     }
 }
 
