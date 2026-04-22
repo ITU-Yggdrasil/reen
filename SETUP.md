@@ -72,6 +72,11 @@ Set your Mistral API key:
 export MISTRAL_API_KEY='your-api-key-here'
 ```
 
+### Set API key on Windows 
+```bash
+Instead of using "export" use "$env:" example: 
+$env:MISTRAL_API_KEY='your-api-key-here'
+```
 **Tip** Add these to your `~/.bashrc`, `~/.zshrc`, or `~/.bash_profile` to make them permanent.
 
 ## Building
