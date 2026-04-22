@@ -139,6 +139,8 @@ Creates a professional, trustworthy experience for business users.
                       `    param: DataType`
 ```
 
+**The list form is the only accepted shape.** Each route is a list item starting with `- path:`. The map form (using URL paths as YAML keys, e.g. `/:` or `/login:`) is not supported. This is deliberate: URL path syntax contains characters that conflict with YAML map-key parsing (`<>`, `:`, leading `-`), and the list form is unambiguous regardless of path complexity.
+
 Example:
 ```
 # Routes: main
