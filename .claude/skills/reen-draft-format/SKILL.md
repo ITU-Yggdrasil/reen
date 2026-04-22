@@ -9,7 +9,7 @@ triggers:
 
 # Reen Draft Format
 
-Three draft kinds, each with a fixed section structure. No types, no signatures, no Rust tokens.
+Six draft kinds, each with a fixed section structure. No types, no signatures, no Rust tokens.
 
 ## Context Draft (`drafts/contexts/<name>.md`)
 
@@ -44,6 +44,119 @@ Three draft kinds, each with a fixed section structure. No types, no signatures,
 ## Scenarios        — ### subsections with Given:/When:/Then:
 ```
 
+## Component Draft (`drafts/components/<Name>.md`)
+
+```
+# Component: <Name>
+## Purpose          — one paragraph: what this component lets the user see and do
+## Props            — bullet list: `- <name>: <data/projection name or prose> — what the prop conveys`
+## Slots            — bullet list: `- <slot name>: <what the slot is for>`
+## Events           — bullet list: `- <event name>: <what just happened; payload in business language>`
+## Variants         — bullet list: `- <variant name>: <when to use this variant>`
+## Composition      — (optional) child component bindings and event→context bindings
+                      `- <child>: <slot/prop bindings, in prose>`
+                      `- when <child>.<event>: invoke <Context>`
+## Invariants       — bullet list of prose invariants
+## Scenarios        — ### subsections with Given:/When:/Then:
+```
+
+Example (coordinating component):
+```
+# Component: LoginForm
+
+## Purpose
+Lets the user enter credentials and submit them for authentication.
+
+## Props
+- error_message: a text value shown when authentication fails
+
+## Events
+- submitted: the user has submitted their credentials
+
+## Composition
+- EmailInput: receives the current email value
+- PasswordInput: receives the current password value
+- SubmitButton: labelled "Sign In"
+- when SubmitButton.pressed: invoke AuthenticateUser
+
+## Scenarios
+### successful submission
+Given: the user has entered valid credentials
+When: the submit button is pressed
+Then: the submitted event fires with the credentials
+```
+
+## Brand Draft (`drafts/brands/<Name>.md`)
+
+```
+# Brand: <Name>
+## Purpose          — one paragraph: what experience this brand creates
+## Voice            — Tone, Register, words we use/avoid (prose)
+## Visual Identity  — ### subsections: Colours, Typography, Spacing
+                      Each token: `- <role name>: <description of the role>`
+## Motion           — bullet list: `- <token>: <role description>`
+## Imagery          — prose style guidelines
+## Iconography      — prose rules
+## Logo             — usage, clear space, don'ts
+```
+
+Example:
+```
+# Brand: Acme
+
+## Purpose
+Creates a professional, trustworthy experience for business users.
+
+## Voice
+- Tone: confident but not arrogant
+- Register: professional
+- Words we use: simple, clear, guide
+- Words we avoid: synergy, leverage, disrupt
+
+## Visual Identity
+### Colours
+- primary-action: the colour that draws the user to the main call-to-action
+- surface-default: the base background for content areas
+### Typography
+- heading-large: the most prominent text on a page
+- body-default: standard reading text
+### Spacing
+- inset-tight: padding inside compact interactive elements
+
+## Motion
+- transition-default: standard duration for state changes, feels responsive
+```
+
+## Routing Table Draft (`drafts/routes/<name>.md`)
+
+```
+# Routes: <name>
+## Purpose          — one paragraph: what part of the app this table describes
+## Routes           — structured list of routes:
+                      `- path: /some/path/<param>`
+                      `  component: ComponentName`
+                      `  params:`
+                      `    param: DataType`
+```
+
+Example:
+```
+# Routes: main
+
+## Purpose
+Maps the primary navigation paths of the application.
+
+## Routes
+- path: /
+  component: HomeScreen
+- path: /products/<id>
+  component: ProductScreen
+  params:
+    id: Product
+- path: /orders
+  component: OrderListScreen
+```
+
 ## Common Pitfalls
 
 - **Sneaking types into drafts**: No `u32`, `String`, `Vec<>`. Types are inferred during prepare.
@@ -69,3 +182,26 @@ Three draft kinds, each with a fixed section structure. No types, no signatures,
 **Also rejected:** return-type arrows (`->`), numeric type suffixes (`10_u64`, `1.0_f64`), and cast syntax (`as u64`).
 
 **What is fine:** domain names (`Amount`, `Ledger`, `Account`), concrete values (`250.00 DKK`, `account 123456`), operation names used in prose (`to_str is called`, `withdraw`), and standard English words (`string`, `character`).
+
+## What not to put in a web draft
+
+Web-kind drafts (component, brand, routing table) have **stricter lint rules** with no `--allow-code-tokens` escape hatch:
+
+### Component drafts reject:
+- **HTML tag names** — `<div>`, `<span>`, `<input>`, `<button>`, `<form>`, etc. Describe what the user sees ("a text entry field"), not the markup.
+- **Style/class attributes** — `style=`, `class=`, `className=`. Appearance is a realisation concern.
+- **CSS property syntax** — `color: #fff`, `margin: 10px`, `display: flex`. Visual rules live in brand tokens or a design source.
+- **Tailwind/utility class names** — `bg-blue-500`, `text-lg`, `p-4`, `mt-2`. These are implementation tokens.
+- **JSX/template syntax** — `{{expression}}`. Components are described in prose.
+- **Framework-specific hooks** — `useState`, `useEffect`, `createSignal`, `use_state`, `use_signal`. State management is a realisation concern.
+- **Raw colour values** — `#3355ff`, `rgb(50, 100, 200)`, `hsl(210, 50%, 50%)`. Use brand tokens named by role instead.
+
+### Brand drafts reject:
+- **Hex/RGB/HSL colour values** — `#ff0`, `rgb()`, `hsl()`. Tokens are named by role, not value.
+- **Specific font stacks** — "Helvetica Neue, Arial, sans-serif". Name the typographic role instead.
+- **Measurement values** — `14px`, `1.5rem`, `16em`, `100vh`. Spacing and sizing are named by role.
+
+### Routing table drafts reject:
+- **Framework-specific route macros** — `get!()`, `post!()`. Routes use the documented path template format only.
+- **Regex route patterns** — `Regex(...)`, raw string literals. Paths use `<param>` syntax.
+- **Function identifiers as handlers** — `handle_login()`. Handler entries must reference component names.
