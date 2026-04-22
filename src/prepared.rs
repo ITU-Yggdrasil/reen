@@ -14,6 +14,7 @@ pub enum ArtifactKind {
     Component,
     Brand,
     RoutingTable,
+    App,
 }
 
 impl ArtifactKind {
@@ -26,6 +27,7 @@ impl ArtifactKind {
             ArtifactKind::Component => "component",
             ArtifactKind::Brand => "brand",
             ArtifactKind::RoutingTable => "routing_table",
+            ArtifactKind::App => "app",
         }
     }
 }
@@ -88,6 +90,18 @@ pub struct PreparedArtifact {
     // ── Context classification (v3) ──────────────────────────────
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realisation_target: Option<String>,
+
+    // ── App-only ─────────────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_functionality: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_dependencies: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 
     // ── Shared across all kinds ───────────────────────────────────
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -376,6 +390,7 @@ impl PreparedArtifact {
             ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
                 PREPARED_SCHEMA_V3_VERSION.to_string()
             }
+            // App uses v2 — additive, no version bump
             _ => PREPARED_SCHEMA_VERSION.to_string(),
         };
         Self {
@@ -412,6 +427,12 @@ impl PreparedArtifact {
             routes: Vec::new(),
             // Context classification
             realisation_target: None,
+            // App-only
+            application_kind: None,
+            entry_context: None,
+            entry_functionality: None,
+            app_dependencies: Vec::new(),
+            notes: None,
         }
     }
 

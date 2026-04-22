@@ -128,6 +128,7 @@ pub fn verify_source(source: &str, artifact: &PreparedArtifact) -> Result<Verify
         ArtifactKind::Operation => false,
         // Phase 10 will extend verify for web kinds
         ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => false,
+        ArtifactKind::App => false, // App verification handled separately
     };
     if check_extra {
         for name in actual_fields.difference(&expected_fields) {
@@ -238,6 +239,7 @@ fn expected_fields(artifact: &PreparedArtifact) -> BTreeSet<String> {
         }
         // Phase 10 will extend verify for web kinds
         ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {}
+        ArtifactKind::App => {} // App fields verified separately
     }
     fields
 }
@@ -273,6 +275,7 @@ fn expected_methods(artifact: &PreparedArtifact) -> (BTreeSet<String>, BTreeSet<
         }
         // Phase 10 will extend verify for web kinds
         ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {}
+        ArtifactKind::App => {}
     }
 
     (pub_methods, priv_methods)
@@ -291,6 +294,7 @@ fn field_label(artifact: &PreparedArtifact, name: &str) -> &'static str {
         ArtifactKind::Projection => "source field",
         ArtifactKind::Operation => "operation field",
         ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => "field",
+        ArtifactKind::App => "field",
     }
 }
 
@@ -301,6 +305,7 @@ fn pub_method_label(artifact: &PreparedArtifact, _name: &str) -> &'static str {
         ArtifactKind::Projection => "query",
         ArtifactKind::Operation => "api operation method",
         ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => "method",
+        ArtifactKind::App => "method",
     }
 }
 

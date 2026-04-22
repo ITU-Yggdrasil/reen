@@ -12,6 +12,7 @@ pub enum ArtifactKind {
     Component,
     Brand,
     RoutingTable,
+    App,
 }
 
 impl ArtifactKind {
@@ -24,10 +25,15 @@ impl ArtifactKind {
             ArtifactKind::Component => "component",
             ArtifactKind::Brand => "brand",
             ArtifactKind::RoutingTable => "routing_table",
+            ArtifactKind::App => "app",
         }
     }
 
     pub fn from_draft_path(relative_path: &Path) -> Option<Self> {
+        // Special case: drafts/app.md is at the root of drafts, not in a subdirectory
+        if relative_path.to_string_lossy() == "app.md" {
+            return Some(Self::App);
+        }
         match first_component(relative_path)? {
             "data" => Some(Self::Data),
             "projections" => Some(Self::Projection),
@@ -40,6 +46,10 @@ impl ArtifactKind {
     }
 
     pub fn from_prepared_path(relative_path: &Path) -> Option<Self> {
+        // Special case: app.yml is at the root of prepare, not in a subdirectory
+        if relative_path.to_string_lossy() == "app.yml" {
+            return Some(Self::App);
+        }
         match first_component(relative_path)? {
             "data" => Some(Self::Data),
             "projections" => Some(Self::Projection),
@@ -260,6 +270,18 @@ pub struct RoutingTableDraft {
     pub routes: Vec<RouteDraft>,
 }
 
+// ── App draft ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppDraft {
+    pub info: DraftInfo,
+    pub application_kind: String,
+    pub entry_context: Option<String>,
+    pub entry_functionality: Option<String>,
+    pub dependencies: Vec<String>,
+    pub notes: String,
+}
+
 // ── Boundary draft (API) ─────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +311,7 @@ pub enum DraftDocument {
     Component(ComponentDraft),
     Brand(BrandDraft),
     RoutingTable(RoutingTableDraft),
+    App(AppDraft),
 }
 
 // ── Entry point ───────────────────────────────────────────────────
@@ -325,6 +348,7 @@ pub fn parse_draft_file(path: &Path, drafts_root: &Path, content: &str) -> Resul
         ArtifactKind::RoutingTable => {
             parse_routing_table_draft(info, content).map(DraftDocument::RoutingTable)
         }
+        ArtifactKind::App => parse_app_draft(info, content).map(DraftDocument::App),
         ArtifactKind::Operation => {
             bail!("Operation artifacts are YAML, not markdown drafts: {}", info.relative_path)
         }
@@ -966,6 +990,98 @@ fn detect_map_form_routes(body: &str) -> Result<()> {
         break;
     }
     Ok(())
+}
+
+// ── App draft parser ─────────────────────────────────────────────
+
+const VALID_APP_KINDS: &[&str] = &["cli_app", "tui_app"];
+
+fn parse_app_draft(info: DraftInfo, content: &str) -> Result<AppDraft> {
+    let sections = parse_sections(content);
+
+    // Application Kind — required
+    let app_kind_section = find_section(&sections, "Application Kind");
+    let application_kind = if let Some(section) = app_kind_section {
+        let kind = section.body.trim().trim_matches('`').trim().to_string();
+        if kind.is_empty() {
+            bail!(
+                "Draft validation failed for {}:\n- `## Application Kind` section is empty. \
+                 Allowed values: {}",
+                info.relative_path,
+                VALID_APP_KINDS.join(", ")
+            );
+        }
+        if kind == "web_app" {
+            bail!(
+                "Draft validation failed for {}:\n- `Application Kind: web_app` is reserved \
+                 for Phase 10 and is not yet implemented. Use `cli_app` or `tui_app`.",
+                info.relative_path
+            );
+        }
+        if !VALID_APP_KINDS.contains(&kind.as_str()) {
+            bail!(
+                "Draft validation failed for {}:\n- `Application Kind: {}` is not recognised. \
+                 Allowed values: {}",
+                info.relative_path,
+                kind,
+                VALID_APP_KINDS.join(", ")
+            );
+        }
+        kind
+    } else {
+        bail!(
+            "Draft validation failed for {}:\n- Missing required `## Application Kind` section. \
+             Allowed values: {}",
+            info.relative_path,
+            VALID_APP_KINDS.join(", ")
+        );
+    };
+
+    // Entry Context — optional in draft (resolved during prepare)
+    let entry_context = find_section(&sections, "Entry Context")
+        .map(|s| s.body.trim().trim_matches('`').trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Entry Functionality — optional
+    let entry_functionality = find_section(&sections, "Entry Functionality")
+        .map(|s| s.body.trim().trim_matches('`').trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // Dependencies — optional list
+    let dependencies = find_section(&sections, "Dependencies")
+        .map(|s| {
+            bullet_lines(Some(&s.body))
+                .into_iter()
+                .filter(|d| !d.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Everything else is preserved as notes
+    let structured_sections = [
+        "Application Kind",
+        "Entry Context",
+        "Entry Functionality",
+        "Dependencies",
+    ];
+    let mut notes = String::new();
+    for section in &sections {
+        if !structured_sections.contains(&section.title.as_str()) {
+            if !notes.is_empty() {
+                notes.push_str("\n\n");
+            }
+            notes.push_str(&format!("## {}\n\n{}", section.title, section.body));
+        }
+    }
+
+    Ok(AppDraft {
+        info,
+        application_kind,
+        entry_context,
+        entry_functionality,
+        dependencies,
+        notes: notes.trim().to_string(),
+    })
 }
 
 // ── Boundary draft parser ────────────────────────────────────────

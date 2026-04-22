@@ -115,6 +115,7 @@ fn scaffold_output_path(workspace: &Workspace, artifact: &PreparedArtifact) -> P
         ArtifactKind::Component => "components",
         ArtifactKind::Brand => "brand",
         ArtifactKind::RoutingTable => "routes",
+        ArtifactKind::App => return workspace.root.join("src").join("main.rs"),
     };
     let filename = to_snake_case(&artifact.export.name);
     workspace
@@ -134,6 +135,8 @@ pub fn generate_rust(artifact: &PreparedArtifact) -> String {
         ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
             String::new()
         }
+        // App codegen is handled separately via generate_app_main
+        ArtifactKind::App => String::new(),
     }
 }
 

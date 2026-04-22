@@ -1,5 +1,5 @@
 use crate::draft_parser::{
-    BrandDraft, ComponentDraft, ContextDraft, DataDraft, DraftDocument, ProjectionDraft,
+    AppDraft, BrandDraft, ComponentDraft, ContextDraft, DataDraft, DraftDocument, ProjectionDraft,
     RoutingTableDraft, parse_draft_file,
 };
 use crate::draft_refine::{DraftReview, review_raw_drafts};
@@ -255,6 +255,7 @@ fn prepare_document(doc: &DraftDocument, vocab: &DciVocabulary) -> Result<Prepar
         DraftDocument::Component(comp) => prepare_component(comp, vocab),
         DraftDocument::Brand(brand) => prepare_brand(brand),
         DraftDocument::RoutingTable(rt) => prepare_routing_table(rt, vocab),
+        DraftDocument::App(app) => prepare_app(app, vocab),
     }
 }
 
@@ -907,6 +908,68 @@ fn prepare_routing_table(
 /// - components → data + projections + brand + components + contexts
 /// - routing_table → components + data
 /// - brand → nothing
+fn prepare_app(app: &AppDraft, vocab: &DciVocabulary) -> Result<PreparedArtifact> {
+    let mut artifact = PreparedArtifact::new(
+        ArtifactKind::App,
+        app.info.relative_path.clone(),
+        app.info.title.clone(),
+        "app".to_string(),
+    );
+
+    let mut ambiguities = Vec::new();
+
+    artifact.application_kind = Some(app.application_kind.clone());
+
+    // Resolve entry context against manifest
+    if let Some(ctx_name) = &app.entry_context {
+        let resolved = vocab.resolve(ctx_name);
+        if let Some(kind) = &resolved {
+            if kind != "context" {
+                ambiguities.push(Ambiguity {
+                    message: format!(
+                        "`drafts/app.md` declares `{}` as the entry context but it is a {} in the manifest — \
+                         the entry context must be a context draft",
+                        ctx_name, kind
+                    ),
+                    severity: "blocking".to_string(),
+                    suggested_resolution: Some(format!(
+                        "Change `Entry Context` to the name of a context draft, or create a context draft for `{}`",
+                        ctx_name
+                    )),
+                    source_line: None,
+                });
+            }
+        } else {
+            ambiguities.push(Ambiguity {
+                message: format!(
+                    "`drafts/app.md` declares `{}` as the entry context but the manifest has no context by that name",
+                    ctx_name
+                ),
+                severity: "blocking".to_string(),
+                suggested_resolution: Some(format!(
+                    "Add a context draft for `{}` under drafts/contexts/, or correct the name in drafts/app.md",
+                    ctx_name
+                )),
+                source_line: None,
+            });
+        }
+        artifact.entry_context = Some(ctx_name.clone());
+    }
+
+    if let Some(func_name) = &app.entry_functionality {
+        artifact.entry_functionality = Some(func_name.clone());
+    }
+
+    artifact.app_dependencies = app.dependencies.clone();
+
+    if !app.notes.is_empty() {
+        artifact.notes = Some(app.notes.clone());
+    }
+
+    artifact.ambiguities = ambiguities;
+    Ok(artifact)
+}
+
 fn is_reference_allowed(source_kind: &str, target_kind: &str) -> bool {
     match source_kind {
         "data" => target_kind == "data",

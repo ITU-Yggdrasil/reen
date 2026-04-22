@@ -173,6 +173,7 @@ impl Selection {
             ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
                 self.app
             }
+            ArtifactKind::App => true, // App is always included when present
         }
     }
 

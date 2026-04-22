@@ -151,6 +151,7 @@ fn review_document(
         DraftDocument::Component(comp) => review_component(path, content, comp, findings),
         DraftDocument::Brand(brand) => review_brand(path, content, brand, findings),
         DraftDocument::RoutingTable(rt) => review_routing_table(path, content, rt, findings),
+        DraftDocument::App(_) => {} // App drafts have no additional review rules
     }
 }
 

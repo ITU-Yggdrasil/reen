@@ -150,6 +150,7 @@ fn call_api(
         ArtifactKind::Component => "component",
         ArtifactKind::Brand => "brand",
         ArtifactKind::RoutingTable => "routing table",
+        ArtifactKind::App => "application",
     };
 
     let existing_tests: Vec<String> = artifact
