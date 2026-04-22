@@ -137,6 +137,9 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     // Second pass: classify contexts (realisation_target)
     classify_contexts(&mut all_prepared, workspace);
 
+    // Validation pass: web_app requires a RoutingTable in the same project
+    validate_web_app_requirements(&mut all_prepared);
+
     // Third pass: report and write
     let mut low_confidence_total = 0usize;
     for (idx, (output_path, prepared)) in all_prepared.iter().enumerate() {
@@ -1189,6 +1192,45 @@ fn classify_contexts(
 
 /// PascalCase tokens that commonly appear at English sentence starts and are
 /// never manifest references. Not configurable — extending is a code change.
+/// Validate that web_app projects have a routing table in the same project.
+fn validate_web_app_requirements(artifacts: &mut [(std::path::PathBuf, PreparedArtifact)]) {
+    let has_web_app = artifacts
+        .iter()
+        .any(|(_, a)| a.kind == ArtifactKind::App && a.application_kind.as_deref() == Some("web_app"));
+
+    if !has_web_app {
+        return;
+    }
+
+    let has_routing_table = artifacts
+        .iter()
+        .any(|(_, a)| a.kind == ArtifactKind::RoutingTable);
+
+    if !has_routing_table {
+        // Find the App artifact and add a blocking ambiguity
+        for (_, artifact) in artifacts.iter_mut() {
+            if artifact.kind == ArtifactKind::App
+                && artifact.application_kind.as_deref() == Some("web_app")
+            {
+                artifact.ambiguities.push(Ambiguity {
+                    message: "A `web_app` project requires at least one routing table draft \
+                              under `drafts/routes/`. Routing is the entry surface for web \
+                              applications — add a routing table draft that maps URL paths \
+                              to components."
+                        .to_string(),
+                    severity: "blocking".to_string(),
+                    suggested_resolution: Some(
+                        "Create a routing table draft under drafts/routes/ with at least one route"
+                            .to_string(),
+                    ),
+                    source_line: None,
+                });
+                break;
+            }
+        }
+    }
+}
+
 const PROSE_REFERENCE_STOPWORDS: &[&str] = &[
     "The", "A", "An", "This", "That", "These", "Those",
     "When", "If", "Then", "Given", "And", "Or", "But", "So",

@@ -994,7 +994,7 @@ fn detect_map_form_routes(body: &str) -> Result<()> {
 
 // ── App draft parser ─────────────────────────────────────────────
 
-const VALID_APP_KINDS: &[&str] = &["cli_app", "tui_app"];
+const VALID_APP_KINDS: &[&str] = &["cli_app", "tui_app", "web_app"];
 
 fn parse_app_draft(info: DraftInfo, content: &str) -> Result<AppDraft> {
     let sections = parse_sections(content);
@@ -1009,13 +1009,6 @@ fn parse_app_draft(info: DraftInfo, content: &str) -> Result<AppDraft> {
                  Allowed values: {}",
                 info.relative_path,
                 VALID_APP_KINDS.join(", ")
-            );
-        }
-        if kind == "web_app" {
-            bail!(
-                "Draft validation failed for {}:\n- `Application Kind: web_app` is reserved \
-                 for Phase 10 and is not yet implemented. Use `cli_app` or `tui_app`.",
-                info.relative_path
             );
         }
         if !VALID_APP_KINDS.contains(&kind.as_str()) {
@@ -1971,24 +1964,23 @@ A terminal Snake game.
     }
 
     #[test]
-    fn parse_app_draft_web_app_rejected() {
+    fn parse_app_draft_web_app_accepted() {
         let content = r#"# App
 
 ## Application Kind
 `web_app`
 "#;
-        let result = parse_draft_file(
+        let doc = parse_draft_file(
             Path::new("drafts/app.md"),
             Path::new("drafts"),
             content,
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Phase 10"),
-            "expected Phase 10 message, got: {}",
-            err
-        );
+        )
+        .unwrap();
+
+        let DraftDocument::App(app) = doc else {
+            panic!("expected App draft");
+        };
+        assert_eq!(app.application_kind, "web_app");
     }
 
     #[test]
