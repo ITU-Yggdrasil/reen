@@ -138,6 +138,7 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     classify_contexts(&mut all_prepared, workspace);
 
     // Third pass: report and write
+    let mut low_confidence_total = 0usize;
     for (idx, (output_path, prepared)) in all_prepared.iter().enumerate() {
         let path = &selected_paths[idx];
         let blockers: Vec<_> = prepared.blocking_ambiguities().collect();
@@ -150,6 +151,24 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
                     None => format!("{}", draft_path.display()),
                 };
                 eprintln!("error[prepare]: {}", ambiguity.message);
+                eprintln!("  --> {}", location);
+            }
+        }
+        // Low-confidence findings (informational, never block)
+        let low: Vec<_> = prepared
+            .ambiguities
+            .iter()
+            .filter(|a| a.severity.eq_ignore_ascii_case("low"))
+            .collect();
+        if !low.is_empty() {
+            low_confidence_total += low.len();
+            let draft_path = path.strip_prefix(&workspace.root).unwrap_or(path);
+            for ambiguity in low {
+                let location = match ambiguity.source_line {
+                    Some(line) => format!("{}:{}", draft_path.display(), line),
+                    None => format!("{}", draft_path.display()),
+                };
+                eprintln!("info[prepare]: {}", ambiguity.message);
                 eprintln!("  --> {}", location);
             }
         }
@@ -171,6 +190,13 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
 
     if options.verbose {
         println!("Prepared {} artifact(s)", wrote);
+    }
+    if low_confidence_total > 0 && options.verbose {
+        eprintln!(
+            "\nPossible prose references: {} informational finding{} (not blocking)",
+            low_confidence_total,
+            if low_confidence_total == 1 { "" } else { "s" }
+        );
     }
     if blocking_total > 0 {
         anyhow::bail!(
@@ -1098,7 +1124,43 @@ fn classify_contexts(
     }
 }
 
-/// Scan prose text for vocabulary entries and check reference graph violations.
+/// PascalCase tokens that commonly appear at English sentence starts and are
+/// never manifest references. Not configurable — extending is a code change.
+const PROSE_REFERENCE_STOPWORDS: &[&str] = &[
+    "The", "A", "An", "This", "That", "These", "Those",
+    "When", "If", "Then", "Given", "And", "Or", "But", "So",
+    "For", "On", "In", "At", "Of", "With", "Without",
+    "It", "Its", "All", "Each", "Every", "No", "Not", "Is",
+    "Are", "Was", "Were", "Has", "Have", "Had", "Do", "Does",
+    "Will", "Would", "Could", "Should", "May", "Must", "Can",
+    "Returns", "Creates", "Fails", "Adds", "Sets", "Gets",
+    "Checks", "Updates", "Removes", "Ensures", "Provides",
+    "Represents", "Contains", "Receives", "Produces", "Requires",
+    "Accepts", "Constructs", "Executes", "Enacts", "Invokes",
+    "Validates", "Transfers", "Converts", "Computes",
+    "Commits", "Takes", "Panics", "Subtracts", "Calculates",
+    "Stores", "Loads", "Sends", "Reads", "Writes", "Finds",
+    "Looks", "Uses", "Calls", "Starts", "Stops", "Runs",
+    "Moves", "Shows", "Hides", "Opens", "Closes",
+    "Negative", "Positive", "Empty", "Full", "New", "Old",
+    "First", "Last", "Next", "Previous", "Current",
+    "Maximum", "Minimum", "Default", "Expected", "Actual",
+    "After", "Before", "During", "Between", "Through",
+    "Only", "Also", "Either", "Neither", "Both", "Same",
+    "Here", "There", "Where", "How", "What", "Which", "Who",
+    "Yes", "No", "True", "False", "None",
+];
+
+/// Scan prose text for PascalCase tokens that may be vocabulary references.
+///
+/// Two-tier severity:
+/// - **High-confidence (blocking):** a PascalCase token that resolves elsewhere
+///   in the same draft but appears unresolved here (likely typo), or an explicit
+///   `@api/Name` / `@brand/token` that doesn't resolve.
+/// - **Low-confidence (informational):** a standalone PascalCase token not in the
+///   manifest and not resolved elsewhere in the draft.
+///
+/// Reference-graph violations for resolved tokens are always blocking.
 fn check_prose_references(
     text: &str,
     source_kind: &str,
@@ -1106,21 +1168,187 @@ fn check_prose_references(
     vocab: &DciVocabulary,
     ambiguities: &mut Vec<Ambiguity>,
 ) {
-    // Check each word against vocabulary entries
-    for (name, kind) in vocab.entries() {
-        // Only check names that appear as distinct words in the prose
-        if text.contains(name.as_str()) {
-            if let Some(ambiguity) = check_reference_graph(source_title, source_kind, name, kind) {
-                // Only flag if the name appears as a whole word (rough check)
-                let pattern = format!(r"\b{}\b", regex::escape(name));
-                if let Ok(re) = regex::Regex::new(&pattern) {
-                    if re.is_match(text) {
-                        ambiguities.push(ambiguity);
-                    }
+    let pascal_re = regex::Regex::new(r"\b[A-Z][A-Za-z0-9]*\b").unwrap();
+    let stopwords: HashSet<&str> = PROSE_REFERENCE_STOPWORDS.iter().copied().collect();
+
+    // First pass: collect all PascalCase tokens that resolve in the manifest.
+    // This becomes the "resolved-in-this-draft" set for typo detection.
+    let mut resolved_in_draft: BTreeSet<String> = BTreeSet::new();
+    for m in pascal_re.find_iter(text) {
+        let token = m.as_str();
+        if stopwords.contains(token) || is_all_caps(token) {
+            continue;
+        }
+        if vocab.resolve(token).is_some() {
+            resolved_in_draft.insert(token.to_string());
+        }
+    }
+
+    // Second pass: scan line-by-line with exclusion zones.
+    let mut unresolved_tokens: BTreeMap<String, Option<usize>> = BTreeMap::new();
+
+    for (line_idx, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Exclusion: heading lines
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Exclusion: scenario concrete-value lines (Given:/When:/Then: with
+        // fixture-like content: tuples, bracketed lists, numbers with units)
+        if is_scenario_value_line(trimmed) {
+            continue;
+        }
+
+        // Strip backtick code spans before scanning
+        let cleaned = strip_backtick_spans(line);
+
+        for m in pascal_re.find_iter(&cleaned) {
+            let token = m.as_str();
+
+            if stopwords.contains(token) || is_all_caps(token) {
+                continue;
+            }
+
+            // Check if it resolves in the manifest
+            if let Some(kind) = vocab.resolve(token) {
+                // It resolves — check reference graph
+                if let Some(ambiguity) =
+                    check_reference_graph(source_title, source_kind, token, &kind)
+                {
+                    ambiguities.push(ambiguity);
                 }
+            } else {
+                // Does not resolve — record for second-pass severity classification
+                unresolved_tokens
+                    .entry(token.to_string())
+                    .or_insert(Some(line_idx + 1));
             }
         }
     }
+
+    // Classify unresolved tokens into high/low confidence
+    for (token, source_line) in &unresolved_tokens {
+        // High-confidence: the token is a near-miss of something resolved in this draft
+        let is_typo = resolved_in_draft.iter().any(|resolved| {
+            is_likely_typo(resolved, token)
+        });
+
+        if is_typo {
+            let closest = resolved_in_draft
+                .iter()
+                .filter(|r| is_likely_typo(r, token))
+                .next()
+                .unwrap();
+            ambiguities.push(Ambiguity {
+                message: format!(
+                    "Possible typo: `{}` is not in the vocabulary manifest but `{}` is. \
+                     Did you mean `{}`?",
+                    token, closest, closest
+                ),
+                severity: "blocking".to_string(),
+                suggested_resolution: Some(format!("Replace `{}` with `{}`", token, closest)),
+                source_line: *source_line,
+            });
+        } else {
+            // Low-confidence: standalone unresolved PascalCase token
+            ambiguities.push(Ambiguity {
+                message: format!(
+                    "Possible prose reference: `{}` looks like a domain name but is not in the vocabulary manifest",
+                    token
+                ),
+                severity: "low".to_string(),
+                suggested_resolution: Some(format!(
+                    "If `{}` is a domain concept, add it to the manifest. Otherwise, ignore this message.",
+                    token
+                )),
+                source_line: *source_line,
+            });
+        }
+    }
+}
+
+/// Check if a token is all-caps (acronym like UTC, DKK, JSON — not PascalCase).
+fn is_all_caps(token: &str) -> bool {
+    token.len() >= 2 && token.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
+/// Check if a line is a scenario concrete-value line (Given:/When:/Then: followed
+/// by fixture-like content: tuples, bracketed lists, numbers with units).
+fn is_scenario_value_line(trimmed: &str) -> bool {
+    let lower = trimmed.to_ascii_lowercase();
+    let after_label = if let Some(rest) = lower.strip_prefix("given:") {
+        rest
+    } else if let Some(rest) = lower.strip_prefix("when:") {
+        rest
+    } else if let Some(rest) = lower.strip_prefix("then:") {
+        rest
+    } else {
+        return false;
+    };
+
+    let after = after_label.trim();
+    // Fixture-like: contains brackets, tuples, or is mostly numeric/symbolic
+    after.contains('[') || after.contains('(') || after.contains('{')
+}
+
+/// Strip backtick-delimited code spans from a line, replacing them with spaces.
+fn strip_backtick_spans(line: &str) -> String {
+    let mut result = String::with_capacity(line.len());
+    let mut in_backtick = false;
+    for ch in line.chars() {
+        if ch == '`' {
+            in_backtick = !in_backtick;
+            result.push(' ');
+        } else if in_backtick {
+            result.push(' ');
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Check if `candidate` is a likely typo of `known` using edit distance.
+/// Returns true if the tokens differ by exactly 1-2 character edits and
+/// are at least 4 characters long (to avoid false positives on short tokens).
+fn is_likely_typo(known: &str, candidate: &str) -> bool {
+    if known == candidate {
+        return false;
+    }
+    if known.len() < 4 || candidate.len() < 4 {
+        return false;
+    }
+    let len_diff = (known.len() as isize - candidate.len() as isize).unsigned_abs();
+    if len_diff > 2 {
+        return false;
+    }
+    let distance = levenshtein_distance(known, candidate);
+    distance >= 1 && distance <= 2
+}
+
+/// Simple Levenshtein distance implementation.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+
+    let mut prev = (0..=n).collect::<Vec<_>>();
+    let mut curr = vec![0; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 /// Extract path parameters from a route path template.
