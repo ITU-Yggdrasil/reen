@@ -3,6 +3,18 @@
 ## Application Kind
 `cli_app`
 
+## Entry Context
+`GameLoop`
+
+## Entry Functionality
+`tick`
+
+## Dependencies
+- anyhow
+- crossterm
+- chrono
+- rand
+
 ## Purpose
 
 A terminal Snake game. The application manages the game lifecycle — initialising state, running the main loop, rendering the board and score, and restarting after game over.

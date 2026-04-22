@@ -159,6 +159,46 @@ Maps the primary navigation paths of the application.
   component: OrderListScreen
 ```
 
+## App Draft (`drafts/app.md`)
+
+Exactly one per project. Describes the application entry point. Three structured fields at the top; the rest is informational prose for the implementer.
+
+```
+# The primary application
+## Application Kind    — `cli_app` or `tui_app` (`web_app` reserved for Phase 10)
+## Entry Context       — PascalCase name of the context the app launches into
+## Entry Functionality — functionality on that context invoked at startup (optional if only one)
+## Dependencies        — bullet list of crate names the app needs
+```
+
+Everything else (Purpose, Startup Sequence, Main Loop Behavior, Collaborators, Error Handling) is preserved as notes prose. It is not schema-enforced — it serves as implementation guidance for Claude Code.
+
+Example:
+```
+# The primary application
+
+## Application Kind
+`cli_app`
+
+## Entry Context
+`GameLoop`
+
+## Entry Functionality
+`tick`
+
+## Dependencies
+- anyhow
+- crossterm
+- chrono
+- rand
+
+## Purpose
+A terminal Snake game that manages the game lifecycle.
+
+## Startup Sequence
+Create a board, snake, food dropper, game state, and GameLoop...
+```
+
 ## Common Pitfalls
 
 - **Sneaking types into drafts**: No `u32`, `String`, `Vec<>`. Types are inferred during prepare.

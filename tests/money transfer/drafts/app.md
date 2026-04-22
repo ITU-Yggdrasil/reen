@@ -3,6 +3,16 @@
 ## Application Kind
 `cli_app`
 
+## Entry Context
+`MoneyTransfer`
+
+## Entry Functionality
+`transfer`
+
+## Dependencies
+- anyhow
+- chrono
+
 ## Purpose
 
 A simple test application that transfers money between two accounts using an immutable ledger.

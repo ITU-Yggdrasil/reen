@@ -1,8 +1,19 @@
 # Application
 
 ## Application Kind
+`cli_app`
 
-`service_app`
+## Entry Context
+`MetricsContext`
+
+## Entry Functionality
+`serve`
+
+## Dependencies
+- anyhow
+- chrono
+- serde
+- serde_json
 
 ## Purpose
 

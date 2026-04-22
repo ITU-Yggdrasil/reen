@@ -44,4 +44,10 @@ The component/brand/routing-table triad covers web applications:
 
 ## Mini-Example
 
+## App as Entry Point
+
+Every project has exactly one `drafts/app.md` that declares the application's entry context and how it starts. The App is not a DCI artifact — it's the wiring that connects domain artifacts to a running binary. The structured fields (`Application Kind`, `Entry Context`, `Entry Functionality`, `Dependencies`) feed the scaffolder; the remaining prose (Startup Sequence, Main Loop, Collaborators) is implementation guidance for Claude Code.
+
+## Mini-Example
+
 A money transfer context binds two Account role players (source, sink), defines role methods withdraw and deposit on each role, composes them into a "transfer" functionality, and specifies a scenario: "Given source has balance 100, sink has 0, amount is 30 — When transfer — Then source has 70, sink has 30."
