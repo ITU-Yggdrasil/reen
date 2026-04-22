@@ -1930,4 +1930,154 @@ Main routes.
         );
         assert!(result.is_ok(), "list form should parse cleanly: {:?}", result.err());
     }
+
+    // ── App parser tests (Phase 2.5) ─────────────────────────────
+
+    #[test]
+    fn parse_app_draft_happy_path() {
+        let content = r#"# The primary application
+
+## Application Kind
+`cli_app`
+
+## Entry Context
+`GameLoop`
+
+## Entry Functionality
+`tick`
+
+## Dependencies
+- anyhow
+- crossterm
+
+## Purpose
+A terminal Snake game.
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::App(app) = doc else {
+            panic!("expected App draft");
+        };
+        assert_eq!(app.application_kind, "cli_app");
+        assert_eq!(app.entry_context.as_deref(), Some("GameLoop"));
+        assert_eq!(app.entry_functionality.as_deref(), Some("tick"));
+        assert_eq!(app.dependencies, vec!["anyhow", "crossterm"]);
+        assert!(app.notes.contains("Purpose"));
+    }
+
+    #[test]
+    fn parse_app_draft_web_app_rejected() {
+        let content = r#"# App
+
+## Application Kind
+`web_app`
+"#;
+        let result = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Phase 10"),
+            "expected Phase 10 message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_app_draft_unknown_kind_rejected() {
+        let content = r#"# App
+
+## Application Kind
+`desktop_app`
+"#;
+        let result = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not recognised"),
+            "expected unrecognised kind message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_app_draft_missing_kind() {
+        let content = r#"# App
+
+## Purpose
+A test app.
+"#;
+        let result = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Application Kind"),
+            "expected missing Application Kind message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_app_draft_tui_app_accepted() {
+        let content = r#"# App
+
+## Application Kind
+`tui_app`
+
+## Entry Context
+`MainMenu`
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::App(app) = doc else {
+            panic!("expected App draft");
+        };
+        assert_eq!(app.application_kind, "tui_app");
+    }
+
+    #[test]
+    fn parse_app_draft_optional_fields() {
+        let content = r#"# App
+
+## Application Kind
+`cli_app`
+
+## Purpose
+Minimal app.
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::App(app) = doc else {
+            panic!("expected App draft");
+        };
+        assert!(app.entry_context.is_none());
+        assert!(app.entry_functionality.is_none());
+        assert!(app.dependencies.is_empty());
+    }
 }

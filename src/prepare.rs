@@ -2426,4 +2426,94 @@ Then: done
         assert!(!is_all_caps("A")); // single char
         assert!(!is_all_caps("iPhone"));
     }
+
+    // ── App prepare tests (Phase 2.5) ────────────────────────────
+
+    #[test]
+    fn prepare_app_resolves_entry_context() {
+        let content = r#"# App
+
+## Application Kind
+`cli_app`
+
+## Entry Context
+`GameLoop`
+
+## Entry Functionality
+`tick`
+
+## Dependencies
+- anyhow
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = vocab_with(&[("GameLoop", "context")]);
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert_eq!(prepared.kind, ArtifactKind::App);
+        assert_eq!(prepared.application_kind.as_deref(), Some("cli_app"));
+        assert_eq!(prepared.entry_context.as_deref(), Some("GameLoop"));
+        assert_eq!(prepared.entry_functionality.as_deref(), Some("tick"));
+        assert_eq!(prepared.app_dependencies, vec!["anyhow"]);
+        assert!(prepared.ambiguities.is_empty(), "{:?}", prepared.ambiguities);
+    }
+
+    #[test]
+    fn prepare_app_flags_unresolved_entry_context() {
+        let content = r#"# App
+
+## Application Kind
+`cli_app`
+
+## Entry Context
+`NonExistent`
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = empty_vocab();
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert!(
+            prepared.ambiguities.iter().any(|a| a.message.contains("NonExistent")),
+            "expected ambiguity about unresolved entry context: {:?}",
+            prepared.ambiguities
+        );
+    }
+
+    #[test]
+    fn prepare_app_flags_non_context_entry() {
+        let content = r#"# App
+
+## Application Kind
+`cli_app`
+
+## Entry Context
+`Amount`
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/app.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = vocab_with(&[("Amount", "data")]);
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert!(
+            prepared.ambiguities.iter().any(|a| a.message.contains("data")),
+            "expected ambiguity about non-context entry: {:?}",
+            prepared.ambiguities
+        );
+    }
 }
