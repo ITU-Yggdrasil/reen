@@ -170,6 +170,9 @@ impl Selection {
             ArtifactKind::Projection => self.projections,
             ArtifactKind::Data => self.data,
             ArtifactKind::Operation => true, // operations always included when present
+            ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
+                self.app
+            }
         }
     }
 

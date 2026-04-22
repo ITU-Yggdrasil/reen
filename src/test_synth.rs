@@ -147,6 +147,9 @@ fn call_api(
         ArtifactKind::Projection => "projection",
         ArtifactKind::Context => "context",
         ArtifactKind::Operation => "operation",
+        ArtifactKind::Component => "component",
+        ArtifactKind::Brand => "brand",
+        ArtifactKind::RoutingTable => "routing table",
     };
 
     let existing_tests: Vec<String> = artifact

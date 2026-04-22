@@ -111,6 +111,10 @@ fn scaffold_output_path(workspace: &Workspace, artifact: &PreparedArtifact) -> P
         ArtifactKind::Projection => "projections",
         ArtifactKind::Context => "contexts",
         ArtifactKind::Operation => "apis", // handled separately by apis_codegen
+        // Phase 10 will add scaffold paths for web kinds
+        ArtifactKind::Component => "components",
+        ArtifactKind::Brand => "brand",
+        ArtifactKind::RoutingTable => "routes",
     };
     let filename = to_snake_case(&artifact.export.name);
     workspace
@@ -126,6 +130,10 @@ pub fn generate_rust(artifact: &PreparedArtifact) -> String {
         ArtifactKind::Data => generate_data(artifact),
         ArtifactKind::Projection => generate_projection(artifact),
         ArtifactKind::Operation => String::new(), // operations use apis_codegen
+        // Phase 10 will add codegen for web kinds
+        ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
+            String::new()
+        }
     }
 }
 

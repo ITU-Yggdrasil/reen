@@ -1,5 +1,6 @@
 use crate::draft_parser::{
-    ContextDraft, DataDraft, DraftDocument, ProjectionDraft, parse_draft_file,
+    BrandDraft, ComponentDraft, ContextDraft, DataDraft, DraftDocument, ProjectionDraft,
+    RoutingTableDraft, parse_draft_file,
 };
 use crate::workspace::Workspace;
 use anyhow::{Context, Result};
@@ -140,6 +141,9 @@ fn review_document(
         DraftDocument::Data(data) => review_data(path, content, data, findings),
         DraftDocument::Projection(proj) => review_projection(path, content, proj, findings),
         DraftDocument::Context(ctx) => review_context(path, content, ctx, findings),
+        DraftDocument::Component(comp) => review_component(path, content, comp, findings),
+        DraftDocument::Brand(brand) => review_brand(path, content, brand, findings),
+        DraftDocument::RoutingTable(rt) => review_routing_table(path, content, rt, findings),
     }
 }
 
@@ -222,6 +226,48 @@ fn review_context(
     for func in &ctx.functionalities {
         scan_vagueness(findings, path, content, &func.description, &format!("functionality `{}`", func.name));
     }
+}
+
+fn review_component(
+    path: &str,
+    content: &str,
+    comp: &ComponentDraft,
+    findings: &mut Vec<DraftReviewFinding>,
+) {
+    if comp.scenarios.is_empty() {
+        push(findings, path, heading_line(content, "## Scenarios"),
+            DraftReviewCategory::Completeness,
+            "component draft must contain at least one scenario");
+    }
+    scan_vagueness(findings, path, content, &comp.purpose, "purpose");
+}
+
+fn review_brand(
+    path: &str,
+    content: &str,
+    brand: &BrandDraft,
+    findings: &mut Vec<DraftReviewFinding>,
+) {
+    if brand.token_groups.is_empty() && brand.voice.is_none() && brand.prose_sections.is_empty() {
+        push(findings, path, None,
+            DraftReviewCategory::Completeness,
+            "brand draft must declare at least one section (Voice, Visual Identity, Motion, etc.)");
+    }
+    scan_vagueness(findings, path, content, &brand.purpose, "purpose");
+}
+
+fn review_routing_table(
+    path: &str,
+    content: &str,
+    rt: &RoutingTableDraft,
+    findings: &mut Vec<DraftReviewFinding>,
+) {
+    if rt.routes.is_empty() {
+        push(findings, path, heading_line(content, "## Routes"),
+            DraftReviewCategory::Completeness,
+            "routing table draft must declare at least one route");
+    }
+    scan_vagueness(findings, path, content, &rt.purpose, "purpose");
 }
 
 fn scan_vagueness(

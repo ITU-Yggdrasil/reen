@@ -9,6 +9,9 @@ pub enum ArtifactKind {
     Projection,
     Context,
     Operation,
+    Component,
+    Brand,
+    RoutingTable,
 }
 
 impl ArtifactKind {
@@ -18,6 +21,9 @@ impl ArtifactKind {
             ArtifactKind::Projection => "projection",
             ArtifactKind::Context => "context",
             ArtifactKind::Operation => "operation",
+            ArtifactKind::Component => "component",
+            ArtifactKind::Brand => "brand",
+            ArtifactKind::RoutingTable => "routing_table",
         }
     }
 
@@ -26,6 +32,9 @@ impl ArtifactKind {
             "data" => Some(Self::Data),
             "projections" => Some(Self::Projection),
             "contexts" => Some(Self::Context),
+            "components" => Some(Self::Component),
+            "brands" => Some(Self::Brand),
+            "routes" => Some(Self::RoutingTable),
             _ => None,
         }
     }
@@ -36,6 +45,9 @@ impl ArtifactKind {
             "projections" => Some(Self::Projection),
             "contexts" => Some(Self::Context),
             "operations" => Some(Self::Operation),
+            "components" => Some(Self::Component),
+            "brands" => Some(Self::Brand),
+            "routes" => Some(Self::RoutingTable),
             _ => None,
         }
     }
@@ -145,6 +157,109 @@ pub struct ProjectionDraft {
     pub scenarios: Vec<ScenarioDraft>,
 }
 
+// ── Component draft ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotDraft {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventDraft {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantDraft {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildBindingDraft {
+    pub child: String,
+    pub bindings: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventBindingDraft {
+    pub child: String,
+    pub event: String,
+    pub context: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositionDraft {
+    pub child_bindings: Vec<ChildBindingDraft>,
+    pub event_bindings: Vec<EventBindingDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentDraft {
+    pub info: DraftInfo,
+    pub purpose: String,
+    pub props: Vec<PropDraft>,
+    pub slots: Vec<SlotDraft>,
+    pub events: Vec<EventDraft>,
+    pub variants: Vec<VariantDraft>,
+    pub composition: Option<CompositionDraft>,
+    pub invariants: Vec<String>,
+    pub scenarios: Vec<ScenarioDraft>,
+}
+
+// ── Brand draft ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrandTokenDraft {
+    pub name: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrandTokenGroupDraft {
+    pub group: String,
+    pub tokens: Vec<BrandTokenDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrandProseSectionDraft {
+    pub name: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrandDraft {
+    pub info: DraftInfo,
+    pub purpose: String,
+    pub voice: Option<BrandProseSectionDraft>,
+    pub token_groups: Vec<BrandTokenGroupDraft>,
+    pub prose_sections: Vec<BrandProseSectionDraft>,
+}
+
+// ── Routing table draft ──────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteParamDraft {
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteDraft {
+    pub path: String,
+    pub component: String,
+    pub params: Vec<RouteParamDraft>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingTableDraft {
+    pub info: DraftInfo,
+    pub purpose: String,
+    pub routes: Vec<RouteDraft>,
+}
+
 // ── Boundary draft (API) ─────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +286,9 @@ pub enum DraftDocument {
     Data(DataDraft),
     Projection(ProjectionDraft),
     Context(ContextDraft),
+    Component(ComponentDraft),
+    Brand(BrandDraft),
+    RoutingTable(RoutingTableDraft),
 }
 
 // ── Entry point ───────────────────────────────────────────────────
@@ -200,6 +318,13 @@ pub fn parse_draft_file(path: &Path, drafts_root: &Path, content: &str) -> Resul
             parse_projection_draft(info, content).map(DraftDocument::Projection)
         }
         ArtifactKind::Context => parse_context_draft(info, content).map(DraftDocument::Context),
+        ArtifactKind::Component => {
+            parse_component_draft(info, content).map(DraftDocument::Component)
+        }
+        ArtifactKind::Brand => parse_brand_draft(info, content).map(DraftDocument::Brand),
+        ArtifactKind::RoutingTable => {
+            parse_routing_table_draft(info, content).map(DraftDocument::RoutingTable)
+        }
         ArtifactKind::Operation => {
             bail!("Operation artifacts are YAML, not markdown drafts: {}", info.relative_path)
         }
@@ -510,6 +635,328 @@ fn extract_labeled_line(body: &str, label: &str) -> String {
         }
     }
     String::new()
+}
+
+// ── Component parser ─────────────────────────────────────────────
+
+fn parse_component_draft(info: DraftInfo, content: &str) -> Result<ComponentDraft> {
+    let sections = parse_sections(content);
+
+    let purpose = require_section_text(&info.relative_path, &sections, "Purpose")?;
+    let props = parse_props(&sections);
+    let slots = parse_slot_bullets(&sections);
+    let events = parse_event_bullets(&sections);
+    let variants = parse_variant_bullets(&sections);
+    let composition = parse_composition(&sections)?;
+    let invariants = bullet_lines(find_section(&sections, "Invariants").map(|s| s.body.as_str()));
+    let scenarios = parse_scenarios(&sections);
+
+    Ok(ComponentDraft {
+        info,
+        purpose,
+        props,
+        slots,
+        events,
+        variants,
+        composition,
+        invariants,
+        scenarios,
+    })
+}
+
+fn parse_slot_bullets(sections: &[Section]) -> Vec<SlotDraft> {
+    let Some(section) = find_section(sections, "Slots") else {
+        return Vec::new();
+    };
+    parse_named_bullets(&section.body)
+        .into_iter()
+        .map(|(name, desc)| SlotDraft {
+            name,
+            description: desc,
+        })
+        .collect()
+}
+
+fn parse_event_bullets(sections: &[Section]) -> Vec<EventDraft> {
+    let Some(section) = find_section(sections, "Events") else {
+        return Vec::new();
+    };
+    parse_named_bullets(&section.body)
+        .into_iter()
+        .map(|(name, desc)| EventDraft {
+            name,
+            description: desc,
+        })
+        .collect()
+}
+
+fn parse_variant_bullets(sections: &[Section]) -> Vec<VariantDraft> {
+    let Some(section) = find_section(sections, "Variants") else {
+        return Vec::new();
+    };
+    parse_named_bullets(&section.body)
+        .into_iter()
+        .map(|(name, desc)| VariantDraft {
+            name,
+            description: desc,
+        })
+        .collect()
+}
+
+fn parse_composition(sections: &[Section]) -> Result<Option<CompositionDraft>> {
+    let Some(section) = find_section(sections, "Composition") else {
+        return Ok(None);
+    };
+    let body = section.body.trim();
+    if body.is_empty() {
+        return Ok(None);
+    }
+
+    let mut child_bindings = Vec::new();
+    let mut event_bindings = Vec::new();
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        else {
+            continue;
+        };
+
+        // Event binding: "when <child>.<event>: invoke <context>"
+        if let Some(when_rest) = rest
+            .strip_prefix("when ")
+            .or_else(|| rest.strip_prefix("When "))
+        {
+            if let Some(eb) = parse_event_binding(when_rest) {
+                event_bindings.push(eb);
+                continue;
+            }
+        }
+
+        // Child binding: "<child>: <bindings prose>"
+        if let Some((child, bindings)) = rest.split_once(':') {
+            child_bindings.push(ChildBindingDraft {
+                child: child.trim().to_string(),
+                bindings: bindings.trim().to_string(),
+            });
+        }
+    }
+
+    Ok(Some(CompositionDraft {
+        child_bindings,
+        event_bindings,
+    }))
+}
+
+/// Parse "when <child>.<event>: invoke <context>" or
+/// "when `<child>`.`<event>`: invoke `<context>`"
+fn parse_event_binding(text: &str) -> Option<EventBindingDraft> {
+    // Try backtick format: `child`.`event`: invoke `Context`
+    let re_backtick = regex::Regex::new(
+        r"^`([^`]+)`\s*\.\s*`([^`]+)`\s*:\s*invoke\s+`([^`]+)`$"
+    ).ok()?;
+    if let Some(caps) = re_backtick.captures(text.trim()) {
+        return Some(EventBindingDraft {
+            child: caps[1].to_string(),
+            event: caps[2].to_string(),
+            context: caps[3].to_string(),
+        });
+    }
+
+    // Try plain format: child.event: invoke Context
+    let re_plain = regex::Regex::new(
+        r"^(\w+)\s*\.\s*(\w+)\s*:\s*invoke\s+(\w+)$"
+    ).ok()?;
+    if let Some(caps) = re_plain.captures(text.trim()) {
+        return Some(EventBindingDraft {
+            child: caps[1].to_string(),
+            event: caps[2].to_string(),
+            context: caps[3].to_string(),
+        });
+    }
+
+    None
+}
+
+// ── Brand parser ─────────────────────────────────────────────────
+
+fn parse_brand_draft(info: DraftInfo, content: &str) -> Result<BrandDraft> {
+    let sections = parse_sections(content);
+
+    let purpose = require_section_text(&info.relative_path, &sections, "Purpose")?;
+
+    let mut voice = None;
+    let mut token_groups = Vec::new();
+    let mut prose_sections = Vec::new();
+
+    // Token groups are subsections under Visual Identity, plus Motion
+    if let Some(visual) = find_section(&sections, "Visual Identity") {
+        let subsections = parse_subsections(&visual.body);
+        for sub in subsections {
+            let tokens = parse_named_bullets(&sub.body)
+                .into_iter()
+                .map(|(name, role)| BrandTokenDraft { name, role })
+                .collect();
+            token_groups.push(BrandTokenGroupDraft {
+                group: sub.title.to_ascii_lowercase(),
+                tokens,
+            });
+        }
+    }
+
+    // Motion tokens
+    if let Some(motion) = find_section(&sections, "Motion") {
+        let tokens = parse_named_bullets(&motion.body)
+            .into_iter()
+            .map(|(name, role)| BrandTokenDraft { name, role })
+            .collect();
+        token_groups.push(BrandTokenGroupDraft {
+            group: "motion".to_string(),
+            tokens,
+        });
+    }
+
+    // Voice section (prose)
+    if let Some(voice_section) = find_section(&sections, "Voice") {
+        voice = Some(BrandProseSectionDraft {
+            name: "voice".to_string(),
+            body: voice_section.body.trim().to_string(),
+        });
+    }
+
+    // Prose sections: Imagery, Iconography, Logo
+    for name in &["Imagery", "Iconography", "Logo"] {
+        if let Some(section) = find_section(&sections, name) {
+            prose_sections.push(BrandProseSectionDraft {
+                name: name.to_ascii_lowercase(),
+                body: section.body.trim().to_string(),
+            });
+        }
+    }
+
+    Ok(BrandDraft {
+        info,
+        purpose,
+        voice,
+        token_groups,
+        prose_sections,
+    })
+}
+
+// ── Routing table parser ─────────────────────────────────────────
+
+fn parse_routing_table_draft(info: DraftInfo, content: &str) -> Result<RoutingTableDraft> {
+    let sections = parse_sections(content);
+
+    let purpose = require_section_text(&info.relative_path, &sections, "Purpose")?;
+    let routes = parse_route_bullets(&info.relative_path, &sections)?;
+
+    Ok(RoutingTableDraft {
+        info,
+        purpose,
+        routes,
+    })
+}
+
+fn parse_route_bullets(relative_path: &str, sections: &[Section]) -> Result<Vec<RouteDraft>> {
+    let section = require_section(relative_path, sections, "Routes")?;
+    let body = section.body.trim();
+
+    let mut routes = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_component: Option<String> = None;
+    let mut current_params: Vec<RouteParamDraft> = Vec::new();
+    let mut in_params = false;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let rest = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "));
+
+        if let Some(rest) = rest {
+            // Check if this is a top-level route item or a nested item
+            let indent = line.len() - line.trim_start().len();
+
+            if indent <= 2 {
+                // Flush previous route
+                if let (Some(path), Some(component)) =
+                    (current_path.take(), current_component.take())
+                {
+                    routes.push(RouteDraft {
+                        path,
+                        component,
+                        params: std::mem::take(&mut current_params),
+                    });
+                }
+                in_params = false;
+
+                // Parse "path: /foo" or "component: Foo"
+                if let Some(value) = strip_label(rest, "path") {
+                    current_path = Some(value.to_string());
+                } else if let Some(value) = strip_label(rest, "component") {
+                    current_component = Some(value.to_string());
+                }
+            } else {
+                // Nested item under current route
+                if let Some(value) = strip_label(rest, "path") {
+                    // Shouldn't happen at nested level, but handle gracefully
+                    current_path = Some(value.to_string());
+                } else if let Some(value) = strip_label(rest, "component") {
+                    current_component = Some(value.to_string());
+                } else if rest.to_ascii_lowercase().starts_with("params") {
+                    in_params = true;
+                } else if in_params {
+                    // Parse param: "name: DataType"
+                    if let Some((name, data_type)) = rest.split_once(':') {
+                        current_params.push(RouteParamDraft {
+                            name: name.trim().to_string(),
+                            data_type: data_type.trim().to_string(),
+                        });
+                    }
+                }
+            }
+        } else if trimmed.starts_with("path:") || trimmed.starts_with("component:") || trimmed.starts_with("params:") {
+            // Non-bulleted key-value lines under a route
+            if let Some(value) = strip_label(trimmed, "path") {
+                current_path = Some(value.to_string());
+            } else if let Some(value) = strip_label(trimmed, "component") {
+                current_component = Some(value.to_string());
+            } else if trimmed.to_ascii_lowercase().starts_with("params") {
+                in_params = true;
+            }
+        } else if in_params {
+            // Param continuation line
+            if let Some(rest) = trimmed
+                .strip_prefix("- ")
+                .or_else(|| trimmed.strip_prefix("* "))
+            {
+                if let Some((name, data_type)) = rest.split_once(':') {
+                    current_params.push(RouteParamDraft {
+                        name: name.trim().to_string(),
+                        data_type: data_type.trim().to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Flush last route
+    if let (Some(path), Some(component)) = (current_path, current_component) {
+        routes.push(RouteDraft {
+            path,
+            component,
+            params: current_params,
+        });
+    }
+
+    Ok(routes)
 }
 
 // ── Boundary draft parser ────────────────────────────────────────

@@ -1,13 +1,16 @@
 use crate::draft_parser::{
-    ContextDraft, DataDraft, DraftDocument, ProjectionDraft, parse_draft_file,
+    BrandDraft, ComponentDraft, ContextDraft, DataDraft, DraftDocument, ProjectionDraft,
+    RoutingTableDraft, parse_draft_file,
 };
 use crate::draft_refine::{DraftReview, review_raw_drafts};
 use crate::manifest::DciVocabulary;
 use crate::test_synth::synthesise_tests;
 use crate::prepared::{
-    Ambiguity, ArtifactKind, AttributeSpec, FunctionalitySpec, OperationSpec, PreparedArtifact,
-    PropSpec, QuerySpec, RoleMethodGroupSpec, RoleMethodSpec, RolePlayerSpec, ScenarioSpec,
-    SynthesisedTest, VocabularyBinding,
+    Ambiguity, ArtifactKind, AttributeSpec, ChildBindingSpec, CompositionSpec, EventBindingSpec,
+    EventSpec, FunctionalitySpec, OperationSpec, PreparedArtifact, ProseSectionSpec, PropSpec,
+    QuerySpec, RoleMethodGroupSpec, RoleMethodSpec, RolePlayerSpec, RouteParamSpec, RouteSpec,
+    ScenarioSpec, SlotSpec, SynthesisedTest, TokenGroupSpec, TokenSpec, VariantSpec,
+    VocabularyBinding,
 };
 use crate::workspace::Workspace;
 use anyhow::{Context, Result};
@@ -184,6 +187,9 @@ fn prepare_document(doc: &DraftDocument, vocab: &DciVocabulary) -> Result<Prepar
         DraftDocument::Context(ctx) => prepare_context(ctx, vocab),
         DraftDocument::Data(data) => prepare_data(data, vocab),
         DraftDocument::Projection(proj) => prepare_projection(proj, vocab),
+        DraftDocument::Component(comp) => prepare_component(comp, vocab),
+        DraftDocument::Brand(brand) => prepare_brand(brand),
+        DraftDocument::RoutingTable(rt) => prepare_routing_table(rt, vocab),
     }
 }
 
@@ -503,6 +509,354 @@ fn prepare_projection(proj: &ProjectionDraft, vocab: &DciVocabulary) -> Result<P
     Ok(artifact)
 }
 
+fn prepare_component(comp: &ComponentDraft, vocab: &DciVocabulary) -> Result<PreparedArtifact> {
+    let export_name = sanitize_export_name(&comp.info.title);
+    let mut artifact = PreparedArtifact::new(
+        ArtifactKind::Component,
+        comp.info.relative_path.clone(),
+        comp.info.title.clone(),
+        export_name,
+    );
+
+    let mut bindings = Vec::new();
+    let mut ambiguities = Vec::new();
+
+    // Props — resolve types against vocabulary
+    for prop in &comp.props {
+        artifact.props.push(PropSpec {
+            name: prop.name.clone(),
+            description: prop.description.clone(),
+        });
+        // Try to resolve the description as a type reference
+        let words: Vec<&str> = prop.description.split_whitespace().collect();
+        if words.len() == 1 {
+            if let Some(resolution) = vocab.resolve(words[0]) {
+                bindings.push(VocabularyBinding {
+                    name: words[0].to_string(),
+                    resolution,
+                    resolved_to: Some(words[0].to_string()),
+                });
+            }
+        }
+    }
+
+    // Slots
+    for slot in &comp.slots {
+        artifact.slots.push(SlotSpec {
+            name: slot.name.clone(),
+            description: slot.description.clone(),
+        });
+    }
+
+    // Events
+    for event in &comp.events {
+        artifact.events.push(EventSpec {
+            name: event.name.clone(),
+            description: event.description.clone(),
+        });
+    }
+
+    // Variants
+    for variant in &comp.variants {
+        artifact.variants.push(VariantSpec {
+            name: variant.name.clone(),
+            description: variant.description.clone(),
+        });
+    }
+
+    // Composition
+    if let Some(composition) = &comp.composition {
+        let child_bindings = composition
+            .child_bindings
+            .iter()
+            .map(|cb| {
+                // Resolve child component reference
+                let resolved = vocab.resolve(&cb.child);
+                if resolved.is_none() {
+                    ambiguities.push(Ambiguity {
+                        message: format!(
+                            "Component `{}` references child component `{}` which is not in the vocabulary manifest",
+                            comp.info.title, cb.child
+                        ),
+                        severity: "blocking".to_string(),
+                        suggested_resolution: Some(format!(
+                            "Add a component draft for `{}` under drafts/components/",
+                            cb.child
+                        )),
+                        source_line: None,
+                    });
+                }
+                ChildBindingSpec {
+                    child: cb.child.clone(),
+                    bindings: cb.bindings.clone(),
+                }
+            })
+            .collect();
+
+        let event_bindings = composition
+            .event_bindings
+            .iter()
+            .map(|eb| {
+                // Resolve context reference
+                let resolved = vocab.resolve(&eb.context);
+                if let Some(kind) = &resolved {
+                    if kind != "context" {
+                        ambiguities.push(Ambiguity {
+                            message: format!(
+                                "Component `{}` binds event `{}.{}` to `{}` which is a {} — event bindings must target contexts",
+                                comp.info.title, eb.child, eb.event, eb.context, kind
+                            ),
+                            severity: "blocking".to_string(),
+                            suggested_resolution: Some(format!(
+                                "Create a context draft for `{}`",
+                                eb.context
+                            )),
+                            source_line: None,
+                        });
+                    }
+                    bindings.push(VocabularyBinding {
+                        name: eb.context.clone(),
+                        resolution: kind.clone(),
+                        resolved_to: Some(eb.context.clone()),
+                    });
+                } else {
+                    ambiguities.push(Ambiguity {
+                        message: format!(
+                            "Component `{}` binds event `{}.{}` to context `{}` which is not in the vocabulary manifest",
+                            comp.info.title, eb.child, eb.event, eb.context
+                        ),
+                        severity: "blocking".to_string(),
+                        suggested_resolution: Some(format!(
+                            "Add a context draft for `{}`",
+                            eb.context
+                        )),
+                        source_line: None,
+                    });
+                }
+                EventBindingSpec {
+                    child: eb.child.clone(),
+                    event: eb.event.clone(),
+                    context: eb.context.clone(),
+                }
+            })
+            .collect();
+
+        artifact.composition = Some(CompositionSpec {
+            child_bindings,
+            event_bindings,
+        });
+    }
+
+    // Invariants
+    artifact.invariants = comp.invariants.clone();
+
+    // Scenarios
+    for scenario in &comp.scenarios {
+        artifact.scenarios.push(ScenarioSpec {
+            name: scenario.name.clone(),
+            given: scenario.given.clone(),
+            when: scenario.when.clone(),
+            then: scenario.then.clone(),
+        });
+        artifact.synthesised_tests.push(SynthesisedTest {
+            source: "scenario".to_string(),
+            given: scenario.given.clone(),
+            when: scenario.when.clone(),
+            then: scenario.then.clone(),
+            citation: Some(format!("Scenarios / {}", scenario.name)),
+        });
+    }
+
+    artifact.vocabulary_bindings = bindings;
+    artifact.ambiguities = ambiguities;
+    Ok(artifact)
+}
+
+fn prepare_brand(brand: &BrandDraft) -> Result<PreparedArtifact> {
+    let export_name = sanitize_export_name(&brand.info.title);
+    let mut artifact = PreparedArtifact::new(
+        ArtifactKind::Brand,
+        brand.info.relative_path.clone(),
+        brand.info.title.clone(),
+        export_name,
+    );
+
+    // Token groups (colours, typography, spacing, motion)
+    for group in &brand.token_groups {
+        artifact.token_groups.push(TokenGroupSpec {
+            group: group.group.clone(),
+            tokens: group
+                .tokens
+                .iter()
+                .map(|t| TokenSpec {
+                    name: t.name.clone(),
+                    role: t.role.clone(),
+                })
+                .collect(),
+        });
+    }
+
+    // Voice section
+    if let Some(voice) = &brand.voice {
+        artifact.prose_sections.push(ProseSectionSpec {
+            name: voice.name.clone(),
+            body: voice.body.clone(),
+        });
+    }
+
+    // Other prose sections (imagery, iconography, logo)
+    for section in &brand.prose_sections {
+        artifact.prose_sections.push(ProseSectionSpec {
+            name: section.name.clone(),
+            body: section.body.clone(),
+        });
+    }
+
+    Ok(artifact)
+}
+
+fn prepare_routing_table(
+    rt: &RoutingTableDraft,
+    vocab: &DciVocabulary,
+) -> Result<PreparedArtifact> {
+    let export_name = sanitize_export_name(&rt.info.title);
+    let mut artifact = PreparedArtifact::new(
+        ArtifactKind::RoutingTable,
+        rt.info.relative_path.clone(),
+        rt.info.title.clone(),
+        export_name,
+    );
+
+    let mut ambiguities = Vec::new();
+    let mut bindings = Vec::new();
+
+    for route in &rt.routes {
+        // Resolve component reference
+        let component_resolved = vocab.resolve(&route.component);
+        if let Some(kind) = &component_resolved {
+            if kind != "component" {
+                ambiguities.push(Ambiguity {
+                    message: format!(
+                        "Route `{}` references `{}` which is a {} — routes must reference components",
+                        route.path, route.component, kind
+                    ),
+                    severity: "blocking".to_string(),
+                    suggested_resolution: Some(format!(
+                        "Create a component draft for `{}`",
+                        route.component
+                    )),
+                    source_line: None,
+                });
+            }
+            bindings.push(VocabularyBinding {
+                name: route.component.clone(),
+                resolution: kind.clone(),
+                resolved_to: Some(route.component.clone()),
+            });
+        } else {
+            ambiguities.push(Ambiguity {
+                message: format!(
+                    "Route `{}` references component `{}` which is not in the vocabulary manifest. \
+                     Is it a component that should be added under drafts/components/?",
+                    route.path, route.component
+                ),
+                severity: "blocking".to_string(),
+                suggested_resolution: Some(format!(
+                    "Add a component draft for `{}`",
+                    route.component
+                )),
+                source_line: None,
+            });
+        }
+
+        // Resolve path param types
+        let mut params = Vec::new();
+        // Extract path parameters from the path template
+        let path_params: Vec<String> = extract_path_params(&route.path);
+
+        for param in &route.params {
+            let resolved = vocab.resolve(&param.data_type);
+            if let Some(kind) = &resolved {
+                bindings.push(VocabularyBinding {
+                    name: param.data_type.clone(),
+                    resolution: kind.clone(),
+                    resolved_to: Some(param.data_type.clone()),
+                });
+            } else {
+                ambiguities.push(Ambiguity {
+                    message: format!(
+                        "Route `{}` param `{}` references type `{}` which is not in the vocabulary manifest",
+                        route.path, param.name, param.data_type
+                    ),
+                    severity: "blocking".to_string(),
+                    suggested_resolution: Some(format!(
+                        "Add `{}` to the vocabulary manifest as a data type",
+                        param.data_type
+                    )),
+                    source_line: None,
+                });
+            }
+            params.push(RouteParamSpec {
+                name: param.name.clone(),
+                data_type: param.data_type.clone(),
+            });
+        }
+
+        // Check that all path parameters have a matching params entry
+        for path_param in &path_params {
+            if !route.params.iter().any(|p| &p.name == path_param) {
+                ambiguities.push(Ambiguity {
+                    message: format!(
+                        "Route `{}` has path parameter `<{}>` but no matching entry under `params:`",
+                        route.path, path_param
+                    ),
+                    severity: "blocking".to_string(),
+                    suggested_resolution: Some(format!(
+                        "Add `{}: <DataType>` under the route's params section",
+                        path_param
+                    )),
+                    source_line: None,
+                });
+            }
+        }
+
+        artifact.routes.push(RouteSpec {
+            path: route.path.clone(),
+            component: route.component.clone(),
+            params,
+        });
+    }
+
+    artifact.vocabulary_bindings = bindings;
+    artifact.ambiguities = ambiguities;
+    Ok(artifact)
+}
+
+/// Extract path parameters from a route path template.
+/// E.g. "/products/<id>/reviews/<review_id>" → ["id", "review_id"]
+fn extract_path_params(path: &str) -> Vec<String> {
+    let mut params = Vec::new();
+    let mut i = 0;
+    let chars: Vec<char> = path.chars().collect();
+    while i < chars.len() {
+        if chars[i] == '<' {
+            i += 1;
+            let start = i;
+            while i < chars.len() && chars[i] != '>' {
+                i += 1;
+            }
+            if i < chars.len() {
+                let param: String = chars[start..i].iter().collect();
+                params.push(param);
+            }
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    params
+}
+
 // ── Helpers ───────────────────────────────────────────────────────
 
 /// Extract role method references from functionality prose.
@@ -565,6 +919,9 @@ fn sanitize_export_name(title: &str) -> String {
         .strip_prefix("Context:")
         .or_else(|| title.strip_prefix("Data:"))
         .or_else(|| title.strip_prefix("Projection:"))
+        .or_else(|| title.strip_prefix("Component:"))
+        .or_else(|| title.strip_prefix("Brand:"))
+        .or_else(|| title.strip_prefix("Routes:"))
         .unwrap_or(title)
         .trim();
     if cleaned.is_empty() {

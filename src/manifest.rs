@@ -94,6 +94,9 @@ impl DciVocabulary {
             ("data", "data"),
             ("projections", "projection"),
             ("contexts", "context"),
+            ("components", "component"),
+            ("brands", "brand"),
+            ("routes", "routing_table"),
         ];
 
         for &(subdir, kind) in dirs {
@@ -671,7 +674,7 @@ fn extract_draft_export_name(path: &Path) -> Option<String> {
         return None;
     }
     let after_hash = first_line.trim_start_matches('#').trim();
-    for prefix in &["Data:", "Context:", "Projection:"] {
+    for prefix in &["Data:", "Context:", "Projection:", "Component:", "Brand:", "Routes:"] {
         if let Some(rest) = after_hash.strip_prefix(prefix) {
             let name = rest.trim();
             if !name.is_empty() {

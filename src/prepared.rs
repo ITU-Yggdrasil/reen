@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v2";
+pub const PREPARED_SCHEMA_V3_VERSION: &str = "reen.prepare/v3";
 
 /// DCI artifact kinds plus the operation kind for external API consumption.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -10,6 +11,23 @@ pub enum ArtifactKind {
     Projection,
     Context,
     Operation,
+    Component,
+    Brand,
+    RoutingTable,
+}
+
+impl ArtifactKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArtifactKind::Data => "data",
+            ArtifactKind::Projection => "projection",
+            ArtifactKind::Context => "context",
+            ArtifactKind::Operation => "operation",
+            ArtifactKind::Component => "component",
+            ArtifactKind::Brand => "brand",
+            ArtifactKind::RoutingTable => "routing_table",
+        }
+    }
 }
 
 /// A fully-resolved, prepared artifact in the v2 schema.
@@ -46,6 +64,30 @@ pub struct PreparedArtifact {
     pub source_data: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queries: Vec<QuerySpec>,
+
+    // ── Component-only (v3) ──────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<SlotSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<EventSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<VariantSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<CompositionSpec>,
+
+    // ── Brand-only (v3) ──────────────────────────────────────────
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_groups: Vec<TokenGroupSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prose_sections: Vec<ProseSectionSpec>,
+
+    // ── Routing-table-only (v3) ──────────────────────────────────
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<RouteSpec>,
+
+    // ── Context classification (v3) ──────────────────────────────
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realisation_target: Option<String>,
 
     // ── Shared across all kinds ───────────────────────────────────
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -136,6 +178,83 @@ pub struct OperationSpec {
 pub struct QuerySpec {
     pub name: String,
     pub description: String,
+}
+
+// ── Component types (v3) ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SlotSpec {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventSpec {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VariantSpec {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChildBindingSpec {
+    pub child: String,
+    pub bindings: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EventBindingSpec {
+    pub child: String,
+    pub event: String,
+    pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompositionSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_bindings: Vec<ChildBindingSpec>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub event_bindings: Vec<EventBindingSpec>,
+}
+
+// ── Brand types (v3) ─────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenSpec {
+    pub name: String,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenGroupSpec {
+    pub group: String,
+    pub tokens: Vec<TokenSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProseSectionSpec {
+    pub name: String,
+    pub body: String,
+}
+
+// ── Routing table types (v3) ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteSpec {
+    pub path: String,
+    pub component: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<RouteParamSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteParamSpec {
+    pub name: String,
+    pub data_type: String,
 }
 
 // ── Shared types ──────────────────────────────────────────────────
@@ -252,14 +371,15 @@ pub const API_MANIFEST_SCHEMA: &str = "reen.api-manifest/v1";
 
 impl PreparedArtifact {
     pub fn new(kind: ArtifactKind, path: String, title: String, export_name: String) -> Self {
-        let kind_str = match &kind {
-            ArtifactKind::Data => "data",
-            ArtifactKind::Projection => "projection",
-            ArtifactKind::Context => "context",
-            ArtifactKind::Operation => "operation",
+        let kind_str = kind.as_str();
+        let schema = match &kind {
+            ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
+                PREPARED_SCHEMA_V3_VERSION.to_string()
+            }
+            _ => PREPARED_SCHEMA_VERSION.to_string(),
         };
         Self {
-            schema: PREPARED_SCHEMA_VERSION.to_string(),
+            schema,
             source: SourceInfo {
                 path,
                 kind: kind_str.to_string(),
@@ -280,6 +400,18 @@ impl PreparedArtifact {
             synthesised_tests: Vec::new(),
             vocabulary_bindings: Vec::new(),
             ambiguities: Vec::new(),
+            // Component-only
+            slots: Vec::new(),
+            events: Vec::new(),
+            variants: Vec::new(),
+            composition: None,
+            // Brand-only
+            token_groups: Vec::new(),
+            prose_sections: Vec::new(),
+            // Routing-table-only
+            routes: Vec::new(),
+            // Context classification
+            realisation_target: None,
         }
     }
 
