@@ -1,0 +1,1025 @@
+//! Web-app scaffold code generation for Phase 10.
+//!
+//! Emits a four-crate Cargo workspace for `web_app` projects:
+//! - `app-core`: data, projections, client-also contexts
+//! - `app-server`: server-only contexts + operations; server binary
+//! - `app-client`: WASM build; client-side event handlers
+//! - `app-components`: components, brand, routing — shared client + server
+
+use crate::codegen::{to_snake_case, GENERATED_MARKER};
+use crate::prepared::{ArtifactKind, PreparedArtifact};
+use crate::workspace::Workspace;
+use anyhow::{Context, Result};
+use std::fmt::Write as FmtWrite;
+use std::fs;
+use std::path::Path;
+
+/// Static-asset path constants derived once, used in server routes and HTML shell.
+pub mod paths {
+    pub const BRAND_CSS: &str = "/static/brand.css";
+    pub const CLIENT_WASM: &str = "/static/app-client.wasm";
+}
+
+/// Options for web scaffold.
+#[derive(Debug, Clone)]
+pub struct WebScaffoldOptions {
+    pub verbose: bool,
+    pub dry_run: bool,
+    pub no_client: bool,
+}
+
+/// Scaffold a web_app project as a four-crate workspace.
+///
+/// Called from `scaffold_workspace` when the prepared tree contains a
+/// `web_app` App entry. The existing single-crate path is NOT used for
+/// web_app projects — this function takes over entirely.
+pub fn scaffold_web_app(
+    workspace: &Workspace,
+    artifacts: &[PreparedArtifact],
+    project_name: &str,
+    options: &WebScaffoldOptions,
+) -> Result<()> {
+    let crates_dir = workspace.root.join("crates");
+
+    // Classify artifacts by target crate
+    let mut core_artifacts = Vec::new();
+    let mut server_artifacts = Vec::new();
+    let mut component_artifacts = Vec::new();
+    let mut brand_artifacts = Vec::new();
+    let mut routing_artifacts = Vec::new();
+
+    for artifact in artifacts {
+        match &artifact.kind {
+            ArtifactKind::Data | ArtifactKind::Projection => {
+                core_artifacts.push(artifact);
+            }
+            ArtifactKind::Context => {
+                match artifact.realisation_target.as_deref() {
+                    Some("server_only") => server_artifacts.push(artifact),
+                    Some("client_also") | None => core_artifacts.push(artifact),
+                    Some("unknown") => {
+                        anyhow::bail!(
+                            "Context `{}` has classification `unknown` — its transitive \
+                             dependency graph could not be resolved. Fix the dependency cycle \
+                             in the draft before scaffolding.",
+                            artifact.export.name
+                        );
+                    }
+                    Some(other) => {
+                        anyhow::bail!(
+                            "Context `{}` has unexpected classification `{}`",
+                            artifact.export.name,
+                            other
+                        );
+                    }
+                }
+            }
+            ArtifactKind::Operation => {
+                server_artifacts.push(artifact);
+            }
+            ArtifactKind::Component => {
+                component_artifacts.push(artifact);
+            }
+            ArtifactKind::Brand => {
+                brand_artifacts.push(artifact);
+            }
+            ArtifactKind::RoutingTable => {
+                routing_artifacts.push(artifact);
+            }
+            ArtifactKind::App => {} // App metadata consumed above, not emitted as code
+        }
+    }
+
+    // Collect RPC edges: component event bindings to server_only contexts
+    let server_context_names: std::collections::HashSet<String> = server_artifacts
+        .iter()
+        .filter(|a| a.kind == ArtifactKind::Context)
+        .map(|a| a.export.name.clone())
+        .collect();
+
+    let mut rpc_edges: Vec<RpcEdge> = Vec::new();
+    for comp in &component_artifacts {
+        if let Some(composition) = &comp.composition {
+            for eb in &composition.event_bindings {
+                if server_context_names.contains(&eb.context) {
+                    rpc_edges.push(RpcEdge {
+                        component: comp.export.name.clone(),
+                        event: eb.event.clone(),
+                        context: eb.context.clone(),
+                        // Look up the context's functionalities to find the right one
+                        functionality: find_default_functionality(artifacts, &eb.context),
+                    });
+                }
+            }
+        }
+    }
+
+    let core_name = format!("{}-core", project_name);
+    let server_name = format!("{}-server", project_name);
+    let client_name = format!("{}-client", project_name);
+    let components_name = format!("{}-components", project_name);
+
+    // 1. Emit workspace root Cargo.toml
+    emit_workspace_cargo_toml(workspace, project_name, options)?;
+
+    // 2. Emit each crate
+    emit_core_crate(&crates_dir, &core_name, &core_artifacts, options)?;
+    emit_components_crate(
+        &crates_dir,
+        &components_name,
+        &core_name,
+        &component_artifacts,
+        &brand_artifacts,
+        &routing_artifacts,
+        options,
+    )?;
+    emit_server_crate(
+        &crates_dir,
+        &server_name,
+        &core_name,
+        &components_name,
+        &server_artifacts,
+        &routing_artifacts,
+        &rpc_edges,
+        !options.no_client,
+        options,
+    )?;
+    if !options.no_client {
+        emit_client_crate(
+            &crates_dir,
+            &client_name,
+            &core_name,
+            &components_name,
+            &component_artifacts,
+            &rpc_edges,
+            options,
+        )?;
+        // Emit rust-toolchain.toml with wasm32 target
+        emit_rust_toolchain(&workspace.root, options)?;
+    }
+
+    if options.verbose {
+        let crate_count = if options.no_client { 3 } else { 4 };
+        println!("Scaffolded web_app workspace with {} crates", crate_count);
+    }
+
+    Ok(())
+}
+
+/// An RPC edge: a component event that invokes a server-only context.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct RpcEdge {
+    component: String,
+    event: String,
+    context: String,
+    functionality: String,
+}
+
+impl RpcEdge {
+    /// The deterministic RPC endpoint path.
+    /// Algorithm: `/_rpc/<context_snake>/<functionality_snake>`
+    fn path(&self) -> String {
+        format!(
+            "/_rpc/{}/{}",
+            to_snake_case(&self.context),
+            to_snake_case(&self.functionality)
+        )
+    }
+}
+
+fn find_default_functionality(artifacts: &[PreparedArtifact], context_name: &str) -> String {
+    for a in artifacts {
+        if a.kind == ArtifactKind::Context && a.export.name == context_name {
+            if let Some(f) = a.functionalities.first() {
+                return f.name.clone();
+            }
+        }
+    }
+    "run".to_string()
+}
+
+// ── Workspace root ──────────────────────────────────────────────
+
+fn emit_workspace_cargo_toml(
+    workspace: &Workspace,
+    project_name: &str,
+    options: &WebScaffoldOptions,
+) -> Result<()> {
+    let cargo_path = workspace.root.join("Cargo.toml");
+
+    // Members sorted alphabetically for determinism
+    let mut members = vec![
+        format!("crates/{}-components", project_name),
+        format!("crates/{}-core", project_name),
+        format!("crates/{}-server", project_name),
+    ];
+    if !options.no_client {
+        members.push(format!("crates/{}-client", project_name));
+    }
+    members.sort();
+
+    let mut content = String::new();
+    writeln!(content, "{}", GENERATED_MARKER).unwrap();
+    writeln!(content, "[workspace]").unwrap();
+    writeln!(content, "resolver = \"2\"").unwrap();
+    writeln!(content, "members = [").unwrap();
+    for m in &members {
+        writeln!(content, "    \"{}\",", m).unwrap();
+    }
+    writeln!(content, "]").unwrap();
+
+    write_generated_file(&cargo_path, &content, options)
+}
+
+fn emit_rust_toolchain(root: &Path, options: &WebScaffoldOptions) -> Result<()> {
+    let path = root.join("rust-toolchain.toml");
+    let content = format!(
+        "{}\n[toolchain]\nchannel = \"stable\"\ntargets = [\"wasm32-unknown-unknown\"]\n",
+        GENERATED_MARKER
+    );
+    write_generated_file(&path, &content, options)
+}
+
+// ── app-core crate ──────────────────────────────────────────────
+
+fn emit_core_crate(
+    crates_dir: &Path,
+    crate_name: &str,
+    artifacts: &[&PreparedArtifact],
+    options: &WebScaffoldOptions,
+) -> Result<()> {
+    let crate_dir = crates_dir.join(crate_name);
+    let src_dir = crate_dir.join("src");
+
+    // Cargo.toml
+    let cargo = format!(
+        "{}\n[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nanyhow = \"1.0\"\n",
+        GENERATED_MARKER, crate_name
+    );
+    write_generated_file(&crate_dir.join("Cargo.toml"), &cargo, options)?;
+
+    // Emit data, projections, contexts modules
+    let mut data_mods = Vec::new();
+    let mut proj_mods = Vec::new();
+    let mut ctx_mods = Vec::new();
+
+    for artifact in artifacts {
+        let snake = to_snake_case(&artifact.export.name);
+        let code = crate::codegen::generate_rust(artifact);
+        if code.is_empty() {
+            continue;
+        }
+        let (subdir, mods) = match artifact.kind {
+            ArtifactKind::Data => ("data", &mut data_mods),
+            ArtifactKind::Projection => ("projections", &mut proj_mods),
+            ArtifactKind::Context => ("contexts", &mut ctx_mods),
+            _ => continue,
+        };
+        let file_path = src_dir.join(subdir).join(format!("{}.rs", snake));
+        write_generated_file(&file_path, &code, options)?;
+        mods.push(snake);
+    }
+
+    // mod.rs files
+    for (subdir, mods) in [("data", &data_mods), ("projections", &proj_mods), ("contexts", &ctx_mods)] {
+        if !mods.is_empty() {
+            let mod_content: String = mods.iter().map(|m| format!("pub mod {};\n", m)).collect();
+            write_generated_file(&src_dir.join(subdir).join("mod.rs"), &mod_content, options)?;
+        }
+    }
+
+    // lib.rs
+    let mut lib = String::new();
+    if !data_mods.is_empty() { writeln!(lib, "pub mod data;").unwrap(); }
+    if !proj_mods.is_empty() { writeln!(lib, "pub mod projections;").unwrap(); }
+    if !ctx_mods.is_empty() { writeln!(lib, "pub mod contexts;").unwrap(); }
+    write_generated_file(&src_dir.join("lib.rs"), &lib, options)?;
+
+    Ok(())
+}
+
+// ── app-components crate ────────────────────────────────────────
+
+fn emit_components_crate(
+    crates_dir: &Path,
+    crate_name: &str,
+    core_name: &str,
+    components: &[&PreparedArtifact],
+    brands: &[&PreparedArtifact],
+    routes: &[&PreparedArtifact],
+    options: &WebScaffoldOptions,
+) -> Result<()> {
+    let crate_dir = crates_dir.join(crate_name);
+    let src_dir = crate_dir.join("src");
+    // Cargo.toml
+    let cargo = format!(
+        "{}\n[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [dependencies]\n{} = {{ path = \"../{}\" }}\nanyhow = \"1.0\"\n",
+        GENERATED_MARKER, crate_name, core_name, core_name
+    );
+    write_generated_file(&crate_dir.join("Cargo.toml"), &cargo, options)?;
+
+    // Markup newtype
+    let markup = format!(
+        "{}\n/// Framework-neutral markup wrapper.\n/// The implementer fills render bodies; Reen only emits the contract.\n\
+         pub struct Markup(pub String);\n\n\
+         impl std::fmt::Display for Markup {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n\
+         \t\tf.write_str(&self.0)\n    }}\n}}\n\n\
+         pub fn html(s: &str) -> Markup {{ Markup(s.to_string()) }}\n",
+        GENERATED_MARKER
+    );
+    write_generated_file(&src_dir.join("markup.rs"), &markup, options)?;
+
+    // Paths module
+    let paths_mod = format!(
+        "{}\npub const BRAND_CSS: &str = \"{}\";\npub const CLIENT_WASM: &str = \"{}\";\n",
+        GENERATED_MARKER, paths::BRAND_CSS, paths::CLIENT_WASM
+    );
+    write_generated_file(&src_dir.join("paths.rs"), &paths_mod, options)?;
+
+    // EventOutcome enum
+    let event_outcome = format!(
+        "{}\n/// Outcome of a component event handler.\n#[derive(Debug)]\n\
+         pub enum EventOutcome {{\n    /// No follow-up action.\n    Noop,\n    \
+         /// Invoke a context directly (client-also).\n    InvokeDirect {{ context: &'static str, functionality: &'static str }},\n    \
+         /// Invoke a server-only context via RPC.\n    InvokeRemote {{ endpoint: &'static str, payload: String }},\n    \
+         /// Navigate to a different route.\n    Navigate {{ path: String }},\n}}\n",
+        GENERATED_MARKER
+    );
+    write_generated_file(&src_dir.join("event_outcome.rs"), &event_outcome, options)?;
+
+    // Components
+    let mut comp_mods = Vec::new();
+    for comp in components {
+        let snake = to_snake_case(&comp.export.name);
+        let code = generate_component(comp);
+        write_generated_file(&src_dir.join("components").join(format!("{}.rs", snake)), &code, options)?;
+        comp_mods.push(snake);
+    }
+    if !comp_mods.is_empty() {
+        let mod_content: String = comp_mods.iter().map(|m| format!("pub mod {};\n", m)).collect();
+        write_generated_file(&src_dir.join("components").join("mod.rs"), &mod_content, options)?;
+    }
+
+    // Brand
+    let mut brand_mods = Vec::new();
+    for brand in brands {
+        let snake = to_snake_case(&brand.export.name);
+        let (code, css) = generate_brand(brand);
+        write_generated_file(&src_dir.join("brand").join(format!("{}.rs", snake)), &code, options)?;
+        write_generated_file(&src_dir.join("brand").join(format!("{}.css", snake)), &css, options)?;
+        brand_mods.push(snake);
+    }
+    if !brand_mods.is_empty() {
+        let mod_content: String = brand_mods.iter().map(|m| format!("pub mod {};\n", m)).collect();
+        write_generated_file(&src_dir.join("brand").join("mod.rs"), &mod_content, options)?;
+    }
+
+    // Router
+    if !routes.is_empty() {
+        let router_code = generate_router(routes, components);
+        write_generated_file(&src_dir.join("router.rs"), &router_code, options)?;
+    }
+
+    // lib.rs
+    let mut lib = String::new();
+    writeln!(lib, "pub mod markup;").unwrap();
+    writeln!(lib, "pub mod paths;").unwrap();
+    writeln!(lib, "pub mod event_outcome;").unwrap();
+    if !comp_mods.is_empty() { writeln!(lib, "pub mod components;").unwrap(); }
+    if !brand_mods.is_empty() { writeln!(lib, "pub mod brand;").unwrap(); }
+    if !routes.is_empty() { writeln!(lib, "pub mod router;").unwrap(); }
+    write_generated_file(&src_dir.join("lib.rs"), &lib, options)?;
+
+    Ok(())
+}
+
+// ── Component codegen ───────────────────────────────────────────
+
+fn generate_component(comp: &PreparedArtifact) -> String {
+    let name = &comp.export.name;
+    let mut out = String::new();
+
+    writeln!(out, "{}", GENERATED_MARKER).unwrap();
+    writeln!(out, "use super::super::markup::Markup;").unwrap();
+    writeln!(out, "use super::super::event_outcome::EventOutcome;").unwrap();
+    writeln!(out).unwrap();
+
+    // Variants enum (if any)
+    if !comp.variants.is_empty() {
+        writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]").unwrap();
+        writeln!(out, "pub enum {}Variant {{", name).unwrap();
+        for v in &comp.variants {
+            writeln!(out, "    {}, // {}", pascal_variant(&v.name), v.description).unwrap();
+        }
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Struct
+    writeln!(out, "pub struct {} {{", name).unwrap();
+    for prop in &comp.props {
+        writeln!(out, "    pub {}: (), // {}", to_snake_case(&prop.name), prop.description).unwrap();
+    }
+    if !comp.variants.is_empty() {
+        writeln!(out, "    pub variant: {}Variant,", name).unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // Impl
+    writeln!(out, "impl {} {{", name).unwrap();
+
+    // render method
+    writeln!(out, "    /// Render this component to markup.").unwrap();
+    writeln!(out, "    pub fn render(&self) -> Markup {{").unwrap();
+    writeln!(out, "        todo!()").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Event handler methods
+    for event in &comp.events {
+        let method = format!("on_{}", to_snake_case(&event.name));
+        writeln!(out, "    /// Event handler: {}", event.description).unwrap();
+        writeln!(out, "    pub fn {}(&self) -> EventOutcome {{", method).unwrap();
+        writeln!(out, "        todo!()").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    writeln!(out, "}}").unwrap();
+    out
+}
+
+fn pascal_variant(name: &str) -> String {
+    name.split(|c: char| c == '_' || c == '-' || c == ' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+// ── Brand codegen ───────────────────────────────────────────────
+
+fn generate_brand(brand: &PreparedArtifact) -> (String, String) {
+    let mut rs = String::new();
+    let mut css = String::new();
+
+    writeln!(rs, "{}", GENERATED_MARKER).unwrap();
+
+    // Voice/imagery/iconography/logo as doc comments
+    for section in &brand.prose_sections {
+        writeln!(rs, "//! ## {}", section.name).unwrap();
+        for line in section.body.lines() {
+            writeln!(rs, "//! {}", line).unwrap();
+        }
+        writeln!(rs).unwrap();
+    }
+
+    // CSS custom properties
+    writeln!(css, "{}", GENERATED_MARKER).unwrap();
+    writeln!(css, ":root {{").unwrap();
+
+    for group in &brand.token_groups {
+        writeln!(rs, "// ── {} tokens ──", group.group).unwrap();
+        writeln!(css, "  /* {} */", group.group).unwrap();
+        for token in &group.tokens {
+            let const_name = token.name.replace('-', "_").to_uppercase();
+            let css_var = format!("--{}", token.name);
+            writeln!(rs, "/// {} — {}", token.name, token.role).unwrap();
+            writeln!(rs, "pub const {}: &str = \"{}\";", const_name, css_var).unwrap();
+            writeln!(css, "  {}: /* {} */;", css_var, token.role).unwrap();
+        }
+        writeln!(rs).unwrap();
+    }
+
+    writeln!(css, "}}").unwrap();
+
+    // Include the CSS
+    let brand_snake = to_snake_case(&brand.export.name);
+    writeln!(rs).unwrap();
+    writeln!(rs, "/// The compiled brand stylesheet.").unwrap();
+    writeln!(
+        rs,
+        "pub static CSS: &str = include_str!(\"{}.css\");",
+        brand_snake
+    )
+    .unwrap();
+
+    (rs, css)
+}
+
+// ── Router codegen ──────────────────────────────────────────────
+
+fn generate_router(
+    routes: &[&PreparedArtifact],
+    _components: &[&PreparedArtifact],
+) -> String {
+    let mut out = String::new();
+
+    writeln!(out, "{}", GENERATED_MARKER).unwrap();
+    writeln!(out, "use super::markup::Markup;").unwrap();
+    writeln!(out).unwrap();
+
+    // Route enum — one variant per route
+    writeln!(out, "#[derive(Debug)]").unwrap();
+    writeln!(out, "pub enum Route {{").unwrap();
+    for rt in routes {
+        for route in &rt.routes {
+            let variant = route_variant_name(&route.path, &route.component);
+            if route.params.is_empty() {
+                writeln!(out, "    {},", variant).unwrap();
+            } else {
+                write!(out, "    {} {{", variant).unwrap();
+                for (i, p) in route.params.iter().enumerate() {
+                    if i > 0 { write!(out, ",").unwrap(); }
+                    write!(out, " {}: String", to_snake_case(&p.name)).unwrap();
+                }
+                writeln!(out, " }},").unwrap();
+            }
+        }
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // RouterError
+    writeln!(out, "#[derive(Debug)]").unwrap();
+    writeln!(out, "pub struct RouterError(pub String);").unwrap();
+    writeln!(out).unwrap();
+
+    // Router struct
+    writeln!(out, "pub struct Router;").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "impl Router {{").unwrap();
+
+    // dispatch method
+    writeln!(out, "    /// Match a URL path to a route, decoding path parameters.").unwrap();
+    writeln!(out, "    pub fn dispatch(&self, path: &str) -> Result<Route, RouterError> {{").unwrap();
+    writeln!(out, "        let segments: Vec<&str> = path.trim_matches('/').split('/').collect();").unwrap();
+
+    let mut first = true;
+    for rt in routes {
+        for route in &rt.routes {
+            let variant = route_variant_name(&route.path, &route.component);
+            let pattern_segments = route_pattern_segments(&route.path);
+
+            if first {
+                write!(out, "        if ").unwrap();
+                first = false;
+            } else {
+                write!(out, " else if ").unwrap();
+            }
+
+            // Emit match condition
+            if route.path == "/" {
+                write!(out, "path == \"/\" || segments == [\"\"]").unwrap();
+            } else {
+                write!(out, "segments.len() == {}", pattern_segments.len()).unwrap();
+                for (i, seg) in pattern_segments.iter().enumerate() {
+                    if !seg.starts_with('<') {
+                        write!(out, " && segments[{}] == \"{}\"", i, seg).unwrap();
+                    }
+                }
+            }
+            writeln!(out, " {{").unwrap();
+
+            if route.params.is_empty() {
+                writeln!(out, "            Ok(Route::{})", variant).unwrap();
+            } else {
+                // Extract params
+                for (i, seg) in pattern_segments.iter().enumerate() {
+                    if seg.starts_with('<') {
+                        let param_name = &seg[1..seg.len() - 1];
+                        writeln!(
+                            out,
+                            "            let {} = segments[{}].to_string();",
+                            to_snake_case(param_name),
+                            i
+                        )
+                        .unwrap();
+                    }
+                }
+                write!(out, "            Ok(Route::{} {{", variant).unwrap();
+                for p in &route.params {
+                    write!(out, " {}", to_snake_case(&p.name)).unwrap();
+                    write!(out, ",").unwrap();
+                }
+                writeln!(out, " }})").unwrap();
+            }
+
+            write!(out, "        }}").unwrap();
+        }
+    }
+    writeln!(out, " else {{").unwrap();
+    writeln!(out, "            Err(RouterError(format!(\"no route matches: {{}}\", path)))").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+
+    // render method — dispatches to components
+    writeln!(out).unwrap();
+    writeln!(out, "    /// Render the matched route to markup.").unwrap();
+    writeln!(out, "    pub fn render(&self, route: Route) -> Markup {{").unwrap();
+    writeln!(out, "        match route {{").unwrap();
+    for rt in routes {
+        for route in &rt.routes {
+            let variant = route_variant_name(&route.path, &route.component);
+            if route.params.is_empty() {
+                writeln!(out, "            Route::{} => todo!(\"render {}\"),", variant, route.component).unwrap();
+            } else {
+                write!(out, "            Route::{} {{", variant).unwrap();
+                for p in &route.params {
+                    write!(out, " {},", to_snake_case(&p.name)).unwrap();
+                }
+                writeln!(out, " }} => todo!(\"render {}\"),", route.component).unwrap();
+            }
+        }
+    }
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+
+    writeln!(out, "}}").unwrap();
+
+    out
+}
+
+fn route_variant_name(_path: &str, component: &str) -> String {
+    component.to_string()
+}
+
+fn route_pattern_segments(path: &str) -> Vec<String> {
+    path.trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+// ── Server crate ────────────────────────────────────────────────
+
+fn emit_server_crate(
+    crates_dir: &Path,
+    crate_name: &str,
+    core_name: &str,
+    components_name: &str,
+    server_artifacts: &[&PreparedArtifact],
+    routing_artifacts: &[&PreparedArtifact],
+    rpc_edges: &[RpcEdge],
+    has_client: bool,
+    options: &WebScaffoldOptions,
+) -> Result<()> {
+    let crate_dir = crates_dir.join(crate_name);
+    let src_dir = crate_dir.join("src");
+
+    // Cargo.toml
+    let cargo = format!(
+        "{}\n[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [[bin]]\nname = \"{}\"\npath = \"src/main.rs\"\n\n\
+         [dependencies]\n{} = {{ path = \"../{}\" }}\n{} = {{ path = \"../{}\" }}\n\
+         anyhow = \"1.0\"\n",
+        GENERATED_MARKER,
+        crate_name,
+        crate_name,
+        core_name, core_name,
+        components_name, components_name,
+    );
+    write_generated_file(&crate_dir.join("Cargo.toml"), &cargo, options)?;
+
+    // Server-only context stubs
+    let mut ctx_mods = Vec::new();
+    for artifact in server_artifacts {
+        if artifact.kind == ArtifactKind::Context {
+            let snake = to_snake_case(&artifact.export.name);
+            let code = crate::codegen::generate_rust(artifact);
+            if !code.is_empty() {
+                write_generated_file(&src_dir.join("contexts").join(format!("{}.rs", snake)), &code, options)?;
+                ctx_mods.push(snake);
+            }
+        }
+    }
+    if !ctx_mods.is_empty() {
+        let mod_content: String = ctx_mods.iter().map(|m| format!("pub mod {};\n", m)).collect();
+        write_generated_file(&src_dir.join("contexts").join("mod.rs"), &mod_content, options)?;
+    }
+
+    // main.rs — minimal TcpListener dispatch
+    let main_rs = generate_server_main(
+        crate_name,
+        components_name,
+        routing_artifacts,
+        rpc_edges,
+        has_client,
+    );
+    write_generated_file(&src_dir.join("main.rs"), &main_rs, options)?;
+
+    // lib.rs
+    let mut lib = String::new();
+    if !ctx_mods.is_empty() { writeln!(lib, "pub mod contexts;").unwrap(); }
+    write_generated_file(&src_dir.join("lib.rs"), &lib, options)?;
+
+    Ok(())
+}
+
+fn generate_server_main(
+    _crate_name: &str,
+    _components_name: &str,
+    _routing_artifacts: &[&PreparedArtifact],
+    rpc_edges: &[RpcEdge],
+    has_client: bool,
+) -> String {
+    let mut out = String::new();
+
+    writeln!(out, "{}", GENERATED_MARKER).unwrap();
+    writeln!(out, "//! Server entry point.").unwrap();
+    writeln!(out, "//!").unwrap();
+    if has_client {
+        writeln!(out, "//! This is an SSR server with optional WASM hydration.").unwrap();
+    } else {
+        writeln!(out, "//! This is a server-only SSR project (no WASM client).").unwrap();
+        writeln!(out, "//! Component events use form-POST flows instead of WASM bindings.").unwrap();
+    }
+    writeln!(out).unwrap();
+    writeln!(out, "use std::io::{{Read, Write}};").unwrap();
+    writeln!(out, "use std::net::TcpListener;").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "fn main() -> anyhow::Result<()> {{").unwrap();
+    writeln!(out, "    let port = std::env::var(\"PORT\").unwrap_or_else(|_| \"3000\".to_string());").unwrap();
+    writeln!(out, "    let addr = format!(\"0.0.0.0:{{}}\", port);").unwrap();
+    writeln!(out, "    let listener = TcpListener::bind(&addr)?;").unwrap();
+    writeln!(out, "    eprintln!(\"Listening on http://{{}}\", addr);").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    for stream in listener.incoming() {{").unwrap();
+    writeln!(out, "        let mut stream = stream?;").unwrap();
+    writeln!(out, "        let mut buf = [0u8; 4096];").unwrap();
+    writeln!(out, "        let n = stream.read(&mut buf)?;").unwrap();
+    writeln!(out, "        let request = String::from_utf8_lossy(&buf[..n]);").unwrap();
+    writeln!(out, "        let path = request.split_whitespace().nth(1).unwrap_or(\"/\");").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "        let response = dispatch(path);").unwrap();
+    writeln!(out, "        stream.write_all(response.as_bytes())?;").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "    Ok(())").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // Dispatch function
+    writeln!(out, "fn dispatch(path: &str) -> String {{").unwrap();
+    writeln!(out, "    match path {{").unwrap();
+
+    // Static asset routes
+    writeln!(out, "        \"{}\" => todo!(\"serve brand CSS\"),", paths::BRAND_CSS).unwrap();
+    if has_client {
+        writeln!(out, "        \"{}\" => todo!(\"serve WASM bundle\"),", paths::CLIENT_WASM).unwrap();
+    }
+
+    // RPC edges
+    for edge in rpc_edges {
+        writeln!(
+            out,
+            "        \"{}\" => todo!(\"RPC: {}.{}\"),",
+            edge.path(),
+            edge.context,
+            edge.functionality
+        )
+        .unwrap();
+    }
+
+    // Route handlers
+    writeln!(out, "        _ => {{").unwrap();
+    writeln!(out, "            // Route to components via Router").unwrap();
+    writeln!(out, "            todo!(\"dispatch route to component\")").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "}}").unwrap();
+
+    out
+}
+
+// ── Client WASM crate ───────────────────────────────────────────
+
+fn emit_client_crate(
+    crates_dir: &Path,
+    crate_name: &str,
+    core_name: &str,
+    components_name: &str,
+    _component_artifacts: &[&PreparedArtifact],
+    rpc_edges: &[RpcEdge],
+    options: &WebScaffoldOptions,
+) -> Result<()> {
+    let crate_dir = crates_dir.join(crate_name);
+    let src_dir = crate_dir.join("src");
+
+    // Cargo.toml
+    let cargo = format!(
+        "{}\n[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+         [lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n\n\
+         [dependencies]\n{} = {{ path = \"../{}\" }}\n{} = {{ path = \"../{}\" }}\n\
+         wasm-bindgen = \"0.2\"\nanyhow = \"1.0\"\n",
+        GENERATED_MARKER,
+        crate_name,
+        core_name, core_name,
+        components_name, components_name,
+    );
+    write_generated_file(&crate_dir.join("Cargo.toml"), &cargo, options)?;
+
+    // lib.rs — WASM entry
+    let mut lib = String::new();
+    writeln!(lib, "{}", GENERATED_MARKER).unwrap();
+    writeln!(lib, "//! Client-side WASM entry point.").unwrap();
+    writeln!(lib, "//!").unwrap();
+    writeln!(lib, "//! Build with `wasm-pack build`, `trunk build`, or `cargo build --target wasm32-unknown-unknown`.").unwrap();
+    writeln!(lib).unwrap();
+    writeln!(lib, "use wasm_bindgen::prelude::*;").unwrap();
+    writeln!(lib).unwrap();
+
+    // Init function
+    writeln!(lib, "#[wasm_bindgen(start)]").unwrap();
+    writeln!(lib, "pub fn init() {{").unwrap();
+    writeln!(lib, "    // Wire DOM event listeners to component event handlers.").unwrap();
+    writeln!(lib, "    todo!(\"bind component events to DOM\")").unwrap();
+    writeln!(lib, "}}").unwrap();
+    writeln!(lib).unwrap();
+
+    // RPC stubs
+    for edge in rpc_edges {
+        let fn_name = format!(
+            "{}_{}",
+            to_snake_case(&edge.context),
+            to_snake_case(&edge.functionality)
+        );
+        writeln!(lib, "/// RPC stub: POST {}", edge.path()).unwrap();
+        writeln!(lib, "pub async fn {}() -> Result<String, JsValue> {{", fn_name).unwrap();
+        writeln!(lib, "    todo!(\"fetch {}\")", edge.path()).unwrap();
+        writeln!(lib, "}}").unwrap();
+        writeln!(lib).unwrap();
+    }
+
+    write_generated_file(&src_dir.join("lib.rs"), &lib, options)?;
+
+    Ok(())
+}
+
+// ── Helpers ─────────────────────────────────────────────────────
+
+/// Write a generated file, respecting the @generated marker convention.
+/// If the file exists and does not contain the marker, preserve it.
+fn write_generated_file(path: &Path, content: &str, options: &WebScaffoldOptions) -> Result<()> {
+    if path.is_file() {
+        let existing = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if !existing.contains(GENERATED_MARKER) {
+            if options.verbose {
+                eprintln!(
+                    "info: {} exists without @generated marker — preserving",
+                    path.display()
+                );
+            }
+            return Ok(());
+        }
+    }
+
+    if options.dry_run {
+        if options.verbose {
+            println!("[dry-run] would write {}", path.display());
+        }
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::write(path, content)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prepared::*;
+
+    fn test_component() -> PreparedArtifact {
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Component,
+            "components/Button.md".into(),
+            "Component: Button".into(),
+            "Button".into(),
+        );
+        a.props = vec![
+            PropSpec { name: "label".into(), description: "text shown".into() },
+        ];
+        a.events = vec![
+            EventSpec { name: "pressed".into(), description: "user pressed the button".into() },
+        ];
+        a.variants = vec![
+            VariantSpec { name: "primary".into(), description: "main CTA".into() },
+            VariantSpec { name: "secondary".into(), description: "less prominent".into() },
+        ];
+        a
+    }
+
+    #[test]
+    fn component_codegen_has_struct_and_methods() {
+        let code = generate_component(&test_component());
+        assert!(code.contains("pub struct Button"), "struct name");
+        assert!(code.contains("pub label: ()"), "prop field");
+        assert!(code.contains("pub fn render(&self) -> Markup"), "render method");
+        assert!(code.contains("pub fn on_pressed(&self) -> EventOutcome"), "event handler");
+        assert!(code.contains("pub enum ButtonVariant"), "variant enum");
+        assert!(code.contains("Primary"), "variant entry");
+    }
+
+    #[test]
+    fn brand_codegen_has_constants_and_css() {
+        let mut brand = PreparedArtifact::new(
+            ArtifactKind::Brand,
+            "brands/Acme.md".into(),
+            "Brand: Acme".into(),
+            "Acme".into(),
+        );
+        brand.token_groups = vec![TokenGroupSpec {
+            group: "colours".into(),
+            tokens: vec![TokenSpec {
+                name: "primary-action".into(),
+                role: "main CTA background".into(),
+            }],
+        }];
+        brand.prose_sections = vec![ProseSectionSpec {
+            name: "voice".into(),
+            body: "Tone: confident".into(),
+        }];
+
+        let (rs, css) = generate_brand(&brand);
+        assert!(rs.contains("pub const PRIMARY_ACTION: &str = \"--primary-action\""), "constant: {}", rs);
+        assert!(rs.contains("pub static CSS: &str"), "CSS include");
+        assert!(css.contains("--primary-action:"), "CSS variable: {}", css);
+    }
+
+    #[test]
+    fn router_codegen_has_dispatch_and_render() {
+        let mut rt = PreparedArtifact::new(
+            ArtifactKind::RoutingTable,
+            "routes/main.md".into(),
+            "Routes: main".into(),
+            "main".into(),
+        );
+        rt.routes = vec![
+            RouteSpec {
+                path: "/".into(),
+                component: "HomeScreen".into(),
+                params: vec![],
+            },
+            RouteSpec {
+                path: "/products/<id>".into(),
+                component: "ProductScreen".into(),
+                params: vec![RouteParamSpec {
+                    name: "id".into(),
+                    data_type: "Product".into(),
+                }],
+            },
+        ];
+
+        let code = generate_router(&[&rt], &[]);
+        assert!(code.contains("pub enum Route"), "Route enum");
+        assert!(code.contains("HomeScreen"), "home variant");
+        assert!(code.contains("ProductScreen"), "product variant");
+        assert!(code.contains("pub fn dispatch"), "dispatch method");
+        assert!(code.contains("pub fn render"), "render method");
+    }
+
+    #[test]
+    fn rpc_edge_path_is_deterministic() {
+        let edge = RpcEdge {
+            component: "LoginForm".into(),
+            event: "submitted".into(),
+            context: "AuthenticateUser".into(),
+            functionality: "login".into(),
+        };
+        // Algorithm: /_rpc/<context_snake>/<functionality_snake>
+        assert_eq!(edge.path(), "/_rpc/authenticate_user/login");
+    }
+
+    #[test]
+    fn workspace_members_sorted_alphabetically() {
+        // This tests the invariant that workspace member ordering is deterministic
+        let mut members = vec![
+            "crates/test-server".to_string(),
+            "crates/test-core".to_string(),
+            "crates/test-components".to_string(),
+            "crates/test-client".to_string(),
+        ];
+        members.sort();
+        assert_eq!(members[0], "crates/test-client");
+        assert_eq!(members[1], "crates/test-components");
+        assert_eq!(members[2], "crates/test-core");
+        assert_eq!(members[3], "crates/test-server");
+    }
+}

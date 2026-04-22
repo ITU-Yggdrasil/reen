@@ -208,6 +208,9 @@ struct ScaffoldArgs {
     #[arg(long, help = "Only process prepared data artifacts")]
     data: bool,
 
+    #[arg(long, help = "Skip client WASM crate for server-only web projects")]
+    no_client: bool,
+
     #[arg(help = "Optional list of prepared artifact names without file extension")]
     names: Vec<String>,
 }
@@ -414,6 +417,7 @@ fn run_scaffold(
         verbose: bool_setting(globals.verbose, section.verbose, config.verbose),
         debug: bool_setting(globals.debug, section.debug, config.debug),
         dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
+        no_client: args.no_client,
     };
     scaffold_workspace(workspace, &options)?;
 

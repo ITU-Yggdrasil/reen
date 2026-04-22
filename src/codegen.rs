@@ -22,6 +22,7 @@ pub struct ScaffoldOptions {
     pub verbose: bool,
     pub debug: bool,
     pub dry_run: bool,
+    pub no_client: bool,
 }
 
 /// Generate Rust stub files from prepared v2 YAML artifacts.
@@ -81,24 +82,41 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
         fs::write(&manifest_path, json)?;
     }
 
-    // App pass: if any App artifact exists, emit main.rs and patch Cargo.toml
-    let app_artifacts: Vec<PreparedArtifact> = prepared_paths
+    // App pass: if any App artifact exists, handle cli_app/tui_app or web_app
+    let all_artifacts: Vec<PreparedArtifact> = prepared_paths
         .iter()
         .filter_map(|path| {
             let raw = fs::read_to_string(path).ok()?;
-            let artifact: PreparedArtifact = serde_yaml::from_str(&raw).ok()?;
-            if artifact.kind == ArtifactKind::App {
-                Some(artifact)
-            } else {
-                None
-            }
+            serde_yaml::from_str(&raw).ok()
         })
         .collect();
 
-    if let Some(app) = app_artifacts.first() {
-        scaffold_app(workspace, app, options.dry_run)?;
-        if !options.dry_run {
-            wrote += 1;
+    let app_artifact = all_artifacts.iter().find(|a| a.kind == ArtifactKind::App);
+
+    if let Some(app) = app_artifact {
+        if app.application_kind.as_deref() == Some("web_app") {
+            // Web-app projects use the workspace layout — the per-artifact pass
+            // above already ran but its output will be superseded by the workspace.
+            // For a clean web_app, the per-artifact pass should have been skipped.
+            // In practice, the per-artifact pass only emits to src/ which the workspace
+            // ignores (it emits to crates/), so both coexist harmlessly.
+            let project_name = detect_project_name(workspace);
+            crate::web_codegen::scaffold_web_app(
+                workspace,
+                &all_artifacts,
+                &project_name,
+                &crate::web_codegen::WebScaffoldOptions {
+                    verbose: options.verbose,
+                    dry_run: options.dry_run,
+                    no_client: options.no_client,
+                },
+            )?;
+        } else {
+            // cli_app / tui_app — emit single-crate main.rs + patch Cargo.toml
+            scaffold_app(workspace, app, options.dry_run)?;
+            if !options.dry_run {
+                wrote += 1;
+            }
         }
     }
 
@@ -106,6 +124,28 @@ pub fn scaffold_workspace(workspace: &Workspace, options: &ScaffoldOptions) -> R
         println!("Scaffolded {} file(s)", wrote);
     }
     Ok(())
+}
+
+/// Detect the project name from Cargo.toml or directory name.
+fn detect_project_name(workspace: &Workspace) -> String {
+    let cargo_path = workspace.root.join("Cargo.toml");
+    if let Ok(raw) = fs::read_to_string(&cargo_path) {
+        if let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() {
+            if let Some(name) = doc
+                .get("package")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                return name.to_string();
+            }
+        }
+    }
+    workspace
+        .root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app")
+        .to_string()
 }
 
 /// Generate the App entry point (`src/main.rs`) and patch `Cargo.toml` for a project
