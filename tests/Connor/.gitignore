@@ -1,2 +1,4 @@
 .env
 target/
+drafts/prepare/
+drafts/.apis/
