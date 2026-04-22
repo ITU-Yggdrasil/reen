@@ -2173,4 +2173,171 @@ Then: done
             vec!["user_id", "post_id"]
         );
     }
+
+    // ── Prose-reference lint tests (Phase 9.5) ──────────────────
+
+    /// Helper: run check_prose_references on text with given vocab and return ambiguities.
+    fn prose_ref_ambiguities(text: &str, vocab: &DciVocabulary) -> Vec<Ambiguity> {
+        let mut ambiguities = Vec::new();
+        check_prose_references(text, "data", "TestDraft", vocab, &mut ambiguities);
+        ambiguities
+    }
+
+    #[test]
+    fn prose_ref_resolved_token_passes() {
+        let vocab = vocab_with(&[("Account", "data")]);
+        let ambs = prose_ref_ambiguities("The source Account is valid", &vocab);
+        // Account resolves, so reference graph check may fire (data→data is allowed)
+        // but no "possible prose reference" or "typo" finding
+        assert!(
+            !ambs.iter().any(|a| a.message.contains("Possible")),
+            "resolved token should not produce prose-reference finding: {:?}",
+            ambs
+        );
+    }
+
+    #[test]
+    fn prose_ref_stopword_ignored() {
+        let vocab = empty_vocab();
+        let ambs = prose_ref_ambiguities("The user types their password", &vocab);
+        assert!(
+            ambs.is_empty(),
+            "stopword 'The' should be ignored: {:?}",
+            ambs
+        );
+    }
+
+    #[test]
+    fn prose_ref_backtick_span_ignored() {
+        let vocab = empty_vocab();
+        let ambs = prose_ref_ambiguities("Use `Widget` to render the output", &vocab);
+        assert!(
+            !ambs.iter().any(|a| a.message.contains("Widget")),
+            "backtick span should be ignored: {:?}",
+            ambs
+        );
+    }
+
+    #[test]
+    fn prose_ref_heading_ignored() {
+        let vocab = empty_vocab();
+        let ambs = prose_ref_ambiguities("# Component: Button\nSome text", &vocab);
+        assert!(
+            !ambs.iter().any(|a| a.message.contains("Button") || a.message.contains("Component")),
+            "heading tokens should be ignored: {:?}",
+            ambs
+        );
+    }
+
+    #[test]
+    fn prose_ref_scenario_value_line_ignored() {
+        let vocab = empty_vocab();
+        let ambs = prose_ref_ambiguities(
+            "Given: a body of [(5,5), (4,5), (3,5)]",
+            &vocab,
+        );
+        assert!(
+            ambs.is_empty(),
+            "scenario value line should be ignored: {:?}",
+            ambs
+        );
+    }
+
+    #[test]
+    fn prose_ref_typo_is_high_confidence() {
+        let vocab = vocab_with(&[("Account", "data")]);
+        let ambs = prose_ref_ambiguities(
+            "The Account is valid but the Accoutn is not",
+            &vocab,
+        );
+        let typo_finding = ambs.iter().find(|a| a.message.contains("Accoutn"));
+        assert!(
+            typo_finding.is_some(),
+            "expected typo finding for Accoutn: {:?}",
+            ambs
+        );
+        let finding = typo_finding.unwrap();
+        assert_eq!(finding.severity, "blocking");
+        assert!(finding.message.contains("Account"));
+    }
+
+    #[test]
+    fn prose_ref_standalone_unresolved_is_low_confidence() {
+        let vocab = empty_vocab();
+        let ambs = prose_ref_ambiguities("Widget is used here", &vocab);
+        let widget = ambs.iter().find(|a| a.message.contains("Widget"));
+        assert!(widget.is_some(), "expected Widget finding: {:?}", ambs);
+        assert_eq!(widget.unwrap().severity, "low");
+    }
+
+    #[test]
+    fn prose_ref_all_caps_acronym_ignored() {
+        let vocab = empty_vocab();
+        let ambs = prose_ref_ambiguities("Use UTC for timestamps and DKK for currency", &vocab);
+        assert!(
+            !ambs.iter().any(|a| a.message.contains("UTC") || a.message.contains("DKK")),
+            "all-caps acronyms should be ignored: {:?}",
+            ambs
+        );
+    }
+
+    #[test]
+    fn prose_ref_order_in_phrase_not_flagged() {
+        // "in order to" should not flag "Order" even if Order is a manifest entry
+        let vocab = vocab_with(&[("Order", "data")]);
+        let ambs = prose_ref_ambiguities(
+            "The system does this in order to complete the transfer",
+            &vocab,
+        );
+        // "Order" is in the manifest as data, data→data is allowed, so no graph violation.
+        // The key check: the lowercase "order" should not match PascalCase regex.
+        // Only "Order" at word boundary matches, which resolves fine.
+        assert!(
+            !ambs.iter().any(|a| a.severity == "blocking"),
+            "lowercase 'order' should not produce a blocking finding: {:?}",
+            ambs
+        );
+    }
+
+    #[test]
+    fn prose_ref_levenshtein_basics() {
+        assert_eq!(levenshtein_distance("Account", "Account"), 0);
+        assert_eq!(levenshtein_distance("Account", "Accoutn"), 2);
+        assert_eq!(levenshtein_distance("Account", "Acount"), 1);
+        assert_eq!(levenshtein_distance("Account", "Widget"), 6);
+    }
+
+    #[test]
+    fn is_likely_typo_basics() {
+        assert!(is_likely_typo("Account", "Accoutn")); // edit distance 2
+        assert!(is_likely_typo("Account", "Acount"));  // edit distance 1
+        assert!(!is_likely_typo("Account", "Widget")); // too different
+        assert!(!is_likely_typo("Account", "Account")); // same
+        assert!(!is_likely_typo("Foo", "Fop")); // too short (< 4 chars)
+    }
+
+    #[test]
+    fn strip_backtick_spans_works() {
+        assert_eq!(strip_backtick_spans("no backticks"), "no backticks");
+        assert_eq!(strip_backtick_spans("use `Widget` here"), "use          here");
+        assert_eq!(strip_backtick_spans("`all`"), "     ");
+    }
+
+    #[test]
+    fn is_scenario_value_line_works() {
+        assert!(is_scenario_value_line("Given: a body of [(5,5), (4,5)]"));
+        assert!(is_scenario_value_line("Then: result is {x: 1, y: 2}"));
+        assert!(!is_scenario_value_line("Given: source has balance 100"));
+        assert!(!is_scenario_value_line("The source withdraws"));
+    }
+
+    #[test]
+    fn is_all_caps_works() {
+        assert!(is_all_caps("UTC"));
+        assert!(is_all_caps("DKK"));
+        assert!(is_all_caps("JSON"));
+        assert!(!is_all_caps("Account"));
+        assert!(!is_all_caps("A")); // single char
+        assert!(!is_all_caps("iPhone"));
+    }
 }

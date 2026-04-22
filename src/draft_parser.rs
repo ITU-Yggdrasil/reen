@@ -1735,4 +1735,83 @@ Maps the primary navigation paths of the application.
         assert_eq!(rt.routes[2].path, "/orders");
         assert_eq!(rt.routes[2].component, "OrderListScreen");
     }
+
+    // ── Routing table error UX tests (Phase 9.5) ─────────────────
+
+    #[test]
+    fn routing_table_map_form_detected_slash_colon() {
+        let content = r#"# Routes: main
+
+## Purpose
+Main routes.
+
+## Routes
+/: { component: HomeScreen }
+/login: { component: LoginScreen }
+"#;
+        let result = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Routes must be a list of entries"),
+            "expected targeted error message, got: {}",
+            err
+        );
+        assert!(
+            err.contains("map form"),
+            "expected map form mention, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn routing_table_map_form_detected_path_colon() {
+        let content = r#"# Routes: main
+
+## Purpose
+Main routes.
+
+## Routes
+/products/<id>:
+  component: ProductScreen
+"#;
+        let result = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Routes must be a list of entries"),
+            "expected targeted error message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn routing_table_list_form_with_angle_brackets_passes() {
+        // The list form with path params including <> should parse cleanly
+        let content = r#"# Routes: main
+
+## Purpose
+Main routes.
+
+## Routes
+- path: /products/<id>
+  component: ProductScreen
+  params:
+    id: Product
+"#;
+        let result = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        );
+        assert!(result.is_ok(), "list form should parse cleanly: {:?}", result.err());
+    }
 }
