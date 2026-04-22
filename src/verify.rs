@@ -413,6 +413,94 @@ pub fn verify_operation_source(
     Ok(VerifyResult { discrepancies })
 }
 
+// ── App verification ─────────────────────────────────────────────
+
+/// Verify that a project's `src/main.rs` and `Cargo.toml` match the App artifact.
+///
+/// Checks:
+/// - `src/main.rs` exists
+/// - It contains a `fn main` that references the declared entry context by name
+/// - It calls the declared entry functionality on that context
+/// - `Cargo.toml` has a `[[bin]]` entry whose name matches the package name
+pub fn verify_app(workspace_root: &Path, artifact: &PreparedArtifact) -> VerifyResult {
+    let mut discrepancies = Vec::new();
+
+    let entry_context = artifact.entry_context.as_deref().unwrap_or("App");
+    let entry_functionality = artifact.entry_functionality.as_deref().unwrap_or("run");
+
+    // Check src/main.rs exists
+    let main_path = workspace_root.join("src/main.rs");
+    if !main_path.is_file() {
+        discrepancies.push(Discrepancy {
+            kind: DiscrepancyKind::MissingField,
+            message: format!(
+                "the app declares `{}` as the entry context but `src/main.rs` does not exist — \
+                 run `reen scaffold` to generate it",
+                entry_context
+            ),
+        });
+        return VerifyResult { discrepancies };
+    }
+
+    // Read and check main.rs content
+    if let Ok(content) = fs::read_to_string(&main_path) {
+        if !content.contains(entry_context) {
+            discrepancies.push(Discrepancy {
+                kind: DiscrepancyKind::MissingField,
+                message: format!(
+                    "the app declares `{}` as the entry context but `src/main.rs` does not reference it",
+                    entry_context
+                ),
+            });
+        }
+        let func_snake = crate::codegen::to_snake_case(entry_functionality);
+        if !content.contains(&func_snake) {
+            discrepancies.push(Discrepancy {
+                kind: DiscrepancyKind::MissingMethod,
+                message: format!(
+                    "the app declares `{}` as the entry functionality but `src/main.rs` does not call it",
+                    entry_functionality
+                ),
+            });
+        }
+    }
+
+    // Check Cargo.toml for [[bin]] entry
+    let cargo_path = workspace_root.join("Cargo.toml");
+    if cargo_path.is_file() {
+        if let Ok(raw) = fs::read_to_string(&cargo_path) {
+            if let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() {
+                let package_name = doc
+                    .get("package")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+
+                let has_bin = doc.get("bin").map_or(false, |bin| {
+                    bin.as_array_of_tables().map_or(false, |tables| {
+                        tables.iter().any(|t| {
+                            t.get("name").and_then(|n| n.as_str()) == Some(package_name)
+                        })
+                    })
+                });
+
+                if !has_bin {
+                    discrepancies.push(Discrepancy {
+                        kind: DiscrepancyKind::MissingField,
+                        message: format!(
+                            "the app declares `{}` as the binary entry but Cargo.toml has no `[[bin]]` section \
+                             with `name = \"{}\"`",
+                            package_name, package_name
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    VerifyResult { discrepancies }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]

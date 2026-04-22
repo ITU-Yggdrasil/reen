@@ -437,14 +437,34 @@ fn run_verify(args: VerifyArgs, workspace: &Workspace) -> Result<()> {
         process::exit(2);
     }
 
-    // Check if this is an operation client (under src/apis/)
     let relative = rs_path
         .strip_prefix(&workspace.root)
         .unwrap_or(rs_path);
-    let is_operation = relative
+    let relative_str = relative
         .to_string_lossy()
-        .replace('\\', "/")
-        .starts_with("src/apis/");
+        .replace('\\', "/");
+
+    // Check if this is main.rs (verify against App artifact if one exists)
+    if relative_str == "src/main.rs" {
+        let app_prepared = workspace.prepared_dir.join("app.yml");
+        if app_prepared.is_file() {
+            let raw = std::fs::read_to_string(&app_prepared)
+                .with_context(|| format!("Failed to read {}", app_prepared.display()))?;
+            let artifact: PreparedArtifact = serde_yaml::from_str(&raw)
+                .with_context(|| format!("Failed to parse {}", app_prepared.display()))?;
+            let result = verify::verify_app(&workspace.root, &artifact);
+            if result.is_ok() {
+                println!("{}", result.render());
+            } else {
+                eprint!("{}", result.render());
+                process::exit(1);
+            }
+            return Ok(());
+        }
+    }
+
+    // Check if this is an operation client (under src/apis/)
+    let is_operation = relative_str.starts_with("src/apis/");
 
     if is_operation {
         // Verify against an operation spec
