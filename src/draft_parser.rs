@@ -864,6 +864,15 @@ fn parse_route_bullets(relative_path: &str, sections: &[Section]) -> Result<Vec<
     let section = require_section(relative_path, sections, "Routes")?;
     let body = section.body.trim();
 
+    // The routing table format is:
+    // - path: /foo
+    //   component: Bar
+    //   params:
+    //     name: Type
+    //
+    // Each route starts with "- path:" at the lowest indent level.
+    // Everything else at higher indent belongs to that route.
+
     let mut routes = Vec::new();
     let mut current_path: Option<String> = None;
     let mut current_component: Option<String> = None;
@@ -876,73 +885,46 @@ fn parse_route_bullets(relative_path: &str, sections: &[Section]) -> Result<Vec<
             continue;
         }
 
-        let rest = trimmed
-            .strip_prefix("- ")
-            .or_else(|| trimmed.strip_prefix("* "));
-
-        if let Some(rest) = rest {
-            // Check if this is a top-level route item or a nested item
-            let indent = line.len() - line.trim_start().len();
-
-            if indent <= 2 {
-                // Flush previous route
-                if let (Some(path), Some(component)) =
-                    (current_path.take(), current_component.take())
-                {
-                    routes.push(RouteDraft {
-                        path,
-                        component,
-                        params: std::mem::take(&mut current_params),
-                    });
-                }
-                in_params = false;
-
-                // Parse "path: /foo" or "component: Foo"
-                if let Some(value) = strip_label(rest, "path") {
-                    current_path = Some(value.to_string());
-                } else if let Some(value) = strip_label(rest, "component") {
-                    current_component = Some(value.to_string());
-                }
-            } else {
-                // Nested item under current route
-                if let Some(value) = strip_label(rest, "path") {
-                    // Shouldn't happen at nested level, but handle gracefully
-                    current_path = Some(value.to_string());
-                } else if let Some(value) = strip_label(rest, "component") {
-                    current_component = Some(value.to_string());
-                } else if rest.to_ascii_lowercase().starts_with("params") {
-                    in_params = true;
-                } else if in_params {
-                    // Parse param: "name: DataType"
-                    if let Some((name, data_type)) = rest.split_once(':') {
-                        current_params.push(RouteParamDraft {
-                            name: name.trim().to_string(),
-                            data_type: data_type.trim().to_string(),
-                        });
-                    }
-                }
+        // Top-level route entry: starts with "- path:"
+        if let Some(rest) = trimmed.strip_prefix("- path:").or_else(|| trimmed.strip_prefix("* path:")) {
+            // Flush previous route
+            if let (Some(path), Some(component)) =
+                (current_path.take(), current_component.take())
+            {
+                routes.push(RouteDraft {
+                    path,
+                    component,
+                    params: std::mem::take(&mut current_params),
+                });
             }
-        } else if trimmed.starts_with("path:") || trimmed.starts_with("component:") || trimmed.starts_with("params:") {
-            // Non-bulleted key-value lines under a route
-            if let Some(value) = strip_label(trimmed, "path") {
-                current_path = Some(value.to_string());
-            } else if let Some(value) = strip_label(trimmed, "component") {
-                current_component = Some(value.to_string());
-            } else if trimmed.to_ascii_lowercase().starts_with("params") {
-                in_params = true;
-            }
-        } else if in_params {
-            // Param continuation line
-            if let Some(rest) = trimmed
+            in_params = false;
+            current_path = Some(rest.trim().to_string());
+            continue;
+        }
+
+        // Nested fields under a route
+        if let Some(value) = strip_label(trimmed, "component") {
+            current_component = Some(value.to_string());
+            in_params = false;
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("params:") || trimmed.starts_with("params:") {
+            in_params = true;
+            continue;
+        }
+
+        if in_params {
+            // Param line: "name: Type" (possibly with "- " prefix)
+            let param_text = trimmed
                 .strip_prefix("- ")
                 .or_else(|| trimmed.strip_prefix("* "))
-            {
-                if let Some((name, data_type)) = rest.split_once(':') {
-                    current_params.push(RouteParamDraft {
-                        name: name.trim().to_string(),
-                        data_type: data_type.trim().to_string(),
-                    });
-                }
+                .unwrap_or(trimmed);
+            if let Some((name, data_type)) = param_text.split_once(':') {
+                current_params.push(RouteParamDraft {
+                    name: name.trim().to_string(),
+                    data_type: data_type.trim().to_string(),
+                });
             }
         }
     }
@@ -1499,5 +1481,231 @@ Vessel tracking.
         let content = "# API\n\n## Notes\n- nothing\n";
         let result = parse_boundary_draft("test", content);
         assert!(result.is_err());
+    }
+
+    // ── Component parser tests ───────────────────────────────────
+
+    #[test]
+    fn parse_leaf_component_draft() {
+        let content = r#"# Component: Button
+
+## Purpose
+A pressable element that triggers an action.
+
+## Props
+- label: the text shown on the button
+- disabled: whether the button ignores presses
+
+## Events
+- pressed: the user has pressed the button
+
+## Variants
+- primary: the main call-to-action variant
+- secondary: a less prominent variant
+
+## Invariants
+- a disabled button never fires the pressed event
+
+## Scenarios
+### pressing a primary button
+Given: a primary button with label "Submit"
+When: the user presses the button
+Then: the pressed event fires
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/components/Button.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::Component(comp) = doc else {
+            panic!("expected Component draft");
+        };
+        assert_eq!(comp.info.title, "Component: Button");
+        assert_eq!(comp.props.len(), 2);
+        assert_eq!(comp.props[0].name, "label");
+        assert_eq!(comp.events.len(), 1);
+        assert_eq!(comp.events[0].name, "pressed");
+        assert_eq!(comp.variants.len(), 2);
+        assert!(comp.composition.is_none());
+        assert_eq!(comp.invariants.len(), 1);
+        assert_eq!(comp.scenarios.len(), 1);
+    }
+
+    #[test]
+    fn parse_coordinating_component_draft() {
+        let content = r#"# Component: LoginForm
+
+## Purpose
+Lets the user enter credentials and submit them for authentication.
+
+## Props
+- error_message: a text value shown when authentication fails
+
+## Events
+- submitted: the user has submitted their credentials
+
+## Composition
+- EmailInput: receives the current email value
+- PasswordInput: receives the current password value
+- SubmitButton: labelled "Sign In"
+- when `SubmitButton`.`pressed`: invoke `AuthenticateUser`
+
+## Scenarios
+### successful submission
+Given: the user has entered valid credentials
+When: the submit button is pressed
+Then: the submitted event fires with the credentials
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/components/LoginForm.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::Component(comp) = doc else {
+            panic!("expected Component draft");
+        };
+        assert_eq!(comp.info.title, "Component: LoginForm");
+        let composition = comp.composition.as_ref().expect("expected composition");
+        assert_eq!(composition.child_bindings.len(), 3);
+        assert_eq!(composition.child_bindings[0].child, "EmailInput");
+        assert_eq!(composition.event_bindings.len(), 1);
+        assert_eq!(composition.event_bindings[0].child, "SubmitButton");
+        assert_eq!(composition.event_bindings[0].event, "pressed");
+        assert_eq!(composition.event_bindings[0].context, "AuthenticateUser");
+    }
+
+    #[test]
+    fn parse_event_binding_plain_format() {
+        let content = r#"# Component: Form
+
+## Purpose
+A simple form.
+
+## Composition
+- when button.clicked: invoke SubmitOrder
+
+## Scenarios
+### submit
+Given: a filled form
+When: button is clicked
+Then: order is submitted
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/components/Form.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::Component(comp) = doc else {
+            panic!("expected Component draft");
+        };
+        let composition = comp.composition.as_ref().expect("expected composition");
+        assert_eq!(composition.event_bindings.len(), 1);
+        assert_eq!(composition.event_bindings[0].child, "button");
+        assert_eq!(composition.event_bindings[0].event, "clicked");
+        assert_eq!(composition.event_bindings[0].context, "SubmitOrder");
+    }
+
+    // ── Brand parser tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_brand_draft() {
+        let content = r#"# Brand: Acme
+
+## Purpose
+Creates a professional, trustworthy experience for business users.
+
+## Voice
+- Tone: confident but not arrogant
+- Register: professional
+- Words we use: simple, clear, guide
+- Words we avoid: synergy, leverage, disrupt
+
+## Visual Identity
+### Colours
+- primary-action: the colour that draws the user to the main call-to-action
+- surface-default: the base background for content areas
+### Typography
+- heading-large: the most prominent text on a page
+- body-default: standard reading text
+### Spacing
+- inset-tight: padding inside compact interactive elements
+
+## Motion
+- transition-default: standard duration for state changes, feels responsive
+
+## Imagery
+- Photography: authentic, unstaged, natural lighting
+
+## Logo
+- Usage: always use the full wordmark on white backgrounds
+- Clear space: at least the height of the "A" in Acme on all sides
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/brands/Acme.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::Brand(brand) = doc else {
+            panic!("expected Brand draft");
+        };
+        assert_eq!(brand.info.title, "Brand: Acme");
+        assert!(brand.voice.is_some());
+        assert_eq!(brand.token_groups.len(), 4); // colours, typography, spacing, motion
+        assert_eq!(brand.token_groups[0].group, "colours");
+        assert_eq!(brand.token_groups[0].tokens.len(), 2);
+        assert_eq!(brand.token_groups[0].tokens[0].name, "primary-action");
+        assert_eq!(brand.token_groups[3].group, "motion");
+        assert_eq!(brand.prose_sections.len(), 2); // imagery, logo
+    }
+
+    // ── Routing table parser tests ───────────────────────────────
+
+    #[test]
+    fn parse_routing_table_draft() {
+        let content = r#"# Routes: main
+
+## Purpose
+Maps the primary navigation paths of the application.
+
+## Routes
+- path: /
+  component: HomeScreen
+- path: /products/<id>
+  component: ProductScreen
+  params:
+    id: Product
+- path: /orders
+  component: OrderListScreen
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::RoutingTable(rt) = doc else {
+            panic!("expected RoutingTable draft");
+        };
+        assert_eq!(rt.info.title, "Routes: main");
+        assert_eq!(rt.routes.len(), 3);
+        assert_eq!(rt.routes[0].path, "/");
+        assert_eq!(rt.routes[0].component, "HomeScreen");
+        assert!(rt.routes[0].params.is_empty());
+        assert_eq!(rt.routes[1].path, "/products/<id>");
+        assert_eq!(rt.routes[1].component, "ProductScreen");
+        assert_eq!(rt.routes[1].params.len(), 1);
+        assert_eq!(rt.routes[1].params[0].name, "id");
+        assert_eq!(rt.routes[1].params[0].data_type, "Product");
+        assert_eq!(rt.routes[2].path, "/orders");
+        assert_eq!(rt.routes[2].component, "OrderListScreen");
     }
 }

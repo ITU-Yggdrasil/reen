@@ -43,25 +43,20 @@ synthesised_tests:
   then: 'the invariant holds: Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.'
   citation: Invariants / Direction does not know about coordinates itself; the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position.
 - source: invariant
-  given: a snake head at (10, 20) and a direction Left
-  when: the position delta for Left is applied
-  then: the next head position is (9, 20)
-  citation: 'invariant: mapping from direction to position delta must be applied consistently'
+  given: a Direction value of Left and two separate position calculation systems
+  when: both systems convert the direction to a position delta
+  then: both systems produce the same delta of (-1, 0)
+  citation: 'invariant: mapping from direction to position delta must be applied consistently wherever a direction is turned into a next position'
 - source: invariant
-  given: a snake head at (10, 20) and a direction Right
-  when: the position delta for Right is applied
-  then: the next head position is (11, 20)
-  citation: 'invariant: mapping from direction to position delta must be applied consistently'
-- source: invariant
-  given: 'the same direction Up applied at two different positions: (0, 0) and (100, 100)'
-  when: the position delta for Up is applied to both
-  then: 'both deltas are identical: (0, -1)'
-  citation: 'invariant: the mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position'
-- source: invariant
-  given: a Direction instance
-  when: queried for coordinate knowledge
-  then: the Direction does not contain or reference any coordinate information
+  given: a Direction value of Right and a position (10, 20)
+  when: the direction is converted to a position delta by one calculation method and applied to the position
+  then: the result is (11, 20) and the Direction itself contains no coordinate information
   citation: 'invariant: Direction does not know about coordinates itself'
+- source: invariant
+  given: Direction values Up, Down, Left, and Right
+  when: each direction is mapped to its position delta across multiple independent modules
+  then: all modules agree on the delta mappings and no module contains coordinate state within the Direction
+  citation: 'invariant: mapping from direction to a position delta must be applied consistently wherever a direction is turned into a next position'
 vocabulary_bindings:
 - name: Up
   resolution: attribute

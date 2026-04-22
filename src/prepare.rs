@@ -1540,4 +1540,409 @@ Then: vessel updates are received
             prepared.ambiguities
         );
     }
+
+    // ── Reference graph tests ────────────────────────────────────
+
+    #[test]
+    fn reference_graph_allowed_edges() {
+        // data → data
+        assert!(is_reference_allowed("data", "data"));
+        // projections → data + projections
+        assert!(is_reference_allowed("projection", "data"));
+        assert!(is_reference_allowed("projection", "projection"));
+        // contexts → everything except brand (nothing blocks contexts)
+        assert!(is_reference_allowed("context", "data"));
+        assert!(is_reference_allowed("context", "projection"));
+        assert!(is_reference_allowed("context", "operation"));
+        assert!(is_reference_allowed("context", "context"));
+        assert!(is_reference_allowed("context", "component"));
+        assert!(is_reference_allowed("context", "brand"));
+        assert!(is_reference_allowed("context", "routing_table"));
+        // components → data + projections + brand + components + contexts
+        assert!(is_reference_allowed("component", "data"));
+        assert!(is_reference_allowed("component", "projection"));
+        assert!(is_reference_allowed("component", "brand"));
+        assert!(is_reference_allowed("component", "component"));
+        assert!(is_reference_allowed("component", "context"));
+        // routing_table → components + data
+        assert!(is_reference_allowed("routing_table", "component"));
+        assert!(is_reference_allowed("routing_table", "data"));
+    }
+
+    #[test]
+    fn reference_graph_forbidden_edges() {
+        // data cannot reference context, component, brand, routing_table, operation
+        assert!(!is_reference_allowed("data", "context"));
+        assert!(!is_reference_allowed("data", "component"));
+        assert!(!is_reference_allowed("data", "brand"));
+        assert!(!is_reference_allowed("data", "routing_table"));
+        assert!(!is_reference_allowed("data", "projection"));
+        assert!(!is_reference_allowed("data", "operation"));
+        // projection cannot reference context, operation, component, brand, routing_table
+        assert!(!is_reference_allowed("projection", "context"));
+        assert!(!is_reference_allowed("projection", "operation"));
+        assert!(!is_reference_allowed("projection", "component"));
+        // component cannot reference operation, routing_table
+        assert!(!is_reference_allowed("component", "operation"));
+        assert!(!is_reference_allowed("component", "routing_table"));
+        // routing_table cannot reference context, projection, operation, brand, routing_table
+        assert!(!is_reference_allowed("routing_table", "context"));
+        assert!(!is_reference_allowed("routing_table", "projection"));
+        assert!(!is_reference_allowed("routing_table", "operation"));
+        assert!(!is_reference_allowed("routing_table", "brand"));
+        // brand → nothing
+        assert!(!is_reference_allowed("brand", "data"));
+        assert!(!is_reference_allowed("brand", "context"));
+        assert!(!is_reference_allowed("brand", "component"));
+    }
+
+    #[test]
+    fn component_referencing_context_resolves_cleanly() {
+        let content = r#"# Component: LoginForm
+
+## Purpose
+Lets the user authenticate.
+
+## Props
+- error_message: authentication error message
+
+## Events
+- submitted: credentials submitted
+
+## Composition
+- EmailInput: receives email
+- when `EmailInput`.`changed`: invoke `ValidateEmail`
+
+## Scenarios
+### submit
+Given: valid credentials
+When: submit is pressed
+Then: submitted event fires
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/components/LoginForm.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = vocab_with(&[
+            ("EmailInput", "component"),
+            ("ValidateEmail", "context"),
+        ]);
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert_eq!(prepared.kind, ArtifactKind::Component);
+        // No ambiguities about the context reference — it's allowed
+        let blocking: Vec<_> = prepared.blocking_ambiguities().collect();
+        assert!(
+            blocking.is_empty(),
+            "expected no blocking ambiguities, got: {:?}",
+            blocking
+        );
+    }
+
+    #[test]
+    fn routing_table_missing_component_fails() {
+        let content = r#"# Routes: main
+
+## Purpose
+Main routes.
+
+## Routes
+- path: /
+  component: HomeScreen
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = empty_vocab(); // HomeScreen NOT in vocabulary
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert!(
+            prepared.ambiguities.iter().any(|a| a.message.contains("HomeScreen")),
+            "expected ambiguity about missing HomeScreen component: {:?}",
+            prepared.ambiguities
+        );
+    }
+
+    #[test]
+    fn routing_table_missing_param_type_fails() {
+        let content = r#"# Routes: main
+
+## Purpose
+Main routes.
+
+## Routes
+- path: /products/<id>
+  component: ProductScreen
+  params:
+    id: Product
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = vocab_with(&[("ProductScreen", "component")]); // Product NOT in vocab
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert!(
+            prepared.ambiguities.iter().any(|a| a.message.contains("Product")),
+            "expected ambiguity about missing Product type: {:?}",
+            prepared.ambiguities
+        );
+    }
+
+    #[test]
+    fn routing_table_path_param_without_declaration_fails() {
+        let content = r#"# Routes: main
+
+## Purpose
+Main routes.
+
+## Routes
+- path: /products/<id>
+  component: ProductScreen
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = vocab_with(&[("ProductScreen", "component")]);
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert!(
+            prepared.ambiguities.iter().any(|a| a.message.contains("<id>")),
+            "expected ambiguity about undeclared path param <id>: {:?}",
+            prepared.ambiguities
+        );
+    }
+
+    // ── Prepared output shape tests ──────────────────────────────
+
+    #[test]
+    fn prepare_component_produces_v3_yaml() {
+        let content = r#"# Component: Button
+
+## Purpose
+A pressable element.
+
+## Props
+- label: the text shown
+
+## Events
+- pressed: the user pressed the button
+
+## Scenarios
+### press
+Given: a button
+When: pressed
+Then: pressed event fires
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/components/Button.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = empty_vocab();
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert_eq!(prepared.schema, "reen.prepare/v3");
+        assert_eq!(prepared.kind, ArtifactKind::Component);
+        assert_eq!(prepared.export.name, "Button");
+        assert_eq!(prepared.props.len(), 1);
+        assert_eq!(prepared.events.len(), 1);
+        assert_eq!(prepared.events[0].name, "pressed");
+    }
+
+    #[test]
+    fn prepare_brand_produces_v3_yaml() {
+        let content = r#"# Brand: Acme
+
+## Purpose
+Professional experience.
+
+## Voice
+- Tone: confident
+- Register: formal
+
+## Visual Identity
+### Colours
+- primary-action: main CTA colour
+### Typography
+- heading-large: page headings
+
+## Motion
+- transition-default: standard transitions
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/brands/Acme.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let prepared = prepare_document(&doc, &empty_vocab()).unwrap();
+
+        assert_eq!(prepared.schema, "reen.prepare/v3");
+        assert_eq!(prepared.kind, ArtifactKind::Brand);
+        assert_eq!(prepared.export.name, "Acme");
+        assert_eq!(prepared.token_groups.len(), 3); // colours, typography, motion
+        assert!(!prepared.prose_sections.is_empty()); // voice
+    }
+
+    #[test]
+    fn prepare_routing_table_produces_v3_yaml() {
+        let content = r#"# Routes: main
+
+## Purpose
+Main routes.
+
+## Routes
+- path: /
+  component: HomeScreen
+- path: /products/<id>
+  component: ProductScreen
+  params:
+    id: Product
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/routes/main.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = vocab_with(&[
+            ("HomeScreen", "component"),
+            ("ProductScreen", "component"),
+            ("Product", "data"),
+        ]);
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        assert_eq!(prepared.schema, "reen.prepare/v3");
+        assert_eq!(prepared.kind, ArtifactKind::RoutingTable);
+        assert_eq!(prepared.routes.len(), 2);
+        assert_eq!(prepared.routes[0].path, "/");
+        assert_eq!(prepared.routes[1].params.len(), 1);
+        assert!(prepared.ambiguities.is_empty());
+    }
+
+    // ── v2/v3 coexistence test ───────────────────────────────────
+
+    #[test]
+    fn existing_v2_kinds_still_produce_v2() {
+        let content = r#"# Data: Amount
+
+## Purpose
+A monetary amount.
+
+## Attributes
+- value: numeric quantity
+
+## Invariants
+- never negative
+
+## Scenarios
+### create
+Given: value 100
+When: created
+Then: value is 100
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/data/amount.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let prepared = prepare_document(&doc, &empty_vocab()).unwrap();
+        assert_eq!(prepared.schema, "reen.prepare/v2");
+    }
+
+    // ── Classification tests ─────────────────────────────────────
+
+    #[test]
+    fn context_without_operations_is_client_also() {
+        let content = r#"# Context: SimpleTransfer
+
+## Purpose
+Transfers amounts.
+
+## Role Players
+- source: Account — provides funds
+- sink: Account — receives funds
+
+## Role Methods
+### source
+- withdraw: removes amount
+
+### sink
+- deposit: adds amount
+
+## Functionalities
+### transfer
+Source withdraws, sink deposits.
+
+## Scenarios
+### ok
+Given: accounts
+When: transfer
+Then: done
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/contexts/simple_transfer.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let vocab = vocab_with(&[("Account", "data")]);
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        // Simulate classification pass
+        let workspace = crate::workspace::Workspace::discover(
+            std::env::temp_dir().join("reen_classify_test_1"),
+        )
+        .unwrap();
+        let output = workspace
+            .prepared_output_path(Path::new("drafts/contexts/simple_transfer.md"))
+            .unwrap();
+        let mut artifacts = vec![(output, prepared)];
+        classify_contexts(&mut artifacts, &workspace);
+
+        assert_eq!(
+            artifacts[0].1.realisation_target.as_deref(),
+            Some("client_also"),
+        );
+    }
+
+    #[test]
+    fn sanitize_export_name_new_kinds() {
+        assert_eq!(sanitize_export_name("Component: Button"), "Button");
+        assert_eq!(sanitize_export_name("Brand: Acme"), "Acme");
+        assert_eq!(sanitize_export_name("Routes: main"), "main");
+    }
+
+    #[test]
+    fn extract_path_params_works() {
+        assert_eq!(extract_path_params("/"), Vec::<String>::new());
+        assert_eq!(extract_path_params("/products/<id>"), vec!["id"]);
+        assert_eq!(
+            extract_path_params("/users/<user_id>/posts/<post_id>"),
+            vec!["user_id", "post_id"]
+        );
+    }
 }

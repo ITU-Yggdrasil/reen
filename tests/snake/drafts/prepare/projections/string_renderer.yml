@@ -36,25 +36,25 @@ synthesised_tests:
   then: the interior rows contain only spaces between the wall symbols
   citation: Scenarios / empty interior shows spaces
 - source: invariant
-  given: a board with mixed symbols (walls, spaces, and game pieces) and a score of 0
-  when: render is called
-  then: the output iterates columns left to right within each row, preserving symbol order exactly
-  citation: Iterates rows from top to bottom. Within each row, iterates columns from left to right, collecting the symbol at each coordinate.
-- source: invariant
-  given: a board instance
-  when: new is called with the board
-  then: the board is stored as the source to query for on-screen symbols and no other collaborators are fetched
+  given: a StringRenderer initialized with a board
+  when: new is called
+  then: the board is stored as the source for querying on-screen symbols and no other collaborators are fetched
   citation: 'query `new`: Stores the board as the source to query for on-screen symbols. No other collaborators are fetched.'
 - source: invariant
-  given: a single-row board with 3 symbols and a score of 42
+  given: a board with varying symbols across multiple rows and columns
   when: render is called
-  then: 'the output contains the row''s symbols, followed by a newline, then ''Score: 42'' and a newline with no additional content after'
-  citation: 'Each row is followed by a newline. After the last row, a score line in the format ''Score: <score>'' followed by a newline is included.'
+  then: symbols are collected iterating rows from top to bottom and within each row from left to right
+  citation: 'query `render`: Iterates rows from top to bottom. Within each row, iterates columns from left to right, collecting the symbol at each coordinate.'
 - source: invariant
-  given: a board with 3 rows of varying symbol compositions and a score of 999
+  given: a board and a score of 0
   when: render is called
-  then: 'each of the 3 rows is separated by newlines in top-to-bottom order, and the final line is ''Score: 999'' followed by a newline'
-  citation: 'Iterates rows from top to bottom... Each row is followed by a newline. After the last row, a score line in the format ''Score: <score>'' followed by a newline is included.'
+  then: 'the returned text ends with a newline after ''Score: 0'''
+  citation: 'query `render`: After the last row, a score line in the format ''Score: <score>'' followed by a newline is included.'
+- source: invariant
+  given: a 3 by 3 board with symbols '#' at all positions
+  when: render is called
+  then: each row contains exactly 3 '#' symbols followed by a newline
+  citation: 'query `render`: Each row is followed by a newline.'
 vocabulary_bindings:
 - name: Board
   resolution: data

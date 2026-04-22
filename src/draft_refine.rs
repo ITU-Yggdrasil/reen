@@ -897,4 +897,203 @@ Then: an error is returned indicating the currency does not match
         assert!(!flags("## Role Players"));
         assert!(!flags("### source"));
     }
+
+    // ── Web-kind lint tests ────────────────────────────────────
+
+    fn web_flags(content: &str, kind: crate::draft_parser::ArtifactKind) -> bool {
+        !scan_web_kind_tokens(content, "test.md", kind).is_empty()
+    }
+
+    fn web_messages(content: &str, kind: crate::draft_parser::ArtifactKind) -> Vec<String> {
+        scan_web_kind_tokens(content, "test.md", kind)
+            .into_iter()
+            .map(|f| f.message)
+            .collect()
+    }
+
+    // Component lint: HTML tags
+    #[test]
+    fn component_flags_html_div() {
+        assert!(web_flags(
+            "Render a <div> with the content",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    #[test]
+    fn component_flags_html_input() {
+        assert!(web_flags(
+            "An <input type=\"email\"> for the user",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    #[test]
+    fn component_passes_clean_prose() {
+        // "the user types their email" should not flag
+        assert!(!web_flags(
+            "the user types their email into the field",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Component lint: CSS property
+    #[test]
+    fn component_flags_css_property() {
+        assert!(web_flags(
+            "color: #fff;",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Component lint: Tailwind
+    #[test]
+    fn component_flags_tailwind_classes() {
+        assert!(web_flags(
+            "Apply bg-blue-500 and text-lg",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Component lint: framework hooks
+    #[test]
+    fn component_flags_use_state() {
+        assert!(web_flags(
+            "Uses useState to track the value",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    #[test]
+    fn component_flags_create_signal() {
+        assert!(web_flags(
+            "Create a createSignal for tracking",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    #[test]
+    fn component_flags_use_signal() {
+        assert!(web_flags(
+            "Call use_signal for reactive state",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Component lint: hex colour
+    #[test]
+    fn component_flags_hex_colour() {
+        assert!(web_flags(
+            "Background is #3355ff",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Component lint: rgb colour
+    #[test]
+    fn component_flags_rgb_colour() {
+        assert!(web_flags(
+            "Uses rgb(50, 100, 200)",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Component lint: style attribute
+    #[test]
+    fn component_flags_classname() {
+        assert!(web_flags(
+            r#"className="header-bar""#,
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Component lint: template syntax
+    #[test]
+    fn component_flags_template_expression() {
+        assert!(web_flags(
+            "Display {{user.name}} in the header",
+            crate::draft_parser::ArtifactKind::Component
+        ));
+    }
+
+    // Brand lint: hex colour
+    #[test]
+    fn brand_flags_hex_colour() {
+        assert!(web_flags(
+            "primary: #ff6600",
+            crate::draft_parser::ArtifactKind::Brand
+        ));
+    }
+
+    // Brand lint: font stack
+    #[test]
+    fn brand_flags_font_stack() {
+        assert!(web_flags(
+            "Heading font: Helvetica Neue, Arial",
+            crate::draft_parser::ArtifactKind::Brand
+        ));
+    }
+
+    // Brand lint: measurement
+    #[test]
+    fn brand_flags_px_value() {
+        assert!(web_flags(
+            "Base size: 14px",
+            crate::draft_parser::ArtifactKind::Brand
+        ));
+    }
+
+    #[test]
+    fn brand_flags_rem_value() {
+        assert!(web_flags(
+            "Spacing unit: 1.5rem",
+            crate::draft_parser::ArtifactKind::Brand
+        ));
+    }
+
+    #[test]
+    fn brand_passes_role_based_token() {
+        // "background of primary CTAs" — no hex, no px
+        assert!(!web_flags(
+            "primary-action: background of primary CTAs",
+            crate::draft_parser::ArtifactKind::Brand
+        ));
+    }
+
+    // Routing table lint: framework macro
+    #[test]
+    fn routing_flags_get_macro() {
+        assert!(web_flags(
+            "get!(\"/api/users\")",
+            crate::draft_parser::ArtifactKind::RoutingTable
+        ));
+    }
+
+    // Routing table lint: regex
+    #[test]
+    fn routing_flags_regex_pattern() {
+        assert!(web_flags(
+            "Regex(r\"^/api/.*\")",
+            crate::draft_parser::ArtifactKind::RoutingTable
+        ));
+    }
+
+    #[test]
+    fn routing_passes_clean_route() {
+        // Headers are skipped, only prose is checked
+        // A clean route section with only "path:" and "component:" should pass
+        // unless function identifiers trigger
+        let findings = scan_web_kind_tokens(
+            "## Routes\n- path: /products\n  component: ProductScreen\n",
+            "test.md",
+            crate::draft_parser::ArtifactKind::RoutingTable,
+        );
+        // path: and component: are clean structured fields, not function calls
+        // The function-identifier pattern checks for word( — "path:" doesn't match
+        assert!(
+            findings.is_empty(),
+            "expected no findings for clean route, got: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
 }

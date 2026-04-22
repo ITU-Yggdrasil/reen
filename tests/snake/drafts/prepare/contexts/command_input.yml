@@ -28,6 +28,7 @@ functionalities:
   description: If the buffer is non-empty, removes and returns the oldest key event. If the buffer is empty, returns no key.
 - name: next_action
   description: 'Removes the oldest key from the buffer and maps it to a gameplay action using case-insensitive matching: w maps to move up, a maps to move left, s maps to move down, d maps to move right, and space maps to fire. If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted. If no valid action is found, returns no action.'
+realisation_target: client_also
 scenarios:
 - name: capture appends in arrival order
   given: key presses are waiting in standard input
@@ -68,44 +69,39 @@ synthesised_tests:
   citation: Scenarios / next_action on empty buffer
 - source: invariant
   given: CommandInput is newly initialized
-  when: the buffer is inspected
-  then: it is empty and ready to receive key presses
-  citation: 'functionality `new`: Initialises the buffer as an empty queue'
+  when: the buffer state is inspected
+  then: the buffer is empty and stdin source and buffer are stored as collaborators
+  citation: 'functionality `new`: Initialises the buffer as an empty queue and stores the stdin source and buffer as collaborators'
 - source: invariant
   given: the shared buffer is empty
   when: next_key is called
-  then: no key is returned
+  then: no key is returned and the buffer remains empty
   citation: 'functionality `next_key`: If the buffer is empty, returns no key'
 - source: invariant
-  given: the shared buffer contains 'w', 'a', 's', 'd' in order
-  when: next_action is called four times
-  then: move-up, move-left, move-down, and move-right actions are returned in that order
-  citation: 'functionality `next_action`: w maps to move up, a maps to move left, s maps to move down, d maps to move right'
+  given: the shared buffer contains "w", "a", "s", "d", and space
+  when: next_action is called five times
+  then: move-up, move-left, move-down, move-right, and fire actions are returned in order
+  citation: 'functionality `next_action`: w maps to move up, a maps to move left, s maps to move down, d maps to move right, and space maps to fire'
 - source: invariant
-  given: the shared buffer contains space
+  given: the shared buffer contains "W" (uppercase)
   when: next_action is called
-  then: a fire action is returned
-  citation: 'functionality `next_action`: space maps to fire'
-- source: invariant
-  given: the shared buffer contains 'W' (uppercase)
-  when: next_action is called
-  then: a move-up action is returned
+  then: a move-up action is returned using case-insensitive matching
   citation: 'functionality `next_action`: case-insensitive matching'
 - source: invariant
-  given: no key presses are available in stdin
+  given: the shared buffer contains "x", "y", "z", then "w"
+  when: next_action is called
+  then: the three invalid keys are discarded and a move-up action is returned
+  citation: 'functionality `next_action`: If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted'
+- source: invariant
+  given: no key presses are waiting in standard input
   when: capture is called
   then: the buffer remains unchanged
   citation: 'functionality `capture`: If no key presses are available, the buffer is unchanged'
 - source: invariant
-  given: the buffer already contains 'w' and new key presses 'a', 's' are available
+  given: the shared buffer contains "a", and new key presses "s", "d" are available in stdin
   when: capture is called
-  then: the buffer contains 'w', 'a', 's' in that order with new keys appended at the end
+  then: the buffer contains "a", "s", "d" with new keys appended to the end
   citation: 'functionality `capture`: Keys already in the buffer before this call remain in place; new keys follow them'
-- source: invariant
-  given: the shared buffer contains 'q', 'x', 'w' in order
-  when: next_action is called
-  then: invalid keys 'q' and 'x' are discarded and a move-up action is returned
-  citation: 'functionality `next_action`: If the key has no gameplay meaning, the process repeats until a valid key is found'
 vocabulary_bindings:
 - name: stdin_source
   resolution: role_player

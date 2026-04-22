@@ -24,6 +24,7 @@ functionalities:
   description: Stores the string renderer and the screen as collaborators. The string renderer is used to format each frame; the screen is updated on each render call.
 - name: render
   description: Asks the string renderer to format the current board picture and score as a text frame. Splits the frame into rows. For each row, positions the cursor at the start of that row on the screen and writes the row's text. After all rows are written, flushes the screen so the frame appears immediately. Every row begins at the start of its line so that the frame displays correctly in immediate-input terminal mode.
+realisation_target: client_also
 scenarios:
 - name: render a frame
   given: a new frame is ready with a board picture and a score
@@ -45,34 +46,34 @@ synthesised_tests:
   then: the terminal shows only the second frame without leftover content from the first
   citation: Scenarios / successive frames overwrite in place
 - source: invariant
-  given: TerminalRenderer is initialized with a string renderer and a screen
-  when: the renderer is created
+  given: a TerminalRenderer is constructed with a string renderer and a screen
+  when: the constructor completes
   then: the string renderer and screen are stored as collaborators for later use
   citation: 'functionality `new`: Stores the string renderer and the screen as collaborators'
 - source: invariant
-  given: a board picture and score are available for rendering
-  when: render is called
+  given: a TerminalRenderer has stored a string renderer and screen
+  when: render is called with a board picture and score
   then: the string renderer is asked to format the board picture and score into a text frame
   citation: 'functionality `render`: Asks the string renderer to format the current board picture and score as a text frame'
 - source: invariant
-  given: a formatted text frame with multiple rows exists
+  given: the string renderer has formatted a frame with multiple rows
   when: render processes the frame
-  then: the frame is split into individual rows for line-by-line rendering
+  then: the frame is split into individual rows
   citation: 'functionality `render`: Splits the frame into rows'
 - source: invariant
-  given: a multi-row text frame is being rendered
-  when: each row is written to the screen
-  then: the cursor is positioned at the start of each row before writing that row's text
+  given: a frame has been split into rows and the screen is ready
+  when: render writes each row
+  then: the cursor is positioned at the start of each row on the screen before the row's text is written
   citation: 'functionality `render`: For each row, positions the cursor at the start of that row on the screen and writes the row''s text'
 - source: invariant
   given: all rows of a frame have been written to the screen
   when: render completes
-  then: the screen is flushed so the complete frame appears immediately
+  then: the screen is flushed so the frame appears immediately
   citation: 'functionality `render`: After all rows are written, flushes the screen so the frame appears immediately'
 - source: invariant
-  given: a frame is being rendered in immediate-input terminal mode
-  when: each row is written
-  then: every row begins at the start of its line to ensure correct display
+  given: a frame with variable-length rows is ready to render
+  when: render writes rows that differ in length
+  then: each row begins at the start of its line, ensuring correct display in immediate-input terminal mode
   citation: 'functionality `render`: Every row begins at the start of its line so that the frame displays correctly in immediate-input terminal mode'
 vocabulary_bindings:
 - name: string_renderer
