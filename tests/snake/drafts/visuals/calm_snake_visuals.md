@@ -17,7 +17,8 @@ Communication should be:
 * Calm and mindful
 * Supportive and empathetic
 
-Avoid overly technical or complex language. The tone should feel natural and soothing, with a focus on creating a sense of peace and understanding. Example: "Find your calm, one breath at a time."
+Avoid overly technical or complex language. The tone should feel natural and soothing, with a focus on creating a sense of peace and understanding. Example: "Find your calm, one breath at a time." 
+There should be many peaceful and inspiring quotes in the background.
 
 ---
 
@@ -48,6 +49,7 @@ Lora is the primary typeface used across all communication. It reflects a modern
 
 * Headings should be gentle and clear, with ample spacing.
 * Body text should prioritize readability and a soothing rhythm.
+* The body text should be at least twice as big as the heading
 
 Fallback fonts include Georgia, Times New Roman, or system serif fonts.
 
@@ -95,7 +97,7 @@ Examples of correct usage should demonstrate a website with a soft gradient back
 ### Optional: Mission, Vision, and Values
 
 **Mission**
-To create a gentle, supportive space for mindfulness and mental well-being.
+<span style="font-size: 1.5em;">To create a gentle, supportive space for mindfulness and mental well-being.</span>
 
 **Vision**
 To be a trusted guide for those seeking calm, clarity, and balance in their lives.
