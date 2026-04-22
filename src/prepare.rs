@@ -14,7 +14,7 @@ use crate::prepared::{
 };
 use crate::workspace::Workspace;
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 
 #[derive(Debug, Clone)]
@@ -90,6 +90,9 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
         println!("Preparing {} draft(s)", selected_paths.len());
     }
 
+    // First pass: prepare all documents
+    let mut all_prepared: Vec<(std::path::PathBuf, PreparedArtifact)> = Vec::new();
+
     for path in &selected_paths {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
@@ -101,6 +104,15 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
         let synth = synthesise_tests(&prepared);
         prepared.synthesised_tests.extend(synth);
 
+        all_prepared.push((output_path, prepared));
+    }
+
+    // Second pass: classify contexts (realisation_target)
+    classify_contexts(&mut all_prepared, workspace);
+
+    // Third pass: report and write
+    for (idx, (output_path, prepared)) in all_prepared.iter().enumerate() {
+        let path = &selected_paths[idx];
         let blockers: Vec<_> = prepared.blocking_ambiguities().collect();
         if !blockers.is_empty() {
             blocking_total += blockers.len();
@@ -114,7 +126,7 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
                 eprintln!("  --> {}", location);
             }
         }
-        let yaml = serde_yaml::to_string(&prepared)?;
+        let yaml = serde_yaml::to_string(prepared)?;
         if options.dry_run {
             if options.verbose {
                 println!("[dry-run] would write {}", output_path.display());
@@ -124,7 +136,7 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
                 fs::create_dir_all(parent)
                     .with_context(|| format!("Failed to create {}", parent.display()))?;
             }
-            fs::write(&output_path, yaml)
+            fs::write(output_path, yaml)
                 .with_context(|| format!("Failed to write {}", output_path.display()))?;
             wrote += 1;
         }
@@ -355,7 +367,7 @@ fn prepare_data(data: &DataDraft, vocab: &DciVocabulary) -> Result<PreparedArtif
 
     let mut bindings = Vec::new();
 
-    // Reference graph enforcement: data drafts cannot reference operations
+    // Reference graph enforcement: scan all prose for references that violate the graph
     let all_prose = format!(
         "{} {} {}",
         data.purpose,
@@ -372,22 +384,21 @@ fn prepare_data(data: &DataDraft, vocab: &DciVocabulary) -> Result<PreparedArtif
     );
     for api_ref in extract_api_references(&all_prose) {
         if let Some(kind) = vocab.resolve_api(&api_ref) {
-            if kind == "operation" {
-                artifact.ambiguities.push(Ambiguity {
-                    message: format!(
-                        "Data draft `{}` references operation `{}`. \
-                         Operations are a context-level concern and cannot be referenced from data drafts.",
-                        data.info.title, api_ref
-                    ),
-                    severity: "blocking".to_string(),
-                    suggested_resolution: Some(
-                        "Move the operation reference to a context draft instead".to_string(),
-                    ),
-                    source_line: None,
-                });
+            if let Some(ambiguity) =
+                check_reference_graph(&data.info.title, "data", &api_ref, &kind)
+            {
+                artifact.ambiguities.push(ambiguity);
             }
         }
     }
+    // Check prose references to non-API vocabulary entries
+    check_prose_references(
+        &all_prose,
+        "data",
+        &data.info.title,
+        vocab,
+        &mut artifact.ambiguities,
+    );
 
     for attr in &data.attributes {
         artifact.attributes.push(AttributeSpec {
@@ -830,6 +841,259 @@ fn prepare_routing_table(
     artifact.vocabulary_bindings = bindings;
     artifact.ambiguities = ambiguities;
     Ok(artifact)
+}
+
+/// Validate that a reference from a source kind to a target kind is allowed
+/// per the DCI reference graph.
+///
+/// The authoritative graph:
+/// - data → data
+/// - projections → data + projections
+/// - operations → data
+/// - contexts → data + projections + operations + contexts + components + brand + routing_table
+/// - components → data + projections + brand + components + contexts
+/// - routing_table → components + data
+/// - brand → nothing
+fn is_reference_allowed(source_kind: &str, target_kind: &str) -> bool {
+    match source_kind {
+        "data" => target_kind == "data",
+        "projection" => matches!(target_kind, "data" | "projection"),
+        "operation" => target_kind == "data",
+        "context" => matches!(
+            target_kind,
+            "data" | "projection" | "operation" | "context" | "component" | "brand" | "routing_table"
+        ),
+        "component" => matches!(
+            target_kind,
+            "data" | "projection" | "brand" | "component" | "context"
+        ),
+        "routing_table" => matches!(target_kind, "component" | "data"),
+        "brand" => false, // brand references nothing
+        _ => false,
+    }
+}
+
+/// Check a vocabulary reference from a draft of the given source kind.
+/// Returns an ambiguity if the reference graph is violated.
+fn check_reference_graph(
+    source_title: &str,
+    source_kind: &str,
+    ref_name: &str,
+    ref_kind: &str,
+) -> Option<Ambiguity> {
+    if is_reference_allowed(source_kind, ref_kind) {
+        return None;
+    }
+
+    let kind_label = match source_kind {
+        "data" => "Data",
+        "projection" => "Projection",
+        "context" => "Context",
+        "component" => "Component",
+        "brand" => "Brand",
+        "routing_table" => "Routing table",
+        "operation" => "Operation",
+        _ => source_kind,
+    };
+
+    Some(Ambiguity {
+        message: format!(
+            "{kind_label} draft `{source_title}` references {ref_kind} `{ref_name}`. \
+             In DCI, {source_kind} drafts cannot reference {ref_kind} artifacts — \
+             this responsibility belongs at a different level of the architecture.",
+        ),
+        severity: "blocking".to_string(),
+        suggested_resolution: Some(format!(
+            "Move the reference to `{ref_name}` into a draft kind that is allowed to reference {ref_kind} artifacts",
+        )),
+        source_line: None,
+    })
+}
+
+/// Classify each context's `realisation_target` based on its transitive dependency graph.
+///
+/// Rules (from PLAN.md Phase 10):
+/// - A context touching only data/projections/brand/other-client_also-contexts → `client_also`
+/// - A context transitively touching an operation with secret-requiring auth → `server_only`
+/// - Anything else → `unknown`
+///
+/// Also checks for cycles in context→context dependencies and reports them as ambiguities.
+fn classify_contexts(
+    artifacts: &mut [(std::path::PathBuf, PreparedArtifact)],
+    workspace: &Workspace,
+) {
+    // Build a map from export name → index for quick lookup
+    let name_to_idx: BTreeMap<String, usize> = artifacts
+        .iter()
+        .enumerate()
+        .map(|(i, (_, a))| (a.export.name.clone(), i))
+        .collect();
+
+    // Build adjacency: for each context, collect the names it references
+    let mut context_deps: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    let mut touches_operation: BTreeSet<usize> = BTreeSet::new();
+
+    for (i, (_, artifact)) in artifacts.iter().enumerate() {
+        if artifact.kind != ArtifactKind::Context {
+            continue;
+        }
+
+        let mut deps = Vec::new();
+
+        // Role player types
+        for rp in &artifact.role_players {
+            deps.push(rp.data_type.clone());
+        }
+
+        // Vocabulary bindings — look for resolved references
+        for binding in &artifact.vocabulary_bindings {
+            if let Some(resolved) = &binding.resolved_to {
+                deps.push(resolved.clone());
+            }
+        }
+
+        // Check if this context touches operations (directly)
+        for binding in &artifact.vocabulary_bindings {
+            if binding.resolution == "operation" {
+                touches_operation.insert(i);
+            }
+        }
+
+        context_deps.insert(i, deps);
+    }
+
+    // Also check for operations in the prepared directory (from Phase 7 API ingestion)
+    let ops_dir = workspace.prepared_dir.join("operations");
+    let has_operations = ops_dir.is_dir();
+    let mut operation_names: BTreeSet<String> = BTreeSet::new();
+    let mut server_only_operations: BTreeSet<String> = BTreeSet::new();
+
+    if has_operations {
+        if let Ok(entries) = fs::read_dir(&ops_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("yml") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(op) =
+                            serde_yaml::from_str::<crate::prepared::ApiOperationSpec>(&content)
+                        {
+                            operation_names.insert(op.name.clone());
+                            // Operations with secret-requiring auth are server-only
+                            let auth_kind = op.auth.kind.as_str();
+                            if matches!(
+                                auth_kind,
+                                "api_key_header" | "api_key_body" | "bearer"
+                            ) {
+                                server_only_operations.insert(op.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build kind lookup from artifacts (immutable pass)
+    let artifact_kinds: Vec<ArtifactKind> = artifacts.iter().map(|(_, a)| a.kind.clone()).collect();
+
+    // Walk transitive deps for each context to determine classification (immutable pass)
+    let mut classifications: BTreeMap<usize, (String, Option<Ambiguity>)> = BTreeMap::new();
+
+    for (i, (_, artifact)) in artifacts.iter().enumerate() {
+        if artifact.kind != ArtifactKind::Context {
+            continue;
+        }
+
+        let mut visited = HashSet::new();
+        let mut stack = vec![i];
+        let mut is_server_only = false;
+        let mut has_cycle = false;
+
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                if current == i && visited.len() > 1 {
+                    has_cycle = true;
+                }
+                continue;
+            }
+
+            if touches_operation.contains(&current) {
+                is_server_only = true;
+            }
+
+            if let Some(deps) = context_deps.get(&current) {
+                for dep in deps {
+                    if let Some(&dep_idx) = name_to_idx.get(dep) {
+                        if artifact_kinds[dep_idx] == ArtifactKind::Context {
+                            stack.push(dep_idx);
+                        }
+                    }
+                    if server_only_operations.contains(dep) {
+                        is_server_only = true;
+                    }
+                }
+            }
+        }
+
+        if has_cycle {
+            classifications.insert(
+                i,
+                (
+                    "unknown".to_string(),
+                    Some(Ambiguity {
+                        message: format!(
+                            "Context `{}` has a circular dependency in its context→context reference graph. \
+                             This prevents reliable classification of its realisation target.",
+                            artifact.export.name,
+                        ),
+                        severity: "blocking".to_string(),
+                        suggested_resolution: Some(
+                            "Break the circular dependency by restructuring the context hierarchy"
+                                .to_string(),
+                        ),
+                        source_line: None,
+                    }),
+                ),
+            );
+        } else if is_server_only {
+            classifications.insert(i, ("server_only".to_string(), None));
+        } else {
+            classifications.insert(i, ("client_also".to_string(), None));
+        }
+    }
+
+    // Apply classifications (mutable pass)
+    for (idx, (target, ambiguity)) in classifications {
+        artifacts[idx].1.realisation_target = Some(target);
+        if let Some(amb) = ambiguity {
+            artifacts[idx].1.ambiguities.push(amb);
+        }
+    }
+}
+
+/// Scan prose text for vocabulary entries and check reference graph violations.
+fn check_prose_references(
+    text: &str,
+    source_kind: &str,
+    source_title: &str,
+    vocab: &DciVocabulary,
+    ambiguities: &mut Vec<Ambiguity>,
+) {
+    // Check each word against vocabulary entries
+    for (name, kind) in vocab.entries() {
+        // Only check names that appear as distinct words in the prose
+        if text.contains(name.as_str()) {
+            if let Some(ambiguity) = check_reference_graph(source_title, source_kind, name, kind) {
+                // Only flag if the name appears as a whole word (rough check)
+                let pattern = format!(r"\b{}\b", regex::escape(name));
+                if let Ok(re) = regex::Regex::new(&pattern) {
+                    if re.is_match(text) {
+                        ambiguities.push(ambiguity);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Extract path parameters from a route path template.

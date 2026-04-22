@@ -8,18 +8,21 @@ use std::path::Path;
 
 // ── DCI Vocabulary Manifest ───────────────────────────────────────
 
-/// The DCI ubiquitous vocabulary — the authoritative list of data and projection
-/// names available to any context draft.
+/// The DCI ubiquitous vocabulary — the authoritative list of data, projection,
+/// context, component, brand, and routing-table names available across drafts.
 ///
-/// Loaded from `drafts/vocabulary.yml`. Prepare refuses to resolve a name not
-/// present in the manifest or locally introduced in the same draft.
+/// Loaded from `drafts/vocabulary.yml` and auto-discovered from draft directories.
 /// Also loads ingested API types/operations from `drafts/.apis/manifest.yml`.
 #[derive(Debug, Clone, Default)]
 pub struct DciVocabulary {
-    /// Maps a name to its kind ("data" or "projection").
+    /// Maps a name to its kind ("data", "projection", "context", "component", "brand", "routing_table").
     entries: BTreeMap<String, String>,
     /// Maps `@<api>/<Name>` to its kind ("data" or "operation").
     api_entries: BTreeMap<String, String>,
+    /// Maps brand token references (`@brand/<token>` or `@<brand>/<token>`) to the brand name.
+    brand_tokens: BTreeMap<String, String>,
+    /// Default brand name (first brand discovered, or explicitly set).
+    default_brand: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +102,8 @@ impl DciVocabulary {
             ("routes", "routing_table"),
         ];
 
+        let mut brand_names = Vec::new();
+
         for &(subdir, kind) in dirs {
             let dir = drafts_dir.join(subdir);
             if !dir.is_dir() {
@@ -120,9 +125,18 @@ impl DciVocabulary {
                             .to_string()
                     });
                 if !name.is_empty() {
+                    if kind == "brand" {
+                        brand_names.push(name.clone());
+                    }
                     self.entries.insert(name, kind.to_string());
                 }
             }
+        }
+
+        // Set default brand (first discovered)
+        if !brand_names.is_empty() {
+            brand_names.sort();
+            self.default_brand = Some(brand_names[0].clone());
         }
 
         Ok(())
@@ -139,6 +153,38 @@ impl DciVocabulary {
     /// Check if a reference is an API reference (starts with `@`).
     pub fn is_api_reference(name: &str) -> bool {
         name.starts_with('@') && name.contains('/')
+    }
+
+    /// Resolve a `@brand/<token>` or `@<brand-name>/<token>` reference.
+    ///
+    /// For single-brand projects, `@brand/<token>` resolves to the default brand.
+    /// Multi-brand references use `@<brand-name>/<token>`.
+    pub fn resolve_brand_token(&self, reference: &str) -> Option<&str> {
+        if let Some(brand) = self.brand_tokens.get(reference) {
+            return Some(brand);
+        }
+        // Check @brand/<token> against default brand
+        if let Some(token) = reference.strip_prefix("@brand/") {
+            if let Some(default) = &self.default_brand {
+                let explicit = format!("@{}/{}", default, token);
+                if self.brand_tokens.contains_key(&explicit) {
+                    return Some(default);
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if a reference is a brand token reference (starts with `@brand/` or `@<brand>/`).
+    pub fn is_brand_reference(name: &str) -> bool {
+        name.starts_with("@brand/")
+            || (name.starts_with('@')
+                && name.contains('/')
+                && !Self::is_api_reference(name))
+    }
+
+    pub fn default_brand(&self) -> Option<&str> {
+        self.default_brand.as_deref()
     }
 
     pub fn entries(&self) -> &BTreeMap<String, String> {
