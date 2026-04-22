@@ -4829,6 +4829,12 @@ assets-dir = "public"
 site-addr = "127.0.0.1:3000"
 reload-port = 3001
 ===END_FILE===
+===FILE: .gitignore===
+target/
+.cargo-leptos/
+.leptos/
+.reen/
+===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
 async fn main() {
@@ -4852,6 +4858,9 @@ use leptos_router::components::{Route, Router, Routes};
 #[component]
 pub fn App() -> impl IntoView {
     view! {
+        <style>
+            {include_str!("../style/app.css")}
+        </style>
         <Router>
             <Routes fallback=|| view! { <main></main> }>
                 <Route path="/" view=|| view! { <main class="shell"></main> }/>
@@ -4920,6 +4929,12 @@ style-file = "style/app.css"
 assets-dir = "public"
 site-addr = "127.0.0.1:3000"
 reload-port = 3001
+===END_FILE===
+===FILE: .gitignore===
+target/
+.cargo-leptos/
+.leptos/
+.reen/
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -4991,6 +5006,12 @@ assets-dir = "public"
 site-addr = "127.0.0.1:3000"
 reload-port = 3001
 ===END_FILE===
+===FILE: .gitignore===
+target/
+.cargo-leptos/
+.leptos/
+.reen/
+===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
 async fn main() {
@@ -5014,6 +5035,9 @@ use leptos_router::components::{Route, Router, Routes};
 #[component]
 pub fn App() -> impl IntoView {
     view! {
+        <style>
+            {include_str!("../style/app.css")}
+        </style>
         <Router>
             <Routes fallback=|| view! { <main></main> }>
                 <Route path="/" view=|| view! { <main class="shell"></main> }/>

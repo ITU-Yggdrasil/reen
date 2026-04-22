@@ -117,6 +117,9 @@ use leptos_router::*;
 #[component]
 pub fn App() -> impl IntoView {
     view! {
+        <style>
+            {include_str!("../style/app.css")}
+        </style>
         <Router>
             <Routes>
                 <Route path="/" view=HomePage/>
@@ -574,6 +577,12 @@ fn validate_app_rs(context_name: &str, content: &str) -> Result<()> {
             context_name
         );
     }
+    if !content.contains("include_str!(\"../style/app.css\")") {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' does not permanently reference style/app.css from src/app.rs",
+            context_name
+        );
+    }
     let markers = [
         "path=\"/\"",
         "path = \"/\"",
@@ -819,6 +828,7 @@ mod tests {
         assert!(rendered.contains("`style/app.css` minimum shape:"));
         assert!(rendered.contains("[package.metadata.leptos]"));
         assert!(rendered.contains("[lib]\nname = \"app_name\""));
+        assert!(rendered.contains("include_str!(\"../style/app.css\")"));
         assert!(rendered.contains("target/"));
         assert!(rendered.contains("cargo leptos watch"));
         assert!(

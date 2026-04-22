@@ -36,9 +36,9 @@ The TestCompany icon is a simple, stylized contained within a circle. It should 
 **Color**
 The visual identity is built on a minimal, high-contrast palette.
 
-Black and white form the foundation, creating clarity and strong visual structure. Red is used as a distinctive accent to introduce emphasis and energy.
+Red and white form the foundation, creating clarity and strong visual structure. Red is used as a distinctive accent to introduce emphasis and energy.
 
-Additional colors such as green, orange, and blue may be used sparingly to support communication (for example, to indicate different states or highlight information), but should never dominate the overall expression.
+Additional colors such as green and blue may be used sparingly to support communication (for example, to indicate different states or highlight information), but should never dominate the overall expression.
 
 Color usage should always prioritize legibility and balance, with generous use of white space.
 
