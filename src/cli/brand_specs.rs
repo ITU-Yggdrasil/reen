@@ -147,10 +147,7 @@ pub fn missing_required_brand_spec_parts(spec_content: &str) -> Vec<String> {
 
     if !saw_title {
         if let Some(found) = saw_wrong_title {
-            missing.push(format!(
-                "Missing title '# {}' (found '# {}')",
-                TITLE, found
-            ));
+            missing.push(format!("Missing title '# {}' (found '# {}')", TITLE, found));
         } else {
             missing.push(format!("Missing title '# {}'", TITLE));
         }
@@ -848,7 +845,9 @@ Ok.
 - Use dotted tokens."#;
 
         let missing = missing_required_brand_spec_parts(spec);
-        assert!(missing.iter().any(|m| m.contains("Missing title '# Brand Identity Specification'")));
+        assert!(missing
+            .iter()
+            .any(|m| m.contains("Missing title '# Brand Identity Specification'")));
         assert!(missing
             .iter()
             .any(|m| m == "Missing section '## Brand Metadata'"));

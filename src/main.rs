@@ -151,7 +151,7 @@ enum CreateCommands {
     Implementation {
         #[arg(long, help = "Only process drafts from the visuals/ folder")]
         visuals: bool,
-    
+
         #[arg(
             long,
             help = "When compilation fails after code generation, invoke the automatic compilation-fix loop"
@@ -175,8 +175,6 @@ enum CreateCommands {
         names: Vec<String>,
     },
 }
-
-
 
 #[derive(Args)]
 struct CreateArgs {

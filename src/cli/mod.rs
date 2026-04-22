@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 mod agent_executor;
+mod brand_scaffold;
 mod brand_specs;
 mod cargo_commands;
 mod compilation_fix;
@@ -24,9 +25,10 @@ mod rate_limiter;
 mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
+use brand_scaffold::render_brand_scaffold_contract;
 use brand_specs::{
-    collect_brand_token_references, is_brand_draft_path, is_brand_spec_path,
-    missing_required_brand_spec_parts, unresolved_brand_token_references, validate_brand_spec_content,
+    is_brand_draft_path, is_brand_spec_path, missing_required_brand_spec_parts,
+    unresolved_brand_token_references, validate_brand_spec_content,
 };
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
@@ -204,12 +206,6 @@ struct ImplementationRunnable {
     context_content: String,
     estimated: usize,
     cache_hit: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct GeneratedOutputFile {
-    path: PathBuf,
-    content: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1006,6 +1002,7 @@ pub async fn create_implementation(
 
     let mut progress = ProgressIndicator::new(total_count);
     let mut updated_count = 0;
+    let mut failed_count = 0;
     let mut updated_in_run: HashSet<String> = HashSet::new();
     let mut had_unspecified = false;
     let mut brand_missing_requirements: std::collections::BTreeMap<PathBuf, Vec<String>> =
@@ -1072,9 +1069,7 @@ pub async fn create_implementation(
             }
 
             let mut dependency_context = build_dependency_context(&node)?;
-            if let Some(target_type_name) = infer_target_type_name(&context_file)? {
-                dependency_context.insert("target_type_name".to_string(), json!(target_type_name));
-            }
+            augment_implementation_generation_context(&context_file, &mut dependency_context)?;
             let context_content = fs::read_to_string(&context_file).unwrap_or_default();
 
             let executor = if agent_name == "create_implementation_brand" {
@@ -1295,6 +1290,7 @@ pub async fn create_implementation(
                             }
                         }
                         Err(e) => {
+                            failed_count += 1;
                             if e.to_string().contains("unfinished specification") {
                                 had_unspecified = true;
                             }
@@ -1377,6 +1373,7 @@ pub async fn create_implementation(
                             }
                         }
                         Err(e) => {
+                            failed_count += 1;
                             if e.to_string().contains("unfinished specification") {
                                 had_unspecified = true;
                             }
@@ -1458,6 +1455,7 @@ pub async fn create_implementation(
                         }
                     }
                     Err(e) => {
+                        failed_count += 1;
                         if e.to_string().contains("unfinished specification") {
                             had_unspecified = true;
                         }
@@ -1485,6 +1483,13 @@ pub async fn create_implementation(
             }
         }
         anyhow::bail!(msg);
+    }
+
+    if failed_count > 0 {
+        anyhow::bail!(
+            "Implementation generation failed for {} item(s). Aborting before compile.",
+            failed_count
+        );
     }
 
     // Always compile after generation. Auto-fix is opt-in via --fix.
@@ -1558,6 +1563,22 @@ fn implementation_agent_name(context_file: &Path) -> &'static str {
     } else {
         "create_implementation"
     }
+}
+
+fn augment_implementation_generation_context(
+    context_file: &Path,
+    additional_context: &mut HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    if let Some(target_type_name) = infer_target_type_name(context_file)? {
+        additional_context.insert("target_type_name".to_string(), json!(target_type_name));
+    }
+    if implementation_agent_name(context_file) == "create_implementation_brand" {
+        additional_context.insert(
+            "brand_scaffold_contract".to_string(),
+            json!(render_brand_scaffold_contract()),
+        );
+    }
+    Ok(())
 }
 
 fn validate_implementation_scaffold_ownership(context_files: &[PathBuf]) -> Result<()> {
@@ -1643,226 +1664,12 @@ fn finalize_brand_implementation_output(
     config: &Config,
     impl_result: String,
 ) -> Result<()> {
-    let generated_files = parse_generated_output_files(&impl_result)?;
-    validate_brand_generated_output(context_file, context_name, &generated_files)?;
-
-    for file in &generated_files {
-        if let Some(parent) = file.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create brand implementation directory {}",
-                    parent.display()
-                )
-            })?;
-        }
-        fs::write(&file.path, &file.content).with_context(|| {
-            format!(
-                "Failed to write brand implementation file {}",
-                file.path.display()
-            )
-        })?;
-        if config.verbose {
-            println!("Written brand implementation file: {}", file.path.display());
-        }
-    }
-
-    if let Some((failed_file, message)) = generated_files
-        .iter()
-        .filter(|file| file.path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
-        .find_map(|file| {
-            extract_implementation_failure_message(&file.content)
-                .map(|message| (file.path.clone(), message))
-        })
-    {
-        eprintln!("error[impl:compile_error]:");
-        eprintln!("\u{001b}[31m{}\u{001b}[0m", context_file.display());
-        eprintln!(
-            "  Generated brand implementation for '{}' contains an explicit failure marker in {}:",
-            context_name,
-            failed_file.display()
-        );
-        eprintln!();
-        for line in message.lines() {
-            eprintln!("  {}", line);
-        }
-        eprintln!();
-        anyhow::bail!(
-            "Generated brand implementation for '{}' contains explicit failure marker",
-            context_name
-        );
-    }
-
-    Ok(())
-}
-
-fn parse_generated_output_files(output: &str) -> Result<Vec<GeneratedOutputFile>> {
-    const FILE_PREFIX: &str = "===FILE:";
-    const FILE_SUFFIX: &str = "===";
-    const END_MARKER: &str = "===END_FILE===";
-
-    let mut files = Vec::new();
-    let mut current_path: Option<String> = None;
-    let mut current_lines: Vec<String> = Vec::new();
-    let mut seen_paths = HashSet::new();
-
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(FILE_PREFIX) && trimmed.ends_with(FILE_SUFFIX) {
-            if current_path.is_some() {
-                anyhow::bail!(
-                    "generated output started a new file block before closing the previous one"
-                );
-            }
-            let raw_path = trimmed
-                .trim_start_matches(FILE_PREFIX)
-                .trim_end_matches(FILE_SUFFIX)
-                .trim();
-            if raw_path.is_empty() {
-                anyhow::bail!("generated output declared an empty file path");
-            }
-            current_path = Some(raw_path.to_string());
-            current_lines.clear();
-            continue;
-        }
-
-        if trimmed == END_MARKER {
-            let raw_path = current_path.take().ok_or_else(|| {
-                anyhow::anyhow!("generated output ended a file block before starting one")
-            })?;
-            let path = validate_generated_output_path(&raw_path)?;
-            let key = path.to_string_lossy().to_string();
-            if !seen_paths.insert(key.clone()) {
-                anyhow::bail!("generated output contains duplicate file entry '{}'", key);
-            }
-            files.push(GeneratedOutputFile {
-                path,
-                content: current_lines.join("\n"),
-            });
-            current_lines.clear();
-            continue;
-        }
-
-        if current_path.is_some() {
-            current_lines.push(line.to_string());
-        } else if !trimmed.is_empty() {
-            anyhow::bail!("generated output contains non-file content outside file blocks");
-        }
-    }
-
-    if current_path.is_some() {
-        anyhow::bail!("generated output ended before closing the last file block");
-    }
-    if files.is_empty() {
-        anyhow::bail!("generated output did not contain any file blocks");
-    }
-
-    Ok(files)
-}
-
-fn validate_generated_output_path(raw_path: &str) -> Result<PathBuf> {
-    let path = Path::new(raw_path);
-    if path.is_absolute() {
-        anyhow::bail!("generated output path '{}' must be relative", raw_path);
-    }
-
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => normalized.push(part),
-            _ => anyhow::bail!(
-                "generated output path '{}' contains disallowed path traversal or prefix components",
-                raw_path
-            ),
-        }
-    }
-
-    if normalized.as_os_str().is_empty() {
-        anyhow::bail!(
-            "generated output path '{}' is empty after normalization",
-            raw_path
-        );
-    }
-
-    Ok(normalized)
-}
-
-fn validate_brand_generated_output(
-    context_file: &Path,
-    context_name: &str,
-    generated_files: &[GeneratedOutputFile],
-) -> Result<()> {
-    let required_paths = [
-        Path::new("Cargo.toml"),
-        Path::new("Leptos.toml"),
-        Path::new("src/main.rs"),
-        Path::new("src/lib.rs"),
-    ];
-    for required in required_paths {
-        if !generated_files.iter().any(|file| file.path == required) {
-            anyhow::bail!(
-                "Generated brand implementation for '{}' is missing required scaffold file '{}'",
-                context_name,
-                required.display()
-            );
-        }
-    }
-
-    if !generated_files
-        .iter()
-        .any(|file| file.path.starts_with("style") && file.path.file_name().is_some())
-    {
-        anyhow::bail!(
-            "Generated brand implementation for '{}' must include at least one file under style/",
-            context_name
-        );
-    }
-
-    let lib_rs = generated_files
-        .iter()
-        .find(|file| file.path == Path::new("src/lib.rs"))
-        .ok_or_else(|| anyhow::anyhow!("Generated brand implementation is missing src/lib.rs"))?;
-    if !contains_root_route(&lib_rs.content) {
-        anyhow::bail!(
-            "Generated brand implementation for '{}' does not define a detectable root route in src/lib.rs",
-            context_name
-        );
-    }
-
-    let combined = generated_files
-        .iter()
-        .map(|file| file.content.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let referenced_tokens = collect_brand_token_references(&combined);
-    if !referenced_tokens.is_empty() {
-        let unresolved = unresolved_brand_token_references(&combined, SPECIFICATIONS_DIR)
-            .with_context(|| {
-                format!(
-                    "failed to validate generated brand token references for {}",
-                    context_file.display()
-                )
-            })?;
-        if !unresolved.is_empty() {
-            anyhow::bail!(
-                "Generated brand implementation for '{}' references undefined brand token(s): {}",
-                context_name,
-                unresolved.join(", ")
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn contains_root_route(content: &str) -> bool {
-    let markers = [
-        "path=\"/\"",
-        "path = \"/\"",
-        "path=path!(\"/\")",
-        "path = path!(\"/\")",
-        "StaticSegment(\"\")",
-    ];
-    content.contains("Route") && markers.iter().any(|marker| content.contains(marker))
+    brand_scaffold::finalize_brand_implementation_output(
+        context_file,
+        context_name,
+        config,
+        impl_result,
+    )
 }
 
 /// Extract Rust code from agent output
@@ -1917,7 +1724,7 @@ fn extract_compile_error_message(code: &str) -> Option<String> {
     Some(unescape_common_rust_string_escapes(raw))
 }
 
-fn extract_implementation_failure_message(code: &str) -> Option<String> {
+pub(crate) fn extract_implementation_failure_message(code: &str) -> Option<String> {
     if let Some(msg) = extract_compile_error_message(code) {
         return Some(msg);
     }
@@ -2412,7 +2219,11 @@ fn json_value_to_string_vec(value: serde_json::Value) -> Option<Vec<String>> {
                 .into_iter()
                 .filter_map(json_value_to_string)
                 .collect::<Vec<_>>();
-            if values.is_empty() { None } else { Some(values) }
+            if values.is_empty() {
+                None
+            } else {
+                Some(values)
+            }
         }
         serde_json::Value::String(s) => Some(vec![s]),
         serde_json::Value::Null => None,
@@ -2421,7 +2232,10 @@ fn json_value_to_string_vec(value: serde_json::Value) -> Option<Vec<String>> {
 }
 
 impl CacheAgentInput {
-    fn new_spec_input(draft_content: String, mut additional: HashMap<String, serde_json::Value>) -> Self {
+    fn new_spec_input(
+        draft_content: String,
+        mut additional: HashMap<String, serde_json::Value>,
+    ) -> Self {
         let openapi_content = additional
             .remove("openapi_content")
             .and_then(json_value_to_string);
@@ -2585,9 +2399,7 @@ fn clear_stage_agent_cache_entries_by_name(
                     )
                 })?;
                 let mut additional = build_dependency_context(&node)?;
-                if let Some(target_type_name) = infer_target_type_name(&context_file)? {
-                    additional.insert("target_type_name".to_string(), json!(target_type_name));
-                }
+                augment_implementation_generation_context(&context_file, &mut additional)?;
                 candidates.push((
                     implementation_agent_name(&context_file).to_string(),
                     CacheAgentInput::new_context_input(context_content, additional),
@@ -4223,26 +4035,30 @@ fn to_snake_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dependency_context, build_dependency_drafts_from_context, build_dependency_manifest,
+        augment_implementation_generation_context, build_dependency_context,
+        build_dependency_drafts_from_context, build_dependency_manifest,
         build_implementation_execution_plan, build_implemented_dependency_manifest,
         build_specification_context, build_specification_execution_plan, clear_cache,
-        determine_bdd_test_paths, determine_draft_input_path, determine_implementation_output_path,
-        determine_specification_agent, determine_specification_output_path,
-        ensure_dev_dependency_entry, extract_actionable_blocking_bullets,
-        extract_compile_error_message, generated_project_structure_paths,
-        implementation_agent_name, instructions_model_hash, parse_generated_files,
-        parse_generated_output_files, resolve_input_files, sync_managed_block,
-        validate_brand_generated_output, validate_implementation_scaffold_ownership,
-        CacheAgentInput, CategoryFilter, Config, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
-        create_implementation, DRAFTS_DIR,
+        create_implementation, determine_bdd_test_paths, determine_draft_input_path,
+        determine_implementation_output_path, determine_specification_agent,
+        determine_specification_output_path, ensure_dev_dependency_entry,
+        extract_actionable_blocking_bullets, extract_compile_error_message,
+        generated_project_structure_paths, implementation_agent_name, instructions_model_hash,
+        parse_generated_files, resolve_input_files, sync_managed_block,
+        validate_implementation_scaffold_ownership, CacheAgentInput, CategoryFilter, Config,
+        BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, DRAFTS_DIR,
     };
     use crate::cli::agent_executor::AgentExecutor;
+    use crate::cli::brand_scaffold::{
+        render_brand_scaffold_contract, BrandEnvelopeParser, BrandScaffoldValidator,
+    };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
     use reen::execution::{
         build_agent_input, cache_key_for_input, AgentModelRegistry, AgentRegistry,
     };
     use reen::registries::{FileAgentModelRegistry, FileAgentRegistry};
+    use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -4952,7 +4768,7 @@ name = "acme"
 use leptos_router::components::Route;
 ===END_FILE==="#;
 
-        let files = parse_generated_output_files(output).expect("parse generated output files");
+        let files = BrandEnvelopeParser::parse(output).expect("parse generated output files");
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path, PathBuf::from("Cargo.toml"));
         assert!(files[0].content.contains("[package]"));
@@ -4965,31 +4781,86 @@ use leptos_router::components::Route;
 oops
 ===END_FILE==="#;
 
-        let err =
-            parse_generated_output_files(output).expect_err("expected path traversal failure");
+        let err = BrandEnvelopeParser::parse(output).expect_err("expected path traversal failure");
         assert!(err.to_string().contains("disallowed path traversal"));
     }
 
     #[test]
-    fn validate_brand_generated_output_requires_scaffold_files_and_root_route() {
-        let files = parse_generated_output_files(
+    fn validate_brand_generated_output_requires_leptos_scaffold_files_and_root_route() {
+        let files = BrandEnvelopeParser::parse(
             r#"===FILE: Cargo.toml===
 [package]
 name = "acme"
+[package.metadata.leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+[lib]
+crate-type = ["cdylib", "rlib"]
+[features]
+hydrate = []
+ssr = []
+[dependencies]
+leptos = "0.6"
+leptos_router = "0.6"
+leptos_axum = "0.6"
+axum = "0.7"
 ===END_FILE===
 ===FILE: Leptos.toml===
+[package]
+name = "acme"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
 output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+===END_FILE===
+===FILE: .gitignore===
+target/
+.cargo-leptos/
+.leptos/
+.reen/
 ===END_FILE===
 ===FILE: src/main.rs===
-fn main() {}
+#[tokio::main]
+async fn main() {
+    let leptos_options = leptos::get_configuration(None).await.unwrap().leptos_options;
+    let routes = leptos_axum::generate_route_list(|| view! { <App/> });
+    let app = axum::Router::new()
+        .leptos_routes(&leptos_options, routes, || view! { <App/> })
+        .with_state(leptos_options);
+    let listener = tokio::net::TcpListener::bind(leptos_options.site_addr).await.unwrap();
+    axum::serve(listener, app.into_make_service()).await.unwrap();
+}
 ===END_FILE===
 ===FILE: src/lib.rs===
+pub mod app;
+pub use app::App;
+===END_FILE===
+===FILE: src/app.rs===
 use leptos::*;
 use leptos_router::components::{Route, Router, Routes};
 
 #[component]
 pub fn App() -> impl IntoView {
     view! {
+        <style>
+            {include_str!("../style/app.css")}
+        </style>
         <Router>
             <Routes fallback=|| view! { <main></main> }>
                 <Route path="/" view=|| view! { <main class="shell"></main> }/>
@@ -5000,43 +4871,238 @@ pub fn App() -> impl IntoView {
 ===END_FILE===
 ===FILE: style/app.css===
 :root { --brand-colors-primary-default: #112233; }
+===END_FILE===
+===FILE: public/favicon.ico===
+placeholder
 ===END_FILE==="#,
         )
         .expect("parse");
 
-        validate_brand_generated_output(Path::new("specifications/brands/acme.md"), "acme", &files)
-            .expect("valid brand generated output");
+        BrandScaffoldValidator::validate(
+            Path::new("specifications/brands/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect("valid brand generated output");
     }
 
     #[test]
     fn validate_brand_generated_output_rejects_missing_root_route() {
-        let files = parse_generated_output_files(
+        let files = BrandEnvelopeParser::parse(
             r#"===FILE: Cargo.toml===
 [package]
 name = "acme"
+[package.metadata.leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+[lib]
+crate-type = ["cdylib", "rlib"]
+[features]
+hydrate = []
+ssr = []
+[dependencies]
+leptos = "0.6"
+leptos_router = "0.6"
+leptos_axum = "0.6"
+axum = "0.7"
 ===END_FILE===
 ===FILE: Leptos.toml===
+[package]
+name = "acme"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
 output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+===END_FILE===
+===FILE: .gitignore===
+target/
+.cargo-leptos/
+.leptos/
+.reen/
 ===END_FILE===
 ===FILE: src/main.rs===
-fn main() {}
+#[tokio::main]
+async fn main() {
+    let leptos_options = leptos::get_configuration(None).await.unwrap().leptos_options;
+    let routes = leptos_axum::generate_route_list(|| view! { <App/> });
+    let app = axum::Router::new()
+        .leptos_routes(&leptos_options, routes, || view! { <App/> });
+    let listener = tokio::net::TcpListener::bind(leptos_options.site_addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
 ===END_FILE===
 ===FILE: src/lib.rs===
+pub mod app;
+pub use app::App;
+===END_FILE===
+===FILE: src/app.rs===
 pub fn app() {}
 ===END_FILE===
 ===FILE: style/app.css===
-:root {}
+:root { --brand-colors-primary-default: #112233; }
+===END_FILE===
+===FILE: public/favicon.ico===
+placeholder
 ===END_FILE==="#,
         )
         .expect("parse");
 
-        let err = validate_brand_generated_output(
+        let err = BrandScaffoldValidator::validate(
             Path::new("specifications/brands/acme.md"),
             "acme",
             &files,
         )
         .expect_err("expected missing root route failure");
-        assert!(err.to_string().contains("root route"));
+        assert!(
+            err.to_string().contains("App router")
+                || err.to_string().contains("root route")
+                || err.to_string().contains("Axum SSR wiring")
+        );
+    }
+
+    #[test]
+    fn validate_brand_generated_output_rejects_missing_package_metadata_leptos() {
+        let files = BrandEnvelopeParser::parse(
+            r#"===FILE: Cargo.toml===
+[package]
+name = "acme"
+[features]
+hydrate = []
+ssr = []
+[dependencies]
+leptos = "0.6"
+leptos_router = "0.6"
+leptos_axum = "0.6"
+axum = "0.7"
+===END_FILE===
+===FILE: Leptos.toml===
+[package]
+name = "acme"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+===END_FILE===
+===FILE: .gitignore===
+target/
+.cargo-leptos/
+.leptos/
+.reen/
+===END_FILE===
+===FILE: src/main.rs===
+#[tokio::main]
+async fn main() {
+    let leptos_options = leptos::get_configuration(None).await.unwrap().leptos_options;
+    let routes = leptos_axum::generate_route_list(|| view! { <App/> });
+    let app = axum::Router::new()
+        .leptos_routes(&leptos_options, routes, || view! { <App/> })
+        .with_state(leptos_options);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    axum::serve(listener, app.into_make_service()).await.unwrap();
+}
+===END_FILE===
+===FILE: src/lib.rs===
+pub mod app;
+pub use app::App;
+===END_FILE===
+===FILE: src/app.rs===
+use leptos::*;
+use leptos_router::components::{Route, Router, Routes};
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>
+            {include_str!("../style/app.css")}
+        </style>
+        <Router>
+            <Routes fallback=|| view! { <main></main> }>
+                <Route path="/" view=|| view! { <main class="shell"></main> }/>
+            </Routes>
+        </Router>
+    }
+}
+===END_FILE===
+===FILE: style/app.css===
+:root { --brand-colors-primary-default: #112233; }
+===END_FILE===
+===FILE: public/favicon.ico===
+placeholder
+===END_FILE==="#,
+        )
+        .expect("parse");
+
+        let err = BrandScaffoldValidator::validate(
+            Path::new("specifications/brands/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect_err("expected missing package metadata failure");
+        assert!(err.to_string().contains("[package.metadata.leptos]"));
+    }
+
+    #[test]
+    fn implementation_context_adds_brand_scaffold_contract_only_for_brand_specs() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_impl_context");
+        fs::create_dir_all(root.join("specifications/brands")).expect("mkdir brands");
+        fs::create_dir_all(root.join("specifications/contexts")).expect("mkdir contexts");
+        fs::write(
+            root.join("specifications/brands/acme.md"),
+            "# Brand Identity Specification\n\n## Description\nplaceholder",
+        )
+        .expect("write brand spec");
+        fs::write(
+            root.join("specifications/contexts/account.md"),
+            "# Account\n\n## Description\nplaceholder",
+        )
+        .expect("write context spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+
+        let mut brand_context = HashMap::new();
+        augment_implementation_generation_context(
+            Path::new("specifications/brands/acme.md"),
+            &mut brand_context,
+        )
+        .expect("augment brand context");
+        assert_eq!(
+            brand_context.get("brand_scaffold_contract"),
+            Some(&json!(render_brand_scaffold_contract()))
+        );
+
+        let mut non_brand_context = HashMap::new();
+        augment_implementation_generation_context(
+            Path::new("specifications/contexts/account.md"),
+            &mut non_brand_context,
+        )
+        .expect("augment non-brand context");
+        assert!(!non_brand_context.contains_key("brand_scaffold_contract"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -5109,7 +5175,8 @@ pub fn app() {}
         let agent_name = determine_specification_agent(&node.input_path, DRAFTS_DIR);
         let executor = AgentExecutor::new(agent_name, &config).expect("executor");
 
-        let clear_input = CacheAgentInput::new_spec_input(draft_content.clone(), additional.clone());
+        let clear_input =
+            CacheAgentInput::new_spec_input(draft_content.clone(), additional.clone());
         let runner_input = build_agent_input(agent_name, &draft_content, additional.clone());
 
         let agent_registry = FileAgentRegistry::new(None);
