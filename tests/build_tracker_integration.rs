@@ -246,6 +246,60 @@ fn prepare_dry_run_does_not_write_tracker() {
 }
 
 #[test]
+fn prepare_rejects_implementation_speak_role_player() {
+    let root = temp_project_dir("boundary_impl_speak");
+    let draft = r#"# Context: BadExample
+
+## Purpose
+Demonstrates an implementation-speak leak.
+
+## Role Players
+- store: SessionStore — persists sessions
+- clock: Clock — provides the current time
+
+## Role Methods
+### store
+- save: saves the session
+
+### clock
+- now: returns the current time
+
+## Functionalities
+### do_thing
+Calls store save and clock now.
+
+## Scenarios
+### happy path
+Given: a store and clock
+When: do_thing is invoked
+Then: session is saved
+"#;
+    write_file(&root, "drafts/contexts/bad_example.md", draft);
+
+    let output = run_reen(&root, &["prepare"]);
+    assert!(!output.status.success(), "prepare should fail with unresolved references");
+
+    let err = stderr(&output);
+    assert!(
+        err.contains("implementation-speak"),
+        "error should mention implementation-speak, got: {}",
+        err
+    );
+    assert!(
+        err.contains("SessionStore"),
+        "error should name SessionStore, got: {}",
+        err
+    );
+    assert!(
+        err.contains("Clock"),
+        "error should name Clock, got: {}",
+        err
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn clean_removes_tracker_prepared_and_owned_source() {
     let root = temp_project_dir("tracker_clean");
     write_file(&root, "drafts/data/Account.md", ACCOUNT_DRAFT);

@@ -182,8 +182,8 @@ Then: widget is handled
     assert!(!output.status.success());
     let err = stderr(&output);
     assert!(
-        err.contains("Widget") && err.contains("vocabulary"),
-        "expected vocabulary ambiguity about Widget, got: {err}"
+        err.contains("Widget") && err.contains("not declared"),
+        "expected unresolved reference error about Widget, got: {err}"
     );
 
     let _ = fs::remove_dir_all(root);

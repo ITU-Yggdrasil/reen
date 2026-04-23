@@ -451,27 +451,28 @@ fn prepare_context(ctx: &ContextDraft, vocab: &DciVocabulary) -> Result<Prepared
                     resolved_to: Some(rp.data_type.clone()),
                 });
             }
-        } else {
-            ambiguities.push(Ambiguity {
-                message: if DciVocabulary::is_api_reference(&rp.data_type) {
-                    format!(
+        } else if !is_builtin_primitive(&rp.data_type) {
+            ambiguities.push(if DciVocabulary::is_api_reference(&rp.data_type) {
+                Ambiguity {
+                    message: format!(
                         "Role player `{}` references `{}` which is not in the API manifest. \
                          Either add the type to the boundary draft whitelist or correct the name.",
                         rp.name, rp.data_type
-                    )
-                } else {
-                    format!(
-                        "Role player `{}` references `{}` which is not in the vocabulary manifest. \
-                         Is it a data type or projection that should be added to the manifest?",
-                        rp.name, rp.data_type
-                    )
-                },
-                severity: "blocking".to_string(),
-                suggested_resolution: Some(format!(
-                    "Add `{}` to the vocabulary manifest as a data or projection type",
-                    rp.data_type
-                )),
-                source_line: None,
+                    ),
+                    severity: "blocking".to_string(),
+                    suggested_resolution: Some(format!(
+                        "Add `{}` to the API manifest",
+                        rp.data_type
+                    )),
+                    source_line: None,
+                }
+            } else {
+                unresolved_reference_error(
+                    &ctx.info.relative_path,
+                    "role player",
+                    &rp.name,
+                    &rp.data_type,
+                )
             });
             bindings.push(VocabularyBinding {
                 name: rp.data_type.clone(),
@@ -676,19 +677,13 @@ fn prepare_projection(proj: &ProjectionDraft, vocab: &DciVocabulary) -> Result<P
                 resolution: resolution.clone(),
                 resolved_to: Some(proj.source.clone()),
             });
-        } else {
-            ambiguities.push(Ambiguity {
-                message: format!(
-                    "Projection source `{}` is not in the vocabulary manifest",
-                    proj.source
-                ),
-                severity: "blocking".to_string(),
-                suggested_resolution: Some(format!(
-                    "Add `{}` to the vocabulary manifest as a data type",
-                    proj.source
-                )),
-                source_line: None,
-            });
+        } else if !is_builtin_primitive(&proj.source) {
+            ambiguities.push(unresolved_reference_error(
+                &proj.info.relative_path,
+                "projection source",
+                "source",
+                &proj.source,
+            ));
         }
     }
 
@@ -785,18 +780,12 @@ fn prepare_component(comp: &ComponentDraft, vocab: &DciVocabulary) -> Result<Pre
                 // Resolve child component reference
                 let resolved = vocab.resolve(&cb.child);
                 if resolved.is_none() {
-                    ambiguities.push(Ambiguity {
-                        message: format!(
-                            "Component `{}` references child component `{}` which is not in the vocabulary manifest",
-                            comp.info.title, cb.child
-                        ),
-                        severity: "blocking".to_string(),
-                        suggested_resolution: Some(format!(
-                            "Add a component draft for `{}` under drafts/components/",
-                            cb.child
-                        )),
-                        source_line: None,
-                    });
+                    ambiguities.push(unresolved_reference_error(
+                        &comp.info.relative_path,
+                        "child component binding",
+                        &cb.child,
+                        &cb.child,
+                    ));
                 }
                 ChildBindingSpec {
                     child: cb.child.clone(),
@@ -832,18 +821,12 @@ fn prepare_component(comp: &ComponentDraft, vocab: &DciVocabulary) -> Result<Pre
                         resolved_to: Some(eb.context.clone()),
                     });
                 } else {
-                    ambiguities.push(Ambiguity {
-                        message: format!(
-                            "Component `{}` binds event `{}.{}` to context `{}` which is not in the vocabulary manifest",
-                            comp.info.title, eb.child, eb.event, eb.context
-                        ),
-                        severity: "blocking".to_string(),
-                        suggested_resolution: Some(format!(
-                            "Add a context draft for `{}`",
-                            eb.context
-                        )),
-                        source_line: None,
-                    });
+                    ambiguities.push(unresolved_reference_error(
+                        &comp.info.relative_path,
+                        &format!("event binding {}.{}", eb.child, eb.event),
+                        &eb.context,
+                        &eb.context,
+                    ));
                 }
                 EventBindingSpec {
                     child: eb.child.clone(),
@@ -966,19 +949,12 @@ fn prepare_routing_table(
                 resolved_to: Some(route.component.clone()),
             });
         } else {
-            ambiguities.push(Ambiguity {
-                message: format!(
-                    "Route `{}` references component `{}` which is not in the vocabulary manifest. \
-                     Is it a component that should be added under drafts/components/?",
-                    route.path, route.component
-                ),
-                severity: "blocking".to_string(),
-                suggested_resolution: Some(format!(
-                    "Add a component draft for `{}`",
-                    route.component
-                )),
-                source_line: None,
-            });
+            ambiguities.push(unresolved_reference_error(
+                &rt.info.relative_path,
+                &format!("route `{}`", route.path),
+                &route.component,
+                &route.component,
+            ));
         }
 
         // Resolve path param types
@@ -994,19 +970,13 @@ fn prepare_routing_table(
                     resolution: kind.clone(),
                     resolved_to: Some(param.data_type.clone()),
                 });
-            } else {
-                ambiguities.push(Ambiguity {
-                    message: format!(
-                        "Route `{}` param `{}` references type `{}` which is not in the vocabulary manifest",
-                        route.path, param.name, param.data_type
-                    ),
-                    severity: "blocking".to_string(),
-                    suggested_resolution: Some(format!(
-                        "Add `{}` to the vocabulary manifest as a data type",
-                        param.data_type
-                    )),
-                    source_line: None,
-                });
+            } else if !is_builtin_primitive(&param.data_type) {
+                ambiguities.push(unresolved_reference_error(
+                    &rt.info.relative_path,
+                    &format!("route `{}` param", route.path),
+                    &param.name,
+                    &param.data_type,
+                ));
             }
             params.push(RouteParamSpec {
                 name: param.name.clone(),
@@ -1087,18 +1057,12 @@ fn prepare_app(app: &AppDraft, vocab: &DciVocabulary) -> Result<PreparedArtifact
                 });
             }
         } else {
-            ambiguities.push(Ambiguity {
-                message: format!(
-                    "`drafts/app.md` declares `{}` as the entry context but the manifest has no context by that name",
-                    ctx_name
-                ),
-                severity: "blocking".to_string(),
-                suggested_resolution: Some(format!(
-                    "Add a context draft for `{}` under drafts/contexts/, or correct the name in drafts/app.md",
-                    ctx_name
-                )),
-                source_line: None,
-            });
+            ambiguities.push(unresolved_reference_error(
+                &app.info.relative_path,
+                "entry context",
+                "entry_context",
+                ctx_name,
+            ));
         }
         artifact.entry_context = Some(ctx_name.clone());
     }
@@ -1372,6 +1336,113 @@ fn validate_web_app_requirements(artifacts: &mut [(std::path::PathBuf, PreparedA
                 break;
             }
         }
+    }
+}
+
+// ── Unresolved reference diagnostics ─────────────────────────────
+
+/// Implementation-speak suffixes that should never appear in a draft.
+/// When a type name ends with one of these, the draft is naming a
+/// mechanism, not a domain concept.
+const IMPLEMENTATION_SPEAK_SUFFIXES: &[&str] = &[
+    "Client", "Store", "Sink", "Ledger", "Repository", "Service",
+    "Manager", "Handler", "Adapter", "Gateway", "Connection", "Pool",
+    "Registry", "Cache", "Queue", "Bus", "Clock", "Timer",
+];
+
+/// Built-in primitive types that are allowed without declaration.
+const BUILTIN_PRIMITIVES: &[&str] = &[
+    "String", "string", "str",
+    "i8", "i16", "i32", "i64", "i128", "isize",
+    "u8", "u16", "u32", "u64", "u128", "usize",
+    "f32", "f64",
+    "bool", "boolean",
+    "uuid", "Uuid", "UUID",
+    "DateTime", "datetime", "NaiveDate", "NaiveDateTime",
+    "Duration",
+    "Vec", "Option", "Result",
+    "HashMap", "BTreeMap", "HashSet", "BTreeSet",
+];
+
+/// Returns true if `name` is a built-in primitive that needs no declaration.
+pub fn is_builtin_primitive(name: &str) -> bool {
+    // Strip generic wrappers: Vec<X>, Option<X>, etc.
+    let base = name.split('<').next().unwrap_or(name).trim();
+    BUILTIN_PRIMITIVES.contains(&base)
+}
+
+/// Categorise an unresolved type reference and produce a diagnostic suggestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnresolvedCategory {
+    ImplementationSpeak,
+    MissingDataDraft,
+    MissingContext,
+}
+
+/// Determine the likely category of an unresolved reference name and return
+/// a (category, suggestion) pair.
+pub fn classify_unresolved_reference(name: &str) -> (UnresolvedCategory, String) {
+    // Check implementation-speak suffixes
+    for suffix in IMPLEMENTATION_SPEAK_SUFFIXES {
+        if name.ends_with(suffix) || name == *suffix {
+            return (
+                UnresolvedCategory::ImplementationSpeak,
+                format!(
+                    "`{}` looks like implementation-speak (ends with `{}`). \
+                     Name the domain concept instead — would a non-technical \
+                     stakeholder recognise this name?",
+                    name, suffix
+                ),
+            );
+        }
+    }
+
+    // If it looks like a verb or action phrase (contains a verb-like word), suggest context
+    let lower = name.to_lowercase();
+    let context_verbs = ["initiate", "execute", "process", "handle", "perform",
+                         "authenticate", "authorize", "validate", "verify",
+                         "transfer", "send", "receive", "fetch", "query"];
+    for verb in &context_verbs {
+        if lower.contains(verb) {
+            return (
+                UnresolvedCategory::MissingContext,
+                format!(
+                    "`{}` looks like a missing context. Consider authoring \
+                     `drafts/contexts/{}.md`.",
+                    name,
+                    crate::codegen::to_snake_case(name)
+                ),
+            );
+        }
+    }
+
+    // Default: missing data draft
+    (
+        UnresolvedCategory::MissingDataDraft,
+        format!(
+            "`{}` is not declared. Consider authoring `drafts/data/{}.md` \
+             or renaming the reference to an existing type.",
+            name, name
+        ),
+    )
+}
+
+/// Build the error message for an unresolved type reference.
+pub fn unresolved_reference_error(
+    draft_path: &str,
+    field_label: &str,
+    field_name: &str,
+    referenced_name: &str,
+) -> Ambiguity {
+    let (_category, suggestion) = classify_unresolved_reference(referenced_name);
+    Ambiguity {
+        message: format!(
+            "Unresolved reference: {} `{}` references `{}` which is not declared as any artefact. {}",
+            field_label, field_name, referenced_name, suggestion
+        ),
+        severity: "blocking".to_string(),
+        suggested_resolution: Some(suggestion),
+        source_line: None,
     }
 }
 
@@ -2700,6 +2771,122 @@ Then: done
             prepared.ambiguities.iter().any(|a| a.message.contains("data")),
             "expected ambiguity about non-context entry: {:?}",
             prepared.ambiguities
+        );
+    }
+
+    // ── Unresolved reference heuristic tests ─────────────────────
+
+    #[test]
+    fn classify_implementation_speak_suffixes() {
+        let cases = vec![
+            "SessionStore", "NordeaClient", "AuditSink", "IdempotencyLedger",
+            "UserRepository", "PaymentService", "RequestHandler",
+            "DatabaseAdapter", "ApiGateway", "ConnectionPool",
+            "TokenRegistry", "ResponseCache", "EventQueue", "MessageBus",
+            "SystemClock", "RetryTimer",
+        ];
+        for name in cases {
+            let (cat, _msg) = classify_unresolved_reference(name);
+            assert_eq!(
+                cat, UnresolvedCategory::ImplementationSpeak,
+                "{} should be classified as implementation-speak",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn classify_missing_data_draft() {
+        let cases = vec!["Account", "Transaction", "Money", "Customer", "Receipt"];
+        for name in cases {
+            let (cat, msg) = classify_unresolved_reference(name);
+            assert_eq!(
+                cat, UnresolvedCategory::MissingDataDraft,
+                "{} should be classified as missing data draft",
+                name
+            );
+            assert!(msg.contains("drafts/data/"), "suggestion should point to data dir: {}", msg);
+        }
+    }
+
+    #[test]
+    fn classify_missing_context() {
+        let cases = vec!["AuthenticateUser", "TransferFunds", "ValidatePayment"];
+        for name in cases {
+            let (cat, msg) = classify_unresolved_reference(name);
+            assert_eq!(
+                cat, UnresolvedCategory::MissingContext,
+                "{} should be classified as missing context",
+                name
+            );
+            assert!(msg.contains("drafts/contexts/"), "suggestion should point to contexts dir: {}", msg);
+        }
+    }
+
+    #[test]
+    fn builtin_primitives_pass() {
+        assert!(is_builtin_primitive("String"));
+        assert!(is_builtin_primitive("i64"));
+        assert!(is_builtin_primitive("bool"));
+        assert!(is_builtin_primitive("DateTime"));
+        assert!(is_builtin_primitive("Vec"));
+        assert!(!is_builtin_primitive("Account"));
+        assert!(!is_builtin_primitive("SessionStore"));
+    }
+
+    #[test]
+    fn prepare_context_rejects_implementation_speak_role_player() {
+        let content = "# Context: BadContext\n\n\
+                       ## Purpose\nDoes something.\n\n\
+                       ## Role Players\n\
+                       - store: SessionStore — persists sessions\n\n\
+                       ## Role Methods\n### store\n- save: saves the session\n\n\
+                       ## Functionalities\n### do_thing\nCalls store save.\n\n\
+                       ## Scenarios\n### happy path\nGiven: a store\nWhen: do_thing\nThen: success\n";
+
+        let doc = parse_draft_file(
+            Path::new("drafts/contexts/bad.md"),
+            Path::new("drafts"),
+            content,
+        ).unwrap();
+        let vocab = empty_vocab();
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        let blocking: Vec<_> = prepared.blocking_ambiguities().collect();
+        assert!(
+            !blocking.is_empty(),
+            "SessionStore should produce a blocking ambiguity"
+        );
+        assert!(
+            blocking.iter().any(|a| a.message.contains("implementation-speak")),
+            "error should mention implementation-speak: {:?}",
+            blocking
+        );
+    }
+
+    #[test]
+    fn prepare_context_accepts_declared_role_player() {
+        let content = "# Context: GoodContext\n\n\
+                       ## Purpose\nDoes something.\n\n\
+                       ## Role Players\n\
+                       - account: Account — the source account\n\n\
+                       ## Role Methods\n### account\n- debit: removes funds\n\n\
+                       ## Functionalities\n### withdraw\nCalls account debit.\n\n\
+                       ## Scenarios\n### happy path\nGiven: an account\nWhen: withdraw\nThen: success\n";
+
+        let doc = parse_draft_file(
+            Path::new("drafts/contexts/good.md"),
+            Path::new("drafts"),
+            content,
+        ).unwrap();
+        let vocab = vocab_with(&[("Account", "data")]);
+        let prepared = prepare_document(&doc, &vocab).unwrap();
+
+        let blocking: Vec<_> = prepared.blocking_ambiguities().collect();
+        assert!(
+            blocking.is_empty(),
+            "Account is declared — should have no blocking ambiguities: {:?}",
+            blocking
         );
     }
 }
