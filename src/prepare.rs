@@ -208,6 +208,12 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
             if blocking_total == 1 { "y" } else { "ies" }
         );
     }
+
+    // ── Build tracker integration ────────────────────────────────
+    if !options.dry_run {
+        update_build_tracker(workspace, &selected_paths, &all_prepared, options.verbose)?;
+    }
+
     Ok(())
 }
 
@@ -245,6 +251,144 @@ pub fn clear_prepared_outputs(workspace: &Workspace, dry_run: bool) -> Result<()
         fs::remove_dir_all(&workspace.prepared_dir)
             .with_context(|| format!("Failed to remove {}", workspace.prepared_dir.display()))?;
     }
+    Ok(())
+}
+
+// ── Build tracker integration ─────────────────────────────────────
+
+fn update_build_tracker(
+    workspace: &Workspace,
+    draft_paths: &[std::path::PathBuf],
+    all_prepared: &[(std::path::PathBuf, PreparedArtifact)],
+    verbose: bool,
+) -> Result<()> {
+    use crate::build_tracker::{
+        ArtefactEntry, ArtefactState, BuildTracker, StaleReason,
+        edges::{extract_artefacts, hash_file_bytes, hash_fragment},
+    };
+
+    let mut tracker = BuildTracker::load(&workspace.state_dir)?;
+
+    // 1. Hash each draft file; short-circuit unchanged drafts
+    let mut changed_drafts: BTreeSet<String> = BTreeSet::new();
+    for path in draft_paths {
+        let relative = path
+            .strip_prefix(&workspace.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
+        let bytes = fs::read(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let hash = hash_file_bytes(&bytes);
+        let old_hash = tracker.drafts.get(&relative);
+        if old_hash != Some(&hash) {
+            changed_drafts.insert(relative.clone());
+        }
+        tracker.drafts.insert(relative, hash);
+    }
+
+    if changed_drafts.is_empty() {
+        let summary = tracker.stale_summary();
+        if verbose {
+            println!(
+                "0 drafts changed. {} method{} stale.",
+                summary.total(),
+                if summary.total() == 1 { "" } else { "s" }
+            );
+        }
+        tracker.save(&workspace.state_dir)?;
+        return Ok(());
+    }
+
+    // 2. For each prepared artifact, extract artefacts with edges
+    let all_artifacts_refs: Vec<&PreparedArtifact> =
+        all_prepared.iter().map(|(_, a)| a).collect();
+
+    let mut stale_roots: Vec<crate::build_tracker::keys::ArtefactKey> = Vec::new();
+    let mut seen_keys: BTreeSet<crate::build_tracker::keys::ArtefactKey> = BTreeSet::new();
+
+    for (_output_path, artifact) in all_prepared {
+        let extracted = extract_artefacts(artifact, &all_artifacts_refs);
+        for ea in extracted {
+            seen_keys.insert(ea.key.clone());
+            let new_hash = hash_fragment(&ea.canonical_fragment);
+
+            let existing = tracker.artefacts.get(&ea.key);
+            let is_new = existing.is_none();
+            let hash_changed = existing
+                .map(|e| e.prepared_hash != new_hash)
+                .unwrap_or(false);
+
+            if is_new {
+                // New artefact: insert as not_implemented
+                tracker.upsert_artefact(
+                    ea.key.clone(),
+                    ArtefactEntry {
+                        kind: ea.key.kind(),
+                        prepared_hash: new_hash,
+                        upstream: ea.upstream,
+                        state: ArtefactState::NotImplemented,
+                        reason: Some(StaleReason::InitialScaffold),
+                        audit_finding: None,
+                    },
+                );
+            } else if hash_changed {
+                // Hash changed: mark stale
+                tracker.upsert_artefact(
+                    ea.key.clone(),
+                    ArtefactEntry {
+                        kind: ea.key.kind(),
+                        prepared_hash: new_hash,
+                        upstream: ea.upstream,
+                        state: ArtefactState::Stale,
+                        reason: Some(StaleReason::DraftChanged),
+                        audit_finding: None,
+                    },
+                );
+                stale_roots.push(ea.key);
+            } else {
+                // Hash unchanged: update edges but keep state
+                if let Some(entry) = tracker.artefacts.get_mut(&ea.key) {
+                    entry.upstream = ea.upstream;
+                }
+            }
+        }
+    }
+
+    // 3. Remove artefacts that no longer exist in prepared YAML
+    let removed_keys: Vec<_> = tracker
+        .artefacts
+        .keys()
+        .filter(|k| !seen_keys.contains(k))
+        .cloned()
+        .collect();
+    for key in removed_keys {
+        tracker.remove_artefact(&key);
+    }
+
+    // 4. Cascade staleness from roots
+    if !stale_roots.is_empty() {
+        tracker.cascade_stale(&stale_roots);
+    }
+
+    // 5. Print summary
+    let summary = tracker.stale_summary();
+    let total = summary.total();
+    if total > 0 {
+        println!(
+            "{} method{} stale ({} direct, {} cascaded). Run `reen scaffold` to regenerate stubs.",
+            total,
+            if total == 1 { "" } else { "s" },
+            summary.direct + summary.initial,
+            summary.cascaded,
+        );
+    } else if verbose {
+        println!("0 methods stale.");
+    }
+
+    // 6. Persist
+    tracker.save(&workspace.state_dir)?;
+
     Ok(())
 }
 
