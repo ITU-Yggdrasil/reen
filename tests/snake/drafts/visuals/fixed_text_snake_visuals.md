@@ -37,9 +37,9 @@ The TestCompany icon is a simple, stylized contained within a circle. It should 
 The visual identity is built on a minimal, high-contrast palette.
 
 
-Red white and blue form the foundation, creating clarity and strong visual structure. blue is used as a distinctive accent to introduce emphasis and energy.
+Red white and blue form the foundation, creating clarity and strong visual structure. 
 
-Additional colors such as green and blue may be used sparingly to support communication (for example, to indicate different states or highlight information), but should never dominate the overall expression.
+Additional colors such as green and grey may be used sparingly to support communication (for example, to indicate different states or highlight information), but should never dominate the overall expression.
 
 Color usage should always prioritize legibility and balance, with generous use of white space.
 
@@ -49,10 +49,9 @@ Color usage should always prioritize legibility and balance, with generous use o
 
 **Typography**
 Typography rules:
-- Headline: very large and bold (make it stand out strongly) most use Comic Sans MS 
-- Body text: clean and highly readable, size 18px
+- Headline: very large and bold (make it stand out strongly) must use Comic Sans MS
+- Body text: clean and highly readable, must use Arial. and word-spacing double the amound of normal
 - All headings should feel confident but not aggressive
-- Use font weight 700 for headings and 400–500 for body text
 
 
 
