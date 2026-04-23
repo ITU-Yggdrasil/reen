@@ -30,6 +30,7 @@ See `DCI.md` for the conceptual reference and `DRAFT_FORMAT.md` for templates.
 - `/scaffold` — generate Rust stubs
 - `/implement` — fill `todo!()` bodies guided by spec + tests
 - `/audit` — discrepancy check after implementation
+- `/clean` — remove tracker, prepared YAML, and reen-owned source
 
 ## Implementation contract
 

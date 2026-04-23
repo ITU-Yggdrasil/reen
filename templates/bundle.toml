@@ -11,6 +11,7 @@
 ".claude/commands/scaffold.md" = "managed"
 ".claude/commands/implement.md" = "managed"
 ".claude/commands/audit.md" = "managed"
+".claude/commands/clean.md" = "managed"
 ".claude/agents/reen-refiner.md" = "managed"
 ".claude/agents/reen-auditor.md" = "managed"
 ".claude/skills/reen-dci-authoring/SKILL.md" = "managed"
