@@ -428,7 +428,12 @@ fn generate_component(comp: &PreparedArtifact) -> String {
     // Struct
     writeln!(out, "pub struct {} {{", name).unwrap();
     for prop in &comp.props {
-        writeln!(out, "    pub {}: (), // {}", to_snake_case(&prop.name), prop.description).unwrap();
+        let prop_snake = to_snake_case(&prop.name);
+        // Skip the "variant" prop when we emit a typed variant enum field
+        if prop_snake == "variant" && !comp.variants.is_empty() {
+            continue;
+        }
+        writeln!(out, "    pub {}: (), // {}", prop_snake, prop.description).unwrap();
     }
     if !comp.variants.is_empty() {
         writeln!(out, "    pub variant: {}Variant,", name).unwrap();
@@ -446,9 +451,13 @@ fn generate_component(comp: &PreparedArtifact) -> String {
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // Event handler methods
+    // Event handler methods — deduplicated by method name
+    let mut emitted_event_methods: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for event in &comp.events {
         let method = format!("on_{}", to_snake_case(&event.name));
+        if !emitted_event_methods.insert(method.clone()) {
+            continue; // skip duplicate method name
+        }
         writeln!(out, "    /// Event handler: {}", event.description).unwrap();
         writeln!(out, "    pub fn {}(&self) -> EventOutcome {{", method).unwrap();
         writeln!(out, "        todo!()").unwrap();
@@ -534,19 +543,60 @@ fn generate_router(
     writeln!(out, "use super::markup::Markup;").unwrap();
     writeln!(out).unwrap();
 
-    // Route enum — one variant per route
+    // Pre-compute how many routes each component has (for sub_path detection)
+    let mut component_route_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for rt in routes {
+        for route in &rt.routes {
+            *component_route_counts.entry(route.component.clone()).or_insert(0) += 1;
+        }
+    }
+
+    // Route enum — one variant per unique component.
+    // Multiple routes mapping to the same component share a variant;
+    // a `sub_path` field disambiguates when there are multiple paths.
     writeln!(out, "#[derive(Debug)]").unwrap();
     writeln!(out, "pub enum Route {{").unwrap();
+    let mut emitted_variants: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for rt in routes {
         for route in &rt.routes {
             let variant = route_variant_name(&route.path, &route.component);
-            if route.params.is_empty() {
+            if !emitted_variants.insert(variant.clone()) {
+                continue; // skip duplicate variant for same component
+            }
+            // Collect all params across routes sharing this component
+            let all_params: Vec<_> = rt
+                .routes
+                .iter()
+                .filter(|r| r.component == route.component)
+                .flat_map(|r| r.params.iter())
+                .collect();
+            // Deduplicate params by name
+            let mut seen_params = std::collections::BTreeSet::new();
+            let unique_params: Vec<_> = all_params
+                .into_iter()
+                .filter(|p| seen_params.insert(p.name.clone()))
+                .collect();
+            // Count how many routes share this component
+            let route_count = rt
+                .routes
+                .iter()
+                .filter(|r| r.component == route.component)
+                .count();
+            let needs_sub_path = route_count > 1;
+
+            if unique_params.is_empty() && !needs_sub_path {
                 writeln!(out, "    {},", variant).unwrap();
             } else {
                 write!(out, "    {} {{", variant).unwrap();
-                for (i, p) in route.params.iter().enumerate() {
-                    if i > 0 { write!(out, ",").unwrap(); }
+                let mut field_idx = 0;
+                for p in &unique_params {
+                    if field_idx > 0 { write!(out, ",").unwrap(); }
                     write!(out, " {}: String", to_snake_case(&p.name)).unwrap();
+                    field_idx += 1;
+                }
+                if needs_sub_path {
+                    if field_idx > 0 { write!(out, ",").unwrap(); }
+                    write!(out, " sub_path: Option<String>").unwrap();
                 }
                 writeln!(out, " }},").unwrap();
             }
@@ -575,6 +625,7 @@ fn generate_router(
         for route in &rt.routes {
             let variant = route_variant_name(&route.path, &route.component);
             let pattern_segments = route_pattern_segments(&route.path);
+            let needs_sub_path = component_route_counts.get(&route.component).copied().unwrap_or(0) > 1;
 
             if first {
                 write!(out, "        if ").unwrap();
@@ -596,26 +647,44 @@ fn generate_router(
             }
             writeln!(out, " {{").unwrap();
 
-            if route.params.is_empty() {
+            // Extract path params
+            for (i, seg) in pattern_segments.iter().enumerate() {
+                if seg.starts_with('<') {
+                    let param_name = &seg[1..seg.len() - 1];
+                    writeln!(
+                        out,
+                        "            let {} = segments[{}].to_string();",
+                        to_snake_case(param_name),
+                        i
+                    )
+                    .unwrap();
+                }
+            }
+
+            // Determine sub_path value for multi-route components
+            let sub_path_value = if needs_sub_path {
+                // Use the last segment of the path as the sub_path discriminator
+                let segs = route_pattern_segments(&route.path);
+                if segs.len() > 1 {
+                    format!("Some(\"{}\".to_string())", segs.last().unwrap())
+                } else {
+                    "None".to_string()
+                }
+            } else {
+                String::new()
+            };
+
+            // Build the variant construction
+            let has_params = !route.params.is_empty();
+            if !has_params && !needs_sub_path {
                 writeln!(out, "            Ok(Route::{})", variant).unwrap();
             } else {
-                // Extract params
-                for (i, seg) in pattern_segments.iter().enumerate() {
-                    if seg.starts_with('<') {
-                        let param_name = &seg[1..seg.len() - 1];
-                        writeln!(
-                            out,
-                            "            let {} = segments[{}].to_string();",
-                            to_snake_case(param_name),
-                            i
-                        )
-                        .unwrap();
-                    }
-                }
                 write!(out, "            Ok(Route::{} {{", variant).unwrap();
                 for p in &route.params {
-                    write!(out, " {}", to_snake_case(&p.name)).unwrap();
-                    write!(out, ",").unwrap();
+                    write!(out, " {},", to_snake_case(&p.name)).unwrap();
+                }
+                if needs_sub_path {
+                    write!(out, " sub_path: {},", sub_path_value).unwrap();
                 }
                 writeln!(out, " }})").unwrap();
             }
@@ -628,20 +697,38 @@ fn generate_router(
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
 
-    // render method — dispatches to components
+    // render method — dispatches to components (one arm per unique variant)
     writeln!(out).unwrap();
     writeln!(out, "    /// Render the matched route to markup.").unwrap();
     writeln!(out, "    pub fn render(&self, route: Route) -> Markup {{").unwrap();
     writeln!(out, "        match route {{").unwrap();
+    let mut rendered_variants: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for rt in routes {
         for route in &rt.routes {
             let variant = route_variant_name(&route.path, &route.component);
-            if route.params.is_empty() {
+            if !rendered_variants.insert(variant.clone()) {
+                continue; // already emitted a match arm for this variant
+            }
+            let needs_sub_path = component_route_counts.get(&route.component).copied().unwrap_or(0) > 1;
+            let has_params = rt.routes.iter()
+                .filter(|r| r.component == route.component)
+                .any(|r| !r.params.is_empty());
+
+            if !has_params && !needs_sub_path {
                 writeln!(out, "            Route::{} => todo!(\"render {}\"),", variant, route.component).unwrap();
             } else {
                 write!(out, "            Route::{} {{", variant).unwrap();
-                for p in &route.params {
-                    write!(out, " {},", to_snake_case(&p.name)).unwrap();
+                // Collect unique param names across all routes for this component
+                let mut seen_p = std::collections::BTreeSet::new();
+                for r in rt.routes.iter().filter(|r| r.component == route.component) {
+                    for p in &r.params {
+                        if seen_p.insert(p.name.clone()) {
+                            write!(out, " {},", to_snake_case(&p.name)).unwrap();
+                        }
+                    }
+                }
+                if needs_sub_path {
+                    write!(out, " sub_path,").unwrap();
                 }
                 writeln!(out, " }} => todo!(\"render {}\"),", route.component).unwrap();
             }
@@ -1013,6 +1100,81 @@ mod tests {
         };
         // Algorithm: /_rpc/<context_snake>/<functionality_snake>
         assert_eq!(edge.path(), "/_rpc/authenticate_user/login");
+    }
+
+    #[test]
+    fn router_deduplicates_variants_for_shared_component() {
+        let mut rt = PreparedArtifact::new(
+            ArtifactKind::RoutingTable,
+            "routes/main.md".into(),
+            "Routes: main".into(),
+            "main".into(),
+        );
+        rt.routes = vec![
+            RouteSpec { path: "/transfer".into(), component: "TransferHub".into(), params: vec![] },
+            RouteSpec { path: "/transfer/own".into(), component: "TransferHub".into(), params: vec![] },
+            RouteSpec { path: "/transfer/domestic".into(), component: "TransferHub".into(), params: vec![] },
+        ];
+
+        let code = generate_router(&[&rt], &[]);
+        // Should have exactly ONE TransferHub variant, not three
+        let variant_count = code.matches("TransferHub").count();
+        // The variant name appears in: enum definition, dispatch arms (3), render arm = 5 total
+        // But the enum definition should have it exactly once
+        let enum_section = &code[..code.find("pub struct Router").unwrap()];
+        let enum_variant_count = enum_section.matches("TransferHub").count();
+        assert_eq!(
+            enum_variant_count, 1,
+            "Route enum should have exactly one TransferHub variant, got {}:\n{}",
+            enum_variant_count, enum_section
+        );
+        // Should have a sub_path field since multiple routes share the component
+        assert!(
+            code.contains("sub_path"),
+            "shared-component variant should have sub_path field:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn component_variant_prop_not_duplicated() {
+        let mut comp = test_component();
+        // Add a "variant" prop that collides with the variant enum field
+        comp.props.push(PropSpec {
+            name: "variant".into(),
+            description: "one of primary or secondary".into(),
+        });
+
+        let code = generate_component(&comp);
+        let variant_field_count = code.matches("pub variant:").count();
+        assert_eq!(
+            variant_field_count, 1,
+            "struct should have exactly one variant field, got {}:\n{}",
+            variant_field_count, code
+        );
+    }
+
+    #[test]
+    fn component_event_methods_deduplicated() {
+        let mut comp = PreparedArtifact::new(
+            ArtifactKind::Component,
+            "components/Card.md".into(),
+            "Component: Card".into(),
+            "Card".into(),
+        );
+        // Two events that would produce the same method name
+        comp.events = vec![
+            EventSpec { name: "click".into(), description: "first click handler".into() },
+            EventSpec { name: "click".into(), description: "duplicate click handler".into() },
+        ];
+
+        let code = generate_component(&comp);
+        let method_count = code.matches("pub fn on_click").count();
+        assert_eq!(
+            method_count, 1,
+            "should have exactly one on_click method, got {}:\n{}",
+            method_count, code
+        );
     }
 
     #[test]
