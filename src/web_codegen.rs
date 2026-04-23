@@ -855,7 +855,11 @@ fn generate_server_main(
     writeln!(out, "        let request = String::from_utf8_lossy(&buf[..n]);").unwrap();
     writeln!(out, "        let path = request.split_whitespace().nth(1).unwrap_or(\"/\");").unwrap();
     writeln!(out).unwrap();
-    writeln!(out, "        let response = dispatch(path);").unwrap();
+    writeln!(out, "        let (content_type, body) = dispatch(path);").unwrap();
+    writeln!(out, "        let response = format!(").unwrap();
+    writeln!(out, "            \"HTTP/1.1 200 OK\\r\\nContent-Type: {{}}\\r\\nContent-Length: {{}}\\r\\n\\r\\n{{}}\",").unwrap();
+    writeln!(out, "            content_type, body.len(), body").unwrap();
+    writeln!(out, "        );").unwrap();
     writeln!(out, "        stream.write_all(response.as_bytes())?;").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
@@ -863,21 +867,21 @@ fn generate_server_main(
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // Dispatch function
-    writeln!(out, "fn dispatch(path: &str) -> String {{").unwrap();
+    // Dispatch function — returns (content_type, body)
+    writeln!(out, "fn dispatch(path: &str) -> (&'static str, String) {{").unwrap();
     writeln!(out, "    match path {{").unwrap();
 
     // Static asset routes
-    writeln!(out, "        \"{}\" => todo!(\"serve brand CSS\"),", paths::BRAND_CSS).unwrap();
+    writeln!(out, "        \"{}\" => (\"text/css; charset=utf-8\", todo!(\"serve brand CSS\")),", paths::BRAND_CSS).unwrap();
     if has_client {
-        writeln!(out, "        \"{}\" => todo!(\"serve WASM bundle\"),", paths::CLIENT_WASM).unwrap();
+        writeln!(out, "        \"{}\" => (\"application/wasm\", todo!(\"serve WASM bundle\")),", paths::CLIENT_WASM).unwrap();
     }
 
     // RPC edges
     for edge in rpc_edges {
         writeln!(
             out,
-            "        \"{}\" => todo!(\"RPC: {}.{}\"),",
+            "        \"{}\" => (\"application/json\", todo!(\"RPC: {}.{}\")),",
             edge.path(),
             edge.context,
             edge.functionality
@@ -888,7 +892,7 @@ fn generate_server_main(
     // Route handlers
     writeln!(out, "        _ => {{").unwrap();
     writeln!(out, "            // Route to components via Router").unwrap();
-    writeln!(out, "            todo!(\"dispatch route to component\")").unwrap();
+    writeln!(out, "            (\"text/html; charset=utf-8\", todo!(\"dispatch route to component\"))").unwrap();
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
