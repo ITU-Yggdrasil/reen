@@ -7,6 +7,7 @@
 //! The tracker is populated during `reen prepare` and consumed by scaffold,
 //! implement, verify, and audit.
 
+pub mod edges;
 pub mod keys;
 
 use keys::{ArtefactEntryKind, ArtefactKey};
