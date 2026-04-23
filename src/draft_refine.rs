@@ -168,10 +168,10 @@ fn review_data(
             DraftReviewCategory::Completeness,
             "data draft must declare at least one attribute");
     }
-    if data.scenarios.is_empty() {
+    if !data.operations.is_empty() && data.scenarios.is_empty() {
         push(findings, path, heading_line(content, "## Scenarios"),
             DraftReviewCategory::Completeness,
-            "data draft must contain at least one scenario");
+            "data draft with operations must contain at least one scenario");
     }
     scan_vagueness(findings, path, content, &data.purpose, "purpose");
     for op in &data.operations {
@@ -195,10 +195,10 @@ fn review_projection(
             DraftReviewCategory::Completeness,
             "projection draft must declare at least one query");
     }
-    if proj.scenarios.is_empty() {
+    if !proj.queries.is_empty() && proj.scenarios.is_empty() {
         push(findings, path, heading_line(content, "## Scenarios"),
             DraftReviewCategory::Completeness,
-            "projection draft must contain at least one scenario");
+            "projection draft with queries must contain at least one scenario");
     }
     scan_vagueness(findings, path, content, &proj.purpose, "purpose");
 }
@@ -224,9 +224,12 @@ fn review_context(
             DraftReviewCategory::Completeness,
             "context draft must contain at least one scenario");
     }
-    // Every role player should have at least one role method group
+    // Every role player should have a Role Methods subsection.
+    // A subsection with the passive-value opt-out line is accepted.
     for rp in &ctx.role_players {
-        if !ctx.role_methods.iter().any(|g| g.role == rp.name) {
+        let has_group = ctx.role_methods.iter().any(|g| g.role == rp.name);
+        let has_passive_opt_out = has_passive_value_opt_out(content, &rp.name);
+        if !has_group && !has_passive_opt_out {
             push(findings, path, find_line(content, &rp.name),
                 DraftReviewCategory::Completeness,
                 &format!("role player `{}` has no matching Role Methods subsection", rp.name));
@@ -244,10 +247,11 @@ fn review_component(
     comp: &ComponentDraft,
     findings: &mut Vec<DraftReviewFinding>,
 ) {
-    if comp.scenarios.is_empty() {
+    let has_behaviour = !comp.events.is_empty() || comp.composition.is_some();
+    if has_behaviour && comp.scenarios.is_empty() {
         push(findings, path, heading_line(content, "## Scenarios"),
             DraftReviewCategory::Completeness,
-            "component draft must contain at least one scenario");
+            "component draft with events or composition must contain at least one scenario");
     }
     scan_vagueness(findings, path, content, &comp.purpose, "purpose");
 }
@@ -329,6 +333,31 @@ fn find_line(content: &str, needle: &str) -> Option<usize> {
             None
         }
     })
+}
+
+/// Check whether the Role Methods section has a subsection for the given role
+/// that contains the passive-value opt-out line.
+fn has_passive_value_opt_out(content: &str, role_name: &str) -> bool {
+    let target_heading = format!("### {}", role_name);
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case(&target_heading) {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            if trimmed.starts_with("### ") || trimmed.starts_with("## ") {
+                return false; // hit next section without finding opt-out
+            }
+            if trimmed == "(no methods — this role is used as a passive value)"
+                || trimmed == "(no methods -- this role is used as a passive value)"
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ── Code-token lint ──────────────────────────────────────────────
@@ -1319,6 +1348,116 @@ Then: an error is returned indicating the currency does not match
             ),
             "should flag unresolved projection source: {:?}",
             findings
+        );
+    }
+
+    // ── Behaviour-based scenario rule tests ──────────────────────
+
+    fn review_findings(content: &str, kind_dir: &str) -> Vec<DraftReviewFinding> {
+        let path_str = format!("drafts/{}/test.md", kind_dir);
+        let path = std::path::Path::new(&path_str);
+        let doc = crate::draft_parser::parse_draft_file(
+            path, std::path::Path::new("drafts"), content,
+        ).unwrap();
+        let relative = format!("{}/test.md", kind_dir);
+        let mut findings = Vec::new();
+        review_document(&relative, content, &doc, &mut findings);
+        findings
+    }
+
+    #[test]
+    fn data_without_operations_skips_scenario_check() {
+        let content = "# Data: Amount\n\n## Purpose\nA monetary value.\n\n\
+                       ## Attributes\n- value: the numeric quantity\n\n\
+                       ## Invariants\n- value must not be negative\n";
+        let findings = review_findings(content, "data");
+        assert!(
+            !findings.iter().any(|f| f.message.contains("scenario")),
+            "pure-value data should not require scenarios: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn data_with_operations_requires_scenarios() {
+        let content = "# Data: Amount\n\n## Purpose\nA monetary value.\n\n\
+                       ## Attributes\n- value: the numeric quantity\n\n\
+                       ## Operations\n### add\nAdds two amounts.\n";
+        let findings = review_findings(content, "data");
+        assert!(
+            findings.iter().any(|f| f.message.contains("scenario")),
+            "data with operations should require scenarios: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn pure_display_component_skips_scenario_check() {
+        let content = "# Component: Button\n\n## Purpose\nA clickable button.\n\n\
+                       ## Props\n- label: the text shown on the button\n";
+        let findings = review_findings(content, "components");
+        assert!(
+            !findings.iter().any(|f| f.message.contains("scenario")),
+            "pure-display component should not require scenarios: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn component_with_events_requires_scenarios() {
+        let content = "# Component: LoginForm\n\n## Purpose\nLets user log in.\n\n\
+                       ## Events\n- submitted: user submitted credentials\n";
+        let findings = review_findings(content, "components");
+        assert!(
+            findings.iter().any(|f| f.message.contains("scenario")),
+            "component with events should require scenarios: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn component_with_composition_requires_scenarios() {
+        let content = "# Component: LoginScreen\n\n## Purpose\nThe login screen.\n\n\
+                       ## Composition\n- LoginForm: receives credentials\n\
+                       - when LoginForm.submitted: invoke AuthenticateUser\n";
+        let findings = review_findings(content, "components");
+        assert!(
+            findings.iter().any(|f| f.message.contains("scenario")),
+            "component with composition should require scenarios: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn passive_role_player_opt_out_accepted() {
+        let content = "# Context: Transfer\n\n## Purpose\nTransfers money.\n\n\
+                       ## Role Players\n- source: Account — the source\n\
+                       - amount: Money — the transfer amount\n\n\
+                       ## Role Methods\n### source\n- debit: removes funds\n\n\
+                       ### amount\n(no methods — this role is used as a passive value)\n\n\
+                       ## Functionalities\n### transfer\nDebits source by amount.\n\n\
+                       ## Scenarios\n### ok\nGiven: x\nWhen: transfer\nThen: done\n";
+        let findings = review_findings(content, "contexts");
+        assert!(
+            !findings.iter().any(|f| f.message.contains("amount") && f.message.contains("Role Methods")),
+            "passive-value opt-out should be accepted: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn silent_role_player_absence_still_flagged() {
+        let content = "# Context: Transfer\n\n## Purpose\nTransfers money.\n\n\
+                       ## Role Players\n- source: Account — the source\n\
+                       - amount: Money — the transfer amount\n\n\
+                       ## Role Methods\n### source\n- debit: removes funds\n\n\
+                       ## Functionalities\n### transfer\nDebits source by amount.\n\n\
+                       ## Scenarios\n### ok\nGiven: x\nWhen: transfer\nThen: done\n";
+        let findings = review_findings(content, "contexts");
+        assert!(
+            findings.iter().any(|f| f.message.contains("amount") && f.message.contains("Role Methods")),
+            "silent role player absence should still be flagged: {:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
         );
     }
 }
