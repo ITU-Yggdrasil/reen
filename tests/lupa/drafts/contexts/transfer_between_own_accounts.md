@@ -7,10 +7,9 @@ Initiates a transfer between two accounts that both belong to the same authentic
 - authenticated_customer: AuthenticatedCustomer — the verified customer identity
 - source: Account — the account to debit
 - destination: Account — the account to credit
-- amount: Money — the sum to transfer
-- idempotency_token: IdempotencyToken — the client-supplied unique token preventing duplicate execution
-
 ## Props
+- amount: the sum to transfer, a Money value
+- idempotency_token: the client-supplied unique token preventing duplicate execution
 - required_scope: payments-initiate-own
 
 ## Role Methods
@@ -19,12 +18,6 @@ Initiates a transfer between two accounts that both belong to the same authentic
 
 ### destination
 - accept_credit: receives the transferred amount
-
-### amount
-(no methods — this role is used as a passive value)
-
-### idempotency_token
-(no methods — this role is used as a passive value)
 
 ### authenticated_customer
 - verify_scope: confirms the session grants payments-initiate-own

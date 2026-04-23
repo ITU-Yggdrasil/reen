@@ -224,15 +224,18 @@ fn review_context(
             DraftReviewCategory::Completeness,
             "context draft must contain at least one scenario");
     }
-    // Every role player should have a Role Methods subsection.
-    // A subsection with the passive-value opt-out line is accepted.
+    // Every role player must have role methods. A role player without
+    // methods is a prop, not a role — demote it to the Props section.
     for rp in &ctx.role_players {
         let has_group = ctx.role_methods.iter().any(|g| g.role == rp.name);
-        let has_passive_opt_out = has_passive_value_opt_out(content, &rp.name);
-        if !has_group && !has_passive_opt_out {
+        if !has_group {
             push(findings, path, find_line(content, &rp.name),
                 DraftReviewCategory::Completeness,
-                &format!("role player `{}` has no matching Role Methods subsection", rp.name));
+                &format!(
+                    "role player `{}` has no role methods — a role without methods is a prop, not a role. \
+                     Move it to the Props section",
+                    rp.name
+                ));
         }
     }
     scan_vagueness(findings, path, content, &ctx.purpose, "purpose");
@@ -333,31 +336,6 @@ fn find_line(content: &str, needle: &str) -> Option<usize> {
             None
         }
     })
-}
-
-/// Check whether the Role Methods section has a subsection for the given role
-/// that contains the passive-value opt-out line.
-fn has_passive_value_opt_out(content: &str, role_name: &str) -> bool {
-    let target_heading = format!("### {}", role_name);
-    let mut in_section = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.eq_ignore_ascii_case(&target_heading) {
-            in_section = true;
-            continue;
-        }
-        if in_section {
-            if trimmed.starts_with("### ") || trimmed.starts_with("## ") {
-                return false; // hit next section without finding opt-out
-            }
-            if trimmed == "(no methods — this role is used as a passive value)"
-                || trimmed == "(no methods -- this role is used as a passive value)"
-            {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 // ── Code-token lint ──────────────────────────────────────────────
@@ -1429,24 +1407,7 @@ Then: an error is returned indicating the currency does not match
     }
 
     #[test]
-    fn passive_role_player_opt_out_accepted() {
-        let content = "# Context: Transfer\n\n## Purpose\nTransfers money.\n\n\
-                       ## Role Players\n- source: Account — the source\n\
-                       - amount: Money — the transfer amount\n\n\
-                       ## Role Methods\n### source\n- debit: removes funds\n\n\
-                       ### amount\n(no methods — this role is used as a passive value)\n\n\
-                       ## Functionalities\n### transfer\nDebits source by amount.\n\n\
-                       ## Scenarios\n### ok\nGiven: x\nWhen: transfer\nThen: done\n";
-        let findings = review_findings(content, "contexts");
-        assert!(
-            !findings.iter().any(|f| f.message.contains("amount") && f.message.contains("Role Methods")),
-            "passive-value opt-out should be accepted: {:?}",
-            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn silent_role_player_absence_still_flagged() {
+    fn role_without_methods_flagged_as_prop() {
         let content = "# Context: Transfer\n\n## Purpose\nTransfers money.\n\n\
                        ## Role Players\n- source: Account — the source\n\
                        - amount: Money — the transfer amount\n\n\
@@ -1455,8 +1416,8 @@ Then: an error is returned indicating the currency does not match
                        ## Scenarios\n### ok\nGiven: x\nWhen: transfer\nThen: done\n";
         let findings = review_findings(content, "contexts");
         assert!(
-            findings.iter().any(|f| f.message.contains("amount") && f.message.contains("Role Methods")),
-            "silent role player absence should still be flagged: {:?}",
+            findings.iter().any(|f| f.message.contains("amount") && f.message.contains("prop")),
+            "role without methods should be flagged as a prop: {:?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>()
         );
     }

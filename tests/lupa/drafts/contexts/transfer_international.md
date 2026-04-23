@@ -7,11 +7,10 @@ Initiates a SWIFT international payment from the authenticated customer's accoun
 - authenticated_customer: AuthenticatedCustomer — the verified customer identity
 - source: Account — the account to debit
 - recipient: IBAN — the payee's international bank account number
-- recipient_bic: BIC — the payee's bank identifier code
-- amount: Money — the sum to transfer
-- idempotency_token: IdempotencyToken — the client-supplied unique token preventing duplicate execution
-
 ## Props
+- recipient_bic: the payee's bank identifier code (BIC/SWIFT code)
+- amount: the sum to transfer, a Money value
+- idempotency_token: the client-supplied unique token preventing duplicate execution
 - required_scope: payments-initiate-international
 - recipient_name: the human-readable name of the payee
 - payment_message: a free-text payment reference or message
@@ -23,15 +22,6 @@ Initiates a SWIFT international payment from the authenticated customer's accoun
 
 ### recipient
 - provide_destination: supplies the IBAN for the SWIFT payment order
-
-### recipient_bic
-(no methods — this role is used as a passive value)
-
-### amount
-(no methods — this role is used as a passive value)
-
-### idempotency_token
-(no methods — this role is used as a passive value)
 
 ### authenticated_customer
 - verify_scope: confirms the session grants payments-initiate-international

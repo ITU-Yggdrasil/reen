@@ -250,16 +250,28 @@ Scenarios track behaviour, not structure. `reen refine` requires scenarios only 
 | **Brand** | Never |
 | **Routing table** | Never |
 
-## Passive role players
+## Roles vs. props
 
-Every role player needs a `### <role>` subsection under `## Role Methods`. If a role player is genuinely passive (carried as a value, never acted upon through role methods), add the subsection with the opt-out line:
+Every role player must have role methods — that is what makes it a role. If a value is passed into the context but never acted upon through role methods, it is a **prop**, not a role player. Move it to the Props section.
 
+**Role player** (has methods — it *does* something in this context):
 ```
-### amount
-(no methods — this role is used as a passive value)
+## Role Players
+- source: Account — the account to debit
+
+## Role Methods
+### source
+- verify_sufficient_funds: checks that the balance covers the amount
 ```
 
-This forces the author to acknowledge the choice explicitly. Silent absence of the subsection is still a finding.
+**Prop** (a passive value — no methods):
+```
+## Props
+- amount: the sum to transfer, a Money value
+- idempotency_token: the client-supplied unique token preventing duplicate execution
+```
+
+`reen refine` flags role players without role methods: "a role without methods is a prop, not a role."
 
 ## What not to put in a draft
 

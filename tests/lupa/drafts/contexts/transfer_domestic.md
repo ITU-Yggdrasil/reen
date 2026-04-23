@@ -7,10 +7,9 @@ Initiates a domestic payment from the authenticated customer's account to a reci
 - authenticated_customer: AuthenticatedCustomer — the verified customer identity
 - source: Account — the account to debit
 - recipient: DomesticAccountNumber — the payee's domestic account number
-- amount: Money — the sum to transfer
-- idempotency_token: IdempotencyToken — the client-supplied unique token preventing duplicate execution
-
 ## Props
+- amount: the sum to transfer, a Money value
+- idempotency_token: the client-supplied unique token preventing duplicate execution
 - required_scope: payments-initiate-domestic
 - recipient_name: the human-readable name of the payee
 - payment_message: a free-text payment message visible to both parties
@@ -21,12 +20,6 @@ Initiates a domestic payment from the authenticated customer's account to a reci
 
 ### recipient
 - provide_destination: supplies the domestic account number for the payment order
-
-### amount
-(no methods — this role is used as a passive value)
-
-### idempotency_token
-(no methods — this role is used as a passive value)
 
 ### authenticated_customer
 - verify_scope: confirms the session grants payments-initiate-domestic
