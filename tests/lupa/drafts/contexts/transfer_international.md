@@ -8,44 +8,32 @@ Initiates a SWIFT international payment from the authenticated customer's accoun
 - source: Account — the account to debit
 - recipient: IBAN — the payee's international bank account number
 - recipient_bic: BIC — the payee's bank identifier code
-- recipient_name: RecipientName — the human-readable name of the payee
 - amount: Money — the sum to transfer
-- message: PaymentMessage — a free-text payment reference or message
-- currency: TargetCurrency — the target currency for the transfer (may differ from source account currency)
 - idempotency_token: IdempotencyToken — the client-supplied unique token preventing duplicate execution
-- idempotency_ledger: IdempotencyLedger — stores token-to-outcome mappings
-- bank: NordeaClient — the payment initiation endpoint
-- audit_sink: AuditSink — receives an audit record of the transfer
 
 ## Props
 - required_scope: payments-initiate-international
+- recipient_name: the human-readable name of the payee
+- payment_message: a free-text payment reference or message
+- target_currency: the target currency for the transfer (may differ from source account currency)
 
 ## Role Methods
 ### authenticated_customer
 - verify_scope: confirms the session grants payments-initiate-international
 - verify_source_ownership: confirms the source account belongs to this customer
 
-### idempotency_ledger
-- enforce: checks whether the idempotency token has been seen; if so, returns the stored outcome
-
-### bank
-- initiate_international_payment: submits the SWIFT payment order to Nordea with source, recipient IBAN, recipient BIC, recipient name, amount, currency, and message, returning a payment reference
-
-### audit_sink
-- record: appends an audit entry describing the international transfer and its outcome
-
 ## Functionalities
 ### transfer
-The authenticated_customer's verify_scope confirms payments-initiate-international. The authenticated_customer's verify_source_ownership confirms the source account belongs to the customer. The idempotency_ledger's enforce checks the token. If already seen, the stored outcome is returned. Otherwise, the bank's initiate_international_payment submits the SWIFT payment. The outcome is recorded in the idempotency ledger and the audit_sink's record logs the transfer.
+The authenticated_customer's verify_scope confirms payments-initiate-international. The authenticated_customer's verify_source_ownership confirms the source account belongs to the customer. The EnforceIdempotency context checks the token. If already seen, the stored outcome is returned. Otherwise, the OpenBanking context's initiate_international_payment submits the SWIFT payment with source, recipient IBAN, recipient BIC, recipient name, amount, target currency, and message. The outcome is recorded against the idempotency token and the AuditRecording context's record logs the transfer.
 
 ## Scenarios
 ### successful international SWIFT transfer
-Given: authenticated customer C-9281 holds scope payments-initiate-international, owns source account FI42 1234 5600 0007 85 (balance 12450.00 EUR), recipient IBAN is DE89 3704 0044 0532 0130 00, recipient BIC is COBADEFFXXX, recipient name is "Schmidt GmbH", amount is 3500.00 EUR, currency is EUR, message is "Contract DE-2026-118", idempotency token idem-INT-20260422-001 is new
+Given: authenticated customer C-9281 holds scope payments-initiate-international, owns source account FI42 1234 5600 0007 85 (balance 12450.00 EUR), recipient IBAN is DE89 3704 0044 0532 0130 00, recipient BIC is COBADEFFXXX, recipient name is "Schmidt GmbH", amount is 3500.00 EUR, target currency is EUR, payment message is "Contract DE-2026-118", idempotency token idem-INT-20260422-001 is new
 When: transfer is invoked
-Then: the bank accepts the payment and returns reference PAY-30567, the idempotency ledger records the outcome, and an audit entry records "international transfer: 3500.00 EUR to DE89370400440532013000 via COBADEFFXXX, reference PAY-30567" for customer C-9281
+Then: the bank accepts the payment and returns reference PAY-30567, the outcome is recorded against the idempotency token, and an audit entry records "international transfer: 3500.00 EUR to DE89370400440532013000 via COBADEFFXXX, reference PAY-30567" for customer C-9281
 
 ### cross-currency international transfer
-Given: authenticated customer C-9281 holds scope payments-initiate-international, owns source account FI42 1234 5600 0007 85 (denominated in EUR), recipient IBAN is GB29 NWBK 6016 1331 9268 19, recipient BIC is NWBKGB2L, recipient name is "Acme Ltd", amount is 1200.00 GBP, currency is GBP, message is "PO-44821", idempotency token idem-INT-20260422-002 is new
+Given: authenticated customer C-9281 holds scope payments-initiate-international, owns source account FI42 1234 5600 0007 85 (denominated in EUR), recipient IBAN is GB29 NWBK 6016 1331 9268 19, recipient BIC is NWBKGB2L, recipient name is "Acme Ltd", amount is 1200.00 GBP, target currency is GBP, payment message is "PO-44821", idempotency token idem-INT-20260422-002 is new
 When: transfer is invoked
 Then: the bank accepts the payment with currency conversion and returns reference PAY-30568, and an audit entry records "international transfer: 1200.00 GBP to GB29NWBK60161331926819, reference PAY-30568" for customer C-9281
 
