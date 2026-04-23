@@ -209,6 +209,34 @@ Create a board, snake, food dropper, game state, and GameLoop...
 - **Missing scenarios**: Every functionality and operation should have at least one concrete Given/When/Then scenario.
 - **Mutation in projections**: Projections are read-only. The parser will reject mutation-shaped prose.
 
+## Spec vs. implementation — what does not belong in a draft
+
+> **If the draft needs to name it, it is not an implementation detail.**
+
+Every capitalised type name referenced in a draft (role player types, projection sources, component bindings, route components) must resolve to a declared artefact — a data, projection, context, component, brand, or routing table draft. `reen prepare` and `reen refine` reject unresolved references.
+
+### Implementation-speak patterns
+
+Names ending with any of these suffixes are almost certainly implementation-speak:
+
+`Client`, `Store`, `Sink`, `Ledger`, `Repository`, `Service`, `Manager`, `Handler`, `Adapter`, `Gateway`, `Connection`, `Pool`, `Registry`, `Cache`, `Queue`, `Bus`, `Clock`, `Timer`
+
+These name mechanisms, not domain concepts. The fix is to name what the domain cares about:
+
+| Implementation-speak | Domain rewrite |
+|---------------------|----------------|
+| `SessionStore` | The user's session is a data concept — author `drafts/data/Session.md` with real attributes and invariants |
+| `Clock` | Express time in domain units ("valid for 15 minutes", "expires after the session timeout"). Do not name a time source |
+| `AuditSink` | If auditing is a domain requirement, author `drafts/contexts/AuditRecording.md`. If it is cross-cutting infrastructure, omit it from drafts |
+| `NordeaClient` | The Nordea integration is a context — author `drafts/contexts/OpenBanking.md` with DCI-native roles. The HTTP client lives inside the context implementation |
+| `IdempotencyLedger` | The domain concept is "requests we've already accepted" or "deduplicated attempts" — author a data draft |
+| `IncomingRequest` | Author `drafts/data/IncomingRequest.md` with actual attributes (path, headers, session cookie), or rename to the existing domain concept |
+| `DateRangeFilter` | Author `drafts/data/DateRange.md`, or use the domain term directly ("the reporting period") |
+
+### Litmus test
+
+Before naming a type in a draft, ask: **"would a non-technical domain stakeholder recognise this name?"** If the answer is no, it is probably implementation-speak. Name what the business cares about; leave the mechanism to the implementer.
+
 ## What not to put in a draft
 
 `reen prepare` enforces a **code-token lint** that blocks any draft containing implementation-level content. The following families are rejected:
