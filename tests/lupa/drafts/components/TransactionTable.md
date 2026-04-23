@@ -26,6 +26,12 @@ Displays a filterable, chronologically ordered list of transactions for a single
 
 ## Scenarios
 
-- User opens account detail: the table loads with the default date range and shows the most recent transactions
-- User narrows the date range: filter-changed fires, the parent fetches filtered data, and the table re-renders with the reduced set
-- No transactions exist in the selected range: the table shows an empty-state message suggesting the user widen the date range
+### user narrows the date range
+Given: a TransactionTable displaying 25 transactions for account FI42 1234 5600 0007 85
+When: the user sets the DateRangePicker to 2026-04-10 through 2026-04-15
+Then: filter-changed fires with start 2026-04-10 and end 2026-04-15, and the parent fetches the filtered transaction set
+
+### no transactions match the selected range
+Given: a TransactionTable for account FI42 1234 5600 0007 85 with the DateRangePicker set to 2026-01-01 through 2026-01-02
+When: the filtered result contains zero transactions
+Then: the table shows an empty-state message suggesting the user widen the date range

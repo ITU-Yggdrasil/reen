@@ -19,7 +19,12 @@ A tabbed screen that hosts the three transfer forms: own-account, domestic, and 
 
 ## Scenarios
 
-- User navigates to the transfer hub without a specific sub-path: the own-account tab activates by default
-- User selects the domestic tab: the route updates and the DomesticTransferForm becomes visible
-- User completes a transfer in any form: a success message appears and the form resets
-- User switches from a partially filled form to another tab and back: the original form retains its values
+### user opens the transfer hub
+Given: authenticated user navigates to the transfer hub without a specific sub-path
+When: the screen loads
+Then: the own-account tab activates by default and the TransferBetweenOwnForm is visible
+
+### user switches tabs and input is preserved
+Given: the user has partially filled the DomesticTransferForm with recipient 1234-56789012 and amount 89,90 EUR
+When: the user switches to the international tab and then back to the domestic tab
+Then: the DomesticTransferForm still shows recipient 1234-56789012 and amount 89,90 EUR

@@ -8,6 +8,9 @@ Performs a complete logout by revoking the bearer token at the bank, destroying 
 - session: Session — the session to be revoked, containing the bearer and refresh tokens
 
 ## Role Methods
+### authenticated_customer
+- provide_identity: supplies the customer identifier for the audit record
+
 ### session
 - provide_tokens: supplies the bearer token and refresh token for revocation at the bank
 - destroy: marks the session as destroyed so it can no longer be resolved by future requests

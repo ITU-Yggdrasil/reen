@@ -24,6 +24,12 @@ Lets the user select a start date and an end date to define a time window, typic
 
 ## Scenarios
 
-- User selects a start date after the current end date: the end date clears and the user is prompted to pick a new end
-- User selects an end date that would exceed max-span: the start date adjusts forward to satisfy the constraint and range-changed fires with both new values
-- User clears both dates: range-changed fires with empty values, indicating no filter is applied
+### user selects a valid date range
+Given: a DateRangePicker with no dates selected and max-span of 90 days
+When: the user selects start date 2026-04-01 and end date 2026-04-15
+Then: range-changed fires with start 2026-04-01 and end 2026-04-15
+
+### end date exceeds max span and start adjusts
+Given: a DateRangePicker with start 2026-01-01 and max-span of 30 days
+When: the user selects end date 2026-04-15
+Then: the start date adjusts to 2026-03-16 and range-changed fires with both new values

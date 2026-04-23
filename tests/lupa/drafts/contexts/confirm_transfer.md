@@ -9,6 +9,9 @@ Verifies and claims a confirmation card before executing a chat-initiated transf
 - ledger_entry: IdempotencyLedgerEntry — the record used to claim the card and prevent double-confirmation
 
 ## Role Methods
+### authenticated_customer
+- verify_ownership: confirms the confirmation card was issued for this customer
+
 ### confirmation_card
 - verify_signature: checks that the card's cryptographic signature is intact and was issued by the system
 - verify_freshness: checks that the card has not expired (cards are valid for a limited window)

@@ -23,6 +23,12 @@ Arranges a collection of AccountCards into a vertical list, giving the user an o
 
 ## Scenarios
 
-- User has three accounts: three AccountCards render in order, each showing its summary
-- User taps the second account: account-selected fires with that account's identifier
-- User has no accounts: an empty-state message explains that no accounts are available
+### user taps an account in the list
+Given: an AccountList displaying three accounts: "Salary", "Savings", and "Investment"
+When: the user taps the "Savings" AccountCard
+Then: account-selected fires carrying the identifier of the "Savings" account
+
+### empty account list shows informative message
+Given: an AccountList with an empty accounts collection
+When: the list renders
+Then: an empty-state message explains that no accounts are available

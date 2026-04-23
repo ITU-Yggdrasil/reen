@@ -13,6 +13,9 @@ Retrieves transactions for a specific account from the Open Banking integration,
 - date_to: the end date of the transaction query range
 
 ## Role Methods
+### account
+- provide_identifier: supplies the account identifier for the transaction fetch
+
 ### authenticated_customer
 - verify_scope: confirms the customer's session grants the transactions-read scope
 - verify_ownership: confirms the requested account belongs to this customer

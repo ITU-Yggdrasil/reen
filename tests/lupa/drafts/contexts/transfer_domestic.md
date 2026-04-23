@@ -16,6 +16,18 @@ Initiates a domestic payment from the authenticated customer's account to a reci
 - payment_message: a free-text payment message visible to both parties
 
 ## Role Methods
+### source
+- verify_sufficient_funds: checks that the source account balance covers the transfer amount
+
+### recipient
+- provide_destination: supplies the domestic account number for the payment order
+
+### amount
+(no methods — this role is used as a passive value)
+
+### idempotency_token
+(no methods — this role is used as a passive value)
+
 ### authenticated_customer
 - verify_scope: confirms the session grants payments-initiate-domestic
 - verify_source_ownership: confirms the source account belongs to this customer

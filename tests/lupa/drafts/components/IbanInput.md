@@ -21,7 +21,12 @@ Accepts an International Bank Account Number and validates its format progressiv
 
 ## Scenarios
 
-- User types a correct IBAN character by character: the field groups characters into fours and reports valid once the full number passes the check-digit test
-- User pastes a complete valid IBAN: the value normalises immediately and valid becomes true
-- User enters an IBAN with an incorrect check digit: the field shows an error state and valid remains false
-- User enters an IBAN with an unrecognised country code: the field shows an error state explaining the country is not supported
+### user enters a valid IBAN
+Given: an empty IbanInput
+When: the user types DE89 3704 0044 0532 0130 00
+Then: iban-changed fires with the normalised value and validity true, and the field displays the IBAN grouped in fours
+
+### user enters an IBAN with incorrect check digit
+Given: an empty IbanInput
+When: the user types DE00 3704 0044 0532 0130 00
+Then: iban-changed fires with validity false and the field shows an error state

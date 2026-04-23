@@ -16,6 +16,12 @@ The primary post-login landing screen. Displays the user's full portfolio of acc
 
 ## Scenarios
 
-- User arrives after login: the screen fetches account summaries and renders the AccountList alongside the ambient ChatPane
-- User taps an account: AccountList emits account-selected and the application navigates to AccountDetailScreen for that account
-- User sends a message in the ChatPane: the message is delivered to the ChatSession context and the agent responds within the pane
+### user arrives after login
+Given: authenticated user C-9281 navigates to AccountsScreen
+When: the screen loads
+Then: the AccountList renders with the user's account summaries and the ChatPane is visible
+
+### user selects an account
+Given: AccountsScreen is displaying the user's accounts
+When: the user taps an account and the AccountList emits account-selected with account identifier FI42 1234 5600 0007 85
+Then: the application navigates to AccountDetailScreen for that account

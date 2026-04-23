@@ -24,7 +24,17 @@ Captures a monetary amount paired with a currency selection. Formats the amount 
 
 ## Scenarios
 
-- User types an amount within bounds: the value updates and amount-changed fires with the formatted value
-- User types more decimal places than the currency permits: input is truncated to the allowed precision
-- User enters an amount exceeding max-amount: the field enters an error state with an explanatory message
-- User switches currency: currency-changed fires and the decimal precision rule re-evaluates against the new currency
+### user enters a valid amount
+Given: a MoneyInput with currency EUR and max-amount 10 000,00
+When: the user types 250,50
+Then: amount-changed fires with the value 250,50
+
+### user switches currency
+Given: a MoneyInput with currency EUR and available currencies EUR and GBP
+When: the user selects GBP
+Then: currency-changed fires with GBP and the decimal precision adjusts to GBP rules
+
+### amount exceeds maximum
+Given: a MoneyInput with currency EUR and max-amount 1 000,00
+When: the user types 1 500,00
+Then: the field enters an error state with a message indicating the maximum is exceeded

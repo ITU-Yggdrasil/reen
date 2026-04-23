@@ -26,7 +26,12 @@ A scrollable conversation panel that combines a chronological list of ChatMessag
 
 ## Scenarios
 
-- User sends a message: the message appears immediately as a user-origin ChatMessage, the pane scrolls to the bottom, and the ChatInput clears
-- Agent responds: a new agent-origin ChatMessage appears and the pane scrolls to the bottom if the user has not scrolled away
-- A tool result arrives: a tool-result ChatMessage appears in the conversation at its chronological position
-- User scrolls up to review earlier messages then a new message arrives: the pane does not auto-scroll, preserving the user's reading position
+### user sends a message
+Given: the ChatPane displays a conversation and the ChatInput contains "Transfer 100 EUR"
+When: the user submits the message via the ChatInput
+Then: message-submit fires with "Transfer 100 EUR", the message appears as a user-origin ChatMessage, and the pane scrolls to the bottom
+
+### new message arrives while user has scrolled up
+Given: the user has scrolled up in the ChatPane to review earlier messages
+When: the agent sends a new response
+Then: the agent-origin ChatMessage appears at the bottom but the pane does not auto-scroll, preserving the user's reading position

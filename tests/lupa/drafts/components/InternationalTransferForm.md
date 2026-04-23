@@ -31,9 +31,12 @@ Lets the user send money to a foreign account. Presents a source account selecto
 
 ## Scenarios
 
-- User fills all fields correctly with a matching currency and submits: the form requests server validation, receives a signed token, and displays the ConfirmationCard
-- User fills all fields with a different target currency: the ConfirmationCard additionally shows the indicative exchange rate and the equivalent amount in the source currency
-- User enters an invalid IBAN: the IbanInput shows an error and the submit control remains disabled
-- User enters an invalid BIC: the BIC field enters an error state and the submit control remains disabled
-- User accepts the ConfirmationCard: transfer-submitted fires with the signed token
-- User rejects the ConfirmationCard: the form returns to its editable state with previous values intact
+### user submits a valid international transfer
+Given: the user has selected source account "Salary", entered IBAN DE89 3704 0044 0532 0130 00, BIC COBADEFFXXX, amount 3 500,00 EUR, and payment reference "Contract DE-2026-118"
+When: the user submits the form
+Then: the form requests server validation, receives a signed token, and displays the ConfirmationCard with the transfer details
+
+### user confirms the international transfer
+Given: the ConfirmationCard is displayed with a signed token for 3 500,00 EUR to DE89 3704 0044 0532 0130 00
+When: the user accepts the ConfirmationCard
+Then: transfer-submitted fires carrying the signed token

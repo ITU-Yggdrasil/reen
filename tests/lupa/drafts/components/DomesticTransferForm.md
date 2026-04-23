@@ -27,8 +27,12 @@ Lets the user send money to another account within the same country. Presents a 
 
 ## Scenarios
 
-- User fills all fields correctly and submits: the form requests server validation, receives a signed token, and displays the ConfirmationCard
-- User enters an invalid recipient account number: the field enters an error state and the submit control remains disabled
-- User attempts to transfer more than the available balance: the MoneyInput enters an error state
-- User accepts the ConfirmationCard: transfer-submitted fires with the signed token
-- User rejects the ConfirmationCard: the form returns to its editable state with previous values intact
+### user submits a valid domestic transfer
+Given: the user has selected source account "Salary", entered recipient 1234-56789012, amount 89,90 EUR, and payment reference "Invoice 2026-04-001"
+When: the user submits the form
+Then: the form requests server validation, receives a signed token, and displays the ConfirmationCard with the transfer details
+
+### user confirms the transfer via ConfirmationCard
+Given: the ConfirmationCard is displayed with a signed token for 89,90 EUR to 1234-56789012
+When: the user accepts the ConfirmationCard
+Then: transfer-submitted fires carrying the signed token

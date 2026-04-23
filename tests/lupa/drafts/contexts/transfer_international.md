@@ -18,6 +18,21 @@ Initiates a SWIFT international payment from the authenticated customer's accoun
 - target_currency: the target currency for the transfer (may differ from source account currency)
 
 ## Role Methods
+### source
+- verify_sufficient_funds: checks that the source account balance covers the transfer amount
+
+### recipient
+- provide_destination: supplies the IBAN for the SWIFT payment order
+
+### recipient_bic
+(no methods — this role is used as a passive value)
+
+### amount
+(no methods — this role is used as a passive value)
+
+### idempotency_token
+(no methods — this role is used as a passive value)
+
 ### authenticated_customer
 - verify_scope: confirms the session grants payments-initiate-international
 - verify_source_ownership: confirms the source account belongs to this customer

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A dedicated full-screen conversation view for extended interaction with the banking agent. Unlike the ambient ChatPane on AccountsScreen, this screen gives the conversation the full viewport, suitable for complex multi-turn flows such as guided transfer setup or account inquiry.
+A dedicated full-screen conversation view for extended interaction with the banking agent. Unlike the ambient ChatPane on AccountsScreen, this screen gives the conversation the full viewport, designed for complex multi-turn flows such as guided transfer setup or account inquiry.
 
 ## Composition
 
@@ -15,6 +15,12 @@ A dedicated full-screen conversation view for extended interaction with the bank
 
 ## Scenarios
 
-- User navigates to the chat screen: the existing conversation history loads and the ChatPane renders with the full message thread
-- User sends a message: the ChatPane handles submission and the agent responds within the same view
-- User navigates away and returns: the conversation resumes from where it was left, with full history intact
+### user opens the chat screen
+Given: authenticated user C-9281 navigates to ChatScreen with an existing conversation of five messages
+When: the screen loads
+Then: the ChatPane renders the full five-message thread and the ChatInput is ready for new input
+
+### conversation persists across navigation
+Given: the user has sent three messages on the ChatScreen and then navigates to AccountsScreen
+When: the user returns to ChatScreen
+Then: all three messages and any agent responses are visible in the ChatPane

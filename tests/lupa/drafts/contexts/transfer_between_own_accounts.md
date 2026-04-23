@@ -14,6 +14,18 @@ Initiates a transfer between two accounts that both belong to the same authentic
 - required_scope: payments-initiate-own
 
 ## Role Methods
+### source
+- verify_sufficient_funds: checks that the source account balance covers the transfer amount
+
+### destination
+- accept_credit: receives the transferred amount
+
+### amount
+(no methods — this role is used as a passive value)
+
+### idempotency_token
+(no methods — this role is used as a passive value)
+
 ### authenticated_customer
 - verify_scope: confirms the session grants payments-initiate-own
 - verify_ownership_of_both: confirms both the source and destination accounts belong to this customer

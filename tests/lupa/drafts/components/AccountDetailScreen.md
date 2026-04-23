@@ -20,6 +20,17 @@ Shows the full transaction history for a single account. Displays the account su
 
 ## Scenarios
 
-- User navigates to an account detail: the screen fetches the account summary and recent transactions, rendering the AccountCard and TransactionTable
-- User adjusts the date range: TransactionTable emits filter-changed and the screen fetches the filtered transaction set
-- User navigates to a non-existent or unauthorised account: an error message appears with a link back to AccountsScreen
+### user opens account detail screen
+Given: authenticated user navigates to account detail for account FI42 1234 5600 0007 85
+When: the screen loads
+Then: the AccountCard displays the account summary and the TransactionTable shows the most recent transactions
+
+### user filters transactions by date range
+Given: the AccountDetailScreen is displaying account FI42 1234 5600 0007 85
+When: the user changes the date range in the TransactionTable's DateRangePicker to 2026-04-01 through 2026-04-15
+Then: the screen fetches transactions for the new range and the TransactionTable re-renders with the filtered set
+
+### unauthorised account shows error
+Given: authenticated user C-9281 navigates to account detail for account FI42 9999 0000 0001 00 which belongs to customer C-6633
+When: the screen loads
+Then: an error message appears and a link navigates back to AccountsScreen

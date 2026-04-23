@@ -12,6 +12,9 @@ Guards mutating operations against duplicate execution by checking an idempotenc
 - operation_description: a human-readable description of the operation being guarded (used for verification, not execution)
 
 ## Role Methods
+### authenticated_customer
+- provide_identity: supplies the customer identifier for scoping the idempotency check
+
 ### ledger_entry
 - lookup: checks whether the idempotency token has been recorded previously and, if so, retrieves the stored outcome
 - claim: reserves the token for the current operation, preventing concurrent duplicate claims

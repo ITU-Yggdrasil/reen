@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Given a transfer request, produces a confirmation-ready text summary suitable for display in both the web UI and the chat agent's confirmation card.
+Given a transfer request, produces a confirmation-ready text summary for display in both the web UI and the chat agent's confirmation card.
 
 ## Source
 - TransferRequest

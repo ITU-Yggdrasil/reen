@@ -25,6 +25,12 @@ Presents a read-only preview of a pending transfer and asks the user to accept o
 
 ## Scenarios
 
-- User reviews a correct transfer and taps accept: transfer-accepted fires with the token and the card enters a busy state
-- User notices an error and taps reject: transfer-rejected fires and the user returns to the form with their previous input preserved
-- Token is missing due to a server error: the accept control is disabled and an explanatory message appears
+### user accepts the transfer
+Given: a ConfirmationCard showing a transfer of 500,00 EUR from "Salary (**** 0785)" to "Savings (**** 0786)" with token tok-ABC123
+When: the user taps the accept control
+Then: accepted fires carrying token tok-ABC123 and the card enters a busy state
+
+### user rejects the transfer
+Given: a ConfirmationCard showing a pending transfer
+When: the user taps the reject control
+Then: rejected fires and the user returns to the form

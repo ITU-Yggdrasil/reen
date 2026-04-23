@@ -27,8 +27,17 @@ Lets the user move money between their own accounts. Presents source and destina
 
 ## Scenarios
 
-- User selects source, destination, and a valid amount then submits: the form requests server validation, receives a signed token, and displays the ConfirmationCard
-- User attempts to transfer more than the available balance: the MoneyInput enters an error state and the submit control remains disabled
-- User selects the same account as both source and destination: the submit control disables with an explanatory message
-- User accepts the ConfirmationCard: transfer-submitted fires with the signed token
-- User rejects the ConfirmationCard: the form returns to its editable state with previous values intact
+### user submits a valid own-account transfer
+Given: the user has selected source account "Salary" and destination account "Savings" with amount 2 000,00 EUR
+When: the user submits the form
+Then: the form requests server validation, receives a signed token, and displays the ConfirmationCard
+
+### user confirms the own-account transfer
+Given: the ConfirmationCard is displayed with a signed token for 2 000,00 EUR from "Salary" to "Savings"
+When: the user accepts the ConfirmationCard
+Then: transfer-submitted fires carrying the signed token
+
+### same account selected as source and destination
+Given: the user has selected "Salary" as both source and destination
+When: the form evaluates the selection
+Then: the submit control is disabled with a message explaining that source and destination must differ
