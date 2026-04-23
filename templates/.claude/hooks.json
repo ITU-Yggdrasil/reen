@@ -71,6 +71,24 @@
       },
       "command": "reen verify \"$CLAUDE_TOOL_ARG_FILE_PATH\" 2>&1 && cargo check -q 2>&1 || true",
       "description": "Verify spec alignment and type-check after Rust edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Write",
+        "path": "crates/*/src/**/*.rs"
+      },
+      "command": "cargo check -q 2>&1 || true",
+      "description": "Type-check after workspace crate Rust edits"
+    },
+    {
+      "event": "PostToolUse",
+      "matcher": {
+        "tool": "Edit",
+        "path": "crates/*/src/**/*.rs"
+      },
+      "command": "cargo check -q 2>&1 || true",
+      "description": "Type-check after workspace crate Rust edits"
     }
   ]
 }

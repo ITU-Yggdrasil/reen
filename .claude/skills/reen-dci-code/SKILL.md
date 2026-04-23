@@ -5,6 +5,7 @@ triggers:
   - glob: "src/contexts/**/*.rs"
   - glob: "src/data/**/*.rs"
   - glob: "src/projections/**/*.rs"
+  - glob: "crates/*/src/**/*.rs"
 ---
 
 # DCI Code Realisation in Rust (Reen)
@@ -66,6 +67,42 @@ Operation clients are generated under `src/apis/<api>/<operation>.rs` from `reen
 - All expected fields are present (transport + auth + input/output/error)
 - Public method set matches the kind table above
 - Error messages use DCI-adjacent vocabulary: "the `Subscribe` operation on the aisstream api is missing the `auth_apikey` field"
+
+## Web-App Four-Crate Layout
+
+For `web_app` projects, `reen scaffold` emits a Cargo workspace with four crates:
+
+| Crate | Contains | Builds for |
+|-------|----------|------------|
+| `app-core` | Data, projections, `client_also` contexts | native + WASM |
+| `app-server` | `server_only` contexts, operations, server binary | native only |
+| `app-client` | WASM entry, DOM event bindings, RPC fetch stubs | WASM only |
+| `app-components` | Components, brand, router, `Markup` newtype | native + WASM |
+
+### Where each kind lives
+
+- **Data / Projections** → `app-core`
+- **Contexts** → `app-core` if `client_also`, `app-server` if `server_only`
+- **Components** → `app-components/src/components/<name>.rs`
+- **Brand** → `app-components/src/brand/<name>.rs` + companion `.css`
+- **Router** → `app-components/src/router.rs`
+
+### The Markup newtype
+
+`Markup(pub String)` in `app-components::markup`. Framework-neutral — the implementer fills `render()` bodies with whatever templating they choose (raw string building, Askama, Maud, etc.). No escaping; that's the implementer's call.
+
+### Component methods
+
+- `render(&self) -> Markup` — produces the component's HTML representation
+- `on_<event>(&self) -> EventOutcome` — one per declared event. Returns `EventOutcome::InvokeDirect` for `client_also` contexts, `EventOutcome::InvokeRemote` for `server_only` contexts, or `EventOutcome::Noop`/`Navigate`
+
+### RPC edges
+
+When a component event binding targets a `server_only` context:
+- **Server side**: `POST /_rpc/<context_snake>/<functionality_snake>` handler in `app-server`
+- **Client side**: `async fn <context>_<func>() -> Result<String, JsValue>` stub in `app-client`
+
+The RPC path is deterministic from the prepared YAML. Frameworks live in bodies, not in Reen-owned scaffolding.
 
 ## Implementation Tips
 

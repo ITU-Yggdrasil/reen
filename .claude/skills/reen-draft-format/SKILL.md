@@ -165,13 +165,15 @@ Exactly one per project. Describes the application entry point. Three structured
 
 ```
 # The primary application
-## Application Kind    — `cli_app` or `tui_app` (`web_app` reserved for Phase 10)
+## Application Kind    — `cli_app`, `tui_app`, or `web_app`
 ## Entry Context       — PascalCase name of the context the app launches into
 ## Entry Functionality — functionality on that context invoked at startup (optional if only one)
 ## Dependencies        — bullet list of crate names the app needs
 ```
 
 Everything else (Purpose, Startup Sequence, Main Loop Behavior, Collaborators, Error Handling) is preserved as notes prose. It is not schema-enforced — it serves as implementation guidance for Claude Code.
+
+**`web_app` projects** require at least one routing table draft under `drafts/routes/`. Routing is the entry surface for web applications — `Entry Context` and `Entry Functionality` are optional (the routing table maps URLs to components).
 
 Example:
 ```
