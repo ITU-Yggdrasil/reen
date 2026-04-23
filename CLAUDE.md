@@ -41,6 +41,12 @@ See `DCI.md` for the conceptual reference and `DRAFT_FORMAT.md` for templates.
 - `reen verify` runs after every Rust write via PostToolUse hook
 - `/audit` checks semantic alignment after implementation: role method responsibilities, functionality flow, invariant enforcement
 
+## Build tracker
+
+`.reen/build.json` records method-level provenance. When a draft changes, `reen prepare` marks affected methods as `stale` and cascades through the dependency graph. `reen scaffold` preserves `fresh` method bodies and resets only `stale` methods to `todo!()`. `/implement` reads the tracker and works only on stale entries. `reen verify` flips `stale → fresh` when a method passes. `/audit` can flip entries back to `stale` with finding text attached.
+
+Source under `src/contexts/`, `src/data/`, `src/projections/` is machine-owned. Users never hand-edit it. `reen clean` removes the tracker, prepared YAML, and machine-owned source.
+
 ## Hooks
 
 PostToolUse hooks auto-run `reen prepare` on draft edits and `reen verify && cargo check` on Rust edits.
