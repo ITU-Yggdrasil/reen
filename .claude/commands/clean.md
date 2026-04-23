@@ -1,11 +1,11 @@
 ---
 name: clean
-description: Remove tracker, prepared YAML, and reen-owned Rust source to reset the project to pre-prepare state
+description: Remove tracker, prepared YAML, and all of src/ to reset the project to pre-prepare state
 ---
 
 Run `reen clean --force` to remove all generated pipeline outputs and return the project to pre-prepare state.
 
 Steps:
 1. Run `reen clean --force`.
-2. Report which items were removed (tracker file, prepared YAML, reen-owned Rust subtrees).
-3. Confirm that drafts and hand-written modules are still intact.
+2. Report which items were removed (tracker file, prepared YAML, src/ tree).
+3. Confirm that drafts are still intact.

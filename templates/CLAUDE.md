@@ -30,7 +30,7 @@ See `DCI.md` for the conceptual reference and `DRAFT_FORMAT.md` for templates.
 - `/scaffold` — generate Rust stubs
 - `/implement` — fill `todo!()` bodies guided by spec + tests
 - `/audit` — discrepancy check after implementation
-- `/clean` — remove tracker, prepared YAML, and reen-owned source
+- `/clean` — remove tracker, prepared YAML, and all of `src/`
 
 ## Implementation contract
 
@@ -46,7 +46,7 @@ See `DCI.md` for the conceptual reference and `DRAFT_FORMAT.md` for templates.
 
 `.reen/build.json` records method-level provenance. When a draft changes, `reen prepare` marks affected methods as `stale` and cascades through the dependency graph. `reen scaffold` preserves `fresh` method bodies and resets only `stale` methods to `todo!()`. `/implement` reads the tracker and works only on stale entries. `reen verify` flips `stale → fresh` when a method passes. `/audit` can flip entries back to `stale` with finding text attached.
 
-Source under `src/contexts/`, `src/data/`, `src/projections/` is machine-owned. Users never hand-edit it. `reen clean` removes the tracker, prepared YAML, and machine-owned source.
+`src/` is machine-owned in its entirety. Users never hand-edit anything under it — if a fix is needed, edit the draft. `reen clean` removes the tracker, prepared YAML, and all of `src/`.
 
 ## Hooks
 

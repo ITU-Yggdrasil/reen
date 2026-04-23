@@ -270,8 +270,7 @@ fn clean_removes_tracker_prepared_and_owned_source() {
     // Everything should be gone
     assert!(!root.join(".reen/build.json").exists(), "tracker should be removed");
     assert!(!root.join("drafts/prepare").exists(), "prepared dir should be removed");
-    assert!(!root.join("src/contexts").exists(), "contexts dir should be removed");
-    assert!(!root.join("src/data").exists(), "data dir should be removed");
+    assert!(!root.join("src").exists(), "entire src/ should be removed");
 
     // Drafts themselves should still exist
     assert!(root.join("drafts/data/Account.md").is_file(), "drafts should be preserved");

@@ -69,7 +69,7 @@ enum Commands {
     #[command(subcommand, about = "External API ingestion and management")]
     Apis(ApisCommand),
 
-    #[command(about = "Remove tracker, prepared YAML, and reen-owned Rust source")]
+    #[command(about = "Remove tracker, prepared YAML, and all of src/")]
     Clean(CleanArgs),
 
     #[command(about = "Install or upgrade the Reen bundle in a project")]
@@ -720,17 +720,13 @@ fn run_clean_cmd(args: CleanArgs, workspace: &Workspace) -> Result<()> {
 
     let build_json = workspace.state_dir.join("build.json");
     let prepared_dir = &workspace.prepared_dir;
-    let owned_dirs: Vec<std::path::PathBuf> = ["contexts", "data", "projections"]
-        .iter()
-        .map(|d| workspace.root.join("src").join(d))
-        .filter(|p| p.is_dir())
-        .collect();
+    let src_dir = workspace.root.join("src");
 
     let has_tracker = build_json.is_file();
     let has_prepared = prepared_dir.is_dir();
-    let has_owned = !owned_dirs.is_empty();
+    let has_src = src_dir.is_dir();
 
-    if !has_tracker && !has_prepared && !has_owned {
+    if !has_tracker && !has_prepared && !has_src {
         println!("Nothing to clean.");
         return Ok(());
     }
@@ -742,11 +738,8 @@ fn run_clean_cmd(args: CleanArgs, workspace: &Workspace) -> Result<()> {
     if has_prepared {
         println!("  drafts/prepare/");
     }
-    for dir in &owned_dirs {
-        let relative = dir
-            .strip_prefix(&workspace.root)
-            .unwrap_or(dir);
-        println!("  {}/", relative.display());
+    if has_src {
+        println!("  src/");
     }
 
     // Confirm unless --force
@@ -770,12 +763,9 @@ fn run_clean_cmd(args: CleanArgs, workspace: &Workspace) -> Result<()> {
         std::fs::remove_dir_all(prepared_dir)?;
         println!("Removed drafts/prepare/");
     }
-    for dir in &owned_dirs {
-        std::fs::remove_dir_all(dir)?;
-        let relative = dir
-            .strip_prefix(&workspace.root)
-            .unwrap_or(dir);
-        println!("Removed {}/", relative.display());
+    if has_src {
+        std::fs::remove_dir_all(&src_dir)?;
+        println!("Removed src/");
     }
 
     // Also remove the generated files manifest
