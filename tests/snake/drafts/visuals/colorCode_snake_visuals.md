@@ -35,7 +35,7 @@ The SereneMind logo is a minimal, abstract leaf or wave shape, symbolizing growt
 **Color usage:**
 The visual identity is built around soft, calming colors.
 
-* Background have to be #4F693E
+* Background have to bergb(177, 208, 157)
 * Headings should have color RGB: 105, 91, 62 
 
 else fill out space with colors like: 
