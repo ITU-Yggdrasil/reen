@@ -244,3 +244,41 @@ fn prepare_dry_run_does_not_write_tracker() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn clean_removes_tracker_prepared_and_owned_source() {
+    let root = temp_project_dir("tracker_clean");
+    write_file(&root, "drafts/data/Account.md", ACCOUNT_DRAFT);
+    write_file(&root, "drafts/contexts/money_transfer.md", TRANSFER_DRAFT);
+
+    // Prepare and scaffold
+    let output = run_reen(&root, &["prepare"]);
+    assert!(output.status.success(), "prepare: {}", stderr(&output));
+    let output = run_reen(&root, &["scaffold"]);
+    assert!(output.status.success(), "scaffold: {}", stderr(&output));
+
+    // Verify things exist
+    assert!(root.join(".reen/build.json").is_file());
+    assert!(root.join("drafts/prepare").is_dir());
+    assert!(root.join("src/contexts").is_dir());
+    assert!(root.join("src/data").is_dir());
+
+    // Clean with --force
+    let output = run_reen(&root, &["clean", "--force"]);
+    assert!(output.status.success(), "clean: {}", stderr(&output));
+
+    // Everything should be gone
+    assert!(!root.join(".reen/build.json").exists(), "tracker should be removed");
+    assert!(!root.join("drafts/prepare").exists(), "prepared dir should be removed");
+    assert!(!root.join("src/contexts").exists(), "contexts dir should be removed");
+    assert!(!root.join("src/data").exists(), "data dir should be removed");
+
+    // Drafts themselves should still exist
+    assert!(root.join("drafts/data/Account.md").is_file(), "drafts should be preserved");
+    assert!(root.join("drafts/contexts/money_transfer.md").is_file(), "drafts should be preserved");
+
+    let out = stdout(&output);
+    assert!(out.contains("Clean complete"), "should report completion, got: {}", out);
+
+    let _ = fs::remove_dir_all(root);
+}

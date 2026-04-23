@@ -49,6 +49,23 @@ PostToolUse hooks auto-run `reen prepare` on draft edits and `reen verify && car
 
 `templates/` is the source of truth for `.claude/`, `DCI.md`, `DRAFT_FORMAT.md`, and this file's seed content. Edit files in `templates/` first, then run `reen init --upgrade` to regenerate the repo-root copies. PRs that edit repo-root copies without updating templates/ will fail the dogfood check.
 
+### Adding a new artefact kind — checklist
+
+When a phase introduces a new artefact kind (Component, Brand, RoutingTable, App, Operation, and future ones), the following touchpoints must all move together in the same phase. Skipping any one produces a silently broken bundle or a scaffold that can't materialise into a user's project via `reen init`:
+
+1. **Parser** — `ArtifactKind::<Kind>` in `src/draft_parser.rs` plus a per-kind parse path.
+2. **Prepared schema** — new variant in `src/prepared.rs` / `src/prepared_contracts.rs`; bump the schema version only if the change is non-additive.
+3. **Canonical filesystem path** — pick a `drafts/<subdir>/` home, document it in the phase's `PLAN.md` section and prompt, use it consistently in every test project.
+4. **Codegen** — emission into the appropriate target location (single-crate `src/<kind>/` or Phase 10's `crates/app-*/src/<kind>/`).
+5. **Verify** — a case per kind, messages in DCI language.
+6. **Phase 8 bundle** — add `drafts/<subdir>/.gitkeep` to `templates/` and classify it `seed` in `templates/bundle.toml`; update the Phase 8 bundle layout in `PLAN.md` and `PROMPT_PHASE_8.md` so future retrofit work does not have to re-discover the list.
+7. **Skills** — extend `templates/.claude/skills/reen-draft-format/SKILL.md` (template), `reen-dci-authoring/SKILL.md` (concept), and `reen-dci-code/SKILL.md` (emission shape) with a section per kind.
+8. **Hooks** — add the draft path pattern to `templates/.claude/hooks.json` if `drafts/**.md` does not already match.
+9. **Test fixtures** — at least one golden-file test with a minimal draft of the new kind under `tests/fixtures/`.
+10. **Dogfood** — after every edit to `templates/`, run `reen init --upgrade` inside the repo and confirm `git status` is clean. Never edit `.claude/` at the repo root directly; always go through `templates/`.
+
+The contributor who adds a kind is responsible for all ten. Reviewers check the full list before approving.
+
 ## CLI
 
 ```
@@ -57,6 +74,7 @@ reen refine [--drafts-only|--prepared-only] [names...]
 reen scaffold [names...]
 reen verify <path.rs> [--prepared path.yml]
 reen clear prepared|generated|all
+reen clean [--force]
 reen manifest types add-prefix <prefix>
 reen manifest capabilities add <domain> <crate>
 ```

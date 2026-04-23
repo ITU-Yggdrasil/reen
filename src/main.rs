@@ -69,8 +69,17 @@ enum Commands {
     #[command(subcommand, about = "External API ingestion and management")]
     Apis(ApisCommand),
 
+    #[command(about = "Remove tracker, prepared YAML, and reen-owned Rust source")]
+    Clean(CleanArgs),
+
     #[command(about = "Install or upgrade the Reen bundle in a project")]
     Init(InitArgs),
+}
+
+#[derive(Args, Clone)]
+struct CleanArgs {
+    #[arg(long, help = "Skip the confirmation prompt")]
+    force: bool,
 }
 
 #[derive(Args, Default, Clone)]
@@ -343,6 +352,7 @@ fn main() -> Result<()> {
         Commands::Manifest(cmd) => run_manifest(cmd, globals, &workspace)?,
         Commands::Clear(cmd) => run_clear(cmd, globals, &workspace, &config)?,
         Commands::Apis(cmd) => run_apis(cmd, globals, &workspace)?,
+        Commands::Clean(args) => run_clean_cmd(args, &workspace)?,
         Commands::Init(_) => unreachable!("handled above"),
     }
 
@@ -703,6 +713,79 @@ fn run_clear(
             clear_generated_outputs(workspace, dry_run)
         }
     }
+}
+
+fn run_clean_cmd(args: CleanArgs, workspace: &Workspace) -> Result<()> {
+    use std::io::{self, Write};
+
+    let build_json = workspace.state_dir.join("build.json");
+    let prepared_dir = &workspace.prepared_dir;
+    let owned_dirs: Vec<std::path::PathBuf> = ["contexts", "data", "projections"]
+        .iter()
+        .map(|d| workspace.root.join("src").join(d))
+        .filter(|p| p.is_dir())
+        .collect();
+
+    let has_tracker = build_json.is_file();
+    let has_prepared = prepared_dir.is_dir();
+    let has_owned = !owned_dirs.is_empty();
+
+    if !has_tracker && !has_prepared && !has_owned {
+        println!("Nothing to clean.");
+        return Ok(());
+    }
+
+    // Show what will be removed
+    if has_tracker {
+        println!("  .reen/build.json");
+    }
+    if has_prepared {
+        println!("  drafts/prepare/");
+    }
+    for dir in &owned_dirs {
+        let relative = dir
+            .strip_prefix(&workspace.root)
+            .unwrap_or(dir);
+        println!("  {}/", relative.display());
+    }
+
+    // Confirm unless --force
+    if !args.force {
+        print!("\nRemove these files? [y/N] ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Remove
+    if has_tracker {
+        std::fs::remove_file(&build_json)?;
+        println!("Removed .reen/build.json");
+    }
+    if has_prepared {
+        std::fs::remove_dir_all(prepared_dir)?;
+        println!("Removed drafts/prepare/");
+    }
+    for dir in &owned_dirs {
+        std::fs::remove_dir_all(dir)?;
+        let relative = dir
+            .strip_prefix(&workspace.root)
+            .unwrap_or(dir);
+        println!("Removed {}/", relative.display());
+    }
+
+    // Also remove the generated files manifest
+    let manifest_path = workspace.root.join(reen::workspace::GENERATED_MANIFEST);
+    if manifest_path.is_file() {
+        std::fs::remove_file(&manifest_path)?;
+    }
+
+    println!("Clean complete.");
+    Ok(())
 }
 
 fn persist_config_settings(
