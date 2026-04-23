@@ -139,6 +139,115 @@ fn parse_severity(s: &str) -> Option<AuditSeverity> {
     }
 }
 
+// ── Tracker integration ──────────────────────────────────────────
+
+/// The default minimum severity for an audit finding to flip a tracker entry
+/// to stale. Findings below this threshold are reported but do not affect
+/// the tracker.
+pub const DEFAULT_STALE_THRESHOLD: AuditSeverity = AuditSeverity::High;
+
+/// Apply audit findings to the build tracker, flipping entries at or above
+/// `threshold` to `stale` with `reason: "audit_finding"` and the finding
+/// text attached.
+///
+/// Returns the number of entries flipped.
+pub fn apply_findings_to_tracker(
+    report: &AuditReport,
+    tracker: &mut crate::build_tracker::BuildTracker,
+    artifact: &crate::prepared::PreparedArtifact,
+    threshold: AuditSeverity,
+) -> usize {
+    let mut flipped = 0;
+
+    for finding in &report.findings {
+        if finding.severity < threshold {
+            continue;
+        }
+
+        // Try to derive a canonical key from the finding
+        let keys = keys_from_finding(finding, artifact);
+        for key in keys {
+            if tracker.artefacts.contains_key(&key) {
+                tracker.mark_stale_audit(
+                    &key,
+                    format!("{}: {}", finding.kind.as_str(), finding.description),
+                );
+                flipped += 1;
+            }
+        }
+    }
+
+    flipped
+}
+
+/// Derive canonical artefact keys from an audit finding.
+///
+/// Uses the finding's code_citation (e.g. `data/snake.rs:12`) and kind
+/// to determine which artefact(s) the finding applies to.
+fn keys_from_finding(
+    finding: &AuditFinding,
+    artifact: &crate::prepared::PreparedArtifact,
+) -> Vec<crate::build_tracker::keys::ArtefactKey> {
+    use crate::build_tracker::keys::ArtefactKey;
+    use crate::prepared::ArtifactKind;
+
+    let export_name = &artifact.export.name;
+    let mut keys = Vec::new();
+
+    match finding.kind {
+        AuditFindingKind::RoleMethodResponsibilityMissing => {
+            // Try to extract the role method name from the description
+            for group in &artifact.role_methods {
+                for rm in &group.methods {
+                    if finding.description.contains(&rm.canonical_name)
+                        || finding.description.contains(&rm.name)
+                    {
+                        keys.push(ArtefactKey::role_method(export_name, &group.role, &rm.name));
+                    }
+                }
+            }
+        }
+        AuditFindingKind::FunctionalityDivergentFlow => {
+            for func in &artifact.functionalities {
+                let func_snake = crate::codegen::to_snake_case(&func.name);
+                if finding.description.contains(&func_snake)
+                    || finding.description.contains(&func.name)
+                {
+                    keys.push(ArtefactKey::functionality(export_name, &func.name));
+                }
+            }
+        }
+        AuditFindingKind::InvariantNotEnforced => {
+            // Invariant findings affect the data type and all its operations
+            if artifact.kind == ArtifactKind::Data {
+                for op in &artifact.operations {
+                    if finding.description.contains(&op.name)
+                        || finding.description.contains(&crate::codegen::to_snake_case(&op.name))
+                    {
+                        keys.push(ArtefactKey::data_operation(export_name, &op.name));
+                    }
+                }
+            }
+        }
+        AuditFindingKind::CodeNotInSpec => {
+            // CodeNotInSpec findings don't flip anything — they're informational
+        }
+    }
+
+    keys
+}
+
+impl AuditFindingKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RoleMethodResponsibilityMissing => "role_method_responsibility_missing",
+            Self::FunctionalityDivergentFlow => "functionality_divergent_flow",
+            Self::InvariantNotEnforced => "invariant_not_enforced",
+            Self::CodeNotInSpec => "code_not_in_spec",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +304,107 @@ mod tests {
         assert_eq!(report.high_severity_count(), 1);
         assert!(report.has_finding_of_kind(AuditFindingKind::InvariantNotEnforced));
         assert!(report.has_finding_of_kind(AuditFindingKind::CodeNotInSpec));
+    }
+
+    // ── Tracker integration tests ───────────────────────────────
+
+    #[test]
+    fn apply_findings_flips_at_threshold() {
+        use crate::build_tracker::*;
+        use crate::build_tracker::keys::ArtefactKey;
+        use crate::prepared::*;
+
+        let mut tracker = BuildTracker::new();
+        let key = ArtefactKey::role_method("Game", "snake", "move_forward");
+        tracker.upsert_artefact(
+            key.clone(),
+            ArtefactEntry {
+                kind: keys::ArtefactEntryKind::RoleMethod,
+                prepared_hash: "hash".into(),
+                upstream: vec![],
+                state: ArtefactState::Fresh,
+                reason: None,
+                audit_finding: None,
+            },
+        );
+
+        let mut artifact = PreparedArtifact::new(
+            ArtifactKind::Context, "contexts/game.md".into(), "Game".into(), "Game".into(),
+        );
+        artifact.role_methods = vec![RoleMethodGroupSpec {
+            role: "snake".into(),
+            methods: vec![RoleMethodSpec {
+                name: "move_forward".into(),
+                canonical_name: "snake_move_forward".into(),
+                signature_hint: None,
+                citation: "moves the snake forward".into(),
+            }],
+        }];
+
+        let report = AuditReport {
+            findings: vec![AuditFinding {
+                kind: AuditFindingKind::RoleMethodResponsibilityMissing,
+                severity: AuditSeverity::High,
+                spec_citation: "Game.md".into(),
+                code_citation: "contexts/game.rs:10".into(),
+                description: "snake_move_forward does not check bounds".into(),
+            }],
+        };
+
+        let flipped = apply_findings_to_tracker(
+            &report, &mut tracker, &artifact, AuditSeverity::High,
+        );
+        assert_eq!(flipped, 1);
+        assert_eq!(tracker.artefacts[&key].state, ArtefactState::Stale);
+        assert_eq!(tracker.artefacts[&key].reason, Some(StaleReason::AuditFinding));
+        assert!(tracker.artefacts[&key].audit_finding.as_ref().unwrap().contains("does not check bounds"));
+    }
+
+    #[test]
+    fn apply_findings_skips_below_threshold() {
+        use crate::build_tracker::*;
+        use crate::build_tracker::keys::ArtefactKey;
+        use crate::prepared::*;
+
+        let mut tracker = BuildTracker::new();
+        let key = ArtefactKey::functionality("Game", "play");
+        tracker.upsert_artefact(
+            key.clone(),
+            ArtefactEntry {
+                kind: keys::ArtefactEntryKind::Functionality,
+                prepared_hash: "hash".into(),
+                upstream: vec![],
+                state: ArtefactState::Fresh,
+                reason: None,
+                audit_finding: None,
+            },
+        );
+
+        let mut artifact = PreparedArtifact::new(
+            ArtifactKind::Context, "contexts/game.md".into(), "Game".into(), "Game".into(),
+        );
+        artifact.functionalities = vec![FunctionalitySpec {
+            name: "play".into(),
+            description: "Play the game.".into(),
+            role_method_refs: vec![],
+        }];
+
+        // Medium severity finding with High threshold — should not flip
+        let report = AuditReport {
+            findings: vec![AuditFinding {
+                kind: AuditFindingKind::FunctionalityDivergentFlow,
+                severity: AuditSeverity::Medium,
+                spec_citation: "Game.md".into(),
+                code_citation: "contexts/game.rs:20".into(),
+                description: "play has extra logging".into(),
+            }],
+        };
+
+        let flipped = apply_findings_to_tracker(
+            &report, &mut tracker, &artifact, AuditSeverity::High,
+        );
+        assert_eq!(flipped, 0);
+        assert_eq!(tracker.artefacts[&key].state, ArtefactState::Fresh);
     }
 
     #[test]
