@@ -1,0 +1,463 @@
+openapi: "3.0.3"
+info:
+  title: Nordea OpenBanking Personal API
+  description: >-
+    Trimmed snapshot of Nordea's OpenBanking Personal API covering only the
+    operations Lupa consumes. See the boundary draft for the full upstream
+    URL and the pruning rationale.
+  version: "3.0"
+  contact:
+    url: https://developer.nordeaopenbanking.com/
+
+servers:
+  - url: https://open.nordea.com/personal
+    description: Nordea Production
+  - url: https://open.nordea.com/personal/sandbox
+    description: Nordea Sandbox
+
+security:
+  - BearerAuth: []
+    ClientCredentials: []
+
+paths:
+  /v4/accounts:
+    get:
+      operationId: GetAccounts
+      summary: List the authenticated customer's accounts
+      parameters:
+        - name: X-IBM-Client-Id
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-IBM-Client-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: psu-ip-address
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Account list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountListResponse"
+        "401":
+          description: Unauthorized
+
+  /v4/accounts/{accountId}:
+    get:
+      operationId: GetAccountById
+      summary: Retrieve a single account
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: X-IBM-Client-Id
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-IBM-Client-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: psu-ip-address
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Account details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountResponse"
+        "404":
+          description: Account not found
+
+  /v4/accounts/{accountId}/transactions:
+    get:
+      operationId: GetTransactions
+      summary: List transactions for an account
+      parameters:
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: fromDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: toDate
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: continuationKey
+          in: query
+          schema:
+            type: string
+        - name: X-IBM-Client-Id
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-IBM-Client-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: psu-ip-address
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Transaction list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionListResponse"
+
+  /v4/payments/domestic:
+    post:
+      operationId: InitiateDomesticPayment
+      summary: Initiate a domestic payment
+      parameters:
+        - name: X-IBM-Client-Id
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-IBM-Client-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: psu-ip-address
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: tpp-redirect-uri
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DomesticPaymentRequest"
+      responses:
+        "201":
+          description: Payment initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentResponse"
+
+  /v4/payments/sepa:
+    post:
+      operationId: InitiateSEPAPayment
+      summary: Initiate a SEPA payment (own-account or domestic within EU)
+      parameters:
+        - name: X-IBM-Client-Id
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-IBM-Client-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: psu-ip-address
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: tpp-redirect-uri
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SEPAPaymentRequest"
+      responses:
+        "201":
+          description: Payment initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentResponse"
+
+  /v4/payments/international:
+    post:
+      operationId: InitiateInternationalPayment
+      summary: Initiate an international SWIFT payment
+      parameters:
+        - name: X-IBM-Client-Id
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: X-IBM-Client-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: psu-ip-address
+          in: header
+          required: true
+          schema:
+            type: string
+        - name: tpp-redirect-uri
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InternationalPaymentRequest"
+      responses:
+        "201":
+          description: Payment initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentResponse"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+    ClientCredentials:
+      type: apiKey
+      in: header
+      name: X-IBM-Client-Id
+
+  schemas:
+    AccountListResponse:
+      type: object
+      properties:
+        response:
+          type: object
+          properties:
+            accounts:
+              type: array
+              items:
+                $ref: "#/components/schemas/AccountInfo"
+            continuation_key:
+              type: string
+
+    AccountResponse:
+      type: object
+      properties:
+        response:
+          $ref: "#/components/schemas/AccountInfo"
+
+    AccountInfo:
+      type: object
+      properties:
+        _id:
+          type: string
+        name:
+          type: string
+        product:
+          type: string
+        account_type:
+          type: string
+        available_balance:
+          type: string
+        booked_balance:
+          type: string
+        currency:
+          type: string
+        iban:
+          type: string
+        bban:
+          type: string
+        status:
+          type: string
+
+    TransactionListResponse:
+      type: object
+      properties:
+        response:
+          type: object
+          properties:
+            transactions:
+              type: array
+              items:
+                $ref: "#/components/schemas/TransactionInfo"
+            continuation_key:
+              type: string
+
+    TransactionInfo:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+        booking_date:
+          type: string
+          format: date
+        value_date:
+          type: string
+          format: date
+        amount:
+          type: string
+        currency:
+          type: string
+        narrative:
+          type: string
+        counterparty_name:
+          type: string
+        counterparty_account:
+          type: string
+        status:
+          type: string
+          enum: [posted, pending]
+        type_description:
+          type: string
+
+    DomesticPaymentRequest:
+      type: object
+      required: [amount, currency, debtor, creditor]
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        debtor:
+          type: object
+          properties:
+            account:
+              type: object
+              properties:
+                value:
+                  type: string
+                type:
+                  type: string
+        creditor:
+          type: object
+          properties:
+            account:
+              type: object
+              properties:
+                value:
+                  type: string
+                type:
+                  type: string
+            name:
+              type: string
+        message:
+          type: string
+
+    SEPAPaymentRequest:
+      type: object
+      required: [amount, currency, debtor, creditor]
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        debtor:
+          type: object
+          properties:
+            account:
+              type: object
+              properties:
+                value:
+                  type: string
+                type:
+                  type: string
+                  enum: [IBAN]
+        creditor:
+          type: object
+          properties:
+            account:
+              type: object
+              properties:
+                value:
+                  type: string
+                type:
+                  type: string
+                  enum: [IBAN]
+            name:
+              type: string
+        message:
+          type: string
+
+    InternationalPaymentRequest:
+      type: object
+      required: [amount, currency, debtor, creditor]
+      properties:
+        amount:
+          type: string
+        currency:
+          type: string
+        debtor:
+          type: object
+          properties:
+            account:
+              type: object
+              properties:
+                value:
+                  type: string
+                type:
+                  type: string
+                  enum: [IBAN]
+        creditor:
+          type: object
+          properties:
+            account:
+              type: object
+              properties:
+                value:
+                  type: string
+                type:
+                  type: string
+                  enum: [IBAN]
+            name:
+              type: string
+            bic:
+              type: string
+        message:
+          type: string
+
+    PaymentResponse:
+      type: object
+      properties:
+        response:
+          type: object
+          properties:
+            _id:
+              type: string
+            payment_status:
+              type: string
+            timestamp:
+              type: string
+              format: date-time
