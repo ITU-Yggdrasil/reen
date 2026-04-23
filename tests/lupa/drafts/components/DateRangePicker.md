@@ -14,7 +14,7 @@ Lets the user select a start date and an end date to define a time window, typic
 
 ## Events
 
-- range:changed: fired when either date changes, carries the new start and end values
+- range-changed: fired when either date changes, carries the new start and end values
 
 ## Invariants
 
@@ -25,5 +25,5 @@ Lets the user select a start date and an end date to define a time window, typic
 ## Scenarios
 
 - User selects a start date after the current end date: the end date clears and the user is prompted to pick a new end
-- User selects an end date that would exceed max-span: the start date adjusts forward to satisfy the constraint and range:changed fires with both new values
-- User clears both dates: range:changed fires with empty values, indicating no filter is applied
+- User selects an end date that would exceed max-span: the start date adjusts forward to satisfy the constraint and range-changed fires with both new values
+- User clears both dates: range-changed fires with empty values, indicating no filter is applied

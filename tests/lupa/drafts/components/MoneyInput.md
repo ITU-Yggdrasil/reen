@@ -13,8 +13,8 @@ Captures a monetary amount paired with a currency selection. Formats the amount 
 
 ## Events
 
-- amount:changed: fired whenever the user modifies the amount, carries the new numeric value
-- currency:changed: fired when the user selects a different currency, carries the new currency code
+- amount-changed: fired whenever the user modifies the amount, carries the new numeric value
+- currency-changed: fired when the user selects a different currency, carries the new currency code
 
 ## Invariants
 
@@ -24,7 +24,7 @@ Captures a monetary amount paired with a currency selection. Formats the amount 
 
 ## Scenarios
 
-- User types an amount within bounds: the value updates and amount:changed fires with the formatted value
+- User types an amount within bounds: the value updates and amount-changed fires with the formatted value
 - User types more decimal places than the currency permits: input is truncated to the allowed precision
 - User enters an amount exceeding max-amount: the field enters an error state with an explanatory message
-- User switches currency: currency:changed fires and the decimal precision rule re-evaluates against the new currency
+- User switches currency: currency-changed fires and the decimal precision rule re-evaluates against the new currency

@@ -16,7 +16,7 @@ Lets the user send money to another account within the same country. Presents a 
 
 ## Events
 
-- transfer:submitted: fired when the user confirms the transfer via the ConfirmationCard, carries the signed token
+- transfer-submitted: fired when the user confirms the transfer via the ConfirmationCard, carries the signed token
 
 ## Invariants
 
@@ -30,5 +30,5 @@ Lets the user send money to another account within the same country. Presents a 
 - User fills all fields correctly and submits: the form requests server validation, receives a signed token, and displays the ConfirmationCard
 - User enters an invalid recipient account number: the field enters an error state and the submit control remains disabled
 - User attempts to transfer more than the available balance: the MoneyInput enters an error state
-- User accepts the ConfirmationCard: transfer:submitted fires with the signed token
+- User accepts the ConfirmationCard: transfer-submitted fires with the signed token
 - User rejects the ConfirmationCard: the form returns to its editable state with previous values intact

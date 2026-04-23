@@ -16,7 +16,7 @@ A scrollable conversation panel that combines a chronological list of ChatMessag
 
 ## Events
 
-- message:submit: propagated from ChatInput when the user sends a message, carries the text content
+- message-submit: propagated from ChatInput when the user sends a message, carries the text content
 
 ## Invariants
 

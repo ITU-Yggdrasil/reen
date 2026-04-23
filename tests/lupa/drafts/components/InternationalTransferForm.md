@@ -18,7 +18,7 @@ Lets the user send money to a foreign account. Presents a source account selecto
 
 ## Events
 
-- transfer:submitted: fired when the user confirms the transfer via the ConfirmationCard, carries the signed token
+- transfer-submitted: fired when the user confirms the transfer via the ConfirmationCard, carries the signed token
 
 ## Invariants
 
@@ -35,5 +35,5 @@ Lets the user send money to a foreign account. Presents a source account selecto
 - User fills all fields with a different target currency: the ConfirmationCard additionally shows the indicative exchange rate and the equivalent amount in the source currency
 - User enters an invalid IBAN: the IbanInput shows an error and the submit control remains disabled
 - User enters an invalid BIC: the BIC field enters an error state and the submit control remains disabled
-- User accepts the ConfirmationCard: transfer:submitted fires with the signed token
+- User accepts the ConfirmationCard: transfer-submitted fires with the signed token
 - User rejects the ConfirmationCard: the form returns to its editable state with previous values intact

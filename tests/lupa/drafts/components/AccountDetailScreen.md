@@ -21,5 +21,5 @@ Shows the full transaction history for a single account. Displays the account su
 ## Scenarios
 
 - User navigates to an account detail: the screen fetches the account summary and recent transactions, rendering the AccountCard and TransactionTable
-- User adjusts the date range: TransactionTable emits filter:changed and the screen fetches the filtered transaction set
+- User adjusts the date range: TransactionTable emits filter-changed and the screen fetches the filtered transaction set
 - User navigates to a non-existent or unauthorised account: an error message appears with a link back to AccountsScreen

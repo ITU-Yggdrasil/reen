@@ -16,7 +16,7 @@ Displays a filterable, chronologically ordered list of transactions for a single
 
 ## Events
 
-- filter:changed: fired when the DateRangePicker's range changes, carries the new start and end dates so the parent can fetch filtered data
+- filter-changed: fired when the DateRangePicker's range changes, carries the new start and end dates so the parent can fetch filtered data
 
 ## Invariants
 
@@ -27,5 +27,5 @@ Displays a filterable, chronologically ordered list of transactions for a single
 ## Scenarios
 
 - User opens account detail: the table loads with the default date range and shows the most recent transactions
-- User narrows the date range: filter:changed fires, the parent fetches filtered data, and the table re-renders with the reduced set
+- User narrows the date range: filter-changed fires, the parent fetches filtered data, and the table re-renders with the reduced set
 - No transactions exist in the selected range: the table shows an empty-state message suggesting the user widen the date range

@@ -11,7 +11,7 @@ A multi-line text entry field paired with a send button, used to compose message
 
 ## Events
 
-- message:submit: fired when the user activates the send control or uses the keyboard shortcut, carries the current text content
+- message-submit: fired when the user activates the send control or uses the keyboard shortcut, carries the current text content
 
 ## Invariants
 
@@ -21,7 +21,7 @@ A multi-line text entry field paired with a send button, used to compose message
 
 ## Scenarios
 
-- User types a message and taps send: message:submit fires with the text, the field clears, and the send control enters the sending state
+- User types a message and taps send: message-submit fires with the text, the field clears, and the send control enters the sending state
 - User presses the keyboard submit shortcut: same behaviour as tapping send
 - User attempts to send an empty message: the send control is disabled, nothing happens
 - A submission is in progress: the send control shows a busy state and additional submissions are blocked

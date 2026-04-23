@@ -14,7 +14,7 @@ Arranges a collection of AccountCards into a vertical list, giving the user an o
 
 ## Events
 
-- account:selected: propagated from the child AccountCard when the user taps an account, carries the account identifier
+- account-selected: propagated from the child AccountCard when the user taps an account, carries the account identifier
 
 ## Invariants
 
@@ -24,5 +24,5 @@ Arranges a collection of AccountCards into a vertical list, giving the user an o
 ## Scenarios
 
 - User has three accounts: three AccountCards render in order, each showing its summary
-- User taps the second account: account:selected fires with that account's identifier
+- User taps the second account: account-selected fires with that account's identifier
 - User has no accounts: an empty-state message explains that no accounts are available

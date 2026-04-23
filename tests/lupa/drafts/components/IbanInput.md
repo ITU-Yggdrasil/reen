@@ -11,7 +11,7 @@ Accepts an International Bank Account Number and validates its format progressiv
 
 ## Events
 
-- iban:changed: fired on every keystroke, carries the current value and its validity status
+- iban-changed: fired on every keystroke, carries the current value and its validity status
 
 ## Invariants
 

@@ -13,7 +13,7 @@ Displays a summary of a single bank account: its human-readable name, current ba
 
 ## Events
 
-- account:selected: fired when the user taps the card, carries the account identifier
+- account-selected: fired when the user taps the card, carries the account identifier
 
 ## Invariants
 
@@ -24,4 +24,4 @@ Displays a summary of a single bank account: its human-readable name, current ba
 
 - User views a checking account with a positive balance: the card shows the name, a balance in text-primary, the masked number, and a label indicating the kind
 - User views a savings account with a zero balance: same layout, balance displays as zero with two decimal places
-- User taps the card: account:selected fires with the account's identifier
+- User taps the card: account-selected fires with the account's identifier

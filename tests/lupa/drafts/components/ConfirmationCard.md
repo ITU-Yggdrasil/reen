@@ -14,8 +14,8 @@ Presents a read-only preview of a pending transfer and asks the user to accept o
 
 ## Events
 
-- transfer:accepted: fired when the user confirms, carries the signed token
-- transfer:rejected: fired when the user declines
+- accepted: fired when the user confirms the transfer, carries the signed token
+- rejected: fired when the user declines the transfer
 
 ## Invariants
 
@@ -25,6 +25,6 @@ Presents a read-only preview of a pending transfer and asks the user to accept o
 
 ## Scenarios
 
-- User reviews a correct transfer and taps accept: transfer:accepted fires with the token and the card enters a busy state
-- User notices an error and taps reject: transfer:rejected fires and the user returns to the form with their previous input preserved
+- User reviews a correct transfer and taps accept: transfer-accepted fires with the token and the card enters a busy state
+- User notices an error and taps reject: transfer-rejected fires and the user returns to the form with their previous input preserved
 - Token is missing due to a server error: the accept control is disabled and an explanatory message appears
