@@ -206,7 +206,7 @@ Create a board, snake, food dropper, game state, and GameLoop...
 - **Sneaking types into drafts**: No `u32`, `String`, `Vec<>`. Types are inferred during prepare.
 - **Mixing role and role player**: "Account withdraws" is wrong. "The source withdraws" is correct — the role does the action.
 - **Putting role methods on data**: If a method only makes sense in a specific scenario, it's a role method on the context, not an operation on the data type.
-- **Missing scenarios**: Every functionality and operation should have at least one concrete Given/When/Then scenario.
+- **Missing scenarios**: Scenarios are required where behaviour is declared (see "When are scenarios required?" below).
 - **Mutation in projections**: Projections are read-only. The parser will reject mutation-shaped prose.
 
 ## Spec vs. implementation — what does not belong in a draft
@@ -236,6 +236,30 @@ These name mechanisms, not domain concepts. The fix is to name what the domain c
 ### Litmus test
 
 Before naming a type in a draft, ask: **"would a non-technical domain stakeholder recognise this name?"** If the answer is no, it is probably implementation-speak. Name what the business cares about; leave the mechanism to the implementer.
+
+## When are scenarios required?
+
+Scenarios track behaviour, not structure. `reen refine` requires scenarios only where behaviour is declared:
+
+| Kind | Scenarios required when… |
+|------|--------------------------|
+| **Context** | Always — contexts *are* behaviour |
+| **Component** | The component declares **Events** or has a **Composition** section. Pure-display components (Props and Slots only) do not need scenarios |
+| **Data** | The data draft declares **Operations**. Pure value types (attributes + invariants only) do not need scenarios |
+| **Projection** | The projection declares **Queries** (in practice, nearly always) |
+| **Brand** | Never |
+| **Routing table** | Never |
+
+## Passive role players
+
+Every role player needs a `### <role>` subsection under `## Role Methods`. If a role player is genuinely passive (carried as a value, never acted upon through role methods), add the subsection with the opt-out line:
+
+```
+### amount
+(no methods — this role is used as a passive value)
+```
+
+This forces the author to acknowledge the choice explicitly. Silent absence of the subsection is still a finding.
 
 ## What not to put in a draft
 
