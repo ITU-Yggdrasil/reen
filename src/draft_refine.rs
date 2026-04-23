@@ -14,6 +14,7 @@ pub enum DraftReviewCategory {
     Completeness,
     Concreteness,
     Ambiguity,
+    UnresolvedReference,
 }
 
 impl DraftReviewCategory {
@@ -22,6 +23,7 @@ impl DraftReviewCategory {
             Self::Completeness => "completeness",
             Self::Concreteness => "concreteness",
             Self::Ambiguity => "ambiguity",
+            Self::UnresolvedReference => "unresolved_reference",
         }
     }
 }
@@ -597,6 +599,146 @@ fn context_snippet(line: &str, start: usize, end: usize) -> String {
     }
 }
 
+// ── Unresolved reference check (vocabulary-aware) ────────────────
+
+/// Check all type references in a parsed draft against the vocabulary.
+/// Produces findings for each unresolved reference with heuristic suggestions.
+pub fn check_unresolved_references(
+    path: &str,
+    doc: &DraftDocument,
+    vocab: &crate::manifest::DciVocabulary,
+    findings: &mut Vec<DraftReviewFinding>,
+) {
+    match doc {
+        DraftDocument::Context(ctx) => {
+            for rp in &ctx.role_players {
+                if !crate::prepare::is_builtin_primitive(&rp.data_type)
+                    && !crate::manifest::DciVocabulary::is_api_reference(&rp.data_type)
+                    && vocab.resolve(&rp.data_type).is_none()
+                {
+                    let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&rp.data_type);
+                    findings.push(DraftReviewFinding {
+                        draft_path: path.to_string(),
+                        source_line: None,
+                        category: DraftReviewCategory::UnresolvedReference,
+                        message: format!(
+                            "role player `{}` references `{}` which is not declared. {}",
+                            rp.name, rp.data_type, suggestion
+                        ),
+                        severity: None,
+                    });
+                }
+            }
+        }
+        DraftDocument::Projection(proj) => {
+            if !proj.source.is_empty()
+                && !crate::prepare::is_builtin_primitive(&proj.source)
+                && vocab.resolve(&proj.source).is_none()
+            {
+                let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&proj.source);
+                findings.push(DraftReviewFinding {
+                    draft_path: path.to_string(),
+                    source_line: None,
+                    category: DraftReviewCategory::UnresolvedReference,
+                    message: format!(
+                        "projection source `{}` is not declared. {}",
+                        proj.source, suggestion
+                    ),
+                    severity: None,
+                });
+            }
+        }
+        DraftDocument::Component(comp) => {
+            if let Some(composition) = &comp.composition {
+                for cb in &composition.child_bindings {
+                    if vocab.resolve(&cb.child).is_none() {
+                        let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&cb.child);
+                        findings.push(DraftReviewFinding {
+                            draft_path: path.to_string(),
+                            source_line: None,
+                            category: DraftReviewCategory::UnresolvedReference,
+                            message: format!(
+                                "child binding `{}` is not declared. {}",
+                                cb.child, suggestion
+                            ),
+                            severity: None,
+                        });
+                    }
+                }
+                for eb in &composition.event_bindings {
+                    if vocab.resolve(&eb.context).is_none() {
+                        let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&eb.context);
+                        findings.push(DraftReviewFinding {
+                            draft_path: path.to_string(),
+                            source_line: None,
+                            category: DraftReviewCategory::UnresolvedReference,
+                            message: format!(
+                                "event binding context `{}` is not declared. {}",
+                                eb.context, suggestion
+                            ),
+                            severity: None,
+                        });
+                    }
+                }
+            }
+        }
+        DraftDocument::RoutingTable(rt) => {
+            for route in &rt.routes {
+                if vocab.resolve(&route.component).is_none() {
+                    let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&route.component);
+                    findings.push(DraftReviewFinding {
+                        draft_path: path.to_string(),
+                        source_line: None,
+                        category: DraftReviewCategory::UnresolvedReference,
+                        message: format!(
+                            "route `{}` references component `{}` which is not declared. {}",
+                            route.path, route.component, suggestion
+                        ),
+                        severity: None,
+                    });
+                }
+                for param in &route.params {
+                    if !crate::prepare::is_builtin_primitive(&param.data_type)
+                        && vocab.resolve(&param.data_type).is_none()
+                    {
+                        let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&param.data_type);
+                        findings.push(DraftReviewFinding {
+                            draft_path: path.to_string(),
+                            source_line: None,
+                            category: DraftReviewCategory::UnresolvedReference,
+                            message: format!(
+                                "route `{}` param `{}` references `{}` which is not declared. {}",
+                                route.path, param.name, param.data_type, suggestion
+                            ),
+                            severity: None,
+                        });
+                    }
+                }
+            }
+        }
+        DraftDocument::App(app) => {
+            if let Some(ctx_name) = &app.entry_context {
+                if vocab.resolve(ctx_name).is_none() {
+                    let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(ctx_name);
+                    findings.push(DraftReviewFinding {
+                        draft_path: path.to_string(),
+                        source_line: None,
+                        category: DraftReviewCategory::UnresolvedReference,
+                        message: format!(
+                            "entry context `{}` is not declared. {}",
+                            ctx_name, suggestion
+                        ),
+                        severity: None,
+                    });
+                }
+            }
+        }
+        DraftDocument::Data(_) | DraftDocument::Brand(_) => {
+            // Data and brand drafts don't have type references to other artefacts
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,6 +1237,88 @@ Then: an error is returned indicating the currency does not match
             findings.is_empty(),
             "expected no findings for clean route, got: {:?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ── Unresolved reference check tests ─────────────────────────
+
+    fn empty_vocab() -> crate::manifest::DciVocabulary {
+        crate::manifest::DciVocabulary::empty()
+    }
+
+    fn vocab_with(entries: &[(&str, &str)]) -> crate::manifest::DciVocabulary {
+        let mut v = crate::manifest::DciVocabulary::empty();
+        for (name, kind) in entries {
+            v.add(name, kind);
+        }
+        v
+    }
+
+    #[test]
+    fn refine_flags_implementation_speak_role_player() {
+        let content = "# Context: Bad\n\n## Purpose\nTest.\n\n## Role Players\n\
+                       - store: SessionStore — stores sessions\n\n\
+                       ## Role Methods\n### store\n- save: saves\n\n\
+                       ## Functionalities\n### act\nCalls store save.\n\n\
+                       ## Scenarios\n### ok\nGiven: x\nWhen: act\nThen: done\n";
+        let doc = crate::draft_parser::parse_draft_file(
+            std::path::Path::new("drafts/contexts/bad.md"),
+            std::path::Path::new("drafts"),
+            content,
+        ).unwrap();
+        let mut findings = Vec::new();
+        check_unresolved_references("contexts/bad.md", &doc, &empty_vocab(), &mut findings);
+        assert!(
+            findings.iter().any(|f|
+                f.category == DraftReviewCategory::UnresolvedReference
+                && f.message.contains("SessionStore")
+                && f.message.contains("implementation-speak")
+            ),
+            "should flag SessionStore as implementation-speak: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn refine_passes_declared_role_player() {
+        let content = "# Context: Good\n\n## Purpose\nTest.\n\n## Role Players\n\
+                       - account: Account — the account\n\n\
+                       ## Role Methods\n### account\n- debit: debits\n\n\
+                       ## Functionalities\n### act\nCalls account debit.\n\n\
+                       ## Scenarios\n### ok\nGiven: x\nWhen: act\nThen: done\n";
+        let doc = crate::draft_parser::parse_draft_file(
+            std::path::Path::new("drafts/contexts/good.md"),
+            std::path::Path::new("drafts"),
+            content,
+        ).unwrap();
+        let mut findings = Vec::new();
+        check_unresolved_references("contexts/good.md", &doc, &vocab_with(&[("Account", "data")]), &mut findings);
+        assert!(
+            findings.is_empty(),
+            "declared type should not produce findings: {:?}",
+            findings
+        );
+    }
+
+    #[test]
+    fn refine_flags_unresolved_projection_source() {
+        let content = "# Projection: BadView\n\n## Purpose\nTest.\n\n## Source\n- Widget\n\n\
+                       ## Queries\n### summary\nReturns a summary.\n\n\
+                       ## Scenarios\n### ok\nGiven: x\nWhen: summary\nThen: done\n";
+        let doc = crate::draft_parser::parse_draft_file(
+            std::path::Path::new("drafts/projections/bad_view.md"),
+            std::path::Path::new("drafts"),
+            content,
+        ).unwrap();
+        let mut findings = Vec::new();
+        check_unresolved_references("projections/bad_view.md", &doc, &empty_vocab(), &mut findings);
+        assert!(
+            findings.iter().any(|f|
+                f.category == DraftReviewCategory::UnresolvedReference
+                && f.message.contains("Widget")
+            ),
+            "should flag unresolved projection source: {:?}",
+            findings
         );
     }
 }

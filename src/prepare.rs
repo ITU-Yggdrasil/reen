@@ -222,7 +222,26 @@ pub fn refine_workspace(workspace: &Workspace, options: &RefineOptions) -> Resul
     if options.verbose {
         println!("Reviewing {} raw draft(s)", raw_paths.len());
     }
-    let draft_review = review_raw_drafts(workspace, &raw_paths)?;
+    let mut draft_review = review_raw_drafts(workspace, &raw_paths)?;
+
+    // Vocabulary-aware unresolved reference check
+    let vocabulary = DciVocabulary::load(workspace)?;
+    for path in &raw_paths {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let relative = path
+            .strip_prefix(&workspace.root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if let Ok(document) = crate::draft_parser::parse_draft_file(path, &workspace.drafts_dir, &content) {
+            crate::draft_refine::check_unresolved_references(
+                &relative, &document, &vocabulary, &mut draft_review.findings,
+            );
+        }
+    }
+    crate::draft_refine::sort_and_dedup_findings(&mut draft_review.findings);
+
     print_draft_findings(&draft_review);
     let failures = draft_review.findings.len();
     if failures > 0 {
