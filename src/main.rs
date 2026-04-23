@@ -506,6 +506,12 @@ fn run_verify(args: VerifyArgs, workspace: &Workspace) -> Result<()> {
 
     if result.is_ok() {
         println!("{}", result.render());
+        // Flip stale → fresh in the build tracker for verified methods
+        if let Err(e) = verify::flip_verified_to_fresh(
+            rs_path, &artifact, &workspace.root, &workspace.state_dir,
+        ) {
+            eprintln!("warning: could not update build tracker: {}", e);
+        }
     } else {
         eprint!("{}", result.render());
         process::exit(1);

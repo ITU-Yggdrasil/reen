@@ -722,6 +722,10 @@ fn detect_receiver(method_name: &str, preserved: &BTreeMap<String, String>) -> &
 /// This is a text-based extractor that handles our generated code format
 /// reliably. It does NOT use syn for body extraction to avoid pretty-printing
 /// drift.
+pub fn extract_method_bodies_from_source(source: &str) -> BTreeMap<String, String> {
+    extract_method_bodies(source)
+}
+
 fn extract_method_bodies(source: &str) -> BTreeMap<String, String> {
     let mut bodies = BTreeMap::new();
     let lines: Vec<&str> = source.lines().collect();

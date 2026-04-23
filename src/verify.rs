@@ -538,6 +538,131 @@ pub fn verify_app(workspace_root: &Path, artifact: &PreparedArtifact) -> VerifyR
     VerifyResult { discrepancies }
 }
 
+// ── Tracker integration ──────────────────────────────────────────
+
+/// After a successful verify, flip any stale tracker entries for this
+/// artifact to `fresh`. Called by the CLI after verify passes.
+pub fn flip_verified_to_fresh(
+    rs_path: &Path,
+    artifact: &PreparedArtifact,
+    _workspace_root: &Path,
+    state_dir: &Path,
+) -> Result<()> {
+    use crate::build_tracker::{ArtefactState, BuildTracker};
+
+    let mut tracker = BuildTracker::load(state_dir)?;
+    if tracker.artefacts.is_empty() {
+        return Ok(()); // No tracker, nothing to flip
+    }
+
+    let export_name = &artifact.export.name;
+
+    // Determine which methods in this file should be flipped
+    let source = fs::read_to_string(rs_path)
+        .with_context(|| format!("Failed to read {}", rs_path.display()))?;
+
+    // Parse to check which methods have actual bodies (no todo!())
+    let file: syn::File = syn::parse_str(&source)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", rs_path.display(), e))?;
+
+    let impl_blocks: Vec<&syn::ItemImpl> = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let syn::Item::Impl(imp) = item {
+                if imp.trait_.is_none() {
+                    if let syn::Type::Path(tp) = imp.self_ty.as_ref() {
+                        if tp.path.is_ident(export_name) {
+                            return Some(imp);
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Collect implemented methods (those without todo!() as the sole body).
+    // We use the raw source text to detect todo!() rather than syn's AST,
+    // because syn::Stmt does not implement Debug without extra-traits.
+    let method_bodies = crate::codegen::extract_method_bodies_from_source(&source);
+    let mut implemented_methods: Vec<(String, bool)> = Vec::new(); // (name, is_public)
+    for imp in &impl_blocks {
+        for item in &imp.items {
+            if let syn::ImplItem::Fn(method) = item {
+                let name = method.sig.ident.to_string();
+                let is_public = matches!(method.vis, syn::Visibility::Public(_));
+                // If the method has a preserved body (i.e. it's not just todo!()), it's implemented
+                if method_bodies.contains_key(&name) {
+                    implemented_methods.push((name, is_public));
+                }
+            }
+        }
+    }
+
+    // Build keys for implemented methods and flip stale → fresh
+    let mut flipped = 0;
+    for (method_name, is_public) in &implemented_methods {
+        let keys = build_keys_for_method(artifact, export_name, method_name, *is_public);
+        for key in keys {
+            if let Some(entry) = tracker.artefacts.get(&key) {
+                if entry.state == ArtefactState::Stale || entry.state == ArtefactState::NotImplemented {
+                    tracker.mark_fresh(&key);
+                    flipped += 1;
+                }
+            }
+        }
+    }
+
+    if flipped > 0 {
+        tracker.save(state_dir)?;
+    }
+
+    Ok(())
+}
+
+/// Build possible ArtefactKeys for a method given the artifact context.
+fn build_keys_for_method(
+    artifact: &PreparedArtifact,
+    export_name: &str,
+    method_name: &str,
+    is_public: bool,
+) -> Vec<crate::build_tracker::keys::ArtefactKey> {
+    use crate::build_tracker::keys::ArtefactKey;
+
+    let mut keys = Vec::new();
+
+    match artifact.kind {
+        ArtifactKind::Context => {
+            if is_public {
+                keys.push(ArtefactKey::functionality(export_name, method_name));
+            } else {
+                // Private method — try to match against known role methods
+                for group in &artifact.role_methods {
+                    for rm in &group.methods {
+                        if rm.canonical_name == method_name {
+                            keys.push(ArtefactKey::role_method(export_name, &group.role, &rm.name));
+                        }
+                    }
+                }
+            }
+        }
+        ArtifactKind::Data => {
+            if is_public {
+                keys.push(ArtefactKey::data_operation(export_name, method_name));
+            }
+        }
+        ArtifactKind::Projection => {
+            if is_public {
+                keys.push(ArtefactKey::projection_query(export_name, method_name));
+            }
+        }
+        _ => {}
+    }
+
+    keys
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
