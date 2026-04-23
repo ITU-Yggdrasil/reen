@@ -130,56 +130,6 @@ synthesised_tests:
   when: new is called
   then: the stored game state has a food placement chosen by the food dropper
   citation: Scenarios / initial food is placed by the food dropper
-- source: invariant
-  given: the next predicted head position is outside the board
-  when: tick is called
-  then: the round ends and the player is dead
-  citation: 'tick step 9: If the next head lands on a position outside the board, the round ends and the player is dead.'
-- source: invariant
-  given: the next predicted head position is a snake body cell
-  when: tick is called
-  then: the round ends and the player is dead
-  citation: 'tick step 9: If the next head lands on a snake body cell, the round ends and the player is dead.'
-- source: invariant
-  given: a movement action is received that repeats the current direction
-  when: tick is called
-  then: the snake's direction is not updated and the snake advances in the current direction
-  citation: 'tick step 7: If a movement action neither repeats nor reverses the current direction, update the direction. Extension: input consumed is not replayed in the next tick.'
-- source: invariant
-  given: a movement action is received that reverses the current direction
-  when: tick is called
-  then: the snake's direction is not updated and the snake advances in the current direction
-  citation: 'tick step 7: If a movement action neither repeats nor reverses the current direction, update the direction.'
-- source: invariant
-  given: a fire action is received
-  when: tick is called
-  then: the fire action is ignored and the snake advances with the current direction unchanged
-  citation: 'tick extension: If a fire action is received, ignore it and continue from step 8 with the current direction.'
-- source: invariant
-  given: no action is available from the command role
-  when: tick is called
-  then: the direction update is skipped and the snake continues with the current direction
-  citation: 'tick extension: If no action is available, skip the direction update and continue from step 8.'
-- source: invariant
-  given: the next head matches the food position and the food dropper returns no replacement position
-  when: tick is called
-  then: the snake grows by one segment, the score increases by 10, and food is cleared from the game state
-  citation: 'tick step 10 and extension: If the food dropper returns no replacement position, clear the food from the game state.'
-- source: invariant
-  given: the board, snake, and game state are current
-  when: current_board is called
-  then: the returned board overlays the snake body positions with the snake symbol and the food position with the food symbol
-  citation: 'current_board: overlays each snake body position with the snake symbol, then overlays the food position (if any) with the food symbol.'
-- source: invariant
-  given: the game state has been updated with a score
-  when: get_score is called
-  then: the current score from the game state is returned
-  citation: 'get_score: Returns the current score from the game state.'
-- source: invariant
-  given: the board has no free interior cell and new is called with a game state that has no food
-  when: new is called
-  then: the food dropper is asked for an initial food position, no position is returned, and the game state is left without food
-  citation: 'new: If a position is returned, the game state is updated with that food placement. If no position is available, the game state is left without food.'
 vocabulary_bindings:
 - name: snake
   resolution: role_player

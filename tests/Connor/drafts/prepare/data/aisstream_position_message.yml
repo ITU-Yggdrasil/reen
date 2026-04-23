@@ -64,30 +64,30 @@ synthesised_tests:
   then: 'the invariant holds: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).'
   citation: Invariants / observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp).
 - source: invariant
-  given: message_type "StandardClassBPositionReport", mmsi "987654321", vessel_name "TANKER", latitude 48.8, longitude 2.3, observed_at as a UTC timestamp
+  given: message_type "StandardClassBPositionReport", mmsi "987654321", vessel_name "TANKER VESSEL", latitude 48.8, longitude 2.3, observed_at as a UTC timestamp
   when: new is called
-  then: an AISStreamPositionMessage is returned with StandardClassBPositionReport as the message family
+  then: an AISStreamPositionMessage is returned with StandardClassBPositionReport message family represented
   citation: 'invariant: Only PositionReport and StandardClassBPositionReport message families may be represented'
 - source: invariant
-  given: message_type "NavigationAid", mmsi "111111111", latitude 40.7, longitude -74.0, observed_at as a UTC timestamp
+  given: message_type "ShipStaticData", mmsi "555555555", latitude 35.0, longitude 139.0, observed_at as a UTC timestamp
   when: new is called
-  then: construction fails or the message is rejected because NavigationAid is not an allowed message family
+  then: an AISStreamPositionMessage construction fails or is rejected because ShipStaticData is not an allowed message family
   citation: 'invariant: Only PositionReport and StandardClassBPositionReport message families may be represented'
 - source: invariant
-  given: raw AIS PositionReport message with AIS Timestamp field set to 45 (seconds within minute), mmsi "555555555", latitude 35.6, longitude 139.7
-  when: new constructs the AISStreamPositionMessage
-  then: observed_at is set to a full UTC timestamp with minutes and hours, not derived solely from the AIS Timestamp field value of 45
-  citation: 'invariant: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp)'
-- source: invariant
-  given: a raw position record with multiple possible coordinate representations from the AIS message
-  when: new constructs the AISStreamPositionMessage
-  then: the record is normalized to a single consistent coordinate format before being stored
+  given: raw AIS message with position data in multiple formats (e.g., different coordinate conventions, timestamp representations)
+  when: the normalized shape is applied before the receiver reads it
+  then: all position data is converted to a single consistent format (e.g., decimal degrees, full UTC timestamp)
   citation: 'invariant: The record is normalized into one consistent shape before the receiver reads it'
 - source: invariant
-  given: message_type "PositionReport", mmsi "222222222", vessel_name "FISHING VESSEL", latitude -33.8, longitude 151.2, observed_at as a full UTC timestamp with hour, minute, second, and timezone
+  given: AIS Timestamp field value "45" (seconds within current UTC minute) and an AIS message received at 2024-01-15T12:34:45Z
+  when: observed_at is set for the AISStreamPositionMessage
+  then: observed_at contains the full UTC timestamp 2024-01-15T12:34:45Z, not derived from the AIS Timestamp field alone
+  citation: 'invariant: observed_at is a full UTC timestamp (the AIS Timestamp field in these message families is only the reported second within the current UTC minute and must not be used as the event timestamp)'
+- source: invariant
+  given: message_type "PositionReport", mmsi "111222333", latitude -45.5, longitude 170.25, observed_at "2024-01-15T10:20:30.500Z"
   when: new is called
-  then: an AISStreamPositionMessage is returned where observed_at is preserved as the complete UTC timestamp
-  citation: 'invariant: observed_at is a full UTC timestamp'
+  then: an AISStreamPositionMessage is constructed with observed_at as the complete UTC timestamp including fractional seconds
+  citation: 'operation new: Constructs an AISStreamPositionMessage from normalized boundary values'
 vocabulary_bindings:
 - name: message_type
   resolution: attribute
@@ -103,3 +103,24 @@ vocabulary_bindings:
   resolution: attribute
 - name: metadata_json
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `AISStream` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `AISStream` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `AISStreamReceiver` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `AISStreamReceiver` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Once` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Once` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `PositionReport` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `PositionReport` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `StandardClassBPositionReport` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `StandardClassBPositionReport` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

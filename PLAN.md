@@ -267,6 +267,34 @@ Schema bumps to `reen.prepare/v2`. Old prepared YAML is not migrated; snake and 
 
 **Exit criteria:** on a minimal prepared YAML, `reen scaffold` produces a `.rs` file that `reen verify` accepts; and a modified `.rs` file that drops a field or renames a method is rejected with a structured diff.
 
+### Phase 2.5 — runnable scaffold via App artefact
+
+**Goal:** the scaffold Phase 2 produces actually runs. Today it emits a library crate with no `[[bin]]` target and no `main.rs`, so `cargo run` in a fresh scaffold fails. Phase 2.5 introduces a first-class `App` artefact kind whose prepared entry carries just enough to parameterise the scaffolder, and extends codegen to emit a runnable binary.
+
+**Why this phase exists.** Snake has a `drafts/app.md` that declares `Application Kind: cli_app` and describes its startup sequence, runtime, and main-loop behaviour, but nothing in the Reen pipeline reads that file. The scaffolder only walks data / projections / contexts / operations and emits `.rs` files under `src/`. Cargo.toml and `main.rs` are hand-maintained, so a freshly scaffolded project cannot be run and the app.md file — which is the one place the BA *has* described the application envelope — is informationally live but mechanically dead. Phase 10's web-app codegen is about to need a sibling App kind (`web_app`) with its own scaffold rules (workspace layout, multiple crates, WASM target); bolting that onto a codegen path that doesn't yet know CLI apps exist would be worse than fixing the gap first.
+
+**Design**
+
+1. **New artefact kind.** `ArtifactKind::App` in `draft_parser.rs`. Filename convention: `drafts/app.md` (exactly one per project; multiple is an ambiguity).
+2. **Minimal schema.** The prepared App entry carries:
+   - `kind`: `cli_app` | `tui_app` (Phase 10 adds `web_app`).
+   - `entry_context`: the context the application launches into, resolved against the manifest.
+   - `entry_functionality`: the functionality on that context invoked at startup. Defaults to the only public functionality if unambiguous.
+   - `dependencies[]`: crate names the BA declares the app needs (`crossterm`, `chrono`, ...). These feed Cargo.toml.
+   - Everything else in app.md (Startup Sequence, Main Loop Behavior, Collaborators and Wiring) stays as BA prose. It is informational, not schema-enforced in this phase. If a later phase wants teeth, add sections then.
+3. **Scaffolder.**
+   - Emits `src/main.rs` with a minimal entry stub: construct the entry context with its role players (left as `todo!()` for the implementer to wire), call the declared entry functionality. The body the BA actually needs to write lives inside the context — main.rs is just the envelope.
+   - Patches `Cargo.toml`: adds `[[bin]]` with `name = <package-name>` and `path = "src/main.rs"`. Idempotent — re-running scaffold does not duplicate the entry or clobber user-added dependencies.
+   - Adds declared dependencies if absent. Never removes dependencies — that is the user's call.
+4. **Verify.** If an App artefact exists, `src/main.rs` must exist and its `main()` must construct the declared entry context. If Cargo.toml is missing a `[[bin]]` entry, verify flags it as drift in DCI language ("the app declares `snake` as the binary entry but Cargo.toml has no `[[bin]]` section").
+5. **Manifest.** The App entry does not appear in the manifest (there is only one; it is addressable by kind, not by name). References from other drafts to "the app" are not expected and would be smell — the Startup Sequence prose is the right home for that.
+6. **Hooks.** PostToolUse Write on `drafts/app.md` triggers `reen prepare` (same pattern as other drafts).
+7. **Migration.** Each test project (`snake`, `money transfer`, `Connor`, and `world data` if Phase 7 has landed) gets its `drafts/app.md` updated to the new App template. The existing hand-written `main.rs` + Cargo.toml `[[bin]]` are checked to match what scaffold would now emit. After migration, `reen scaffold` run fresh on each project produces a runnable binary.
+
+**Exit criteria:** a project with a valid `drafts/app.md` scaffolds to a runnable binary (`cargo run` either succeeds or fails cleanly on `todo!()` inside a context body, never on a missing entry point); Cargo.toml carries a `[[bin]]` entry after scaffold; verify flags a mismatch between the declared entry_context and the actual `src/main.rs`; snake, money transfer, and Connor continue to build end-to-end after re-scaffolding; and Phase 10 can extend the kind enum with `web_app` and the scaffold switch with its branch without having to invent the App artefact at the same time.
+
+**Out of scope.** Runtime behaviour — this phase does not generate an event loop, terminal setup, or UI rendering; the Main Loop prose remains implementation guidance for Claude Code, not for Reen. Multi-binary projects (one App per project). Web apps (`web_app` lands in Phase 10).
+
 ### Phase 3 — Claude Code integration
 
 **Goal:** every manual step is available as a slash command; hooks enforce spec alignment automatically.
@@ -504,7 +532,13 @@ templates/
   drafts/projections/.gitkeep
   drafts/contexts/.gitkeep
   drafts/apis/.gitkeep
+  drafts/components/.gitkeep   # Phase 9 — web-app component drafts
+  drafts/brands/.gitkeep       # Phase 9 — brand drafts (plural: multi-brand projects allowed)
+  drafts/routes/.gitkeep       # Phase 9 — routing-table drafts
+  drafts/apps/.gitkeep         # Phase 12 — multi-app directory form; supersedes the singleton drafts/app.md
 ```
+
+The `drafts/` subdirectory list is the canonical filesystem layout for every artefact kind Reen knows about; it grows whenever a phase introduces a new kind. Kinds listed but empty in a given project are fine — `.gitkeep` keeps the structure committed without forcing authorship. Any phase that adds a new artefact kind must retrofit this list (and `templates/bundle.toml`) as part of its own scope; the contributor checklist in `CLAUDE.md` spells this out.
 
 Contents are embedded at build time via the `include_dir` crate (or equivalent), so the compiled `reen` binary carries the templates with it. No network access at init time; no parallel template repo to keep in sync; no post-install scripts.
 
@@ -569,6 +603,189 @@ Templates are authored once and the reen repo itself dogfoods them: running `ree
 
 **Exit criteria:** `reen init` in a fresh empty directory produces a ready-to-use project whose `.claude/` matches the bundle and whose `.reen-bundle.yml` reflects the current binary version. `reen init --upgrade` in the reen repo itself leaves the repo byte-identical — the CI check passes. A user who has edited `DCI.md` and runs `reen init --upgrade` sees a clear refusal with a diff summary and can opt into `--force`. All three in-scope test projects (snake, money transfer, Connor) build end-to-end after their migration commit.
 
+### Phase 9 — web-app artefact schema
+
+**Goal:** extend the Reen schema so a BA can specify web applications end-to-end in the user's mental model. Three new artefact kinds land: **component**, **brand**, and **routing table**. Screens are components (addressability is a property of the composition, not of the component itself). Stores are deliberately absent — mutable state across interactions is a framework concern, not a vocabulary concern; contexts return new data values and the runtime rebinds live references. No codegen in this phase.
+
+**Why this phase exists.** Phases 0–8 cover terminal and backend applications. The UI surface is missing. The obvious framing — "components are data, themes are tokens, stores are the model" — is mostly wrong: components have slot and event surfaces that don't fit the data template; design tokens are a narrow subset of a brand; stores leak the developer's mental model into the BA's vocabulary. Phase 9 takes the DCI-purist path: UI artefacts describe *what the user sees and does*, brand captures *the identity being expressed* (voice, tone, visual, motion), and the mutation-across-interactions question is answered by DCI value semantics with the runtime carrying live references.
+
+**Design.**
+
+*Filesystem layout.* Drafts for the three new kinds live at canonical paths — `drafts/components/<Name>.md` (PascalCase filename matching the component name), `drafts/brands/<Name>.md` (plural directory since multi-brand white-label projects are allowed), and `drafts/routes/<name>.md` (snake_case; most projects have a single `main.md` routing table). The parser uses the path to determine the kind, the filename stem to determine the artefact name. Phase 8's bundle ships `.gitkeep` files for each of these directories, so `reen init` produces the full skeleton on day one.
+
+*Three new kinds.*
+
+**Component.** Reusable UI building blocks. Leaf components (Button, Label, Icon) just render; coordinating components (Form, List, LoginScreen) compose child components and bind their events to context invocations. Same template for both — the Composition section tells you which flavour you're looking at. Screens are components with a route mapped to them from the routing table; they carry no schema-level marker that says "I am a screen."
+
+Authored surface:
+
+```
+# Component: <Name>
+
+## Purpose
+One paragraph: what this component lets the user see and do.
+
+## Props
+- <name>: <data/projection name or prose description> — what the prop conveys
+
+## Slots
+- <slot name>: <what the slot is for, who can fill it>
+
+## Events
+- <event name>: <what just happened; payload described in business language>
+
+## Variants
+- <variant name>: <when to use this variant>
+
+## Composition
+(Optional — present when the component coordinates child components)
+- <child component>: <slot/prop bindings, in prose>
+- when <child>.<event>: invoke <context>
+
+## Invariants
+- <invariant>
+
+## Scenarios
+### <name>
+Given: <props, slots, ambient brand>
+When: <user action or event>
+Then: <observable outcome — what the user sees, what events fire>
+```
+
+No render prose beyond "what the user sees." No HTML, no JSX, no Tailwind class names, no style rules. Pixel-level specificity lives in a design source linked from the component's Purpose paragraph; the draft constrains behaviour, not appearance.
+
+**Brand.** Brand identity as one coherent artefact: voice, tone, visual tokens, motion, iconography, imagery, logo rules. Not every section is machine-consumable, and that's intentional — brand is the source of truth both the scaffolder and the copywriter read. The scaffolder compiles the machine-consumable parts (colours, typography scale, spacing scale, motion curves) to whatever realisation the agent picks in Phase 10 (CSS custom properties, Rust constants, stylesheet modules); the human-facing sections (voice, logo rules, imagery style) travel unchanged as reference material.
+
+Multiple brands are allowed (white-label); one is default. Tokens are named by role, not value — the value is a realisation concern. The draft describes "primary CTA background," not "#3355ff."
+
+**Routing table.** URL-pattern-to-component binding. Most projects have one table; modular apps can have several, each mounting a namespace. Path parameters bind to data types from the manifest, resolved exactly like any other data reference. The form is YAML list-of-maps (`- path: /...`, `component: ...`, optional `params:` block) — a deliberate choice over path-as-map-key because list form is robust against paths containing `:`, `<`, `>`, `,`, or a leading `-`.
+
+*Reference graph (revised and authoritative after this phase).*
+
+- data → data
+- projections → data + projections
+- operations → data
+- contexts → data + projections + operations + contexts + components + brand + routing table
+- components → data + projections + brand + components + contexts
+- routing table → components + data
+- brand → nothing
+
+Two pairs that were latent but are now explicit:
+
+- **components → contexts.** A coordinating component binds child events to context invocations. The form component invokes the validator context when the input emits `changed`. This is how the "context-like component" pattern realises — not a schema distinction, just a use of the Composition section.
+- **contexts → contexts.** One context can enact another. The application-level context that orchestrates a login invokes the session-setup context.
+
+No store kind. No screen kind. Addressability moves to routing. State-across-interactions is handled by DCI value semantics: a context takes data in, returns updated data out, the runtime rebinds the live reference. The draft vocabulary never names storage.
+
+*Concreteness lint extensions.*
+
+Phase 3.5's lint applies to the new kinds with tightened rules:
+
+- Component drafts may not contain: HTML tag names (`div`, `span`, `input`, ...), style/class attributes, CSS property syntax, Tailwind or other utility class names, JSX/template syntax, framework-specific hook names (`useState`, `useEffect`, `createSignal`), or raw hex / rgb / hsl colour values.
+- Brand drafts may not contain hex/rgb/hsl colour values, specific font stacks, or px/em/rem/vh/vw measurements. Tokens are named by role; realisation is the scaffolder's job.
+- Routing table drafts may not contain framework-specific route-matching syntax beyond the documented path template format; handler names must be component names, not function identifiers.
+
+*Context classification (for Phase 10).* Every context's prepared entry carries a `realisation_target` field computed by prepare from the transitive dependency graph: `client_also` (touches only data, projections, brand, and other contexts), `server_only` (transitively touches an authenticated operation or a secret-bearing transport), or `unknown` (graph cycle or unresolved dependency). Phase 10's WASM inference consumes this; Phase 9 only has to compute and store it correctly.
+
+**Exit criteria:** `reen prepare` on minimal hand-written drafts of a leaf component, a coordinating component, a brand, and a single-route routing table produces valid v3 YAML. The reference-graph rules are enforced by prepare with clear error messages. The lint catches HTML tags, hex colour values, and framework-specific hook names on appropriate drafts. The authoring skills name the new vocabulary. No codegen yet — verify still operates only on pre-Phase-9 kinds.
+
+### Phase 9.5 — prose-reference lint and routing-table parser refinements
+
+**Goal:** tighten two rough edges surfaced during Phase 9 implementation before they calcify into Phase 10's codegen assumptions. No schema changes; behaviour and UX only.
+
+**Why this phase exists.** Phase 9 introduced (a) a prose-reference check in prepare that scans draft prose for manifest names using whole-word matching and (b) a routing-table parser that accepts the YAML list-of-maps form (`- path: /...`). Both work. Both have specific, isolated sharp edges that are better fixed now than after Phase 10 builds on top of them.
+
+**Design.**
+
+*Prose-reference check — tightened matching, two-tier severity.*
+
+The whole-word scan produces false positives on common English words that happen to match domain type names — "in order to" collides with an `Order` data type, "the user types their email" collides with a `User` data type. Over a realistic draft the false-positive rate dominates, the check becomes noise, and a BA learns to ignore it. The fix is to raise the bar on what counts as "probably a reference."
+
+1. **PascalCase-only scan.** Restrict the whole-word regex to `\b[A-Z][A-Za-z0-9]*\b`. Manifest-bound names follow PascalCase by convention across every kind (data, projections, components, brand names, operation types). Role players, props, and scenario-local identifiers are lowercase by convention and context-local — never manifest references. Excluding them cuts the false-positive rate dramatically without missing legitimate references.
+2. **Exclude match sites where references don't belong.** The scanner does not scan inside backtick-delimited code spans (drafts shouldn't contain them, but belt-and-braces), inside heading text (`# Component: Button` must not flag `Button` as unresolved — that's the draft's own title), and inside `Given:` / `When:` / `Then:` lines where the content is a concrete scenario value rather than prose (a body of `[(5,5), (4,5)]` has no references to scan).
+3. **Stopword list for PascalCase tokens common at English sentence starts.** The scanner holds a stopword list: `The`, `A`, `An`, `This`, `That`, `These`, `Those`, `When`, `If`, `Then`, `Given`, `And`, `Or`, `But`, `So`, `For`, `On`, `In`, `At`, `Of`, `With`, `Without`. These collide with sentence-start capitalisation in English prose and are never legitimate manifest names. The list lives in code as a named constant, not in user config — reen does not invite users to tune the stopword set.
+4. **Two-tier severity.** Split findings into high-confidence and low-confidence:
+   - **High-confidence (blocking):** a reference using the explicit syntax `@<api>/<Name>` or `@brand/<token>` that doesn't resolve; or a PascalCase token that already appears resolved elsewhere in the same draft and then appears again somewhere it doesn't resolve (very likely a typo of a known reference).
+   - **Low-confidence (informational):** a standalone PascalCase token not otherwise resolved in the same draft and not in the manifest. Listed in the prepared YAML's `ambiguities[]` with `severity: low`, printed in `reen prepare` output under a clearly separated "Possible prose references" heading, and never blocks prepare.
+5. **Keep the check on by default.** No `--skip-prose-check` escape hatch; no opt-in flag. The tightened rules eliminate the need.
+
+*Routing-table parser — keep list form, tighten skill + error message.*
+
+The list-of-maps form (`- path: /...`, `component: ...`) is the right canonical form. The path-as-map-key alternative looks cleaner for simple cases but degrades on paths containing `:`, `<`, `>`, `,`, or a leading `-` — which forces quoted keys, which is uglier than the preamble it was trying to replace. Dual-form parsing (accept either) is a predictable source of ambiguity bugs and error-message difficulty. The list form stays as the only accepted shape.
+
+1. **Skill documentation.** `.claude/skills/reen-draft-format/SKILL.md` (template and root twin) gains a dedicated routing-table section that shows the list form, says explicitly that it is the only accepted shape, and briefly explains why (YAML idiom, robust to path syntax). The section preempts the "can I write it like `/: { component: ... }` instead" question rather than leaving it as a gotcha.
+2. **Targeted error message.** When the parser sees a routing-table body whose first non-blank, non-header line is a path-shaped token followed by `:` (i.e. the user attempted the map form), it fails with a specific message: *"Routes must be a list of entries, each starting with `- path: <url>`. The map form (`/: { component: ... }`) is not supported — see the reen-draft-format skill for the routing-table template."* Generic YAML parser errors are caught and rewritten; the BA sees the actionable message rather than a `serde_yaml` stack trace.
+
+**Steps.**
+
+1. Replace the whole-word scan in the prose-reference checker with the PascalCase-only regex. Add unit tests covering: a PascalCase token that resolves (passes), a PascalCase token in the stopword list (ignored), an `@api/Name` reference that doesn't resolve (blocking), a PascalCase token that appears once resolved and once unresolved in the same draft (blocking on the unresolved site), a PascalCase token that appears only unresolved (informational).
+2. Add the exclusion zones: backtick code spans, heading text, scenario concrete-value lines. Unit-test each exclusion against a known-bad fragment that would otherwise flag.
+3. Introduce the two-tier severity split in the prepared YAML's `ambiguities[]` shape. High-confidence entries stay as they are; low-confidence entries get `severity: low` and render under a separate heading in `reen prepare` output.
+4. Tighten the routing-table parser's error handling: detect the map-form attempt at the top of the routes section and emit the targeted message. Unit-test that error against a draft that uses the map form.
+5. Update `reen-draft-format` skill: add the routing-table section. Edit in `templates/` if Phase 8 has landed; otherwise edit `.claude/` and reconcile in the next `reen init --upgrade`.
+6. Regression tests on the existing Phase 9 fixtures: none of them should start failing or start emitting new low-confidence findings. If they do, the fixtures are the thing that's wrong, not the lint.
+
+**Exit criteria:** `reen prepare` on a draft that mentions `Order` in the English phrase "in order to" does not flag anything. A draft that references `@aisstream/MissingType` still fails prepare. A draft that references `Accoutn` (typo of a resolved `Account`) flags high-confidence blocking with a message naming the typo. A routing-table draft written in the map form fails prepare with the targeted error message, not a generic YAML one. All pre-Phase-9 test projects continue to prepare without new warnings.
+
+### Phase 10 — Rust SSR codegen with WASM target inference
+
+**Goal:** turn Phase 9's schema into compilable Rust. Scaffold + verify for components, brand, and routing tables. SSR is the preferred realisation path; the agent picks the specific framework (Leptos, Dioxus, Axum+Askama/Maud, or another reasonable choice) and reen does not hardcode the choice. The scaffolder figures out which contexts need to compile to both native and WASM, and structures the crate accordingly.
+
+**Why this phase exists.** The schema lands nothing by itself. Phase 10 is where a Reen project becomes a runnable web app. It is the largest new engineering surface since Phase 2, because the scaffold shape is load-bearing for every web project reen will ever produce, and because verify has to work from the Rust AST regardless of which framework the agent picked.
+
+**Design.**
+
+*Framework non-commitment.* The plan does not pick a framework. The scaffolded crate is conventional Rust — no framework-specific macros in reen-owned code, no assumption about whether rendering is Leptos' `view!` macro or Dioxus' RSX or Askama templates or raw `Display` impls. The scaffolder emits the contract (struct shape, method signatures, public surface) and leaves the body to Claude Code. Verify checks the contract. The agent is free to introduce framework-specific macros inside method bodies; verify's structural check ignores body contents.
+
+*SSR preference.* When the scaffold has no other constraint, it emits an SSR-first shape: a server-side Rust binary with routes handled per entry in the routing table, components rendered to HTML on the server, brand realised as a stylesheet plus Rust constants for inline access. CSR/hybrid variants are permitted — a component scaffold must be compatible with being mounted client-side after hydration — but SSR is the default shape the scaffolder emits.
+
+*WASM target inference.* The scaffolder classifies each context as server-only, client-also, or client-only based on its transitive dependencies (the `realisation_target` computed in Phase 9). A context invoked from a component's Composition section must be reachable from the client. If its classification is server-only, the scaffolder emits an RPC edge — a server endpoint that the client-side component calls — rather than compiling it to WASM. The BA's draft still reads "when the form emits submit, invoke SubmitOrder"; the scaffolder turns that into `POST /api/submit-order` transparently.
+
+*Crate layout.* A Reen-initialised web project, after Phase 10 scaffolding, is structured as a Cargo workspace:
+
+```
+<project>/
+  crates/
+    app-core/          # data, projections, contexts, operations (client-also)
+    app-server/        # server-only contexts + operations; binary entry for SSR
+    app-client/        # WASM build; client-side handlers for component events
+    app-components/    # components, brand, routing — shared between server and client
+```
+
+The four-crate split is an implementation convention the scaffolder enforces. The server binary pulls in `app-core`, `app-components`, and `app-server`; the client WASM pulls in `app-core`, `app-components`, and `app-client`. A scaffold flag lets server-only projects skip `app-client` entirely.
+
+*Scaffold-per-kind.*
+
+- **Component.** A `Component` struct per draft, fields matching props + ambient brand reference. Public methods: `render(&self) -> Markup` (or framework-equivalent), plus one method per event (`fn on_<event>(...)`). The Composition section drives child-component instantiation and event-to-context wiring.
+- **Brand.** A module of typed constants and a stylesheet source. Colour tokens become CSS custom properties plus `&'static str` constants. Typography and spacing scales become indexable tables. Voice, logo rules, and imagery travel as doc comments.
+- **Routing table.** A single `Router` struct with entries for every route. Path parameters decoded to declared data types; the scaffolder emits the decode calls.
+
+*Verify extensions.* `reen verify` gains new cases for components, routing tables, and brand. Plus a WASM-classification sanity check: a context classified `client_also` must not depend on a server-only symbol.
+
+**Exit criteria:** a minimal Reen web project — one brand, one leaf component, one coordinating component, a routing table with a single route, and a validator context — scaffolds to a compilable workspace, `cargo check` passes across all crates, and `reen verify` accepts the scaffold. A deliberately server-only context (one that transitively touches an authenticated operation) is classified as such and its component invocation emits an RPC edge rather than WASM-compiled inline code.
+
+### Phase 11 — web-app test project (Lupa)
+
+**Goal:** a real web application, built end-to-end under the new pipeline, that stresses the schema and the Phase 10 scaffolder the way snake, money transfer, and Connor stressed Phases 1–6.
+
+**Why this phase exists.** Every previous phase that tried to validate a schema purely on fixture drafts shipped bugs. Real use kicks them out. Phase 11 is where Phases 9, 9.5, and 10 earn their keep.
+
+**Test case: Lupa.** A net bank for a Nordea retail-banking customer, designed to be production-ready though not production-deployed. The feature set is small — accounts listing, transactions listing per account, transfer between own accounts, transfer domestically, transfer internationally (IBAN + BIC/SWIFT). The architectural ask is not: every feature must be reachable via a conventional keyboard-and-mouse web UI *and* invokable by a conversational chat agent embedded in the app, and the server must handle many concurrent user sessions with no cross-session leakage. Dual access — web UI plus chat agent — is the design spine, but it is not a surface multiplication: Lupa ships one HTTP surface (the SSR web app, with whatever JSON endpoints the UI's own interactive fragments need), and the chat agent runs in-process inside the server as an ordinary collaborator that dispatches to business contexts via plain Rust function calls. The agent has no network privileges the UI doesn't have — it has no network at all between itself and the contexts; they share a process and a tool registry derived from the same context catalogue. Mutating actions initiated from chat route through a signed, single-use confirmation card that the user clicks in the UI before the context is actually invoked. Nordea's OpenBanking API is the external specification authority, consumed via Phase 7's ingestion path — Lupa does not hand-author banking primitives, it ingests them.
+
+**Shape.** A brand ("Lupa"), a routing table with entry points for accounts/transactions/transfer-hub/chat, screen components per route, coordinating components per transfer flow, leaf components for money/IBAN input plus a `ConfirmationCard` for chat-initiated mutations. Business contexts for each of the five features, plus infrastructure contexts (`AuthenticateWithNordea` with PSD2 scopes and SCA, `AuthenticateSession`, `RefreshNordeaSession`, `RevokeSession`, `RecordAuditEntry`, `EnforceIdempotency`, `ConfirmTransfer`, `ChatSession`). Every context classifies `server_only`; Phase 10's RPC edge emission is the primary call path from components. Every mutating context takes an `IdempotencyToken` role player and writes an `AuditEntry` before returning. Sessions are per-request and backed by a pluggable store (in-memory for dev/fixture tests; durable for staging). The chat agent's tool registry is an in-process Rust data structure built once at startup from the context catalogue and shared across sessions; invocation is session-scoped. Reference implementation runs in fixture mode by default (committed Nordea response corpus that simulates multi-customer behaviour); a `sandbox` mode smoke-tests against Nordea's sandbox. The chat agent backend (Anthropic Messages API by default) is declared as a second ingested API. Deployment shape ships as a `Dockerfile` + `docker-compose.yml` with Postgres for durable-mode testing.
+
+**Exit criteria:** Lupa builds end-to-end from drafts. `reen prepare && reen scaffold && reen verify && cargo check --workspace` is clean. `cargo run -p app-server` boots in fixture mode with all five features reachable via both the web UI and the in-process chat agent, serving multiple concurrent sessions without cross-session leakage (concurrency test explicitly asserts this in CI, not `#[ignore]`d). Surface-parity tests pass: invoking a context via an SSR form POST and via the chat agent's tool-dispatch path with equivalent inputs produces equivalent outcomes — same audit entries, same idempotency behaviour, same return data modulo surface format. A prompt-injection test confirms no chat path executes a mutating action without an explicit confirmation-card Accept. CSRF protection, secure cookie flags, CSP nonces, PII-redacting logs, and graceful shutdown are all in place and tested. The project surfaces at least one concrete defect in Phases 2.5 / 7 / 8 / 9 / 9.5 / 10 that gets fixed in its own commit; if it does not, Lupa is not exercising the schema hard enough and should be expanded before Phase 11 closes. A production-readiness assessment in Lupa's `README.md` enumerates which work remains before a real deployment and who would need to sign off.
+
+### Phase 12 — feature flags on artefacts and multiple apps per project
+
+**Goal:** let BAs declare compile-time feature flags on individual artefacts (contexts, projections, data, components, operations) and let a single project ship more than one runnable app, each with its own feature closure. Validated by splitting snake into `snake_terminal` and `snake_web` variants that share a core game lib but compile to different binaries.
+
+**Why this phase exists.** Today every context a project declares is in every binary the project produces — there is no way for a BA to say "this renderer is terminal-only" or "this screen exists only in the web variant," and no way to produce two binaries from one project. Runtime switching via env vars (as snake's `SNAKE_RENDERER` hack does today) is the workaround; it ships both renderers in every build and can't describe a terminal-vs-web split where the platforms differ structurally. Feature flagging is a Cargo-native capability that Reen currently ignores. Reintroducing it at the draft level, and letting apps declare their feature sets, turns the snake-web/snake-terminal story from a runtime env-var kludge into a schema-level split. It also gives Lupa a clean way to express fixture-mode vs sandbox-mode as compile-time variants after the fact.
+
+**Shape.** Draft-level addition: an optional `Feature: <snake-name>` line on any context / projection / data / component / operation draft. Prepared YAML carries the feature name on the artefact entry. Unfeatured artefacts behave exactly as today — always compiled, no gate. App artefacts move from the singleton `drafts/app.md` to the directory form `drafts/apps/<app_name>.md`; each app gains an optional `Requires Features:` list. Codegen wraps gated modules in `#[cfg(feature = "<name>")]` at the `mod` declaration (module files are always on disk; Cargo decides whether to compile them). Cargo.toml's `[features]` section is managed as scaffolder-owned content: every feature named on an artefact becomes `<feature> = []`; every app becomes `<app_snake> = [<its feature closure>]`. Multiple `[[bin]]` entries — one per app — each with `required-features = [...]` and `path = "src/bin/<app_snake>.rs"`. Verify gains a structural check that each declared app's transitive context closure is satisfiable under its required feature set, reported in DCI language. The snake test project is migrated to two apps: `snake_terminal` (today's binary, gated `terminal_renderer`) and a new `snake_web` (Phase 10's web-app shape, gated `web_renderer`) that shares the Board / Snake / GameLoop / CommandInput / StringRenderer core unfeatured. Money transfer and Connor migrate trivially — one app, no features.
+
+**Exit criteria:** `reen prepare && reen scaffold && reen verify && cargo check --workspace` is clean on snake with both app variants declared. `cargo build --no-default-features --features snake_terminal` and `cargo build --no-default-features --features snake_web` each produce a runnable binary; the terminal variant contains no WebRenderer symbols, the web variant contains no crossterm-dependent symbols (check by `nm` or `cargo tree -e features`). A deliberately-broken app declaration (a feature named on the app that no artefact provides; a context reachable from the app's entry that requires a feature the app does not include) is rejected by `reen verify` with a DCI-language message. Snake's two apps round-trip through the pipeline without losing features across re-scaffolds. The phase surfaces at least one concrete defect in Phase 2.5 / 7 / 9.5 / 10 that gets fixed in its own commit — typically something in codegen's Cargo.toml round-trip or verify's cross-artefact walk. A third validation case: Lupa gains a compile-time `sandbox_mode` feature that flips the Nordea client between fixture and live sandbox — evidence that Phase 12 composes with Phase 11 without requiring Lupa rework.
+
 ---
 
 ## Testing strategy
@@ -598,4 +815,4 @@ Templates are authored once and the reen repo itself dogfoods them: running `ree
 
 ## Estimated sequencing
 
-Phases 0–2 can run linearly over a focused week each. Phase 3 can start in parallel with late Phase 2 once the CLI surface is frozen. Phase 4 is the longest-running because it forces real use and will kick bugs back into 1–3. Phase 5 needs Phase 4 complete. Phase 6 closes the main-use-case pipeline. Phase 7 is additive and independent of Phases 4–6 in principle (it introduces a new artifact kind rather than changing existing ones), but is sequenced after Phase 6 so the core pipeline is stable before the ingestion path is grafted on. Phase 8 is packaging only — no new pipeline behaviour — so it can run in parallel with Phase 7 if desired, but dogfooding the bundle is simplest once Phase 7's additions are already in the canonical `.claude/` tree.
+Phases 0–2 can run linearly over a focused week each. Phase 2.5 is a retrofit — it was identified after Phases 3–9 had shipped, when it became clear that scaffolds were library-only and `cargo run` did not work; it is named 2.5 because conceptually it belongs with Phase 2's scaffold story, but in practice it runs before Phase 10 (Phase 10 depends on the App artefact kind existing). Phase 3 can start in parallel with late Phase 2 once the CLI surface is frozen. Phase 4 is the longest-running because it forces real use and will kick bugs back into 1–3. Phase 5 needs Phase 4 complete. Phase 6 closes the main-use-case pipeline. Phase 7 is additive and independent of Phases 4–6 in principle (it introduces a new artifact kind rather than changing existing ones), but is sequenced after Phase 6 so the core pipeline is stable before the ingestion path is grafted on. Phase 8 is packaging only — no new pipeline behaviour — so it can run in parallel with Phase 7 if desired, but dogfooding the bundle is simplest once Phase 7's additions are already in the canonical `.claude/` tree. Phase 9 adds the web-app schema; Phase 9.5 refines the two specific rough edges surfaced by the Phase 9 run (prose-reference false positives, routing-table parser error message). Phase 10 depends on both Phase 9.5 (sharper lint and parser) and Phase 2.5 (App artefact kind) — it extends each with a web-app branch rather than inventing the pattern from scratch. Phase 11 is test-project work that only begins once Phases 9, 9.5, 2.5, and 10 are stable. Phase 12 runs after Phase 11 — it needs Phase 10's web-app scaffolder to have something to gate (the snake-web variant is the test case) and benefits from Lupa as a second stress project against which to validate the feature-flag/multi-app machinery. Phase 12 is cross-cutting: it touches the parser, the prepared schema (additive; no version bump unless the multi-app rework forces one, in which case v4 is acceptable), codegen's Cargo.toml round-trip, verify's cross-artefact walk, and every migrated test project — but no phase depends on it, so it can slip in the schedule without blocking anything downstream.

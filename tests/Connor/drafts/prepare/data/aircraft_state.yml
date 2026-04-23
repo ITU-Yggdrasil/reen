@@ -45,19 +45,24 @@ synthesised_tests:
   then: the ICAO hex code "A1B2C3" is used as the event label
   citation: Scenarios / aircraft without callsign
 - source: invariant
-  given: icao "A1B2C3", callsign "UAL123", latitude 40.6, longitude -73.8, altitude 35000, UTC timestamp, and all boundary values are within normalized ranges
+  given: icao "A1B2C3", callsign "UAL123", latitude 40.6, longitude -73.8, altitude 35000, UTC timestamp, and all boundary values are normalized
   when: new is called with these normalized boundary values
-  then: an AircraftState is constructed with all fields normalized and stored correctly
+  then: an AircraftState is constructed and all fields are initialized to their provided normalized values
   citation: 'operation `new`: Constructs an AircraftState from normalized boundary values'
 - source: invariant
-  given: latitude at minimum normalized boundary (e.g., -90), longitude at maximum normalized boundary (e.g., 180), altitude at minimum (0), and icao "A1B2C3"
-  when: new is called with extreme normalized boundary values
-  then: an AircraftState is constructed successfully with these extreme boundary values preserved
+  given: icao "A1B2C3", callsign "", latitude 40.6, longitude -73.8, altitude 35000, and a UTC timestamp
+  when: new is called with an empty callsign string
+  then: an AircraftState is returned with the empty callsign preserved, demonstrating that normalization handles empty string values
   citation: 'operation `new`: Constructs an AircraftState from normalized boundary values'
 - source: invariant
-  given: latitude 40.6, longitude -73.8, altitude 35000, icao "A1B2C3", and a UTC timestamp with sub-second precision
-  when: new is called to construct the AircraftState
-  then: the timestamp is normalized and stored with appropriate precision in the resulting AircraftState
+  given: icao "A1B2C3", callsign "UAL123", latitude at minimum boundary (−90), longitude at minimum boundary (−180), altitude 0, and a UTC timestamp
+  when: new is called with minimum normalized boundary values
+  then: an AircraftState is constructed with all minimum boundary values accepted and stored
+  citation: 'operation `new`: Constructs an AircraftState from normalized boundary values'
+- source: invariant
+  given: icao "A1B2C3", callsign "UAL123", latitude at maximum boundary (90), longitude at maximum boundary (180), altitude 43000, and a UTC timestamp
+  when: new is called with maximum normalized boundary values
+  then: an AircraftState is constructed with all maximum boundary values accepted and stored
   citation: 'operation `new`: Constructs an AircraftState from normalized boundary values'
 vocabulary_bindings:
 - name: icao
@@ -74,3 +79,24 @@ vocabulary_bindings:
   resolution: attribute
 - name: timestamp
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `AdsbReceiver` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `AdsbReceiver` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Aircraft` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Aircraft` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `B` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `B` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Exchange` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Exchange` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Once` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Once` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

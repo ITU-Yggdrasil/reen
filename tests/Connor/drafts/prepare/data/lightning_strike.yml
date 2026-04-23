@@ -30,19 +30,19 @@ synthesised_tests:
   then: a LightningStrike is returned with those values
   citation: Scenarios / create a strike record
 - source: invariant
-  given: latitude -33.9, longitude 151.2, a UTC timestamp, and station_count of 0
+  given: latitude -33.9, longitude 151.2, a UTC timestamp, and station_count of 12
   when: new is called
-  then: a LightningStrike is returned with those values including station_count of 0
+  then: a LightningStrike is returned with latitude -33.9, longitude 151.2, the provided timestamp, and station_count of 12
   citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
 - source: invariant
-  given: latitude 0, longitude 0, a UTC timestamp, and station_count of 12
+  given: latitude 0.0, longitude 0.0, a UTC timestamp, and station_count of 1
   when: new is called
-  then: a LightningStrike is returned with those values at the equator prime meridian
+  then: a LightningStrike is returned with latitude 0.0, longitude 0.0, the provided timestamp, and station_count of 1
   citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
 - source: invariant
-  given: latitude 90, longitude -180, a UTC timestamp, and station_count of 1
+  given: latitude 89.9, longitude -179.5, a UTC timestamp, and station_count of 100
   when: new is called
-  then: a LightningStrike is returned with those extreme coordinate values
+  then: a LightningStrike is returned with latitude 89.9, longitude -179.5, the provided timestamp, and station_count of 100
   citation: 'operation `new`: Constructs a LightningStrike from the provided field values'
 vocabulary_bindings:
 - name: latitude
@@ -53,3 +53,16 @@ vocabulary_bindings:
   resolution: attribute
 - name: station_count
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `Blitzortung` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Blitzortung` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `LightningReceiver` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `LightningReceiver` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Once` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Once` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

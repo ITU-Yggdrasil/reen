@@ -36,24 +36,24 @@ synthesised_tests:
   then: the interior rows contain only spaces between the wall symbols
   citation: Scenarios / empty interior shows spaces
 - source: invariant
-  given: a StringRenderer initialized with a board
-  when: new is called
-  then: the board is stored as the source for querying on-screen symbols and no other collaborators are fetched
+  given: a StringRenderer instance is created with a board
+  when: the instance is constructed via new
+  then: the board is stored as the source for querying on-screen symbols and no other collaborators are instantiated
   citation: 'query `new`: Stores the board as the source to query for on-screen symbols. No other collaborators are fetched.'
 - source: invariant
-  given: a board with varying symbols across multiple rows and columns
+  given: a 3 by 3 board with specific symbols at known coordinates
   when: render is called
-  then: symbols are collected iterating rows from top to bottom and within each row from left to right
+  then: symbols are collected in row-major order (top to bottom, left to right) matching the board's coordinates
   citation: 'query `render`: Iterates rows from top to bottom. Within each row, iterates columns from left to right, collecting the symbol at each coordinate.'
 - source: invariant
-  given: a board and a score of 0
+  given: a board with 3 rows and a score of 42
   when: render is called
-  then: 'the returned text ends with a newline after ''Score: 0'''
+  then: 'the output ends with a newline after the score line formatted as ''Score: 42\n'''
   citation: 'query `render`: After the last row, a score line in the format ''Score: <score>'' followed by a newline is included.'
 - source: invariant
-  given: a 3 by 3 board with symbols '#' at all positions
+  given: a board with variable row lengths and a score of 0
   when: render is called
-  then: each row contains exactly 3 '#' symbols followed by a newline
+  then: each row in the output is terminated by a newline character before the score line
   citation: 'query `render`: Each row is followed by a newline.'
 vocabulary_bindings:
 - name: Board

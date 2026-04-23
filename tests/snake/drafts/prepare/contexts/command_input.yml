@@ -78,30 +78,35 @@ synthesised_tests:
   then: no key is returned and the buffer remains empty
   citation: 'functionality `next_key`: If the buffer is empty, returns no key'
 - source: invariant
-  given: the shared buffer contains "w", "a", "s", "d", and space
-  when: next_action is called five times
-  then: move-up, move-left, move-down, move-right, and fire actions are returned in order
-  citation: 'functionality `next_action`: w maps to move up, a maps to move left, s maps to move down, d maps to move right, and space maps to fire'
+  given: 'the shared buffer contains multiple key events in order: ''w'', ''a'', ''s'''
+  when: next_key is called three times in sequence
+  then: the keys are returned in order 'w', 'a', 's' and each is removed from the buffer
+  citation: 'functionality `next_key`: removes and returns the oldest key event'
 - source: invariant
-  given: the shared buffer contains "W" (uppercase)
-  when: next_action is called
-  then: a move-up action is returned using case-insensitive matching
-  citation: 'functionality `next_action`: case-insensitive matching'
-- source: invariant
-  given: the shared buffer contains "x", "y", "z", then "w"
-  when: next_action is called
-  then: the three invalid keys are discarded and a move-up action is returned
-  citation: 'functionality `next_action`: If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted'
-- source: invariant
-  given: no key presses are waiting in standard input
+  given: the shared buffer is empty and stdin has no available key presses
   when: capture is called
-  then: the buffer remains unchanged
+  then: the buffer remains empty
   citation: 'functionality `capture`: If no key presses are available, the buffer is unchanged'
 - source: invariant
-  given: the shared buffer contains "a", and new key presses "s", "d" are available in stdin
+  given: the shared buffer contains 'w' and stdin provides 'a', 's'
   when: capture is called
-  then: the buffer contains "a", "s", "d" with new keys appended to the end
+  then: the buffer contains 'w', 'a', 's' in that order
   citation: 'functionality `capture`: Keys already in the buffer before this call remain in place; new keys follow them'
+- source: invariant
+  given: the shared buffer contains 'W' (uppercase)
+  when: next_action is called
+  then: a move-up action is returned using case-insensitive matching
+  citation: 'functionality `next_action`: maps it to a gameplay action using case-insensitive matching: w maps to move up'
+- source: invariant
+  given: the shared buffer contains 'x', 'y', 'space'
+  when: next_action is called
+  then: invalid keys 'x' and 'y' are discarded and a fire action is returned
+  citation: 'functionality `next_action`: If the key has no gameplay meaning, the process repeats until a valid key is found or the buffer is exhausted'
+- source: invariant
+  given: the shared buffer contains 'A', 's', 'D'
+  when: next_action is called three times in sequence
+  then: move-left, move-down, and move-right actions are returned respectively
+  citation: 'functionality `next_action`: case-insensitive matching for a, s, d keys'
 vocabulary_bindings:
 - name: stdin_source
   resolution: role_player

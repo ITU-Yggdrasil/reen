@@ -78,25 +78,20 @@ synthesised_tests:
   then: an error is returned
   citation: 'operation `new`: Returns an error if the value is not finite or is negative.'
 - source: invariant
-  given: an attempt to construct an EventRate with NaN (not-a-number) as events_per_minute
+  given: an attempt to construct an EventRate with NaN as events_per_minute
   when: the new operation is invoked
   then: an error is returned
-  citation: 'operation `new`: Returns an error if the value is not finite or is negative.'
+  citation: Negative values, not-a-number, and infinity are invalid.
 - source: invariant
-  given: an EventCount of 7 events over a 2-minute window
-  when: the rate is computed using decimal division
-  then: events_per_minute equals 3.5 (7 / 2)
-  citation: 'invariant: The rate is computed as event count divided by window minutes using decimal division.'
+  given: an EventCount of 7 over a two-minute window
+  when: the rate is derived using decimal division
+  then: events_per_minute is 3.5
+  citation: The rate is computed as event count divided by window minutes using decimal division.
 - source: invariant
-  given: an EventCount of 1 event over a 1-minute window
-  when: the rate is derived
-  then: events_per_minute is 1.0 and no division by zero occurs
-  citation: 'invariant: Because the window is always at least one minute, division by zero does not occur.'
-- source: invariant
-  given: an EventRate with a precisely computed events_per_minute value
-  when: the rate is serialized without rounding
-  then: the full precision is preserved in the internal representation
-  citation: 'invariant: EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.'
+  given: an EventRate with an unrounded decimal events_per_minute value
+  when: the value is serialized
+  then: the full precision is preserved without internal rounding
+  citation: EventRate defines no presentation rounding; formatting is the responsibility of the serialising context.
 vocabulary_bindings:
 - name: cell
   resolution: attribute
@@ -104,3 +99,8 @@ vocabulary_bindings:
   resolution: attribute
 - name: window
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `PositionEvents` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `PositionEvents` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

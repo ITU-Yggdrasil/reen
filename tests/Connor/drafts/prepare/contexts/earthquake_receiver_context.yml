@@ -32,6 +32,7 @@ functionalities:
   description: Issues a GET request to the configured API URL. On a successful response, parses the GeoJSON feature collection and processes each feature. On failure, records a diagnostic error count and waits until the next interval.
 - name: on_event_received
   description: Attempts to parse the raw feature as an EarthquakeEvent. If the event ID has already been seen, discards it silently. Records each newly seen event ID for future deduplication. If a minimum magnitude is configured and the event's magnitude is below the threshold, discards the event silently. Maps latitude and longitude from the epicentre coordinates. Uses the event timestamp as occurred_at. Sets source to "earthquake". Forms the label from magnitude and place when both are available, using whichever is present otherwise. Delivers the resulting PositionEvent to the event sink.
+realisation_target: client_also
 scenarios:
 - name: duplicate event is deduplicated
   given: an already-seen earthquake event arrives a second time
@@ -62,50 +63,45 @@ synthesised_tests:
   then: five PositionEvents with source "earthquake" can be delivered
   citation: Scenarios / successful poll with unique events
 - source: invariant
-  given: a new EarthquakeReceiverContext with event sink, API URL, poll interval, and optional minimum magnitude
-  when: the context is constructed
-  then: the event sink, API URL, poll interval, and minimum magnitude are stored; the seen event IDs set is empty; no polling loop is started
+  given: a new EarthquakeReceiverContext with event sink, API URL, poll interval, and minimum magnitude
+  when: construction completes
+  then: the context stores all configuration parameters, initializes an empty set of seen event IDs, and does not start polling
   citation: 'functionality `new`: Stores configuration and initializes empty deduplication set without starting polling'
 - source: invariant
-  given: an EarthquakeReceiverContext with configured poll interval and API URL
+  given: a started EarthquakeReceiverContext with a configured poll interval
   when: start is called
   then: a continuous background loop begins that waits for the poll interval to elapse before each fetch cycle and retains configuration and deduplication state across iterations
-  citation: 'functionality `start`: Begins continuous loop with interval waits and state retention'
+  citation: 'functionality `start`: Begins continuous loop respecting poll interval and maintaining state'
 - source: invariant
-  given: a configured API URL and a failed GET request response
+  given: an earthquake event with magnitude 4.5, place 'San Francisco', latitude 37.7, longitude -122.4, timestamp '2024-01-15T10:30:00Z', and a unique event ID
+  when: on_event_received processes the feature
+  then: a PositionEvent is delivered with latitude 37.7, longitude -122.4, occurred_at set to the timestamp, source set to 'earthquake', and label set to '4.5 San Francisco'
+  citation: 'functionality `on_event_received`: Maps coordinates, uses timestamp as occurred_at, sets source to ''earthquake'', forms label from magnitude and place'
+- source: invariant
+  given: an earthquake event with only magnitude 3.2 and no place information
+  when: on_event_received processes the feature
+  then: a PositionEvent is delivered with label set to '3.2' (magnitude only)
+  citation: 'functionality `on_event_received`: Forms label from whichever of magnitude or place is available'
+- source: invariant
+  given: an earthquake event with only place 'Tokyo' and no magnitude information
+  when: on_event_received processes the feature
+  then: a PositionEvent is delivered with label set to 'Tokyo' (place only)
+  citation: 'functionality `on_event_received`: Forms label from whichever of magnitude or place is available'
+- source: invariant
+  given: a failed HTTP response from the configured API URL
   when: fetch_events runs
-  then: a diagnostic error count is recorded and the loop waits until the next interval before retrying
-  citation: 'functionality `fetch_events`: Records error on failure and waits for next interval'
+  then: a diagnostic error count is recorded and the context waits until the next poll interval before attempting another fetch
+  citation: 'functionality `fetch_events`: On failure, records diagnostic error count and waits until next interval'
 - source: invariant
-  given: a successful GeoJSON feature collection response from the API
-  when: fetch_events runs and parses the response
-  then: each feature in the collection is processed by on_event_received
-  citation: 'functionality `fetch_events`: Parses GeoJSON and processes each feature'
+  given: a successful GeoJSON feature collection response from the API with multiple features
+  when: fetch_events runs
+  then: each feature in the collection is passed to on_event_received for processing
+  citation: 'functionality `fetch_events`: Parses GeoJSON feature collection and processes each feature'
 - source: invariant
-  given: an earthquake event with valid coordinates, timestamp, magnitude 4.5, and place 'San Francisco Bay'
-  when: on_event_received processes the event
-  then: latitude and longitude are mapped from epicentre coordinates; occurred_at is set to the event timestamp; source is set to 'earthquake'; label is formed from magnitude and place; a PositionEvent is delivered to the event sink
-  citation: 'functionality `on_event_received`: Maps coordinates, timestamp, source, and label formation'
-- source: invariant
-  given: an earthquake event with magnitude 4.5 and no place field
-  when: on_event_received processes the event
-  then: the label is formed using only the magnitude value
-  citation: 'functionality `on_event_received`: Uses magnitude alone when place is absent'
-- source: invariant
-  given: an earthquake event with place 'Chile' and no magnitude field
-  when: on_event_received processes the event
-  then: the label is formed using only the place value
-  citation: 'functionality `on_event_received`: Uses place alone when magnitude is absent'
-- source: invariant
-  given: an earthquake event that passes all filters and validations
-  when: on_event_received processes the event
-  then: the event ID is recorded in the seen event IDs set for future deduplication
-  citation: 'functionality `on_event_received`: Records newly seen event ID for deduplication'
-- source: invariant
-  given: a minimum magnitude of 5.0 and an event with magnitude 5.0
-  when: on_event_receive runs
-  then: the event is not discarded and proceeds to be delivered
-  citation: 'functionality `on_event_received`: Threshold comparison at boundary condition'
+  given: an earthquake event with a minimum magnitude threshold of 5.0 configured and the event has magnitude 5.0
+  when: on_event_received runs
+  then: the event is accepted and a PositionEvent is delivered (event magnitude equals threshold)
+  citation: 'functionality `on_event_received`: Discards silently only if magnitude is below threshold'
 vocabulary_bindings:
 - name: event_sink
   resolution: role_player

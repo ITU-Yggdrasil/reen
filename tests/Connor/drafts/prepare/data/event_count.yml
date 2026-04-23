@@ -56,24 +56,24 @@ synthesised_tests:
   then: 'the invariant holds: Each matching PositionEvent contributes exactly one to the total for its cell.'
   citation: Invariants / Each matching PositionEvent contributes exactly one to the total for its cell.
 - source: invariant
-  given: a GeographicCell and a TimeWindow with multiple matching PositionEvents
+  given: a GeographicCell and a TimeWindow with five matching PositionEvents
   when: an EventCount is constructed from the cell and window
-  then: the count equals the number of matching PositionEvents, with each event contributing exactly one
+  then: the EventCount has a count of exactly five
   citation: 'invariant: Each matching PositionEvent contributes exactly one to the total for its cell.'
 - source: invariant
   given: a GeographicCell, a count of zero, and a TimeWindow
   when: new is called
-  then: an EventCount with count 0 is returned and satisfies the non-negative invariant
+  then: an EventCount with count zero is returned and satisfies the non-negativity invariant
   citation: 'invariant: The count must be greater than or equal to zero.'
 - source: invariant
   given: a GeographicCell and a TimeWindow
   when: new is called with a fractional count value
-  then: the operation rejects the input or normalizes to an integer, preserving the fractional-invalid invariant
+  then: the operation rejects the fractional count or the EventCount is invalid
   citation: 'invariant: Fractional counts are invalid.'
 - source: invariant
-  given: a GeographicCell with 5 matching PositionEvents and a TimeWindow
-  when: an EventCount is constructed
-  then: the resulting count is exactly 5, demonstrating one-to-one contribution per event
+  given: a GeographicCell with seven matching PositionEvents in a TimeWindow
+  when: the EventCount is computed and verified
+  then: each of the seven events contributes exactly one to the total count of seven
   citation: 'invariant: Each matching PositionEvent contributes exactly one to the total for its cell.'
 vocabulary_bindings:
 - name: cell
@@ -82,3 +82,8 @@ vocabulary_bindings:
   resolution: attribute
 - name: window
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `PositionEvents` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `PositionEvents` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

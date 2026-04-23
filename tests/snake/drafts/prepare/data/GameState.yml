@@ -83,44 +83,39 @@ synthesised_tests:
   citation: Invariants / The score never exceeds 2,000,000,000 during normal play; score increases saturate at this cap.
 - source: invariant
   given: a GameState with score 2,000,000,000 (at cap)
-  when: increment_score is called with amount 5
-  then: the returned GameState has score 2,000,000,000 (saturated, not exceeded)
-  citation: 'invariant: The score never exceeds 2,000,000,000 during normal play; score increases saturate at this cap'
-- source: invariant
-  given: a GameState with score 100
   when: increment_score is called with amount 50
-  then: the returned GameState has score 150 and all other fields unchanged
-  citation: 'operation `increment_score`: All other fields are unchanged'
+  then: the returned GameState has score 2,000,000,000 (saturated, not increased)
+  citation: 'invariant: The score never exceeds 2,000,000,000 during normal play; score increases saturate at this cap.'
 - source: invariant
-  given: a GameState with food at (10, 20) and score 500
-  when: place_food is called with a Food at position (7, 8)
-  then: the returned GameState has food at (7, 8) and score 500
-  citation: 'operation `place_food`: All other fields are unchanged'
+  given: a GameState with a recorded start timestamp of 1000 milliseconds and current UTC time is 3500 milliseconds
+  when: game_time is called
+  then: the returned elapsed time is 2500 milliseconds
+  citation: 'operation `game_time`: Returns the elapsed milliseconds since the game started (current UTC milliseconds minus game_started).'
 - source: invariant
-  given: a GameState with game_started set to 1000 milliseconds
-  when: game_time is called with current UTC time 5000 milliseconds
-  then: game_time returns 4000 milliseconds
-  citation: 'operation `game_time`: Returns the elapsed milliseconds since the game started'
-- source: invariant
-  given: a GameState with food at (3, 4)
+  given: a GameState with food at (10, 20)
   when: food is called
-  then: the operation returns the Food at position (3, 4)
-  citation: 'operation `food`: Returns the current food placement, or absent if none'
+  then: the returned food is at position (10, 20)
+  citation: 'operation `food`: Returns the current food placement, or absent if none.'
 - source: invariant
   given: a GameState with no food
   when: food is called
-  then: the operation returns absent
-  citation: 'operation `food`: Returns the current food placement, or absent if none'
+  then: the returned food is absent
+  citation: 'operation `food`: Returns the current food placement, or absent if none.'
 - source: invariant
-  given: a GameState with game_started set to 12345 milliseconds
+  given: a GameState with a recorded start timestamp of 5000 milliseconds
   when: game_started is called
-  then: the operation returns 12345
-  citation: 'operation `game_started`: Returns the recorded start timestamp in milliseconds'
+  then: the returned timestamp is 5000 milliseconds
+  citation: 'operation `game_started`: Returns the recorded start timestamp in milliseconds.'
 - source: invariant
-  given: a GameState with score 0
-  when: increment_score is called with amount 1
-  then: the returned GameState has score 1
-  citation: 'invariant: The score only increases during play'
+  given: a GameState with score 100 and food at (7, 8)
+  when: increment_score is called with amount 25
+  then: the returned GameState has score 125 and food at (7, 8) unchanged
+  citation: 'operation `increment_score`: All other fields are unchanged.'
+- source: invariant
+  given: a GameState with score 50 and game_started timestamp of 1000
+  when: place_food is called with a Food at position (3, 4)
+  then: the returned GameState has food at (3, 4), score 50, and game_started 1000 unchanged
+  citation: 'operation `place_food`: All other fields are unchanged.'
 vocabulary_bindings:
 - name: score
   resolution: attribute

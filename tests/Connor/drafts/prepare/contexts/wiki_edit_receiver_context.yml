@@ -36,6 +36,7 @@ functionalities:
   description: Checks the coordinate cache for an entry matching the wiki and title. If a cached entry exists and has not expired, returns it without making an API call. Otherwise, issues a GET request to the GeoData API for the given wiki and title. If the API response includes coordinates, stores them in the cache and returns them. If the response indicates the article has no coordinates, stores a negative cache entry and returns absent. If the API call fails, returns absent without caching the failure so a later edit can retry. Cache entries expire after several hours.
 - name: on_stream_disconnected
   description: Runs when the SSE connection drops or the server closes it. Waits for the configured reconnect delay. Reconnects by calling start again. Retains the existing event sink, coordinate cache, and configuration.
+realisation_target: client_also
 scenarios:
 - name: geotagged article produces event
   given: an edit to "Eiffel Tower" on "enwiki" and a successful coordinate lookup

@@ -52,3 +52,28 @@ vocabulary_bindings:
   resolution: attribute
 - name: bot
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `GeoData` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `GeoData` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `MediaWiki` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `MediaWiki` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Most` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Most` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `RecentChange` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `RecentChange` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `WikiEditReceiver` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `WikiEditReceiver` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Wikimedia` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Wikimedia` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

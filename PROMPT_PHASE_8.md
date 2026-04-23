@@ -14,7 +14,7 @@ You are implementing Phase 8 of the Reen rewrite — packaging and distribution 
    - Author `templates/reen.manifest.yml` as an empty-but-valid starter manifest (schema header + empty capability sections).
    - Author `templates/.gitignore.fragment` with the three lines reen wants in a project's gitignore: `drafts/prepare/`, `drafts/.apis/`, `target/`.
    - Author `templates/bundle.toml` declaring, per file, whether it is `managed` (reen upgrades it) or `seed` (reen drops once). `.claude/**`, `DCI.md`, `DRAFT_FORMAT.md` → managed. `CLAUDE.md`, `reen.manifest.yml`, every `.gitkeep` → seed.
-   - Add `.gitkeep` files for each `drafts/` subdirectory: `drafts/`, `drafts/data/`, `drafts/projections/`, `drafts/contexts/`, `drafts/apis/`.
+   - Add `.gitkeep` files for every `drafts/` subdirectory that any current phase uses: `drafts/`, `drafts/data/`, `drafts/projections/`, `drafts/contexts/`, `drafts/apis/`, `drafts/components/` (Phase 9), `drafts/brands/` (Phase 9), `drafts/routes/` (Phase 9), `drafts/apps/` (Phase 12). Every `.gitkeep` is classified `seed` in `bundle.toml`. The layout is cross-checked against Phase 9's canonical paths (`drafts/components/<Name>.md`, `drafts/brands/<Name>.md`, `drafts/routes/<name>.md`) and Phase 12's multi-app convention (`drafts/apps/<app_name>.md`); add a short comment to `bundle.toml` noting which phase introduced each directory so future contributors can reason about the set.
 
 2. **Embed the bundle in the binary.**
    - Add `include_dir` (0.7 or current) to `Cargo.toml`.

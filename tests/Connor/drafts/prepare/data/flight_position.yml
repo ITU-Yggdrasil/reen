@@ -41,19 +41,19 @@ synthesised_tests:
   then: no PositionEvent is produced
   citation: Scenarios / missing coordinates
 - source: invariant
-  given: callsign "BA747", latitude 51.5, longitude -0.1, altitude 35000, and a UTC timestamp
-  when: new is called with all required field values
-  then: a FlightPosition is returned with callsign "BA747", latitude 51.5, longitude -0.1, altitude 35000, and the provided timestamp
+  given: callsign "BA9876", latitude 51.5, longitude -0.1, altitude 35000, and a UTC timestamp
+  when: new is called with these field values
+  then: a FlightPosition is returned with callsign "BA9876", latitude 51.5, longitude -0.1, altitude 35000, and the provided timestamp
   citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
 - source: invariant
-  given: callsign "UA456", latitude 40.7, longitude -74.0, altitude 0, and a UTC timestamp
+  given: callsign "LH4567", latitude 52.3, longitude 13.4, altitude 0, and a UTC timestamp
   when: new is called with altitude set to 0
-  then: a FlightPosition is returned with all field values including altitude 0
+  then: a FlightPosition is returned with all field values preserved, including altitude 0
   citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
 - source: invariant
-  given: callsign "LH888", latitude -33.9, longitude 151.2, altitude 8000, and a UTC timestamp
-  when: new is called with negative latitude value
-  then: a FlightPosition is returned with the negative latitude preserved
+  given: callsign "AF2019", latitude -33.9, longitude 18.6, altitude 25000, and a UTC timestamp
+  when: new is called with negative latitude (southern hemisphere)
+  then: a FlightPosition is returned with the negative latitude value correctly preserved
   citation: 'operation `new`: Constructs a FlightPosition from the supplied field values'
 vocabulary_bindings:
 - name: callsign
@@ -66,3 +66,24 @@ vocabulary_bindings:
   resolution: attribute
 - name: timestamp
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `FlightReceiver` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `FlightReceiver` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Flights` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Flights` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Network` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Network` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Once` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Once` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `OpenSky` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `OpenSky` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

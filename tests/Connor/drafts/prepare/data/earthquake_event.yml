@@ -43,3 +43,20 @@ vocabulary_bindings:
   resolution: attribute
 - name: place
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `Earthquake` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Earthquake` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `EarthquakeReceiver` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `EarthquakeReceiver` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `GeoJSON` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `GeoJSON` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Hazards` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Hazards` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

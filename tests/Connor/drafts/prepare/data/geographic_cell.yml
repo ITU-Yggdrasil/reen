@@ -49,40 +49,35 @@ synthesised_tests:
   then: 'the invariant holds: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude.'
   citation: Invariants / Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude.
 - source: invariant
-  given: min_latitude equal to max_latitude at 45 degrees
+  given: min_latitude equals max_latitude at 45 degrees
   when: new is called with min_latitude 45 and max_latitude 45
-  then: the invariant min_latitude < max_latitude is violated
+  then: the invariant min_latitude is less than max_latitude is violated
   citation: 'invariant: min_latitude is less than max_latitude'
 - source: invariant
-  given: min_longitude equal to max_longitude at -90 degrees
+  given: min_longitude equals max_longitude at -90 degrees
   when: new is called with min_longitude -90 and max_longitude -90
-  then: the invariant min_longitude < max_longitude is violated
+  then: the invariant min_longitude is less than max_longitude is violated
   citation: 'invariant: min_longitude is less than max_longitude'
 - source: invariant
-  given: min_latitude greater than max_latitude
-  when: new is called with min_latitude 60 and max_latitude 50
-  then: the invariant min_latitude < max_latitude is violated
+  given: 'boundary values that are not aligned to the global lattice: min_latitude -90.5, max_latitude -80.3, min_longitude -180.25, max_longitude -170.75'
+  when: new is called
+  then: the invariant Cell boundaries align to the fixed global lattice is violated
+  citation: 'invariant: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude'
+- source: invariant
+  given: 'boundary values aligned to the lattice: min_latitude -90, max_latitude -45, min_longitude -180, max_longitude 0'
+  when: new is called
+  then: the invariant Cell boundaries align to the fixed global lattice is satisfied
+  citation: 'invariant: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude'
+- source: invariant
+  given: min_latitude 30.5, max_latitude 20.5
+  when: new is called with reversed latitude boundaries
+  then: the invariant min_latitude is less than max_latitude is violated
   citation: 'invariant: min_latitude is less than max_latitude'
 - source: invariant
-  given: min_longitude greater than max_longitude
-  when: new is called with min_longitude 10 and max_longitude -10
-  then: the invariant min_longitude < max_longitude is violated
+  given: min_longitude 45, max_longitude -45
+  when: new is called with reversed longitude boundaries
+  then: the invariant min_longitude is less than max_longitude is violated
   citation: 'invariant: min_longitude is less than max_longitude'
-- source: invariant
-  given: 'boundaries at global origin: min_latitude -90, max_latitude -80, min_longitude -180, max_longitude -170'
-  when: new is called
-  then: the cell aligns to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude
-  citation: 'invariant: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude'
-- source: invariant
-  given: 'boundaries at equator and prime meridian: min_latitude 0, max_latitude 10, min_longitude 0, max_longitude 10'
-  when: new is called
-  then: the cell aligns to the fixed global lattice
-  citation: 'invariant: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude'
-- source: invariant
-  given: 'boundaries with non-integer degree values: min_latitude 45.5, max_latitude 55.5, min_longitude -20.3, max_longitude -10.3'
-  when: new is called
-  then: the cell boundaries do not align to the fixed global lattice or construction fails
-  citation: 'invariant: Cell boundaries align to the fixed global lattice starting at -90 degrees latitude and -180 degrees longitude'
 vocabulary_bindings:
 - name: min_latitude
   resolution: attribute
@@ -92,3 +87,8 @@ vocabulary_bindings:
   resolution: attribute
 - name: max_longitude
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `Earth` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Earth` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

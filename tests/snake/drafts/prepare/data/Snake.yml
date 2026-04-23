@@ -101,33 +101,28 @@ synthesised_tests:
 - source: invariant
   given: a Snake with body [(5,5), (4,5), (3,5)] and direction Right
   when: body is called
-  then: the ordered sequence [(5,5), (4,5), (3,5)] is returned with head first
+  then: a read-only sequence [(5,5), (4,5), (3,5)] is returned with head first
   citation: 'operation `body`: Returns the ordered body as a read-only sequence of positions, head first.'
 - source: invariant
-  given: a Snake with body [(2,3), (2,4), (2,5)] and direction Left
+  given: a Snake with body [(2,3), (2,2), (2,1)] and direction Down
   when: direction is called
-  then: Left is returned
+  then: Down is returned
   citation: 'operation `direction`: Returns the current direction of travel.'
 - source: invariant
-  given: a body of [(0,0), (0,1), (1,1), (1,0)] and direction Down
+  given: a body of [(0,0), (0,1), (0,2), (0,3)] and direction Left
   when: new is called
-  then: a Snake is returned with head at (0,0) and length 4
+  then: a Snake is returned with 4 consecutive orthogonally adjacent positions
   citation: 'invariant: Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).'
 - source: invariant
-  given: a body of [(10,10), (10,11)] and direction Down
+  given: a body of [(1,1), (2,1)] and direction Up
   when: new is called
-  then: a Snake is returned where direction Down is independent of head-to-neck orientation
+  then: a Snake is returned where direction Up is recorded independently of head-to-neck orientation which is Right
   citation: 'invariant: The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.'
 - source: invariant
-  given: a body of [(1,1), (1,2), (1,1)] and direction Right
+  given: a body of [(5,5), (6,5)] and direction Left
   when: new is called
-  then: an error is returned because positions are not unique
-  citation: 'invariant: All positions in the body are unique (no overlap).'
-- source: invariant
-  given: a body of [(3,3), (3,4), (4,4), (4,3)] and direction Up
-  when: new is called
-  then: a Snake is returned with all consecutive positions orthogonally adjacent
-  citation: 'invariant: Every pair of consecutive positions is orthogonally adjacent (they differ by exactly 1 in either x or y, not both).'
+  then: a Snake is returned with direction Left despite the neck being to the right of the head
+  citation: 'invariant: The direction does not need to be consistent with the head-to-neck orientation; it records the intended direction of travel independently.'
 vocabulary_bindings:
 - name: body
   resolution: attribute

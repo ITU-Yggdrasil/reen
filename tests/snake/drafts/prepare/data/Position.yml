@@ -39,19 +39,29 @@ synthesised_tests:
   then: 'the invariant holds: Both x and y are non-negative whole numbers.'
   citation: Invariants / Both x and y are non-negative whole numbers.
 - source: invariant
-  given: a Position is created with x = -1 and y = 5
-  when: the Position constructor is called
-  then: it rejects the creation or constrains x to be non-negative
+  given: x is -1 and y is 5
+  when: a Position is created with negative x
+  then: the Position creation fails or x is rejected to maintain the invariant
   citation: 'invariant: Both x and y are non-negative whole numbers'
 - source: invariant
-  given: a Position is created with x = 3 and y = -2
-  when: the Position constructor is called
-  then: it rejects the creation or constrains y to be non-negative
+  given: x is 3 and y is -2
+  when: a Position is created with negative y
+  then: the Position creation fails or y is rejected to maintain the invariant
   citation: 'invariant: Both x and y are non-negative whole numbers'
 - source: invariant
-  given: a Position is created with x = 2.5 and y = 3
-  when: the Position constructor is called
-  then: it rejects the creation or rounds to whole numbers, ensuring x and y remain whole numbers
+  given: x is 2.5 and y is 4
+  when: a Position is created with a non-whole number for x
+  then: the Position creation fails or x is rejected to maintain the invariant
+  citation: 'invariant: Both x and y are non-negative whole numbers'
+- source: invariant
+  given: x is 10 and y is 3.7
+  when: a Position is created with a non-whole number for y
+  then: the Position creation fails or y is rejected to maintain the invariant
+  citation: 'invariant: Both x and y are non-negative whole numbers'
+- source: invariant
+  given: a Position at (0, 0)
+  when: x is set to 0 and y is set to 0
+  then: both coordinates remain non-negative whole numbers satisfying the invariant
   citation: 'invariant: Both x and y are non-negative whole numbers'
 vocabulary_bindings:
 - name: x

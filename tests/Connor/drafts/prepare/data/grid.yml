@@ -92,3 +92,40 @@ vocabulary_bindings:
   resolution: attribute
 - name: cells
   resolution: attribute
+ambiguities:
+- message: 'Possible prose reference: `Cells` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Cells` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `GeographicCells` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `GeographicCells` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Grid` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Grid` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Inputs` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Inputs` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Interior` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Interior` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Latitude` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Latitude` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Lays` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Lays` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Longitude` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Longitude` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1
+- message: 'Possible prose reference: `Valid` looks like a domain name but is not in the vocabulary manifest'
+  severity: low
+  suggested_resolution: If `Valid` is a domain concept, add it to the manifest. Otherwise, ignore this message.
+  source_line: 1

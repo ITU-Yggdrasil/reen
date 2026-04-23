@@ -34,6 +34,7 @@ functionalities:
   description: Issues a GET request to the configured API URL. Includes the API key as a request header. Applies the bounding box when configured. On a successful response, iterates the returned aircraft records and processes each one. On failure, records a diagnostic error count and waits until the next interval.
 - name: on_aircraft_received
   description: Attempts to parse the raw record as an AircraftState. If latitude or longitude is absent, discards the record silently. Maps latitude and longitude directly from the aircraft state when present. Uses the state's timestamp as occurred_at. Sets source to "adsb". Uses the callsign as label when present and non-blank. Falls back to the ICAO hex code as label when the callsign is absent or blank. Delivers the resulting PositionEvent to the event sink.
+realisation_target: client_also
 scenarios:
 - name: blank callsign uses ICAO fallback
   given: an aircraft record with blank callsign and valid coordinates

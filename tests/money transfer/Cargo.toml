@@ -11,3 +11,7 @@ anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 base64 = "0.22"
+
+[[bin]]
+name = "money-transfer"
+path = "src/main.rs"
