@@ -1,7 +1,7 @@
 # Data: Money
 
 ## Purpose
-Represents a monetary value in a specific currency. Money is the fundamental unit of financial measurement throughout the Lupa banking domain, combining an amount with its denomination so that arithmetic across currencies is never silently mixed.
+Represents a monetary value in a specific currency. Money is the fundamental unit of financial measurement throughout the banking domain, combining an amount with its denomination so that arithmetic across currencies is never silently mixed.
 
 ## Attributes
 - amount: the quantity in minor units (hundredths of the currency unit), always a whole number

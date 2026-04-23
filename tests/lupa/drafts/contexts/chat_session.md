@@ -5,9 +5,9 @@ Manages an in-process conversational agent that helps the authenticated customer
 
 ## Role Players
 - authenticated_customer: AuthenticatedCustomer — the verified customer identity participating in the conversation
-- session: Session carrying ChatConversation — the session containing the ongoing conversation history
-- agent: @chat-llm — the language model that interprets customer messages and selects tools
-- tool_registry: the registry of available tools, constrained to the five business contexts
+- session: Session — the session containing the ongoing conversation history
+- agent: LlmClient — the language model that interprets customer messages and selects tools
+- tool_registry: ToolRegistry — the registry of available tools, constrained to the five business contexts
 - audit_sink: AuditSink — receives audit records for every conversation turn and tool invocation
 
 ## Role Methods

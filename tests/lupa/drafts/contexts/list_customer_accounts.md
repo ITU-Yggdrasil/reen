@@ -5,7 +5,7 @@ Retrieves the list of bank accounts belonging to the authenticated customer from
 
 ## Role Players
 - authenticated_customer: AuthenticatedCustomer — the verified customer identity with granted scopes
-- bank: @nordea-openbanking — the external API that returns account information
+- bank: NordeaClient — the external API that returns account information
 - audit_sink: AuditSink — receives an audit record of the listing action
 
 ## Props

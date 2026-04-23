@@ -1,7 +1,7 @@
 # Data: Customer
 
 ## Purpose
-Represents a banking customer in the Lupa system, holding the customer's identity and the set of accounts they own. Customer is the anchor entity that ties together accounts, sessions, and audit trails.
+Represents a banking customer in the system, holding the customer's identity and the set of accounts they own. Customer is the anchor entity that ties together accounts, sessions, and audit trails.
 
 ## Attributes
 - name: the customer's full legal name, a text value

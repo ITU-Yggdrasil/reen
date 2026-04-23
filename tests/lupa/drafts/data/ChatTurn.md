@@ -22,13 +22,13 @@ Represents a single exchange unit in a chat conversation. ChatTurn is a variant 
 - tool output: the result returned by the tool, a text value
 
 ### Confirmation-card-rendered attributes
-- card reference: a reference to the ConfirmationCard that was shown to the customer
+- card reference: a reference to the confirmation card that was shown to the customer
 
 ### Confirmation-card-accepted attributes
-- card reference: a reference to the ConfirmationCard the customer accepted
+- card reference: a reference to the confirmation card the customer accepted
 
 ### Confirmation-card-rejected attributes
-- card reference: a reference to the ConfirmationCard the customer rejected
+- card reference: a reference to the confirmation card the customer rejected
 - reason: the customer's stated reason for rejection, a text value (present or absent)
 
 ## Invariants

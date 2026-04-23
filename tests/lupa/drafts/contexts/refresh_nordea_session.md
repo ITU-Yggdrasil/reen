@@ -5,7 +5,7 @@ Refreshes an expiring bearer token using the stored refresh token, making exactl
 
 ## Role Players
 - session: Session — the existing session whose bearer token is approaching expiry
-- oauth_endpoint: @nordea-openbanking — the token endpoint that exchanges a refresh token for a new bearer token
+- oauth_endpoint: NordeaClient — the token endpoint that exchanges a refresh token for a new bearer token
 - session_store: SessionStore — persists the updated or expired session
 - audit_sink: AuditSink — receives an immutable record of the refresh outcome
 

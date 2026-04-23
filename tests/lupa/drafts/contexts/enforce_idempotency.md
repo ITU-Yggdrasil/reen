@@ -7,7 +7,7 @@ Guards mutating operations against duplicate execution by checking an idempotenc
 - authenticated_customer: AuthenticatedCustomer — the identity requesting the operation
 - idempotency_token: IdempotencyToken — the client-supplied unique token for this request
 - idempotency_ledger: IdempotencyLedger — stores token-to-outcome mappings
-- intended_operation: a description of the operation to be guarded (used for verification, not execution)
+- intended_operation: IntendedOperation — a description of the operation to be guarded (used for verification, not execution)
 
 ## Role Methods
 ### idempotency_ledger

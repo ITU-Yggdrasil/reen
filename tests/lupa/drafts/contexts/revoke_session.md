@@ -7,7 +7,7 @@ Performs a complete logout by revoking the bearer token at Nordea, destroying th
 - authenticated_customer: AuthenticatedCustomer — the verified customer identity requesting logout
 - session: Session — the session to be revoked, containing the bearer and refresh tokens
 - session_store: SessionStore — removes the session from persistent storage
-- oauth_endpoint: @nordea-openbanking — the token revocation endpoint at the bank
+- oauth_endpoint: NordeaClient — the token revocation endpoint at the bank
 - audit_sink: AuditSink — receives an audit record of the revocation
 
 ## Role Methods

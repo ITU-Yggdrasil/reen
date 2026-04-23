@@ -1,7 +1,7 @@
 # Data: ChatConversation
 
 ## Purpose
-Represents the ordered sequence of exchanges between a customer and the Lupa banking agent within a single session. A ChatConversation accumulates ChatTurns as the dialogue progresses, preserving the full history needed for context-aware agent responses and audit compliance.
+Represents the ordered sequence of exchanges between a customer and the banking agent within a single session. A ChatConversation accumulates ChatTurns as the dialogue progresses, preserving the full history needed for context-aware agent responses and audit compliance.
 
 ## Attributes
 - turns: an ordered list of ChatTurn values, from earliest to most recent

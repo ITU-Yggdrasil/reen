@@ -1,0 +1,22 @@
+schema: reen.vocabulary/v1
+
+# Infrastructure types that serve as role players in contexts
+# but don't have their own data drafts.
+data:
+  - SessionStore
+  - AuditSink
+  - Clock
+  - IdempotencyLedger
+  - ToolRegistry
+  - IncomingRequest
+  - NordeaClient
+  - LlmClient
+  - EventDescriptor
+  - CorrelationId
+  - DateRangeFilter
+  - IntendedOperation
+  - PaymentMessage
+  - RecipientName
+  - TargetCurrency
+
+projections: []

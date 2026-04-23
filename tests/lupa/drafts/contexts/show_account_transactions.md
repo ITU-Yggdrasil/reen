@@ -6,8 +6,8 @@ Retrieves transactions for a specific account from Nordea's Open Banking API, fi
 ## Role Players
 - authenticated_customer: AuthenticatedCustomer — the verified customer identity
 - account: Account — the account whose transactions are requested
-- bank: @nordea-openbanking — the external API returning transaction data
-- filter: date range boundaries for the transaction query
+- bank: NordeaClient — the external API returning transaction data
+- filter: DateRangeFilter — date range boundaries for the transaction query
 - audit_sink: AuditSink — receives an audit record of the query
 
 ## Props

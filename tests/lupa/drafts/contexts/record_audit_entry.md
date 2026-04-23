@@ -5,8 +5,8 @@ Appends an immutable audit record for any significant action taken by an authent
 
 ## Role Players
 - authenticated_customer: AuthenticatedCustomer — the identity on whose behalf the action was performed
-- event_descriptor: a description of what happened (the action name, target resource, and outcome)
-- correlation_id: the request-scoped correlation identifier linking this entry to other records in the same request
+- event_descriptor: EventDescriptor — a description of what happened (the action name, target resource, and outcome)
+- correlation_id: CorrelationId — the request-scoped correlation identifier linking this entry to other records in the same request
 - audit_sink: AuditSink — the append-only store that receives the entry
 
 ## Role Methods

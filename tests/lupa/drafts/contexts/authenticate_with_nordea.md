@@ -4,8 +4,8 @@
 Enacts the OAuth consent flow against Nordea's PSD2 Open Banking API, guiding the customer through Strong Customer Authentication before establishing a local session. This is the only entry point for new sessions.
 
 ## Role Players
-- user: incoming request — the unauthenticated party initiating login
-- oauth_endpoint: @nordea-openbanking — the external authorization server that issues tokens after consent
+- user: IncomingRequest — the unauthenticated party initiating login
+- oauth_endpoint: NordeaClient — the external authorization server that issues tokens after consent
 - session_store: SessionStore — persists sessions for later retrieval
 - audit_sink: AuditSink — receives immutable audit records of authentication events
 

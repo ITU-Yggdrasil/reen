@@ -1,7 +1,7 @@
 # Data: Session
 
 ## Purpose
-Represents an authenticated banking session for a customer, carrying the OAuth tokens, security tokens, and timing information needed to maintain a secure connection with the Nordea API and the Lupa chat interface.
+Represents an authenticated banking session for a customer, carrying the OAuth tokens, security tokens, and timing information needed to maintain a secure connection with the Nordea API and the chat interface.
 
 ## Attributes
 - customer id: the identifier of the authenticated customer, a text value

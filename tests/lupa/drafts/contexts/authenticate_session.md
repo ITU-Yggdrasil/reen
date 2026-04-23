@@ -4,12 +4,12 @@
 Resolves and verifies the session cookie on every incoming request, binding the request to an authenticated customer identity or producing a typed failure. This context guards every protected endpoint.
 
 ## Role Players
-- incoming_request: the HTTP request carrying a session cookie
+- request: IncomingRequest — carries a session cookie identifying the caller
 - session_store: SessionStore — retrieves sessions by identifier
 - clock: Clock — provides the current time for expiry and freshness checks
 
 ## Role Methods
-### incoming_request
+### request
 - resolve_session_cookie: extracts the session identifier from the request cookie header
 
 ### session_store
@@ -20,7 +20,7 @@ Resolves and verifies the session cookie on every incoming request, binding the 
 
 ## Functionalities
 ### authenticate
-The incoming_request's resolve_session_cookie extracts the session identifier. The session_store's lookup retrieves the session. The clock's now provides the current time, and the session is checked for expiry. If the session is live and its scopes satisfy the request, an AuthenticatedCustomer is returned carrying the customer identity, granted scopes, and correlation identifier. If the cookie is missing, the session is not found, or the session has expired, a typed failure is returned describing the reason.
+The request's resolve_session_cookie extracts the session identifier. The session_store's lookup retrieves the session. The clock's now provides the current time, and the session is checked for expiry. If the session is live and its scopes satisfy the request, an AuthenticatedCustomer is returned carrying the customer identity, granted scopes, and correlation identifier. If the cookie is missing, the session is not found, or the session has expired, a typed failure is returned describing the reason.
 
 ## Scenarios
 ### valid session resolves to authenticated customer

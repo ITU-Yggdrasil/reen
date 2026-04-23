@@ -8,13 +8,13 @@ Initiates a SWIFT international payment from the authenticated customer's accoun
 - source: Account — the account to debit
 - recipient: IBAN — the payee's international bank account number
 - recipient_bic: BIC — the payee's bank identifier code
-- recipient_name: the human-readable name of the payee
+- recipient_name: RecipientName — the human-readable name of the payee
 - amount: Money — the sum to transfer
-- message: a free-text payment reference or message
-- currency: the target currency for the transfer (may differ from source account currency)
+- message: PaymentMessage — a free-text payment reference or message
+- currency: TargetCurrency — the target currency for the transfer (may differ from source account currency)
 - idempotency_token: IdempotencyToken — the client-supplied unique token preventing duplicate execution
 - idempotency_ledger: IdempotencyLedger — stores token-to-outcome mappings
-- bank: @nordea-openbanking — the payment initiation endpoint
+- bank: NordeaClient — the payment initiation endpoint
 - audit_sink: AuditSink — receives an audit record of the transfer
 
 ## Props

@@ -10,7 +10,7 @@ Initiates a transfer between two accounts that both belong to the same authentic
 - amount: Money — the sum to transfer
 - idempotency_token: IdempotencyToken — the client-supplied unique token preventing duplicate execution
 - idempotency_ledger: IdempotencyLedger — stores token-to-outcome mappings
-- bank: @nordea-openbanking — the payment initiation endpoint
+- bank: NordeaClient — the payment initiation endpoint
 - audit_sink: AuditSink — receives an audit record of the transfer
 
 ## Props
