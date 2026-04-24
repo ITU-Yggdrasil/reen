@@ -148,6 +148,7 @@ pub fn scaffold_web_app(
         &components_name,
         &server_artifacts,
         &routing_artifacts,
+        &brand_artifacts,
         &rpc_edges,
         !options.no_client,
         options,
@@ -535,12 +536,13 @@ fn generate_brand(brand: &PreparedArtifact) -> (String, String) {
 
 fn generate_router(
     routes: &[&PreparedArtifact],
-    _components: &[&PreparedArtifact],
+    components: &[&PreparedArtifact],
 ) -> String {
     let mut out = String::new();
 
     writeln!(out, "{}", GENERATED_MARKER).unwrap();
     writeln!(out, "use super::markup::Markup;").unwrap();
+    writeln!(out, "use super::components::*;").unwrap();
     writeln!(out).unwrap();
 
     // Pre-compute how many routes each component has (for sub_path detection)
@@ -698,6 +700,8 @@ fn generate_router(
     writeln!(out, "    }}").unwrap();
 
     // render method — dispatches to components (one arm per unique variant)
+    // Phase 10 Scope item 3: "Bodies of the match arms are deterministic from the
+    // routing table + component specs; emit them fully."
     writeln!(out).unwrap();
     writeln!(out, "    /// Render the matched route to markup.").unwrap();
     writeln!(out, "    pub fn render(&self, route: Route) -> Markup {{").unwrap();
@@ -714,24 +718,57 @@ fn generate_router(
                 .filter(|r| r.component == route.component)
                 .any(|r| !r.params.is_empty());
 
+            let comp_snake = to_snake_case(&route.component);
+
+            // Find the component's declared props from the components list
+            let comp_art = components.iter().find(|c| c.export.name == route.component);
+            let comp_props: Vec<String> = comp_art
+                .map(|c| c.props.iter().map(|p| to_snake_case(&p.name)).collect())
+                .unwrap_or_default();
+
+            // Collect route param names for this variant
+            let mut param_names = Vec::new();
+            let mut seen_p = std::collections::BTreeSet::new();
+            for r in rt.routes.iter().filter(|r| r.component == route.component) {
+                for p in &r.params {
+                    if seen_p.insert(p.name.clone()) {
+                        param_names.push(to_snake_case(&p.name));
+                    }
+                }
+            }
+
+            // Emit the match arm pattern
             if !has_params && !needs_sub_path {
-                writeln!(out, "            Route::{} => todo!(\"render {}\"),", variant, route.component).unwrap();
+                writeln!(out, "            Route::{} => {{", variant).unwrap();
             } else {
                 write!(out, "            Route::{} {{", variant).unwrap();
-                // Collect unique param names across all routes for this component
-                let mut seen_p = std::collections::BTreeSet::new();
-                for r in rt.routes.iter().filter(|r| r.component == route.component) {
-                    for p in &r.params {
-                        if seen_p.insert(p.name.clone()) {
-                            write!(out, " {},", to_snake_case(&p.name)).unwrap();
-                        }
-                    }
+                for pn in &param_names {
+                    write!(out, " {},", pn).unwrap();
                 }
                 if needs_sub_path {
                     write!(out, " sub_path,").unwrap();
                 }
-                writeln!(out, " }} => todo!(\"render {}\"),", route.component).unwrap();
+                writeln!(out, " }} => {{").unwrap();
             }
+
+            // Emit component construction + render call
+            writeln!(out, "                let screen = {}::{} {{", comp_snake, route.component).unwrap();
+            for prop in &comp_props {
+                // Check if this prop is bound from a route param
+                if param_names.contains(prop) {
+                    writeln!(out, "                    {},", prop).unwrap();
+                } else if prop == "sub_path" && needs_sub_path {
+                    writeln!(out, "                    sub_path,").unwrap();
+                } else {
+                    writeln!(out, "                    {}: (), // todo!(\"wire {} from ambient context\")", prop, prop).unwrap();
+                }
+            }
+            writeln!(out, "                }};").unwrap();
+            if needs_sub_path && !comp_props.contains(&"sub_path".to_string()) {
+                writeln!(out, "                let _ = sub_path;").unwrap();
+            }
+            writeln!(out, "                screen.render()").unwrap();
+            writeln!(out, "            }}").unwrap();
         }
     }
     writeln!(out, "        }}").unwrap();
@@ -763,6 +800,7 @@ fn emit_server_crate(
     components_name: &str,
     server_artifacts: &[&PreparedArtifact],
     routing_artifacts: &[&PreparedArtifact],
+    brand_artifacts: &[&PreparedArtifact],
     rpc_edges: &[RpcEdge],
     has_client: bool,
     options: &WebScaffoldOptions,
@@ -808,6 +846,7 @@ fn emit_server_crate(
         routing_artifacts,
         rpc_edges,
         has_client,
+        brand_artifacts,
     );
     write_generated_file(&src_dir.join("main.rs"), &main_rs, options)?;
 
@@ -821,10 +860,11 @@ fn emit_server_crate(
 
 fn generate_server_main(
     _crate_name: &str,
-    _components_name: &str,
-    _routing_artifacts: &[&PreparedArtifact],
+    components_name: &str,
+    routing_artifacts: &[&PreparedArtifact],
     rpc_edges: &[RpcEdge],
     has_client: bool,
+    brand_artifacts: &[&PreparedArtifact],
 ) -> String {
     let mut out = String::new();
 
@@ -868,16 +908,29 @@ fn generate_server_main(
     writeln!(out).unwrap();
 
     // Dispatch function — returns (content_type, body)
+    // Phase 10 Scope item 5: per-route arms, per-RPC arms, 404 fallback.
+    let components_crate = components_name.replace('-', "_");
+    let brand_snake = brand_artifacts.first()
+        .map(|b| to_snake_case(&b.export.name))
+        .unwrap_or_else(|| "default".to_string());
+
     writeln!(out, "fn dispatch(path: &str) -> (&'static str, String) {{").unwrap();
     writeln!(out, "    match path {{").unwrap();
 
-    // Static asset routes
-    writeln!(out, "        \"{}\" => (\"text/css; charset=utf-8\", todo!(\"serve brand CSS\")),", paths::BRAND_CSS).unwrap();
+    // Static asset routes — serve real content
+    writeln!(out, "        \"{}\" => (\"text/css; charset=utf-8\", {}::brand::{}::CSS.to_string()),",
+        paths::BRAND_CSS, components_crate, brand_snake).unwrap();
     if has_client {
-        writeln!(out, "        \"{}\" => (\"application/wasm\", todo!(\"serve WASM bundle\")),", paths::CLIENT_WASM).unwrap();
+        writeln!(out, "        \"{}\" => {{", paths::CLIENT_WASM).unwrap();
+        writeln!(out, "            // WASM bundle: read from build output, graceful 503 if not built").unwrap();
+        writeln!(out, "            match std::fs::read_to_string(\"target/wasm32-unknown-unknown/release/app_client_bg.wasm\") {{").unwrap();
+        writeln!(out, "                Ok(bytes) => (\"application/wasm\", bytes),").unwrap();
+        writeln!(out, "                Err(_) => (\"text/plain; charset=utf-8\", \"503 WASM bundle not built. Run: wasm-pack build crates/{}\".to_string()),", components_name.replace("-components", "-client")).unwrap();
+        writeln!(out, "            }}").unwrap();
+        writeln!(out, "        }}").unwrap();
     }
 
-    // RPC edges
+    // RPC edges — per-RPC handler arms
     for edge in rpc_edges {
         writeln!(
             out,
@@ -889,10 +942,13 @@ fn generate_server_main(
         .unwrap();
     }
 
-    // Route handlers
+    // Route handlers — dispatch through Router, per-route
     writeln!(out, "        _ => {{").unwrap();
-    writeln!(out, "            // Route to components via Router").unwrap();
-    writeln!(out, "            (\"text/html; charset=utf-8\", todo!(\"dispatch route to component\"))").unwrap();
+    writeln!(out, "            let router = {}::router::Router;", components_crate).unwrap();
+    writeln!(out, "            match router.dispatch(path) {{").unwrap();
+    writeln!(out, "                Ok(route) => (\"text/html; charset=utf-8\", router.render(route).0),").unwrap();
+    writeln!(out, "                Err(_) => (\"text/html; charset=utf-8\", \"<h1>404 Not Found</h1>\".to_string()),").unwrap();
+    writeln!(out, "            }}").unwrap();
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
@@ -937,11 +993,33 @@ fn emit_client_crate(
     writeln!(lib, "use wasm_bindgen::prelude::*;").unwrap();
     writeln!(lib).unwrap();
 
-    // Init function
+    // Per-component init functions for interactive components
+    let interactive_components: Vec<&PreparedArtifact> = _component_artifacts
+        .iter()
+        .filter(|c| !c.events.is_empty())
+        .copied()
+        .collect();
+
+    for comp in &interactive_components {
+        let fn_name = format!("init_{}", to_snake_case(&comp.export.name));
+        writeln!(lib, "/// Bind DOM event listeners for the {} component.", comp.export.name).unwrap();
+        writeln!(lib, "pub fn {}() {{", fn_name).unwrap();
+        writeln!(lib, "    todo!(\"bind {} events to DOM\")", comp.export.name).unwrap();
+        writeln!(lib, "}}").unwrap();
+        writeln!(lib).unwrap();
+    }
+
+    // Main init function calls per-component inits
     writeln!(lib, "#[wasm_bindgen(start)]").unwrap();
     writeln!(lib, "pub fn init() {{").unwrap();
-    writeln!(lib, "    // Wire DOM event listeners to component event handlers.").unwrap();
-    writeln!(lib, "    todo!(\"bind component events to DOM\")").unwrap();
+    if interactive_components.is_empty() {
+        writeln!(lib, "    // No interactive components — nothing to bind.").unwrap();
+    } else {
+        for comp in &interactive_components {
+            let fn_name = format!("init_{}", to_snake_case(&comp.export.name));
+            writeln!(lib, "    {}();", fn_name).unwrap();
+        }
+    }
     writeln!(lib, "}}").unwrap();
     writeln!(lib).unwrap();
 
