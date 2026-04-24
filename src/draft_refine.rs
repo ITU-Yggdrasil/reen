@@ -232,9 +232,10 @@ fn review_context(
             push(findings, path, find_line(content, &rp.name),
                 DraftReviewCategory::Completeness,
                 &format!(
-                    "role player `{}` has no role methods — a role without methods is a prop, not a role. \
-                     Move it to the Props section",
-                    rp.name
+                    "role player `{}` has no role methods — a role is extended with \
+                     role methods inside a context; if `{}` is used as-is without \
+                     extension, declare it under ## Props instead",
+                    rp.name, rp.name
                 ));
         }
     }
@@ -1416,8 +1417,8 @@ Then: an error is returned indicating the currency does not match
                        ## Scenarios\n### ok\nGiven: x\nWhen: transfer\nThen: done\n";
         let findings = review_findings(content, "contexts");
         assert!(
-            findings.iter().any(|f| f.message.contains("amount") && f.message.contains("prop")),
-            "role without methods should be flagged as a prop: {:?}",
+            findings.iter().any(|f| f.message.contains("amount") && f.message.contains("Props instead")),
+            "role without methods should redirect to Props: {:?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>()
         );
     }

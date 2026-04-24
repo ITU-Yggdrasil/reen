@@ -17,7 +17,7 @@ Six draft kinds, each with a fixed section structure. No types, no signatures, n
 # Context: <Name>
 ## Purpose          — one paragraph, business terms
 ## Role Players     — bullet list: `- <role>: <DataType> — <responsibility>`
-## Props            — bullet list: `- <name>: <description>` (scalar config only)
+## Props            — bullet list: `- <name>: <description>` (values the context uses as-is, without extending them with role methods — scalars, tokens, identifiers, small value types)
 ## Role Methods     — ### subsections per role, each with `- <method>: <description>` bullets
 ## Functionalities  — ### subsections, each with prose describing the enactment
 ## Scenarios        — ### subsections, each with Given:/When:/Then: lines
@@ -252,9 +252,13 @@ Scenarios track behaviour, not structure. `reen refine` requires scenarios only 
 
 ## Roles vs. props
 
-Every role player must have role methods — that is what makes it a role. If a value is passed into the context but never acted upon through role methods, it is a **prop**, not a role player. Move it to the Props section.
+In DCI, **a role is an object extended with role methods inside a context**. Role methods exist only in the scope of the enactment and typically call other role methods on other roles. What distinguishes a role from a prop is that the context declares role methods for it, adding context-specific behaviour.
 
-**Role player** (has methods — it *does* something in this context):
+**Methods being called on an object does not make it a role.** A prop can have its own methods called on it (e.g. `amount.add(other)` is a data operation, not a role method). The test is whether the context declares *new* behaviour for the name via role methods.
+
+Every role player must have role methods — there is no opt-out. When a role player has no methods, `reen refine` emits: "role player `<name>` has no role methods — a role is extended with role methods inside a context; if `<name>` is used as-is without extension, declare it under ## Props instead."
+
+**Role player** (the context extends it with new behaviour):
 ```
 ## Role Players
 - source: Account — the account to debit
@@ -264,14 +268,15 @@ Every role player must have role methods — that is what makes it a role. If a 
 - verify_sufficient_funds: checks that the balance covers the amount
 ```
 
-**Prop** (a passive value — no methods):
+**Prop** (the context uses it as-is, without extending it):
 ```
 ## Props
 - amount: the sum to transfer, a Money value
 - idempotency_token: the client-supplied unique token preventing duplicate execution
+- required_scope: payments-initiate-own
 ```
 
-`reen refine` flags role players without role methods: "a role without methods is a prop, not a role."
+Props can be scalars, tokens, identifiers, or small value types — anything the context uses without declaring role methods for it.
 
 ## What not to put in a draft
 
