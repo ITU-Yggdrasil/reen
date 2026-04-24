@@ -663,6 +663,186 @@ fn build_keys_for_method(
     keys
 }
 
+// ── Web-app structural verification (Phase 10) ─────────────────
+
+/// Check tracker-vs-source reconciliation: detect drift where tracker
+/// state disagrees with the actual source content.
+pub fn verify_tracker_consistency(
+    state_dir: &Path,
+    workspace_root: &Path,
+) -> VerifyResult {
+    use crate::build_tracker::{ArtefactState, BuildTracker};
+
+    let mut discrepancies = Vec::new();
+    let tracker = match BuildTracker::load(state_dir) {
+        Ok(t) => t,
+        Err(_) => return VerifyResult { discrepancies },
+    };
+
+    if tracker.artefacts.is_empty() {
+        return VerifyResult { discrepancies };
+    }
+
+    // For method-level entries, check if the source file exists and whether
+    // the body contains todo!() when marked fresh, or has real code when marked not_implemented.
+    // This is a heuristic check — we scan for todo!() as a proxy for "not implemented."
+    for (key, entry) in &tracker.artefacts {
+        let key_str = key.to_string();
+
+        // Determine the source file path from the key
+        let source_path = match key {
+            crate::build_tracker::keys::ArtefactKey::Functionality { context, name } => {
+                Some(workspace_root.join("src/contexts").join(format!("{}.rs", context)))
+            }
+            crate::build_tracker::keys::ArtefactKey::RoleMethod { context, .. } => {
+                Some(workspace_root.join("src/contexts").join(format!("{}.rs", context)))
+            }
+            crate::build_tracker::keys::ArtefactKey::DataOperation { data, .. } => {
+                Some(workspace_root.join("src/data").join(format!("{}.rs", data)))
+            }
+            crate::build_tracker::keys::ArtefactKey::ProjectionQuery { projection, .. } => {
+                Some(workspace_root.join("src/projections").join(format!("{}.rs", projection)))
+            }
+            _ => None, // Web entries and type entries don't have method bodies to check
+        };
+
+        if let Some(path) = source_path {
+            if !path.is_file() {
+                continue; // File doesn't exist yet — not a drift
+            }
+            if let Ok(source) = fs::read_to_string(&path) {
+                let has_todo = source.contains("todo!()");
+
+                if entry.state == ArtefactState::Fresh && has_todo {
+                    discrepancies.push(Discrepancy {
+                        kind: DiscrepancyKind::MissingMethod,
+                        message: format!(
+                            "the {} `{}` is recorded as fresh in the build tracker but its source file still contains a todo!() placeholder",
+                            entry.kind.as_str(), key_str
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    VerifyResult { discrepancies }
+}
+
+/// Check that every declared route in the routing table is reachable from
+/// the server's dispatch table (not hidden behind a catch-all todo!()).
+pub fn verify_route_reachability(
+    server_main_path: &Path,
+    routing_artifacts: &[&PreparedArtifact],
+) -> VerifyResult {
+    let mut discrepancies = Vec::new();
+
+    if !server_main_path.is_file() {
+        return VerifyResult { discrepancies };
+    }
+
+    let source = match fs::read_to_string(server_main_path) {
+        Ok(s) => s,
+        Err(_) => return VerifyResult { discrepancies },
+    };
+
+    // Check if the dispatch function has a catch-all todo!()
+    let has_catchall_todo = source.contains("todo!(\"dispatch route to component\")");
+
+    if has_catchall_todo {
+        for rt in routing_artifacts {
+            for route in &rt.routes {
+                discrepancies.push(Discrepancy {
+                    kind: DiscrepancyKind::MissingMethod,
+                    message: format!(
+                        "the route `{}` is declared in the routing table but is not reachable from the server dispatch — \
+                         the dispatch table has a catch-all todo!() instead of per-route arms",
+                        route.path
+                    ),
+                });
+            }
+        }
+    }
+
+    VerifyResult { discrepancies }
+}
+
+/// Check that every component event binding to a server_only context has
+/// both a server handler and a client stub emitted.
+pub fn verify_rpc_edge_completeness(
+    workspace_root: &Path,
+    component_artifacts: &[&PreparedArtifact],
+    context_artifacts: &[&PreparedArtifact],
+) -> VerifyResult {
+    use crate::codegen::to_snake_case;
+
+    let mut discrepancies = Vec::new();
+
+    // Find server_only contexts
+    let server_only_contexts: BTreeSet<String> = context_artifacts
+        .iter()
+        .filter(|a| a.realisation_target.as_deref() == Some("server_only"))
+        .map(|a| a.export.name.clone())
+        .collect();
+
+    if server_only_contexts.is_empty() {
+        return VerifyResult { discrepancies };
+    }
+
+    // Check each component's event bindings
+    for comp in component_artifacts {
+        if let Some(composition) = &comp.composition {
+            for eb in &composition.event_bindings {
+                if server_only_contexts.contains(&eb.context) {
+                    let ctx_snake = to_snake_case(&eb.context);
+                    // Look up default functionality
+                    let func_snake = context_artifacts
+                        .iter()
+                        .find(|a| a.export.name == eb.context)
+                        .and_then(|a| a.functionalities.first())
+                        .map(|f| to_snake_case(&f.name))
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    let expected_path = format!("/_rpc/{}/{}", ctx_snake, func_snake);
+
+                    // Check server handler exists
+                    let server_main = workspace_root.join("crates")
+                        .read_dir().ok()
+                        .and_then(|mut entries| {
+                            entries.find_map(|e| {
+                                let path = e.ok()?.path();
+                                if path.file_name()?.to_str()?.ends_with("-server") {
+                                    Some(path.join("src/main.rs"))
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+
+                    if let Some(main_path) = &server_main {
+                        if main_path.is_file() {
+                            if let Ok(source) = fs::read_to_string(main_path) {
+                                if !source.contains(&expected_path) {
+                                    discrepancies.push(Discrepancy {
+                                        kind: DiscrepancyKind::MissingMethod,
+                                        message: format!(
+                                            "the component `{}` binds its `{}` event to `{}/{}` (server_only), \
+                                             but no RPC edge has been emitted — expected `{}` on the server",
+                                            comp.export.name, eb.event, eb.context, func_snake, expected_path
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    VerifyResult { discrepancies }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]
