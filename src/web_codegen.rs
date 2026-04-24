@@ -278,6 +278,15 @@ fn seed_web_tracker(
         );
     }
 
+    // Component render — one per component
+    for comp in component_artifacts {
+        let comp_snake = to_snake_case(&comp.export.name);
+        seed(
+            ArtefactKey::ComponentRender { component: comp_snake },
+            ArtefactEntryKind::ComponentRender,
+        );
+    }
+
     tracker.save(&workspace.state_dir)?;
     Ok(())
 }
@@ -552,10 +561,18 @@ fn generate_component(comp: &PreparedArtifact) -> String {
     // Impl
     writeln!(out, "impl {} {{", name).unwrap();
 
-    // render method
+    // render method — todo!() with spec breadcrumb listing composition children and events
+    let comp_children: Vec<String> = comp.composition.as_ref()
+        .map(|c| c.child_bindings.iter().map(|cb| cb.child.clone()).collect())
+        .unwrap_or_default();
+    let comp_events: Vec<String> = comp.events.iter().map(|e| e.name.clone()).collect();
+    let children_str = if comp_children.is_empty() { "none".to_string() } else { comp_children.join(", ") };
+    let events_str = if comp_events.is_empty() { "none".to_string() } else { comp_events.join(", ") };
+
     writeln!(out, "    /// Render this component to markup.").unwrap();
     writeln!(out, "    pub fn render(&self) -> Markup {{").unwrap();
-    writeln!(out, "        todo!()").unwrap();
+    writeln!(out, "        todo!(\"render {}: composition = [{}], events = [{}]; see drafts/components/{}.md\")",
+        name, children_str, events_str, name).unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 

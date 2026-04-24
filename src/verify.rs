@@ -843,6 +843,55 @@ pub fn verify_rpc_edge_completeness(
     VerifyResult { discrepancies }
 }
 
+/// Check that every component with Composition children actually constructs
+/// and renders those children in its render body. Bodies containing only
+/// todo!() are not violations (they're tracked work items). The check fires
+/// on bodies that look real but miss a declared child.
+pub fn verify_composition_actualisation(
+    component_file: &Path,
+    component_artifact: &PreparedArtifact,
+) -> VerifyResult {
+    let mut discrepancies = Vec::new();
+
+    let composition = match &component_artifact.composition {
+        Some(c) if !c.child_bindings.is_empty() => c,
+        _ => return VerifyResult { discrepancies },
+    };
+
+    if !component_file.is_file() {
+        return VerifyResult { discrepancies };
+    }
+
+    let source = match fs::read_to_string(component_file) {
+        Ok(s) => s,
+        Err(_) => return VerifyResult { discrepancies },
+    };
+
+    // If the body contains todo!(), it's an unfilled work item — not a violation
+    if source.contains("todo!(") {
+        return VerifyResult { discrepancies };
+    }
+
+    // Check each declared child is referenced in the source
+    for cb in &composition.child_bindings {
+        if !source.contains(&cb.child) {
+            discrepancies.push(Discrepancy {
+                kind: DiscrepancyKind::MissingMethod,
+                message: format!(
+                    "the component `{}` declares `{}` in its Composition, but `{}` is not constructed or \
+                     rendered in {}",
+                    component_artifact.export.name,
+                    cb.child,
+                    cb.child,
+                    component_file.display()
+                ),
+            });
+        }
+    }
+
+    VerifyResult { discrepancies }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────
 
 #[cfg(test)]

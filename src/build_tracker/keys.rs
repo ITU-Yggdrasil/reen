@@ -33,6 +33,8 @@ pub enum ArtefactEntryKind {
     ClientInit,
     BrandCss,
     ServerMain,
+    ComponentRender,
+    SessionGuard,
 }
 
 impl ArtefactEntryKind {
@@ -51,6 +53,8 @@ impl ArtefactEntryKind {
             Self::ClientInit => "client_init",
             Self::BrandCss => "brand_css",
             Self::ServerMain => "server_main",
+            Self::ComponentRender => "component_render",
+            Self::SessionGuard => "session_guard",
         }
     }
 }
@@ -105,6 +109,10 @@ pub enum ArtefactKey {
     BrandCss { brand: String },
     /// `web/server/main`
     ServerMain,
+    /// `web/component/<component>/render`
+    ComponentRender { component: String },
+    /// `web/server/guard/<route>`
+    SessionGuard { route: String },
 }
 
 impl ArtefactKey {
@@ -123,6 +131,8 @@ impl ArtefactKey {
             Self::ClientInit { .. } => ArtefactEntryKind::ClientInit,
             Self::BrandCss { .. } => ArtefactEntryKind::BrandCss,
             Self::ServerMain => ArtefactEntryKind::ServerMain,
+            Self::ComponentRender { .. } => ArtefactEntryKind::ComponentRender,
+            Self::SessionGuard { .. } => ArtefactEntryKind::SessionGuard,
         }
     }
 
@@ -274,6 +284,8 @@ impl fmt::Display for ArtefactKey {
             Self::ClientInit { component } => write!(f, "web/client/{}", component),
             Self::BrandCss { brand } => write!(f, "web/brand/{}", brand),
             Self::ServerMain => write!(f, "web/server/main"),
+            Self::ComponentRender { component } => write!(f, "web/component/{}/render", component),
+            Self::SessionGuard { route } => write!(f, "web/server/guard/{}", route),
         }
     }
 }
@@ -322,6 +334,8 @@ impl FromStr for ArtefactKey {
             }),
             ["web", "client", comp] => Ok(Self::ClientInit { component: comp.to_string() }),
             ["web", "brand", brand] => Ok(Self::BrandCss { brand: brand.to_string() }),
+            ["web", "component", comp, "render"] => Ok(Self::ComponentRender { component: comp.to_string() }),
+            ["web", "server", "guard", route] => Ok(Self::SessionGuard { route: route.to_string() }),
             _ => Err(format!("invalid artefact key: {}", s)),
         }
     }
