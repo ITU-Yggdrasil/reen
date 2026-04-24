@@ -25,6 +25,14 @@ pub enum ArtefactEntryKind {
     ProjectionQuery,
     RoleType,
     DataType,
+    // Web-specific kinds (Phase 10)
+    RouterArm,
+    ServerRoute,
+    RpcServer,
+    RpcClient,
+    ClientInit,
+    BrandCss,
+    ServerMain,
 }
 
 impl ArtefactEntryKind {
@@ -36,6 +44,13 @@ impl ArtefactEntryKind {
             Self::ProjectionQuery => "projection_query",
             Self::RoleType => "role_type",
             Self::DataType => "data_type",
+            Self::RouterArm => "router_arm",
+            Self::ServerRoute => "server_route",
+            Self::RpcServer => "rpc_server",
+            Self::RpcClient => "rpc_client",
+            Self::ClientInit => "client_init",
+            Self::BrandCss => "brand_css",
+            Self::ServerMain => "server_main",
         }
     }
 }
@@ -75,6 +90,21 @@ pub enum ArtefactKey {
         projection: String,
         name: String,
     },
+    // ── Web-specific keys (Phase 10) ─────────────────────────
+    /// `web/router/<route_name>`
+    RouterArm { route: String },
+    /// `web/server/<route_name>`
+    ServerRoute { route: String },
+    /// `web/rpc/server/<context>/<functionality>`
+    RpcServer { context: String, functionality: String },
+    /// `web/rpc/client/<context>/<functionality>`
+    RpcClient { context: String, functionality: String },
+    /// `web/client/<component>`
+    ClientInit { component: String },
+    /// `web/brand/<brand>`
+    BrandCss { brand: String },
+    /// `web/server/main`
+    ServerMain,
 }
 
 impl ArtefactKey {
@@ -86,6 +116,13 @@ impl ArtefactKey {
             Self::DataOperation { .. } => ArtefactEntryKind::DataOperation,
             Self::DataType { .. } => ArtefactEntryKind::DataType,
             Self::ProjectionQuery { .. } => ArtefactEntryKind::ProjectionQuery,
+            Self::RouterArm { .. } => ArtefactEntryKind::RouterArm,
+            Self::ServerRoute { .. } => ArtefactEntryKind::ServerRoute,
+            Self::RpcServer { .. } => ArtefactEntryKind::RpcServer,
+            Self::RpcClient { .. } => ArtefactEntryKind::RpcClient,
+            Self::ClientInit { .. } => ArtefactEntryKind::ClientInit,
+            Self::BrandCss { .. } => ArtefactEntryKind::BrandCss,
+            Self::ServerMain => ArtefactEntryKind::ServerMain,
         }
     }
 
@@ -226,6 +263,17 @@ impl fmt::Display for ArtefactKey {
             Self::ProjectionQuery { projection, name } => {
                 write!(f, "projections/{}/query/{}", projection, name)
             }
+            Self::RouterArm { route } => write!(f, "web/router/{}", route),
+            Self::ServerRoute { route } => write!(f, "web/server/{}", route),
+            Self::RpcServer { context, functionality } => {
+                write!(f, "web/rpc/server/{}/{}", context, functionality)
+            }
+            Self::RpcClient { context, functionality } => {
+                write!(f, "web/rpc/client/{}/{}", context, functionality)
+            }
+            Self::ClientInit { component } => write!(f, "web/client/{}", component),
+            Self::BrandCss { brand } => write!(f, "web/brand/{}", brand),
+            Self::ServerMain => write!(f, "web/server/main"),
         }
     }
 }
@@ -260,6 +308,20 @@ impl FromStr for ArtefactKey {
                 projection: proj.to_string(),
                 name: name.to_string(),
             }),
+            // Web-specific keys
+            ["web", "router", route] => Ok(Self::RouterArm { route: route.to_string() }),
+            ["web", "server", "main"] => Ok(Self::ServerMain),
+            ["web", "server", route] => Ok(Self::ServerRoute { route: route.to_string() }),
+            ["web", "rpc", "server", ctx, func] => Ok(Self::RpcServer {
+                context: ctx.to_string(),
+                functionality: func.to_string(),
+            }),
+            ["web", "rpc", "client", ctx, func] => Ok(Self::RpcClient {
+                context: ctx.to_string(),
+                functionality: func.to_string(),
+            }),
+            ["web", "client", comp] => Ok(Self::ClientInit { component: comp.to_string() }),
+            ["web", "brand", brand] => Ok(Self::BrandCss { brand: brand.to_string() }),
             _ => Err(format!("invalid artefact key: {}", s)),
         }
     }

@@ -172,6 +172,113 @@ pub fn scaffold_web_app(
         println!("Scaffolded web_app workspace with {} crates", crate_count);
     }
 
+    // Seed the build tracker with web-specific entries
+    if !options.dry_run {
+        seed_web_tracker(
+            workspace,
+            &routing_artifacts,
+            &brand_artifacts,
+            &component_artifacts,
+            &rpc_edges,
+            !options.no_client,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Seed the build tracker with web-specific entries so /implement has a full work list.
+fn seed_web_tracker(
+    workspace: &Workspace,
+    routing_artifacts: &[&PreparedArtifact],
+    brand_artifacts: &[&PreparedArtifact],
+    component_artifacts: &[&PreparedArtifact],
+    rpc_edges: &[RpcEdge],
+    has_client: bool,
+) -> Result<()> {
+    use crate::build_tracker::{ArtefactEntry, ArtefactState, BuildTracker, StaleReason};
+    use crate::build_tracker::keys::{ArtefactEntryKind, ArtefactKey};
+
+    let mut tracker = BuildTracker::load(&workspace.state_dir)?;
+
+    // Helper: insert if not already present
+    let mut seed = |key: ArtefactKey, kind: ArtefactEntryKind| {
+        if !tracker.artefacts.contains_key(&key) {
+            tracker.upsert_artefact(key, ArtefactEntry {
+                kind,
+                prepared_hash: String::new(),
+                upstream: vec![],
+                state: ArtefactState::NotImplemented,
+                reason: Some(StaleReason::InitialScaffold),
+                audit_finding: None,
+            });
+        }
+    };
+
+    // Router arms — one per route variant
+    for rt in routing_artifacts {
+        for route in &rt.routes {
+            let variant = to_snake_case(&route.component);
+            seed(
+                ArtefactKey::RouterArm { route: variant.clone() },
+                ArtefactEntryKind::RouterArm,
+            );
+        }
+    }
+
+    // Server main
+    seed(ArtefactKey::ServerMain, ArtefactEntryKind::ServerMain);
+
+    // Server routes — one per declared route path
+    for rt in routing_artifacts {
+        for route in &rt.routes {
+            let route_name = route.path.replace('/', "_").trim_matches('_').to_string();
+            seed(
+                ArtefactKey::ServerRoute { route: route_name },
+                ArtefactEntryKind::ServerRoute,
+            );
+        }
+    }
+
+    // RPC edges
+    for edge in rpc_edges {
+        let ctx = to_snake_case(&edge.context);
+        let func = to_snake_case(&edge.functionality);
+        seed(
+            ArtefactKey::RpcServer { context: ctx.clone(), functionality: func.clone() },
+            ArtefactEntryKind::RpcServer,
+        );
+        if has_client {
+            seed(
+                ArtefactKey::RpcClient { context: ctx, functionality: func },
+                ArtefactEntryKind::RpcClient,
+            );
+        }
+    }
+
+    // Client init — one per component with events
+    if has_client {
+        for comp in component_artifacts {
+            if !comp.events.is_empty() {
+                let comp_snake = to_snake_case(&comp.export.name);
+                seed(
+                    ArtefactKey::ClientInit { component: comp_snake },
+                    ArtefactEntryKind::ClientInit,
+                );
+            }
+        }
+    }
+
+    // Brand CSS
+    for brand in brand_artifacts {
+        let brand_snake = to_snake_case(&brand.export.name);
+        seed(
+            ArtefactKey::BrandCss { brand: brand_snake },
+            ArtefactEntryKind::BrandCss,
+        );
+    }
+
+    tracker.save(&workspace.state_dir)?;
     Ok(())
 }
 
