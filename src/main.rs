@@ -512,7 +512,10 @@ fn run_verify(args: VerifyArgs, workspace: &Workspace) -> Result<()> {
     let artifact: PreparedArtifact = serde_yaml::from_str(&raw)
         .with_context(|| format!("Failed to parse {}", prepared_path.display()))?;
 
-    let result = verify::verify_file(rs_path, &artifact)?;
+    let prepared_root = workspace.root.join("drafts").join("prepare");
+    let kind_index = reen::verify_kind::KindIndex::from_prepared_dir(&prepared_root)
+        .unwrap_or_default();
+    let result = verify::verify_file_with_kind(rs_path, &artifact, &kind_index)?;
 
     if result.is_ok() {
         println!("{}", result.render());

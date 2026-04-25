@@ -13,5 +13,6 @@ pub mod prepared;
 pub mod prepared_contracts;
 pub mod test_synth;
 pub mod verify;
+pub mod verify_kind;
 pub mod web_codegen;
 pub mod workspace;

@@ -49,10 +49,35 @@ impl VerifyResult {
 }
 
 /// Verify a Rust source file against a prepared artifact.
+///
+/// Runs the structural checks only. To additionally enforce the kind-discipline
+/// rules (private fields, mandatory constructors, getter presence, immutability,
+/// field-type containment), call `verify_file_with_kind`.
 pub fn verify_file(rs_path: &Path, artifact: &PreparedArtifact) -> Result<VerifyResult> {
     let source = fs::read_to_string(rs_path)
         .with_context(|| format!("Failed to read {}", rs_path.display()))?;
     verify_source(&source, artifact)
+}
+
+/// Verify a Rust source file against a prepared artifact, including
+/// kind-discipline structural gates.
+///
+/// `kind_index` resolves type names to artefact kinds for field-type
+/// containment checks (Data may reference Data only; Projection may reference
+/// Data or Projection).
+pub fn verify_file_with_kind(
+    rs_path: &Path,
+    artifact: &PreparedArtifact,
+    kind_index: &crate::verify_kind::KindIndex,
+) -> Result<VerifyResult> {
+    let source = fs::read_to_string(rs_path)
+        .with_context(|| format!("Failed to read {}", rs_path.display()))?;
+    let mut result = verify_source(&source, artifact)?;
+    let file: syn::File = syn::parse_str(&source)
+        .map_err(|e| anyhow::anyhow!("Failed to parse Rust source: {}", e))?;
+    let kind_findings = crate::verify_kind::check(&file, artifact, kind_index);
+    result.discrepancies.extend(kind_findings);
+    Ok(result)
 }
 
 /// Verify Rust source string against a prepared artifact.
