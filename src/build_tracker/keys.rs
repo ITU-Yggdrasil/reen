@@ -22,6 +22,8 @@ pub enum ArtefactEntryKind {
     Functionality,
     RoleMethod,
     DataOperation,
+    DataConstructor,
+    DataGetter,
     ProjectionQuery,
     RoleType,
     DataType,
@@ -43,6 +45,8 @@ impl ArtefactEntryKind {
             Self::Functionality => "functionality",
             Self::RoleMethod => "role_method",
             Self::DataOperation => "data_operation",
+            Self::DataConstructor => "data_constructor",
+            Self::DataGetter => "data_getter",
             Self::ProjectionQuery => "projection_query",
             Self::RoleType => "role_type",
             Self::DataType => "data_type",
@@ -85,6 +89,15 @@ pub enum ArtefactKey {
         data: String,
         name: String,
     },
+    /// `data/<data>/constructor` — the mandatory `new()` constructor for a Data type.
+    DataConstructor {
+        data: String,
+    },
+    /// `data/<data>/getter/<field>` — one per declared attribute.
+    DataGetter {
+        data: String,
+        field: String,
+    },
     /// `data/<data>/type`
     DataType {
         data: String,
@@ -122,6 +135,8 @@ impl ArtefactKey {
             Self::RoleMethod { .. } => ArtefactEntryKind::RoleMethod,
             Self::RoleType { .. } => ArtefactEntryKind::RoleType,
             Self::DataOperation { .. } => ArtefactEntryKind::DataOperation,
+            Self::DataConstructor { .. } => ArtefactEntryKind::DataConstructor,
+            Self::DataGetter { .. } => ArtefactEntryKind::DataGetter,
             Self::DataType { .. } => ArtefactEntryKind::DataType,
             Self::ProjectionQuery { .. } => ArtefactEntryKind::ProjectionQuery,
             Self::RouterArm { .. } => ArtefactEntryKind::RouterArm,
@@ -164,6 +179,19 @@ impl ArtefactKey {
         Self::DataOperation {
             data: crate::codegen::to_snake_case(data),
             name: crate::codegen::to_snake_case(name),
+        }
+    }
+
+    pub fn data_constructor(data: &str) -> Self {
+        Self::DataConstructor {
+            data: crate::codegen::to_snake_case(data),
+        }
+    }
+
+    pub fn data_getter(data: &str, field: &str) -> Self {
+        Self::DataGetter {
+            data: crate::codegen::to_snake_case(data),
+            field: crate::codegen::to_snake_case(field),
         }
     }
 
@@ -267,6 +295,12 @@ impl fmt::Display for ArtefactKey {
             Self::DataOperation { data, name } => {
                 write!(f, "data/{}/operation/{}", data, name)
             }
+            Self::DataConstructor { data } => {
+                write!(f, "data/{}/constructor", data)
+            }
+            Self::DataGetter { data, field } => {
+                write!(f, "data/{}/getter/{}", data, field)
+            }
             Self::DataType { data } => {
                 write!(f, "data/{}/type", data)
             }
@@ -312,6 +346,13 @@ impl FromStr for ArtefactKey {
             ["data", data, "operation", name] => Ok(Self::DataOperation {
                 data: data.to_string(),
                 name: name.to_string(),
+            }),
+            ["data", data, "constructor"] => Ok(Self::DataConstructor {
+                data: data.to_string(),
+            }),
+            ["data", data, "getter", field] => Ok(Self::DataGetter {
+                data: data.to_string(),
+                field: field.to_string(),
             }),
             ["data", data, "type"] => Ok(Self::DataType {
                 data: data.to_string(),
@@ -366,6 +407,8 @@ mod tests {
             ArtefactKey::role_method("MoneyTransfer", "source", "withdraw"),
             ArtefactKey::role_type("MoneyTransfer", "source"),
             ArtefactKey::data_operation("Account", "deposit"),
+            ArtefactKey::data_constructor("Account"),
+            ArtefactKey::data_getter("Account", "balance"),
             ArtefactKey::data_type("Account"),
             ArtefactKey::projection_query("AccountBalance", "current_balance"),
         ];
@@ -375,6 +418,30 @@ mod tests {
             let parsed: ArtefactKey = s.parse().unwrap();
             assert_eq!(&parsed, key, "round-trip failed for {}", s);
         }
+    }
+
+    #[test]
+    fn data_constructor_and_getter_display_format() {
+        assert_eq!(
+            ArtefactKey::data_constructor("Money").to_string(),
+            "data/money/constructor"
+        );
+        assert_eq!(
+            ArtefactKey::data_getter("Money", "currency").to_string(),
+            "data/money/getter/currency"
+        );
+    }
+
+    #[test]
+    fn data_constructor_and_getter_kind_classification() {
+        assert_eq!(
+            ArtefactKey::data_constructor("Money").kind(),
+            ArtefactEntryKind::DataConstructor
+        );
+        assert_eq!(
+            ArtefactKey::data_getter("Money", "currency").kind(),
+            ArtefactEntryKind::DataGetter
+        );
     }
 
     #[test]

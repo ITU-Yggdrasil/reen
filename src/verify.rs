@@ -697,7 +697,9 @@ pub fn verify_tracker_consistency(
             crate::build_tracker::keys::ArtefactKey::RoleMethod { context, .. } => {
                 Some(workspace_root.join("src/contexts").join(format!("{}.rs", context)))
             }
-            crate::build_tracker::keys::ArtefactKey::DataOperation { data, .. } => {
+            crate::build_tracker::keys::ArtefactKey::DataOperation { data, .. }
+            | crate::build_tracker::keys::ArtefactKey::DataConstructor { data }
+            | crate::build_tracker::keys::ArtefactKey::DataGetter { data, .. } => {
                 Some(workspace_root.join("src/data").join(format!("{}.rs", data)))
             }
             crate::build_tracker::keys::ArtefactKey::ProjectionQuery { projection, .. } => {

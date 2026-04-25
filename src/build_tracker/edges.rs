@@ -169,6 +169,39 @@ fn extract_data(a: &PreparedArtifact) -> Vec<ExtractedArtefact> {
         upstream: vec![],
     });
 
+    // Data constructor — every Data type has a mandatory new() that enforces
+    // declared invariants. Fragment includes attributes and invariants so any
+    // change to either marks the constructor stale.
+    let constructor_key = ArtefactKey::data_constructor(data_name);
+    let constructor_fragment = canonical_yaml(&BTreeMap::from([
+        ("data", data_name.as_str()),
+        ("constructor", "new"),
+        ("attributes", attrs_str.as_str()),
+        ("invariants", invariants_str.as_str()),
+    ]));
+    result.push(ExtractedArtefact {
+        key: constructor_key,
+        canonical_fragment: constructor_fragment,
+        upstream: vec![type_key.clone()],
+    });
+
+    // Data getters — one per declared attribute. Fragment is just the
+    // attribute name + description; renaming or removing the attribute marks
+    // the getter stale (and the scaffolder will drop it).
+    for attr in &a.attributes {
+        let key = ArtefactKey::data_getter(data_name, &attr.name);
+        let fragment = canonical_yaml(&BTreeMap::from([
+            ("data", data_name.as_str()),
+            ("getter", attr.name.as_str()),
+            ("description", attr.description.as_str()),
+        ]));
+        result.push(ExtractedArtefact {
+            key,
+            canonical_fragment: fragment,
+            upstream: vec![type_key.clone()],
+        });
+    }
+
     // Data operations
     for op in &a.operations {
         let key = ArtefactKey::data_operation(data_name, &op.name);
@@ -352,12 +385,21 @@ mod tests {
         let data = account_data();
         let extracted = extract_artefacts(&data, &[]);
 
-        // Should have: data_type + 2 operations = 3 entries
-        assert_eq!(extracted.len(), 3);
+        // Should have: data_type + constructor + 2 getters + 2 operations = 6 entries
+        assert_eq!(extracted.len(), 6);
 
         let type_entry = extracted.iter().find(|e| matches!(e.key, ArtefactKey::DataType { .. })).unwrap();
         assert_eq!(type_entry.key.to_string(), "data/account/type");
         assert!(type_entry.upstream.is_empty());
+
+        let constructor = extracted.iter().find(|e| e.key.to_string() == "data/account/constructor").unwrap();
+        assert_eq!(constructor.upstream, vec![ArtefactKey::data_type("Account")]);
+
+        let balance_getter = extracted.iter().find(|e| e.key.to_string() == "data/account/getter/balance").unwrap();
+        assert_eq!(balance_getter.upstream, vec![ArtefactKey::data_type("Account")]);
+
+        let owner_getter = extracted.iter().find(|e| e.key.to_string() == "data/account/getter/owner").unwrap();
+        assert_eq!(owner_getter.upstream, vec![ArtefactKey::data_type("Account")]);
 
         let deposit = extracted.iter().find(|e| e.key.to_string() == "data/account/operation/deposit").unwrap();
         assert_eq!(deposit.upstream, vec![ArtefactKey::data_type("Account")]);
@@ -575,10 +617,10 @@ mod tests {
         let proj_artefacts = extract_artefacts(&proj, &siblings);
 
         // Verify the total count
-        // Data: 1 type + 2 ops = 3
+        // Data: 1 type + 1 constructor + 2 getters + 2 ops = 6
         // Context: 2 role types + 2 role methods + 1 functionality = 5
         // Projection: 1 query = 1
-        assert_eq!(data_artefacts.len(), 3);
+        assert_eq!(data_artefacts.len(), 6);
         assert_eq!(ctx_artefacts.len(), 5);
         assert_eq!(proj_artefacts.len(), 1);
 
