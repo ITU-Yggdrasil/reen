@@ -14,9 +14,9 @@ When helping a BA author or edit a draft, think in DCI vocabulary.
 
 ## The Six Artifact Kinds
 
-- **Data** — a domain concept with attributes, invariants, and operations. Example: `Amount`, `Account`, `Board`.
-- **Projection** — a read-only view over underlying data. Example: `AccountBalance`. Projections never mutate.
-- **Context** — a scenario enactment. Contexts bind role players (data/projections) to roles, define role methods as per-role responsibilities, compose them into functionalities, and specify scenarios with concrete Given/When/Then.
+- **Data** — a domain concept with attributes, invariants, and operations. Example: `Amount`, `Account`, `Board`. Always immutable.
+- **Projection** — structurally identical to a context, but immutable. Same six draft sections (Purpose, Role Players, Props, Role Methods, Functionalities, Scenarios), same vocabulary. The constraints: role methods take role players as `&` (never `&mut`), functionalities take `&self`, and role-method bodies do not write through role-player state. References Data and Projection types only — never Context.
+- **Context** — a scenario enactment. Contexts bind role players (data/projections) to roles, define role methods as per-role responsibilities, compose them into functionalities, and specify scenarios with concrete Given/When/Then. Contexts are the only mutable kind.
 - **Component** — a reusable UI building block. Leaf components (Button, Label) just render; coordinating components (LoginForm, OrderList) compose children and bind events to context invocations via the Composition section.
 - **Brand** — identity as one coherent artefact: voice, visual tokens (colours, typography, spacing), motion, imagery, iconography, logo. Machine-consumable tokens are named by role ("primary CTA background"), never by value ("#3355ff").
 - **Routing Table** — URL-pattern-to-component binding. Routes map paths to components; path parameters bind to data types from the manifest.
@@ -38,7 +38,7 @@ For Data drafts, you author **Attributes**, **Invariants**, and **non-default Op
 
 The Operations list is for behaviours beyond construction and field access: comparisons, derivations, transformations. **Non-destructive mutation** (returning a new instance with one field replaced) is one such operation — author it explicitly under Operations, marked `kind: with`, and the scaffolder emits a `with_<field>` method. Without that explicit declaration, no `with_*` is emitted.
 
-Projection queries follow the same pattern: author them under **## Queries**; the scaffolder makes them public, while any private helpers it emits stay private. Context functionalities and role methods are authored as before.
+Projections use the same authoring shape as contexts: declare role players (data the projection reads), declare role methods describing what each role provides, and compose them into functionalities. The legacy `## Source` / `## Queries` shape is rejected — projections share the context template exactly. Migration of an old-shape draft is mechanical: each `## Source` entry becomes a `## Role Players` entry with role-method responsibilities; each `## Queries` entry becomes a `## Functionalities` entry; the prose stays the same.
 
 ## UI Authoring
 

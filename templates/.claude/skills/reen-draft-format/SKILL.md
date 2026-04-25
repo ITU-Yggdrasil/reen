@@ -11,6 +11,8 @@ triggers:
 
 Six draft kinds, each with a fixed section structure. No types, no signatures, no Rust tokens.
 
+> **Migration note (Projection rename).** Projection drafts that still use `## Source` / `## Queries` are stale and rejected by `reen prepare`. Rewrite them to the context-aligned template below: `## Source` becomes `## Role Players`, `## Queries` becomes `## Functionalities`, and add `## Role Methods` describing what each role player provides. The prose can stay verbatim.
+
 ## Context Draft (`drafts/contexts/<name>.md`)
 
 ```
@@ -40,11 +42,16 @@ For non-destructive mutation (returning a new instance with one field replaced),
 
 ## Projection Draft (`drafts/projections/<name>.md`)
 
+A Projection is **structurally identical to a Context** — same six sections, same vocabulary. The difference is immutability: every functionality takes `&self`, every role method takes its role player as `&` (never `&mut`), and role-method bodies do not write through role-player state. References Data and Projection types only.
+
 ```
 # Projection: <Name>
 ## Purpose          — one paragraph
-## Source           — bullet list referencing underlying data
-## Queries          — ### subsections with prose descriptions
+## Role Players     — bullet list: `- <role>: <DataType or ProjectionType> — <responsibility>`
+## Props            — bullet list: `- <name>: <description>`
+## Role Methods     — ### subsections per role, each with `- <method>: <description>` bullets
+                      (Read-only — describe what each role provides, not what it changes.)
+## Functionalities  — ### subsections, each with prose describing the read-only enactment
 ## Scenarios        — ### subsections with Given:/When:/Then:
 ```
 
