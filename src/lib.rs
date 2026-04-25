@@ -1,5 +1,6 @@
 pub mod apis_codegen;
 pub mod apis_ingest;
+pub mod audit_persist;
 pub mod build_tracker;
 pub mod bundle;
 pub mod init;

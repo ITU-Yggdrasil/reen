@@ -74,6 +74,32 @@ enum Commands {
 
     #[command(about = "Install or upgrade the Reen bundle in a project")]
     Init(InitArgs),
+
+    #[command(subcommand, about = "Audit-loop persistence: record findings and flip tracker entries")]
+    Audit(AuditCommand),
+}
+
+#[derive(Subcommand, Clone)]
+enum AuditCommand {
+    #[command(
+        about = "Record audit findings: write .reen/audit.json, render AUDIT.md, flip tracker entries above the severity threshold"
+    )]
+    Record(AuditRecordArgs),
+}
+
+#[derive(Args, Clone)]
+struct AuditRecordArgs {
+    #[arg(
+        long,
+        help = "Read findings JSON from this file. Pass `-` (or omit) to read from stdin."
+    )]
+    from: Option<String>,
+    #[arg(
+        long,
+        default_value = "medium",
+        help = "Tracker-flip severity threshold (low, medium, high). Findings below this severity are persisted but do not flip tracker entries."
+    )]
+    severity_threshold: String,
 }
 
 #[derive(Args, Clone)]
@@ -354,8 +380,44 @@ fn main() -> Result<()> {
         Commands::Apis(cmd) => run_apis(cmd, globals, &workspace)?,
         Commands::Clean(args) => run_clean_cmd(args, &workspace)?,
         Commands::Init(_) => unreachable!("handled above"),
+        Commands::Audit(cmd) => run_audit_cmd(cmd, &workspace)?,
     }
 
+    Ok(())
+}
+
+fn run_audit_cmd(cmd: AuditCommand, workspace: &Workspace) -> Result<()> {
+    use anyhow::Context as _;
+    use std::io::Read;
+    match cmd {
+        AuditCommand::Record(args) => {
+            let threshold = reen::audit_persist::Severity::parse(&args.severity_threshold)?;
+            let raw = match args.from.as_deref() {
+                Some("-") | None => {
+                    let mut buf = String::new();
+                    std::io::stdin().read_to_string(&mut buf)
+                        .context("failed to read findings JSON from stdin")?;
+                    buf
+                }
+                Some(path) => std::fs::read_to_string(path)
+                    .with_context(|| format!("failed to read findings JSON from {}", path))?,
+            };
+            let report = reen::audit_persist::AuditReport::from_json(&raw)?;
+            let outcome = reen::audit_persist::record(
+                &report, &workspace.root, &workspace.state_dir, threshold,
+            )?;
+            println!(
+                "audit: recorded {} finding(s), {} open spec question(s); {} tracker flip(s), {} idempotent skip(s), {} unmatched.",
+                outcome.findings_count,
+                outcome.open_questions_count,
+                outcome.flipped_count,
+                outcome.idempotent_skipped_count,
+                outcome.unmatched_count,
+            );
+            println!("  written: {}", outcome.audit_json_path);
+            println!("  written: {}", outcome.audit_md_path);
+        }
+    }
     Ok(())
 }
 
