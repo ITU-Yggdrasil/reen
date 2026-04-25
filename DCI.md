@@ -46,11 +46,15 @@ The three artefact kinds are not naming conventions. Each kind carries a structu
 
 ### Projection
 
-- **Immutability.** A Projection MUST be immutable. Queries observe; they never mutate.
+A Projection is **structurally identical to a Context** — same six draft sections (Purpose, Role Players, Props, Role Methods, Functionalities, Scenarios), same prepared-YAML shape, same emission pattern. The single difference is **immutability**: nothing on a projection writes through its role players.
+
+- **Immutability.** Every Projection functionality MUST take `&self` (never `&mut self`). Every Projection role method MUST take its role player as `&` (never `&mut`). Role-method bodies MUST NOT write through role-player state.
 - **Private fields.** All struct fields of a Projection MUST be private.
-- **Private role methods.** Role methods on a Projection (the per-source-data "how" of a query) MUST be private. They are implementation detail.
-- **Public surface = Queries.** Only methods declared under `## Queries` in the prepared YAML MAY be public. Any other public method on a Projection is a violation.
+- **Public surface = Functionalities.** The set of public methods on a Projection MUST equal its declared Functionalities (plus the `pub fn new` constructor). There is no separate "Query" concept.
+- **Private role methods.** Role methods on a Projection MUST be private. They are the per-role-player "how" of the projection's read-only computation.
 - **Field types.** Every non-primitive field of a Projection MUST reference a Data or Projection type. Projections MUST NOT have fields whose types are Contexts.
+
+Projection drafts use the same template as Contexts: declare role players (typically the data the projection reads), declare their role methods, and compose them into functionalities. The legacy `## Source` / `## Queries` shape is rejected at parse time with a migration error pointing at the new shape.
 
 ### Context
 
