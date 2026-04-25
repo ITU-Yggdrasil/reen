@@ -185,20 +185,22 @@ fn review_projection(
     proj: &ProjectionDraft,
     findings: &mut Vec<DraftReviewFinding>,
 ) {
-    if proj.source.is_empty() {
-        push(findings, path, heading_line(content, "## Source"),
+    // Projections share the context-shaped six-section template. The same
+    // completeness checks apply.
+    if proj.role_players.is_empty() {
+        push(findings, path, heading_line(content, "## Role Players"),
             DraftReviewCategory::Completeness,
-            "projection draft must declare a source");
+            "projection draft must declare at least one role player");
     }
-    if proj.queries.is_empty() {
-        push(findings, path, heading_line(content, "## Queries"),
+    if proj.functionalities.is_empty() {
+        push(findings, path, heading_line(content, "## Functionalities"),
             DraftReviewCategory::Completeness,
-            "projection draft must declare at least one query");
+            "projection draft must declare at least one functionality");
     }
-    if !proj.queries.is_empty() && proj.scenarios.is_empty() {
+    if !proj.functionalities.is_empty() && proj.scenarios.is_empty() {
         push(findings, path, heading_line(content, "## Scenarios"),
             DraftReviewCategory::Completeness,
-            "projection draft with queries must contain at least one scenario");
+            "projection draft with functionalities must contain at least one scenario");
     }
     scan_vagueness(findings, path, content, &proj.purpose, "purpose");
 }
@@ -639,21 +641,24 @@ pub fn check_unresolved_references(
             }
         }
         DraftDocument::Projection(proj) => {
-            if !proj.source.is_empty()
-                && !crate::prepare::is_builtin_primitive(&proj.source)
-                && vocab.resolve(&proj.source).is_none()
-            {
-                let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&proj.source);
-                findings.push(DraftReviewFinding {
-                    draft_path: path.to_string(),
-                    source_line: None,
-                    category: DraftReviewCategory::UnresolvedReference,
-                    message: format!(
-                        "projection source `{}` is not declared. {}",
-                        proj.source, suggestion
-                    ),
-                    severity: None,
-                });
+            // Projections now declare role players just like contexts.
+            for rp in &proj.role_players {
+                if !crate::prepare::is_builtin_primitive(&rp.data_type)
+                    && !crate::manifest::DciVocabulary::is_api_reference(&rp.data_type)
+                    && vocab.resolve(&rp.data_type).is_none()
+                {
+                    let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&rp.data_type);
+                    findings.push(DraftReviewFinding {
+                        draft_path: path.to_string(),
+                        source_line: None,
+                        category: DraftReviewCategory::UnresolvedReference,
+                        message: format!(
+                            "role player `{}` references `{}` which is not declared. {}",
+                            rp.name, rp.data_type, suggestion
+                        ),
+                        severity: None,
+                    });
+                }
             }
         }
         DraftDocument::Component(comp) => {
@@ -1309,9 +1314,13 @@ Then: an error is returned indicating the currency does not match
     }
 
     #[test]
-    fn refine_flags_unresolved_projection_source() {
-        let content = "# Projection: BadView\n\n## Purpose\nTest.\n\n## Source\n- Widget\n\n\
-                       ## Queries\n### summary\nReturns a summary.\n\n\
+    fn refine_flags_unresolved_projection_role_player() {
+        // Projection now uses the context-aligned six-section shape; the
+        // unresolved-reference check fires on its role players.
+        let content = "# Projection: BadView\n\n## Purpose\nTest.\n\n\
+                       ## Role Players\n- view: Widget — the view source\n\n\
+                       ## Role Methods\n### view\n- read: provides the view contents\n\n\
+                       ## Functionalities\n### summary\nReturns a summary using view's read.\n\n\
                        ## Scenarios\n### ok\nGiven: x\nWhen: summary\nThen: done\n";
         let doc = crate::draft_parser::parse_draft_file(
             std::path::Path::new("drafts/projections/bad_view.md"),
@@ -1325,7 +1334,7 @@ Then: an error is returned indicating the currency does not match
                 f.category == DraftReviewCategory::UnresolvedReference
                 && f.message.contains("Widget")
             ),
-            "should flag unresolved projection source: {:?}",
+            "should flag unresolved projection role player: {:?}",
             findings
         );
     }

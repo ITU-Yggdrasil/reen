@@ -231,8 +231,13 @@ fn expected_fields(artifact: &PreparedArtifact) -> BTreeSet<String> {
             }
         }
         ArtifactKind::Projection => {
-            if artifact.source_data.is_some() {
-                fields.insert("source".to_string());
+            // Projections share the context shape: role players + props become
+            // private struct fields.
+            for rp in &artifact.role_players {
+                fields.insert(crate::codegen::to_snake_case(&rp.name));
+            }
+            for prop in &artifact.props {
+                fields.insert(crate::codegen::to_snake_case(&prop.name));
             }
         }
         ArtifactKind::Operation => {
@@ -274,8 +279,16 @@ fn expected_methods(artifact: &PreparedArtifact) -> (BTreeSet<String>, BTreeSet<
             }
         }
         ArtifactKind::Projection => {
-            for query in &artifact.queries {
-                pub_methods.insert(crate::codegen::to_snake_case(&query.name));
+            // Projection public surface = declared functionalities + the
+            // mandatory `new` constructor. Role methods are private.
+            pub_methods.insert("new".to_string());
+            for func in &artifact.functionalities {
+                pub_methods.insert(crate::codegen::to_snake_case(&func.name));
+            }
+            for group in &artifact.role_methods {
+                for rm in &group.methods {
+                    priv_methods.insert(rm.canonical_name.clone());
+                }
             }
         }
         ArtifactKind::Operation => {
@@ -654,7 +667,16 @@ fn build_keys_for_method(
         }
         ArtifactKind::Projection => {
             if is_public {
-                keys.push(ArtefactKey::projection_query(export_name, method_name));
+                keys.push(ArtefactKey::projection_functionality(export_name, method_name));
+            } else {
+                // Private method — match against the projection's role methods.
+                for group in &artifact.role_methods {
+                    for rm in &group.methods {
+                        if rm.canonical_name == method_name {
+                            keys.push(ArtefactKey::projection_role_method(export_name, &group.role, &rm.name));
+                        }
+                    }
+                }
             }
         }
         _ => {}
@@ -702,7 +724,8 @@ pub fn verify_tracker_consistency(
             | crate::build_tracker::keys::ArtefactKey::DataGetter { data, .. } => {
                 Some(workspace_root.join("src/data").join(format!("{}.rs", data)))
             }
-            crate::build_tracker::keys::ArtefactKey::ProjectionQuery { projection, .. } => {
+            crate::build_tracker::keys::ArtefactKey::ProjectionFunctionality { projection, .. }
+            | crate::build_tracker::keys::ArtefactKey::ProjectionRoleMethod { projection, .. } => {
                 Some(workspace_root.join("src/projections").join(format!("{}.rs", projection)))
             }
             _ => None, // Web entries and type entries don't have method bodies to check

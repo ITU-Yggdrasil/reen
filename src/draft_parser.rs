@@ -154,19 +154,23 @@ pub struct DataDraft {
 }
 
 // ── Projection draft ──────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueryDraft {
-    pub name: String,
-    pub description: String,
-}
+//
+// A Projection draft is structurally identical to a Context draft: same six
+// sections (Purpose, Role Players, Props, Role Methods, Functionalities,
+// Scenarios). The only difference is immutability, which is enforced at the
+// schema, codegen, and verify layers — not at the draft level.
+//
+// The legacy `## Source` / `## Queries` shape is rejected at parse time with a
+// migration-pointing error. Callers must rewrite old drafts to the new shape.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionDraft {
     pub info: DraftInfo,
     pub purpose: String,
-    pub source: String,
-    pub queries: Vec<QueryDraft>,
+    pub role_players: Vec<RolePlayerDraft>,
+    pub props: Vec<PropDraft>,
+    pub role_methods: Vec<RoleMethodGroupDraft>,
+    pub functionalities: Vec<FunctionalityDraft>,
     pub scenarios: Vec<ScenarioDraft>,
 }
 
@@ -589,56 +593,36 @@ fn extract_kind_marker(raw: &str) -> (String, Option<String>) {
 fn parse_projection_draft(info: DraftInfo, content: &str) -> Result<ProjectionDraft> {
     let sections = parse_sections(content);
 
-    let purpose = require_section_text(&info.relative_path, &sections, "Purpose")?;
-    let source = parse_source_section(&sections);
-    let queries = parse_query_subsections(&sections);
-    let scenarios = parse_scenarios(&sections);
+    // Reject the legacy `## Source` / `## Queries` shape with a clear migration
+    // error. Projections now share the context-aligned six-section template.
+    if find_section(&sections, "Source").is_some() || find_section(&sections, "Queries").is_some() {
+        return Err(anyhow::anyhow!(
+            "{}: this projection draft uses the legacy `## Source` / `## Queries` shape, which is no longer supported. \
+            Projections are now structurally identical to contexts — same six sections \
+            (Purpose, Role Players, Props, Role Methods, Functionalities, Scenarios). \
+            Migration: rewrite each `## Source` entry as a `## Role Players` entry, \
+            each `## Queries` entry as a `## Functionalities` entry, and add a `## Role Methods` \
+            section describing what each role player provides to the projection.",
+            info.relative_path
+        ));
+    }
 
-    // Reject mutation-shaped prose in projections
-    reject_mutation_prose(&info.relative_path, &sections)?;
+    let purpose = require_section_text(&info.relative_path, &sections, "Purpose")?;
+    let role_players = parse_role_players(&info.relative_path, &sections)?;
+    let props = parse_props(&sections);
+    let role_methods = parse_role_method_groups(&info.relative_path, &sections)?;
+    let functionalities = parse_functionality_subsections(&info.relative_path, &sections)?;
+    let scenarios = parse_scenarios(&sections);
 
     Ok(ProjectionDraft {
         info,
         purpose,
-        source,
-        queries,
+        role_players,
+        props,
+        role_methods,
+        functionalities,
         scenarios,
     })
-}
-
-fn parse_source_section(sections: &[Section]) -> String {
-    let Some(section) = find_section(sections, "Source") else {
-        return String::new();
-    };
-    // Source can be a single bullet or plain text
-    let lines = bullet_lines(Some(&section.body));
-    if !lines.is_empty() {
-        return lines.join(", ");
-    }
-    section.body.trim().to_string()
-}
-
-fn parse_query_subsections(sections: &[Section]) -> Vec<QueryDraft> {
-    let Some(section) = find_section(sections, "Queries") else {
-        return Vec::new();
-    };
-    let subsections = parse_subsections(&section.body);
-    if subsections.is_empty() {
-        return parse_named_bullets(&section.body)
-            .into_iter()
-            .map(|(name, desc)| QueryDraft {
-                name,
-                description: desc,
-            })
-            .collect();
-    }
-    subsections
-        .into_iter()
-        .map(|sub| QueryDraft {
-            name: sub.title,
-            description: sub.body.trim().to_string(),
-        })
-        .collect()
 }
 
 fn reject_mutation_prose(relative_path: &str, sections: &[Section]) -> Result<()> {
@@ -1608,15 +1592,20 @@ Then: a Money of 100 EUR
 
     #[test]
     fn parse_minimal_projection_draft() {
+        // New shape: projections share the context-aligned six-section template.
         let content = r#"# Projection: AccountBalance
 
 ## Purpose
 Provides a read-only view of an account's current balance.
 
-## Source
-- Account
+## Role Players
+- account: Account — the account being viewed
 
-## Queries
+## Role Methods
+### account
+- read_balance: provides the current balance value
+
+## Functionalities
 ### current_balance
 Returns the current balance of the underlying account.
 
@@ -1636,39 +1625,49 @@ Then: returns 100
         let DraftDocument::Projection(proj) = doc else {
             panic!("expected Projection draft");
         };
-        assert_eq!(proj.source, "Account");
-        assert_eq!(proj.queries.len(), 1);
+        assert_eq!(proj.role_players.len(), 1);
+        assert_eq!(proj.role_players[0].name, "account");
+        assert_eq!(proj.role_players[0].data_type, "Account");
+        assert_eq!(proj.role_methods.len(), 1);
+        assert_eq!(proj.role_methods[0].role, "account");
+        assert_eq!(proj.role_methods[0].methods[0].name, "read_balance");
+        assert_eq!(proj.functionalities.len(), 1);
+        assert_eq!(proj.functionalities[0].name, "current_balance");
         assert_eq!(proj.scenarios.len(), 1);
     }
 
     #[test]
-    fn projection_with_mutation_is_rejected() {
-        let content = r#"# Projection: BadProjection
+    fn legacy_projection_shape_rejected_with_migration_error() {
+        // Old `## Source` / `## Queries` shape must surface a migration error
+        // pointing at the new context-aligned template.
+        let content = r#"# Projection: LegacyView
 
 ## Purpose
-This projection will modify data.
+A projection that still uses the old shape.
 
 ## Source
 - Account
 
 ## Queries
-### update_balance
-Updates the balance.
+### balance
+Returns the current balance.
 
 ## Scenarios
-### test
+### example
 Given: x
 When: y
 Then: z
 "#;
         let result = parse_draft_file(
-            Path::new("drafts/projections/bad.md"),
+            Path::new("drafts/projections/legacy.md"),
             Path::new("drafts"),
             content,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("mutation-shaped prose"));
+        assert!(err.contains("legacy"), "expected migration error, got: {}", err);
+        assert!(err.contains("Role Players"), "expected migration guidance to mention Role Players, got: {}", err);
+        assert!(err.contains("Functionalities"), "expected migration guidance to mention Functionalities, got: {}", err);
     }
 
     #[test]

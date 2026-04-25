@@ -65,7 +65,7 @@ fn collect_synthesisable_prose(artifact: &PreparedArtifact) -> Vec<SynthProse> {
         });
     }
 
-    // Functionality descriptions (context artifacts)
+    // Functionality descriptions (context and projection artifacts)
     for func in &artifact.functionalities {
         if !func.description.trim().is_empty() {
             prose.push(SynthProse {
@@ -81,16 +81,6 @@ fn collect_synthesisable_prose(artifact: &PreparedArtifact) -> Vec<SynthProse> {
             prose.push(SynthProse {
                 label: format!("operation `{}`", op.name),
                 text: op.description.clone(),
-            });
-        }
-    }
-
-    // Query descriptions (projection artifacts)
-    for query in &artifact.queries {
-        if !query.description.trim().is_empty() {
-            prose.push(SynthProse {
-                label: format!("query `{}`", query.name),
-                text: query.description.clone(),
             });
         }
     }

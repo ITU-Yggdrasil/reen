@@ -468,35 +468,78 @@ fn generate_data(a: &PreparedArtifact) -> String {
 }
 
 fn generate_projection(a: &PreparedArtifact) -> String {
+    // Projections emit identically to contexts, with two structural
+    // constraints enforced by `reen verify`:
+    //   * every functionality takes &self (never &mut self)
+    //   * every role method takes its role player as & (never &mut)
+    // The codegen path itself produces &self/`&` already; verify keeps
+    // /implement edits honest.
     let name = &a.export.name;
     let mut out = String::new();
 
-    // Struct
+    // Struct — private fields, one per role player and prop.
     writeln!(out, "pub struct {} {{", name).unwrap();
-    if let Some(src) = &a.source_data {
-        let rust_type = sanitize_rust_type(src);
+    for rp in &a.role_players {
+        let rust_type = sanitize_rust_type(&rp.data_type);
         if rust_type == "()" {
-            writeln!(out, "    source: (), // {}", src).unwrap();
+            writeln!(out, "    {}: (), // {}", to_snake_case(&rp.name), rp.data_type).unwrap();
         } else {
-            writeln!(out, "    source: {}, // projection over this data", rust_type).unwrap();
+            writeln!(out, "    {}: {},", to_snake_case(&rp.name), rust_type).unwrap();
         }
+    }
+    for prop in &a.props {
+        writeln!(out, "    {}: (), // prop: {}", to_snake_case(&prop.name), prop.description).unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // Impl with queries
-    if !a.queries.is_empty() {
-        writeln!(out, "impl {} {{", name).unwrap();
-        for query in &a.queries {
-            writeln!(out, "    /// {}", query.description.lines().next().unwrap_or("")).unwrap();
-            writeln!(out, "    pub fn {}(&self) {{", to_snake_case(&query.name)).unwrap();
+    writeln!(out, "impl {} {{", name).unwrap();
+
+    // Constructor — projections expose a public new() that adapters call to
+    // bind role players + props at construction time.
+    if !a.role_players.is_empty() || !a.props.is_empty() {
+        let params: Vec<String> = a.role_players.iter()
+            .map(|rp| {
+                let ty = sanitize_rust_type(&rp.data_type);
+                format!("{}: {}", to_snake_case(&rp.name), ty)
+            })
+            .chain(a.props.iter().map(|p| format!("{}: ()", to_snake_case(&p.name))))
+            .collect();
+        writeln!(out, "    /// Bind role players and props.").unwrap();
+        writeln!(out, "    pub fn new({}) -> Self {{", params.join(", ")).unwrap();
+        writeln!(out, "        todo!()").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Functionalities — pub, always &self (immutable).
+    for func in &a.functionalities {
+        writeln!(out, "    /// {}", func.description.lines().next().unwrap_or("")).unwrap();
+        writeln!(out, "    pub fn {}(&self) {{", to_snake_case(&func.name)).unwrap();
+        writeln!(out, "        todo!()").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Role methods — private, role player as & (never &mut).
+    for group in &a.role_methods {
+        for rm in &group.methods {
+            writeln!(out, "    /// Role method ({}.{}): {}", group.role, rm.name, rm.citation).unwrap();
+            writeln!(
+                out,
+                "    fn {}(&self, {}_: &{}) {{",
+                rm.canonical_name,
+                to_snake_case(&group.role),
+                role_player_type(a, &group.role)
+            )
+            .unwrap();
             writeln!(out, "        todo!()").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
         }
-        writeln!(out, "}}").unwrap();
     }
 
+    writeln!(out, "}}").unwrap();
     out
 }
 
@@ -636,40 +679,82 @@ fn generate_projection_surgical(
     tracker: &BuildTracker,
     preserved: &BTreeMap<String, String>,
 ) -> String {
+    // Surgical projection emission. Same shape as generate_projection but
+    // resolves bodies from the tracker + preserved map so fresh entries keep
+    // their existing implementation and stale entries reset to todo!().
     let name = &a.export.name;
     let mut out = String::new();
 
-    // Struct — regenerated wholesale
+    // Struct — regenerated wholesale, private fields.
     writeln!(out, "pub struct {} {{", name).unwrap();
-    if let Some(src) = &a.source_data {
-        let rust_type = sanitize_rust_type(src);
+    for rp in &a.role_players {
+        let rust_type = sanitize_rust_type(&rp.data_type);
         if rust_type == "()" {
-            writeln!(out, "    source: (), // {}", src).unwrap();
+            writeln!(out, "    {}: (), // {}", to_snake_case(&rp.name), rp.data_type).unwrap();
         } else {
-            writeln!(out, "    source: {}, // projection over this data", rust_type).unwrap();
+            writeln!(out, "    {}: {},", to_snake_case(&rp.name), rust_type).unwrap();
         }
+    }
+    for prop in &a.props {
+        writeln!(out, "    {}: (), // prop: {}", to_snake_case(&prop.name), prop.description).unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // Impl
-    if !a.queries.is_empty() {
-        writeln!(out, "impl {} {{", name).unwrap();
-        for query in &a.queries {
-            let key = ArtefactKey::projection_query(name, &query.name);
-            let method_name = to_snake_case(&query.name);
-            let body = resolve_body(&key, &method_name, tracker, preserved);
+    writeln!(out, "impl {} {{", name).unwrap();
 
-            writeln!(out, "    /// {}", query.description.lines().next().unwrap_or("")).unwrap();
-            let receiver = detect_receiver(&method_name, preserved);
-            writeln!(out, "    pub fn {}({}) {{", method_name, receiver).unwrap();
+    // Constructor.
+    if !a.role_players.is_empty() || !a.props.is_empty() {
+        let params: Vec<String> = a.role_players.iter()
+            .map(|rp| {
+                let ty = sanitize_rust_type(&rp.data_type);
+                format!("{}: {}", to_snake_case(&rp.name), ty)
+            })
+            .chain(a.props.iter().map(|p| format!("{}: ()", to_snake_case(&p.name))))
+            .collect();
+        writeln!(out, "    /// Bind role players and props.").unwrap();
+        writeln!(out, "    pub fn new({}) -> Self {{", params.join(", ")).unwrap();
+        writeln!(out, "        todo!()").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Functionalities — pub, always &self.
+    for func in &a.functionalities {
+        let key = ArtefactKey::projection_functionality(name, &func.name);
+        let method_name = to_snake_case(&func.name);
+        let body = resolve_body(&key, &method_name, tracker, preserved);
+
+        writeln!(out, "    /// {}", func.description.lines().next().unwrap_or("")).unwrap();
+        // Force &self; projection functionalities never upgrade to &mut self.
+        writeln!(out, "    pub fn {}(&self) {{", method_name).unwrap();
+        write!(out, "{}", body).unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Role methods — private, role player as & (never &mut).
+    for group in &a.role_methods {
+        for rm in &group.methods {
+            let key = ArtefactKey::projection_role_method(name, &group.role, &rm.name);
+            let body = resolve_body(&key, &rm.canonical_name, tracker, preserved);
+
+            writeln!(out, "    /// Role method ({}.{}): {}", group.role, rm.name, rm.citation).unwrap();
+            writeln!(
+                out,
+                "    fn {}(&self, {}_: &{}) {{",
+                rm.canonical_name,
+                to_snake_case(&group.role),
+                role_player_type(a, &group.role)
+            )
+            .unwrap();
             write!(out, "{}", body).unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
         }
-        writeln!(out, "}}").unwrap();
     }
 
+    writeln!(out, "}}").unwrap();
     out
 }
 
@@ -913,38 +998,38 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_projection_has_source_and_queries() {
+    fn scaffold_projection_emits_context_shape_with_immutable_signatures() {
+        // Projections share the context-shaped emission: role players become
+        // private struct fields, functionalities become pub fn (&self), role
+        // methods become private fn taking the role player as &.
         let mut a = PreparedArtifact::new(
             ArtifactKind::Projection, "projections/balance.md".into(), "AccountBalance".into(), "AccountBalance".into(),
         );
-        a.source_data = Some("Account".into());
-        a.queries = vec![QuerySpec { name: "current_balance".into(), description: "Current balance.".into() }];
+        a.role_players = vec![
+            RolePlayerSpec {
+                name: "account".into(),
+                data_type: "Account".into(),
+                responsibility: "the account being viewed".into(),
+            },
+        ];
+        a.functionalities = vec![
+            FunctionalitySpec {
+                name: "current_balance".into(),
+                description: "Returns the current balance.".into(),
+                role_method_refs: vec![],
+            },
+        ];
 
         let code = generate_rust(&a);
         assert!(code.contains("pub struct AccountBalance"));
-        assert!(code.contains("source: Account"));
-        assert!(code.contains("pub fn current_balance("));
-    }
-
-    #[test]
-    fn prose_source_data_falls_back_to_unit() {
-        let mut a = PreparedArtifact::new(
-            ArtifactKind::Projection, "projections/account.md".into(), "Account".into(), "Account".into(),
-        );
-        a.source_data = Some("Ledger, filtered by account identifier".into());
-        a.queries = vec![QuerySpec { name: "balance".into(), description: "Current balance.".into() }];
-
-        let code = generate_rust(&a);
-        assert!(
-            !code.contains("source: Ledger, filtered"),
-            "prose source_data should not appear as Rust struct field type, got:\n{}",
-            code
-        );
-        assert!(
-            code.contains("source: ()"),
-            "prose source_data should fall back to () for struct field, got:\n{}",
-            code
-        );
+        // Private field — no `pub` keyword.
+        assert!(code.contains("    account: Account,"));
+        // Public constructor.
+        assert!(code.contains("pub fn new(account: Account)"));
+        // Functionality is pub fn (&self).
+        assert!(code.contains("pub fn current_balance(&self)"));
+        // No &mut self anywhere on the projection's impl.
+        assert!(!code.contains("&mut self"));
     }
 
     #[test]

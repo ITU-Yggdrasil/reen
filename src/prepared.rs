@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v2";
+pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v3";
+/// Retained for code that historically distinguished v2 from v3 — both now point
+/// at the unified v3 schema after the projection-adopts-context-shape rename.
 pub const PREPARED_SCHEMA_V3_VERSION: &str = "reen.prepare/v3";
 
 /// DCI artifact kinds plus the operation kind for external API consumption.
@@ -61,11 +63,10 @@ pub struct PreparedArtifact {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<OperationSpec>,
 
-    // ── Projection-only ───────────────────────────────────────────
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_data: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub queries: Vec<QuerySpec>,
+    // ── Projection (v3+) ──────────────────────────────────────────
+    // Projections share the context-shaped fields above (role_players,
+    // role_methods, props, functionalities). The legacy `source_data` /
+    // `queries` fields have been removed from the schema.
 
     // ── Component-only (v3) ──────────────────────────────────────
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -190,14 +191,6 @@ pub struct OperationSpec {
     /// Additive field; absent in legacy prepared YAML.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-}
-
-// ── Projection types ──────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct QuerySpec {
-    pub name: String,
-    pub description: String,
 }
 
 // ── Component types (v3) ─────────────────────────────────────────
@@ -392,13 +385,9 @@ pub const API_MANIFEST_SCHEMA: &str = "reen.api-manifest/v1";
 impl PreparedArtifact {
     pub fn new(kind: ArtifactKind, path: String, title: String, export_name: String) -> Self {
         let kind_str = kind.as_str();
-        let schema = match &kind {
-            ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
-                PREPARED_SCHEMA_V3_VERSION.to_string()
-            }
-            // App uses v2 — additive, no version bump
-            _ => PREPARED_SCHEMA_VERSION.to_string(),
-        };
+        // All artefact kinds now use the unified v3 schema after the
+        // projection-adopts-context-shape rename.
+        let schema = PREPARED_SCHEMA_VERSION.to_string();
         Self {
             schema,
             source: SourceInfo {
@@ -415,8 +404,6 @@ impl PreparedArtifact {
             attributes: Vec::new(),
             invariants: Vec::new(),
             operations: Vec::new(),
-            source_data: None,
-            queries: Vec::new(),
             scenarios: Vec::new(),
             synthesised_tests: Vec::new(),
             vocabulary_bindings: Vec::new(),

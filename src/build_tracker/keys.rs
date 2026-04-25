@@ -24,7 +24,9 @@ pub enum ArtefactEntryKind {
     DataOperation,
     DataConstructor,
     DataGetter,
-    ProjectionQuery,
+    ProjectionFunctionality,
+    ProjectionRoleMethod,
+    ProjectionRoleType,
     RoleType,
     DataType,
     // Web-specific kinds (Phase 10)
@@ -47,7 +49,9 @@ impl ArtefactEntryKind {
             Self::DataOperation => "data_operation",
             Self::DataConstructor => "data_constructor",
             Self::DataGetter => "data_getter",
-            Self::ProjectionQuery => "projection_query",
+            Self::ProjectionFunctionality => "projection_functionality",
+            Self::ProjectionRoleMethod => "projection_role_method",
+            Self::ProjectionRoleType => "projection_role_type",
             Self::RoleType => "role_type",
             Self::DataType => "data_type",
             Self::RouterArm => "router_arm",
@@ -102,10 +106,21 @@ pub enum ArtefactKey {
     DataType {
         data: String,
     },
-    /// `projections/<projection>/query/<name>`
-    ProjectionQuery {
+    /// `projections/<projection>/functionality/<name>`
+    ProjectionFunctionality {
         projection: String,
         name: String,
+    },
+    /// `projections/<projection>/role/<role>/<method>`
+    ProjectionRoleMethod {
+        projection: String,
+        role: String,
+        method: String,
+    },
+    /// `projections/<projection>/role/<role>/type`
+    ProjectionRoleType {
+        projection: String,
+        role: String,
     },
     // ── Web-specific keys (Phase 10) ─────────────────────────
     /// `web/router/<route_name>`
@@ -138,7 +153,9 @@ impl ArtefactKey {
             Self::DataConstructor { .. } => ArtefactEntryKind::DataConstructor,
             Self::DataGetter { .. } => ArtefactEntryKind::DataGetter,
             Self::DataType { .. } => ArtefactEntryKind::DataType,
-            Self::ProjectionQuery { .. } => ArtefactEntryKind::ProjectionQuery,
+            Self::ProjectionFunctionality { .. } => ArtefactEntryKind::ProjectionFunctionality,
+            Self::ProjectionRoleMethod { .. } => ArtefactEntryKind::ProjectionRoleMethod,
+            Self::ProjectionRoleType { .. } => ArtefactEntryKind::ProjectionRoleType,
             Self::RouterArm { .. } => ArtefactEntryKind::RouterArm,
             Self::ServerRoute { .. } => ArtefactEntryKind::ServerRoute,
             Self::RpcServer { .. } => ArtefactEntryKind::RpcServer,
@@ -201,10 +218,25 @@ impl ArtefactKey {
         }
     }
 
-    pub fn projection_query(projection: &str, name: &str) -> Self {
-        Self::ProjectionQuery {
+    pub fn projection_functionality(projection: &str, name: &str) -> Self {
+        Self::ProjectionFunctionality {
             projection: crate::codegen::to_snake_case(projection),
             name: crate::codegen::to_snake_case(name),
+        }
+    }
+
+    pub fn projection_role_method(projection: &str, role: &str, method: &str) -> Self {
+        Self::ProjectionRoleMethod {
+            projection: crate::codegen::to_snake_case(projection),
+            role: crate::codegen::to_snake_case(role),
+            method: crate::codegen::to_snake_case(method),
+        }
+    }
+
+    pub fn projection_role_type(projection: &str, role: &str) -> Self {
+        Self::ProjectionRoleType {
+            projection: crate::codegen::to_snake_case(projection),
+            role: crate::codegen::to_snake_case(role),
         }
     }
 
@@ -253,7 +285,7 @@ impl ArtefactKey {
             }
             "projections" => {
                 if is_public {
-                    Some(Self::ProjectionQuery {
+                    Some(Self::ProjectionFunctionality {
                         projection: type_snake,
                         name: method_snake,
                     })
@@ -304,8 +336,14 @@ impl fmt::Display for ArtefactKey {
             Self::DataType { data } => {
                 write!(f, "data/{}/type", data)
             }
-            Self::ProjectionQuery { projection, name } => {
-                write!(f, "projections/{}/query/{}", projection, name)
+            Self::ProjectionFunctionality { projection, name } => {
+                write!(f, "projections/{}/functionality/{}", projection, name)
+            }
+            Self::ProjectionRoleMethod { projection, role, method } => {
+                write!(f, "projections/{}/role/{}/{}", projection, role, method)
+            }
+            Self::ProjectionRoleType { projection, role } => {
+                write!(f, "projections/{}/role/{}/type", projection, role)
             }
             Self::RouterArm { route } => write!(f, "web/router/{}", route),
             Self::ServerRoute { route } => write!(f, "web/server/{}", route),
@@ -357,9 +395,18 @@ impl FromStr for ArtefactKey {
             ["data", data, "type"] => Ok(Self::DataType {
                 data: data.to_string(),
             }),
-            ["projections", proj, "query", name] => Ok(Self::ProjectionQuery {
+            ["projections", proj, "functionality", name] => Ok(Self::ProjectionFunctionality {
                 projection: proj.to_string(),
                 name: name.to_string(),
+            }),
+            ["projections", proj, "role", role, "type"] => Ok(Self::ProjectionRoleType {
+                projection: proj.to_string(),
+                role: role.to_string(),
+            }),
+            ["projections", proj, "role", role, method] => Ok(Self::ProjectionRoleMethod {
+                projection: proj.to_string(),
+                role: role.to_string(),
+                method: method.to_string(),
             }),
             // Web-specific keys
             ["web", "router", route] => Ok(Self::RouterArm { route: route.to_string() }),
@@ -410,7 +457,7 @@ mod tests {
             ArtefactKey::data_constructor("Account"),
             ArtefactKey::data_getter("Account", "balance"),
             ArtefactKey::data_type("Account"),
-            ArtefactKey::projection_query("AccountBalance", "current_balance"),
+            ArtefactKey::projection_functionality("AccountBalance", "current_balance"),
         ];
 
         for key in &keys {
@@ -467,8 +514,8 @@ mod tests {
             "data/account/type"
         );
         assert_eq!(
-            ArtefactKey::projection_query("AccountBalance", "current_balance").to_string(),
-            "projections/account_balance/query/current_balance"
+            ArtefactKey::projection_functionality("AccountBalance", "current_balance").to_string(),
+            "projections/account_balance/functionality/current_balance"
         );
     }
 
@@ -511,8 +558,16 @@ mod tests {
             ArtefactEntryKind::DataType
         );
         assert_eq!(
-            ArtefactKey::projection_query("X", "y").kind(),
-            ArtefactEntryKind::ProjectionQuery
+            ArtefactKey::projection_functionality("X", "y").kind(),
+            ArtefactEntryKind::ProjectionFunctionality
+        );
+        assert_eq!(
+            ArtefactKey::projection_role_type("X", "r").kind(),
+            ArtefactEntryKind::ProjectionRoleType
+        );
+        assert_eq!(
+            ArtefactKey::projection_role_method("X", "r", "m").kind(),
+            ArtefactEntryKind::ProjectionRoleMethod
         );
     }
 
@@ -538,6 +593,6 @@ mod tests {
     #[test]
     fn from_rust_method_projections() {
         let key = ArtefactKey::from_rust_method("projections", "account_balance", "current_balance", true);
-        assert_eq!(key, Some(ArtefactKey::projection_query("account_balance", "current_balance")));
+        assert_eq!(key, Some(ArtefactKey::projection_functionality("account_balance", "current_balance")));
     }
 }

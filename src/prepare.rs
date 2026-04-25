@@ -8,7 +8,7 @@ use crate::test_synth::synthesise_tests;
 use crate::prepared::{
     Ambiguity, ArtifactKind, AttributeSpec, ChildBindingSpec, CompositionSpec, EventBindingSpec,
     EventSpec, FunctionalitySpec, OperationSpec, PreparedArtifact, ProseSectionSpec, PropSpec,
-    QuerySpec, RoleMethodGroupSpec, RoleMethodSpec, RolePlayerSpec, RouteParamSpec, RouteSpec,
+    RoleMethodGroupSpec, RoleMethodSpec, RolePlayerSpec, RouteParamSpec, RouteSpec,
     ScenarioSpec, SlotSpec, SynthesisedTest, TokenGroupSpec, TokenSpec, VariantSpec,
     VocabularyBinding,
 };
@@ -676,6 +676,9 @@ fn prepare_data(data: &DataDraft, vocab: &DciVocabulary) -> Result<PreparedArtif
 }
 
 fn prepare_projection(proj: &ProjectionDraft, vocab: &DciVocabulary) -> Result<PreparedArtifact> {
+    // Projections share the context-shaped fields. The structural rules
+    // (immutability, no-Context-refs, private fields, public-surface =
+    // Functionalities) are enforced downstream by codegen and verify.
     let export_name = sanitize_export_name(&proj.info.title);
     let mut artifact = PreparedArtifact::new(
         ArtifactKind::Projection,
@@ -687,30 +690,89 @@ fn prepare_projection(proj: &ProjectionDraft, vocab: &DciVocabulary) -> Result<P
     let mut bindings = Vec::new();
     let mut ambiguities = Vec::new();
 
-    // Source resolution
-    artifact.source_data = Some(proj.source.clone());
-    if !proj.source.is_empty() {
-        let resolved = vocab.resolve(&proj.source);
+    // Role players — projections may reference Data and Projection types only.
+    // (Context references are rejected by verify, not here, so the failure
+    // surfaces with full kind-disciplined wording rather than at parse time.)
+    for rp in &proj.role_players {
+        let resolved = vocab.resolve(&rp.data_type);
+        artifact.role_players.push(RolePlayerSpec {
+            name: rp.name.clone(),
+            data_type: rp.data_type.clone(),
+            responsibility: rp.responsibility.clone(),
+        });
+        bindings.push(VocabularyBinding {
+            name: rp.name.clone(),
+            resolution: "role_player".to_string(),
+            resolved_to: Some(rp.data_type.clone()),
+        });
         if let Some(resolution) = &resolved {
             bindings.push(VocabularyBinding {
-                name: proj.source.clone(),
+                name: rp.data_type.clone(),
                 resolution: resolution.clone(),
-                resolved_to: Some(proj.source.clone()),
+                resolved_to: Some(rp.data_type.clone()),
             });
-        } else if !is_builtin_primitive(&proj.source) {
+        } else if !is_builtin_primitive(&rp.data_type) {
             ambiguities.push(unresolved_reference_error(
                 &proj.info.relative_path,
-                "projection source",
-                "source",
-                &proj.source,
+                "role player",
+                &rp.name,
+                &rp.data_type,
             ));
         }
     }
 
-    for query in &proj.queries {
-        artifact.queries.push(QuerySpec {
-            name: query.name.clone(),
-            description: query.description.clone(),
+    // Props
+    for prop in &proj.props {
+        artifact.props.push(PropSpec {
+            name: prop.name.clone(),
+            description: prop.description.clone(),
+        });
+        bindings.push(VocabularyBinding {
+            name: prop.name.clone(),
+            resolution: "prop".to_string(),
+            resolved_to: None,
+        });
+    }
+
+    // Role methods — same shape as a context's role methods.
+    for group in &proj.role_methods {
+        let methods: Vec<RoleMethodSpec> = group
+            .methods
+            .iter()
+            .map(|m| {
+                let canonical = format!("{}_{}", group.role, m.name);
+                bindings.push(VocabularyBinding {
+                    name: canonical.clone(),
+                    resolution: "role_method".to_string(),
+                    resolved_to: Some(format!("{}.{}", group.role, m.name)),
+                });
+                RoleMethodSpec {
+                    name: m.name.clone(),
+                    canonical_name: canonical,
+                    signature_hint: None,
+                    citation: m.description.clone(),
+                }
+            })
+            .collect();
+        artifact.role_methods.push(RoleMethodGroupSpec {
+            role: group.role.clone(),
+            methods,
+        });
+        bindings.push(VocabularyBinding {
+            name: group.role.clone(),
+            resolution: "role".to_string(),
+            resolved_to: None,
+        });
+    }
+
+    // Functionalities — same as contexts, but at verify time these will be
+    // checked to take &self only.
+    for func in &proj.functionalities {
+        let role_method_refs = extract_role_method_refs(&func.description, &artifact.role_methods);
+        artifact.functionalities.push(FunctionalitySpec {
+            name: func.name.clone(),
+            description: func.description.clone(),
+            role_method_refs,
         });
     }
 
@@ -1988,18 +2050,24 @@ Then: the result is 80
     }
 
     #[test]
-    fn prepare_projection_flags_unresolved_source() {
+    fn prepare_projection_flags_unresolved_role_player_data_type() {
+        // Projections share the context-aligned six-section shape; the
+        // unresolved-reference path runs over their role players.
         let content = r#"# Projection: AccountBalance
 
 ## Purpose
 Provides a read-only view of an account's current balance.
 
-## Source
-- Account
+## Role Players
+- account: Account — the account being viewed
 
-## Queries
+## Role Methods
+### account
+- read_balance: provides the current balance value
+
+## Functionalities
 ### current_balance
-Returns the current balance of the underlying account.
+Returns the account's current balance via the account's read_balance role method.
 
 ## Scenarios
 ### balance query
@@ -2429,10 +2497,12 @@ Main routes.
         assert!(prepared.ambiguities.is_empty());
     }
 
-    // ── v2/v3 coexistence test ───────────────────────────────────
+    // ── Schema version test ──────────────────────────────────────
 
     #[test]
-    fn existing_v2_kinds_still_produce_v2() {
+    fn all_artefact_kinds_produce_v3_schema() {
+        // After the projection-adopts-context-shape rename, all artefact
+        // kinds emit the unified v3 schema.
         let content = r#"# Data: Amount
 
 ## Purpose
@@ -2458,7 +2528,7 @@ Then: value is 100
         .unwrap();
 
         let prepared = prepare_document(&doc, &empty_vocab()).unwrap();
-        assert_eq!(prepared.schema, "reen.prepare/v2");
+        assert_eq!(prepared.schema, "reen.prepare/v3");
     }
 
     // ── Classification tests ─────────────────────────────────────

@@ -226,27 +226,94 @@ fn extract_projection(
     a: &PreparedArtifact,
     siblings: &[&PreparedArtifact],
 ) -> Vec<ExtractedArtefact> {
+    // Projections share the context-shaped fields (role_players, role_methods,
+    // functionalities). Extraction mirrors extract_context with
+    // projection-flavoured key variants.
     let proj_name = &a.export.name;
     let mut result = Vec::new();
 
-    for query in &a.queries {
-        let key = ArtefactKey::projection_query(proj_name, &query.name);
+    // Role types — one per role player.
+    for rp in &a.role_players {
+        let key = ArtefactKey::projection_role_type(proj_name, &rp.name);
 
-        // Upstream: the source data type (cross-draft edge)
         let mut upstream = Vec::new();
-        if let Some(src) = &a.source_data {
-            if find_data_artifact(src, siblings).is_some() {
-                upstream.push(ArtefactKey::data_type(src));
+        if find_data_artifact(&rp.data_type, siblings).is_some() {
+            upstream.push(ArtefactKey::data_type(&rp.data_type));
+        }
+
+        let fragment = canonical_yaml(&BTreeMap::from([
+            ("projection", proj_name.as_str()),
+            ("role", rp.name.as_str()),
+            ("data_type", rp.data_type.as_str()),
+            ("responsibility", rp.responsibility.as_str()),
+        ]));
+
+        result.push(ExtractedArtefact { key, canonical_fragment: fragment, upstream });
+    }
+
+    // Role methods — one per method in each role group.
+    for group in &a.role_methods {
+        let role_type_key = ArtefactKey::projection_role_type(proj_name, &group.role);
+
+        for rm in &group.methods {
+            let key = ArtefactKey::projection_role_method(proj_name, &group.role, &rm.name);
+
+            let mut upstream = vec![role_type_key.clone()];
+
+            // Cross-draft edge to data operations referenced by the role method.
+            let rp_data_type = a.role_players.iter()
+                .find(|rp| rp.name == group.role)
+                .map(|rp| &rp.data_type);
+
+            if let Some(data_type) = rp_data_type {
+                if let Some(data_art) = find_data_artifact(data_type, siblings) {
+                    for op in &data_art.operations {
+                        let op_snake = to_snake_case(&op.name);
+                        let rm_text = format!("{} {}", rm.citation, rm.name);
+                        if rm_text.to_lowercase().contains(&op_snake) {
+                            upstream.push(ArtefactKey::data_operation(data_type, &op.name));
+                        }
+                    }
+                }
+            }
+
+            let mut frag_map = BTreeMap::new();
+            frag_map.insert("projection", proj_name.as_str());
+            frag_map.insert("role", group.role.as_str());
+            frag_map.insert("method", rm.name.as_str());
+            frag_map.insert("canonical_name", rm.canonical_name.as_str());
+            frag_map.insert("citation", rm.citation.as_str());
+            if let Some(hint) = &rm.signature_hint {
+                frag_map.insert("signature_hint", hint.as_str());
+            }
+            let fragment = canonical_yaml(&frag_map);
+
+            result.push(ExtractedArtefact { key, canonical_fragment: fragment, upstream });
+        }
+    }
+
+    // Functionalities — one per functionality.
+    for func in &a.functionalities {
+        let key = ArtefactKey::projection_functionality(proj_name, &func.name);
+
+        let mut upstream: Vec<ArtefactKey> = Vec::new();
+        for rm_ref in &func.role_method_refs {
+            for group in &a.role_methods {
+                for rm in &group.methods {
+                    if rm.canonical_name == *rm_ref {
+                        upstream.push(ArtefactKey::projection_role_method(proj_name, &group.role, &rm.name));
+                    }
+                }
             }
         }
 
-        let source_str = a.source_data.as_deref().unwrap_or("");
-        let fragment = canonical_yaml(&BTreeMap::from([
-            ("projection", proj_name.as_str()),
-            ("query", query.name.as_str()),
-            ("description", query.description.as_str()),
-            ("source_data", source_str),
-        ]));
+        let mut frag_map = BTreeMap::new();
+        frag_map.insert("projection", proj_name.as_str());
+        frag_map.insert("functionality", func.name.as_str());
+        frag_map.insert("description", func.description.as_str());
+        let refs_str = func.role_method_refs.join(",");
+        frag_map.insert("role_method_refs", &refs_str);
+        let fragment = canonical_yaml(&frag_map);
 
         result.push(ExtractedArtefact { key, canonical_fragment: fragment, upstream });
     }
@@ -365,15 +432,27 @@ mod tests {
     }
 
     fn balance_projection() -> PreparedArtifact {
+        // Projections share the context shape: declare role players and a
+        // functionality that reads from them.
         let mut a = PreparedArtifact::new(
             ArtifactKind::Projection,
             "projections/balance.md".into(),
             "AccountBalance".into(),
             "AccountBalance".into(),
         );
-        a.source_data = Some("Account".into());
-        a.queries = vec![
-            QuerySpec { name: "current_balance".into(), description: "Current balance.".into() },
+        a.role_players = vec![
+            RolePlayerSpec {
+                name: "account".into(),
+                data_type: "Account".into(),
+                responsibility: "the account being viewed".into(),
+            },
+        ];
+        a.functionalities = vec![
+            FunctionalitySpec {
+                name: "current_balance".into(),
+                description: "Returns the account's current balance.".into(),
+                role_method_refs: vec![],
+            },
         ];
         a
     }
@@ -527,15 +606,26 @@ mod tests {
     // ── Projection edge tests ────────────────────────────────────
 
     #[test]
-    fn projection_query_depends_on_source_data() {
+    fn projection_functionality_depends_on_role_player_data_type() {
         let proj = balance_projection();
         let data = account_data();
         let extracted = extract_artefacts(&proj, &[&data]);
 
-        assert_eq!(extracted.len(), 1);
-        let query = &extracted[0];
-        assert_eq!(query.key.to_string(), "projections/account_balance/query/current_balance");
-        assert!(query.upstream.contains(&ArtefactKey::data_type("Account")));
+        // Projections now extract context-shape entries: role types and
+        // functionalities. The single role player + single functionality
+        // produces 2 entries.
+        assert_eq!(extracted.len(), 2);
+
+        let role_type = extracted.iter()
+            .find(|e| e.key.to_string() == "projections/account_balance/role/account/type")
+            .unwrap();
+        assert!(role_type.upstream.contains(&ArtefactKey::data_type("Account")));
+
+        let functionality = extracted.iter()
+            .find(|e| e.key.to_string() == "projections/account_balance/functionality/current_balance")
+            .unwrap();
+        // Functionality has no role_method_refs in this fixture, so no upstream.
+        assert!(functionality.upstream.is_empty());
     }
 
     #[test]
@@ -619,10 +709,10 @@ mod tests {
         // Verify the total count
         // Data: 1 type + 1 constructor + 2 getters + 2 ops = 6
         // Context: 2 role types + 2 role methods + 1 functionality = 5
-        // Projection: 1 query = 1
+        // Projection (context-shape): 1 role type + 1 functionality = 2
         assert_eq!(data_artefacts.len(), 6);
         assert_eq!(ctx_artefacts.len(), 5);
-        assert_eq!(proj_artefacts.len(), 1);
+        assert_eq!(proj_artefacts.len(), 2);
 
         // Verify the cascade chain: Account type → Account.deposit → sink role type → sink_deposit → transfer
         // This is the path that should go stale if Account's attributes change.
