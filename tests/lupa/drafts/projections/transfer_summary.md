@@ -4,14 +4,25 @@
 
 Given a transfer request, produces a confirmation-ready text summary for display in both the web UI and the chat agent's confirmation card.
 
-## Source
-- TransferRequest
+## Role Players
 
-## Queries
+- request: TransferRequest — provides the transfer details to be summarised
+
+## Role Methods
+
+### request
+- read_amount: provides the amount and currency to display
+- read_source: provides the source account label (account name for own-account transfers, account identifier otherwise)
+- read_destination: provides the destination details (account name for own-account transfers, recipient and account number for domestic, recipient and IBAN/BIC for international)
+- read_kind: provides which transfer category the request belongs to (own-account, domestic, or international)
+
+## Functionalities
+
 ### summary
 Returns a single text line describing the transfer: the amount with currency, the source account name, and the destination identifier. For own-account transfers, names both accounts. For domestic transfers, names the recipient and account number. For international transfers, names the recipient, IBAN, and BIC.
 
 ## Scenarios
+
 ### own-account transfer summary
 Given: a transfer request of type own-account, five hundred kroner from "Salary" to "Savings"
 When: summary is queried

@@ -4,17 +4,24 @@
 
 StringRenderer turns one board picture and a score into plain text. It is the canonical formatter for the visible game frame.
 
-## Source
+## Role Players
 
-- Board
+- board: Board — provides the cells the renderer reads symbols from
 
-## Queries
+## Props
 
-### new
-Stores the board as the source to query for on-screen symbols. No other collaborators are fetched.
+- score: the numeric score to display in the score line
+
+## Role Methods
+
+### board
+- read_dimensions: provides the row and column counts of the board picture
+- read_symbol_at: provides the symbol at a given row-and-column coordinate
+
+## Functionalities
 
 ### render
-Produces a complete text frame from the board and a given score.
+Produces a complete text frame from the board and the bound score.
 
 Iterates rows from top to bottom. Within each row, iterates columns from left to right, collecting the symbol at each coordinate. Each row is followed by a newline. After the last row, a score line in the format "Score: <score>" followed by a newline is included. Returns the complete text.
 

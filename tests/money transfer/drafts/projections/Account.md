@@ -4,14 +4,21 @@
 
 Account provides a read-only view of a single account's state on the ledger. It is constructed from an account identifier and the ledger, and exposes the account's balance, currency, and transaction history without allowing mutation.
 
-## Source
+## Role Players
 
-- Ledger, filtered by account identifier
+- ledger: Ledger — provides the entries the account view filters and aggregates
 
-## Queries
+## Props
 
-### new
-Creates an Account view for a given account identifier and ledger. At least one ledger entry for the account must exist; if none exists, an error is returned. All entries for the account must use the same currency.
+- account_id: the identifier of the account this view is bound to
+
+## Role Methods
+
+### ledger
+- find_entries_for_account: provides all entries where the bound account is either the source or the sink
+- determine_currency: provides the currency consistently used by all of the bound account's entries
+
+## Functionalities
 
 ### balance
 Returns the current balance as an Amount. The balance is the sum of all entries where the account is sink, minus the sum of all entries where the account is source.
@@ -29,13 +36,8 @@ Returns all ledger entries related to this account, sorted by timestamp in desce
 
 ### create an account view
 Given: a Ledger containing entries for account 123456
-When: new is called for account 123456
-Then: an Account projection is returned
-
-### reject account with no entries
-Given: a Ledger with no entries for account 999
-When: new is called for account 999
-Then: an error is returned
+When: an Account projection is constructed for account 123456
+Then: the projection is bound to account 123456 and ready to be queried
 
 ### compute balance from deposits and withdrawals
 Given: account 123456 has a 1000.00 DKK deposit (sink) and a 250.00 DKK withdrawal (source)

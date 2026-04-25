@@ -4,10 +4,17 @@
 
 Given a list of transactions and a filter, produces the filtered-and-sorted list for rendering. Pure function of inputs — the filter logic is deterministic; no context coordination.
 
-## Source
-- Transaction
+## Role Players
 
-## Queries
+- transactions: Transaction — provides the transactions the projection filters and sorts
+
+## Role Methods
+
+### transactions
+- read_all: provides the transactions to be filtered, sorted, and returned
+
+## Functionalities
+
 ### filtered
 Returns the transactions that match the given date range (start and end, both inclusive), sorted by booking date with newest first. Transactions outside the range are excluded. If no date range is provided, all transactions are returned.
 
@@ -18,6 +25,7 @@ Returns transactions whose counterparty name contains the given search text, cas
 Returns transactions whose amount falls within the given minimum and maximum bounds, inclusive.
 
 ## Scenarios
+
 ### filter by date range
 Given: ten transactions spanning the last thirty days
 When: filtered is queried with a range covering the last seven days
