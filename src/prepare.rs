@@ -639,6 +639,7 @@ fn prepare_data(data: &DataDraft, vocab: &DciVocabulary) -> Result<PreparedArtif
         artifact.operations.push(OperationSpec {
             name: op.name.clone(),
             description: op.description.clone(),
+            kind: op.kind.clone(),
         });
     }
 

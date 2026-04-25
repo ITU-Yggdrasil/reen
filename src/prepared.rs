@@ -184,6 +184,12 @@ pub struct AttributeSpec {
 pub struct OperationSpec {
     pub name: String,
     pub description: String,
+    /// Kind marker. `Some("with")` indicates a non-destructive mutation
+    /// operation — the scaffolder emits `with_<field>(self, value) -> Result<Self>`.
+    /// Authored in the draft as `(kind: with)` after the operation name.
+    /// Additive field; absent in legacy prepared YAML.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 // ── Projection types ──────────────────────────────────────────────

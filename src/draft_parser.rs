@@ -138,6 +138,9 @@ pub struct AttributeDraft {
 pub struct OperationDraft {
     pub name: String,
     pub description: String,
+    /// Kind marker — e.g. `Some("with")` for non-destructive mutation.
+    /// Parsed from `(kind: <value>)` parenthetical in the operation title/bullet.
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -529,19 +532,56 @@ fn parse_operation_subsections(sections: &[Section]) -> Vec<OperationDraft> {
         // Fall back to bullet items
         return parse_named_bullets(&section.body)
             .into_iter()
-            .map(|(name, desc)| OperationDraft {
-                name,
-                description: desc,
+            .map(|(name, desc)| {
+                let (clean_name, kind) = extract_kind_marker(&name);
+                OperationDraft {
+                    name: clean_name,
+                    description: desc,
+                    kind,
+                }
             })
             .collect();
     }
     subsections
         .into_iter()
-        .map(|sub| OperationDraft {
-            name: sub.title,
-            description: sub.body.trim().to_string(),
+        .map(|sub| {
+            let (clean_name, kind) = extract_kind_marker(&sub.title);
+            OperationDraft {
+                name: clean_name,
+                description: sub.body.trim().to_string(),
+                kind,
+            }
         })
         .collect()
+}
+
+/// Extract a `(kind: <value>)` parenthetical from an operation title or bullet name.
+///
+/// Returns the cleaned name (with the parenthetical stripped) and the extracted
+/// kind value if present. The marker is recognised as `(kind: <value>)` with
+/// optional whitespace; the parenthetical must appear at the end of the input.
+///
+/// Examples:
+/// - `"with_currency"` → (`"with_currency"`, `None`)
+/// - `"with_currency (kind: with)"` → (`"with_currency"`, `Some("with")`)
+/// - `"with_currency  ( kind: with )"` → (`"with_currency"`, `Some("with")`)
+fn extract_kind_marker(raw: &str) -> (String, Option<String>) {
+    let trimmed = raw.trim_end();
+    if !trimmed.ends_with(')') {
+        return (raw.trim().to_string(), None);
+    }
+    let Some(open_paren) = trimmed.rfind('(') else {
+        return (raw.trim().to_string(), None);
+    };
+    let inner = &trimmed[open_paren + 1..trimmed.len() - 1];
+    let Some(value) = inner.trim().strip_prefix("kind:").map(str::trim) else {
+        return (raw.trim().to_string(), None);
+    };
+    if value.is_empty() {
+        return (raw.trim().to_string(), None);
+    }
+    let prefix = trimmed[..open_paren].trim_end();
+    (prefix.to_string(), Some(value.to_string()))
 }
 
 // ── Projection parser ─────────────────────────────────────────────
@@ -1487,6 +1527,83 @@ Then: the result is 80
         assert_eq!(data.invariants, vec!["an Amount is never negative"]);
         assert_eq!(data.operations.len(), 1);
         assert_eq!(data.scenarios.len(), 1);
+    }
+
+    #[test]
+    fn extract_kind_marker_handles_present_and_absent() {
+        // Absent — name unchanged, kind None.
+        assert_eq!(
+            extract_kind_marker("with_currency"),
+            ("with_currency".to_string(), None)
+        );
+
+        // Standard form.
+        assert_eq!(
+            extract_kind_marker("with_currency (kind: with)"),
+            ("with_currency".to_string(), Some("with".to_string()))
+        );
+
+        // Whitespace tolerance inside the parenthetical.
+        assert_eq!(
+            extract_kind_marker("with_currency  ( kind:   with )"),
+            ("with_currency".to_string(), Some("with".to_string()))
+        );
+
+        // Trailing parenthetical without `kind:` prefix is not a marker.
+        assert_eq!(
+            extract_kind_marker("withdraw (deprecated)"),
+            ("withdraw (deprecated)".to_string(), None)
+        );
+
+        // Empty kind value is rejected.
+        assert_eq!(
+            extract_kind_marker("withdraw (kind:)"),
+            ("withdraw (kind:)".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn parse_data_draft_extracts_kind_with_marker() {
+        let content = r#"# Data: Money
+
+## Purpose
+A monetary amount.
+
+## Attributes
+- amount: the value in minor units
+- currency: the ISO code
+
+## Invariants
+- amount is never negative
+
+## Operations
+### with_currency (kind: with)
+Returns a new Money with the currency replaced.
+
+### normalise
+Adjusts the amount to standard form.
+
+## Scenarios
+### example
+Given: a Money of 100 DKK
+When: with_currency is called with EUR
+Then: a Money of 100 EUR
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/data/money.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+
+        let DraftDocument::Data(data) = doc else {
+            panic!("expected Data draft");
+        };
+        assert_eq!(data.operations.len(), 2);
+        assert_eq!(data.operations[0].name, "with_currency");
+        assert_eq!(data.operations[0].kind, Some("with".to_string()));
+        assert_eq!(data.operations[1].name, "normalise");
+        assert_eq!(data.operations[1].kind, None);
     }
 
     #[test]

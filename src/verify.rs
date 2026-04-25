@@ -1082,7 +1082,7 @@ impl MoneyTransfer {
             AttributeSpec { name: "value".into(), description: "cents".into() },
         ];
         a.operations = vec![
-            OperationSpec { name: "add".into(), description: "add".into() },
+            OperationSpec { name: "add".into(), description: "add".into(), kind: None },
         ];
 
         let source = r#"

@@ -904,7 +904,7 @@ mod tests {
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
         a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into() }];
-        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into() }];
+        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None }];
 
         let code = generate_rust(&a);
         assert!(code.contains("pub struct Amount"));
@@ -1129,7 +1129,7 @@ impl Amount {
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
         a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into() }];
-        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into() }];
+        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None }];
 
         let tracker = tracker_with_entries(&[
             ("data/amount/type", ArtefactState::Fresh),
@@ -1162,7 +1162,7 @@ impl Amount {
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
         a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into() }];
-        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into() }];
+        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None }];
 
         let tracker = tracker_with_entries(&[
             ("data/amount/type", ArtefactState::Stale),

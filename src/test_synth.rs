@@ -309,6 +309,7 @@ mod tests {
         artifact.operations.push(crate::prepared::OperationSpec {
             name: "add".to_string(),
             description: "Adds two amounts together.".to_string(),
+            kind: None,
         });
         let prose = collect_synthesisable_prose(&artifact);
         assert_eq!(prose.len(), 2);

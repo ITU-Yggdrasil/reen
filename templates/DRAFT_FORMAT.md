@@ -69,6 +69,18 @@ Then: <resulting value>
 - **Invariants** states "Two Amounts can only be combined when their currencies match." This is enforced in the addition and subtraction operations.
 - **Scenarios** use concrete numbers: "an Amount of 1050 in DKK" → "the result is 10.50." Five scenarios cover success paths, error paths, and edge cases.
 
+The Operations list is for **non-default** operations only — every Data type automatically gets a `new(...)` constructor and a getter per attribute, emitted by the scaffolder. Do not list them under Operations.
+
+For non-destructive mutation (returning a new instance with one field replaced), declare the operation with a `(kind: with)` marker in the title or bullet:
+
+```
+## Operations
+### with_currency (kind: with)
+Returns a new Money with the currency replaced.
+```
+
+The marker instructs the scaffolder to emit `pub fn with_currency(self, currency: ...) -> Result<Self>` whose body re-validates via `Self::new(...)`. Without `(kind: with)`, no `with_*` method is emitted.
+
 ## Projection (`drafts/projections/<name>.md`)
 
 ```

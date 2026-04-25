@@ -281,8 +281,8 @@ mod tests {
         ];
         a.invariants = vec!["balance >= 0".into()];
         a.operations = vec![
-            OperationSpec { name: "deposit".into(), description: "Add funds.".into() },
-            OperationSpec { name: "withdraw".into(), description: "Remove funds.".into() },
+            OperationSpec { name: "deposit".into(), description: "Add funds.".into(), kind: None },
+            OperationSpec { name: "withdraw".into(), description: "Remove funds.".into(), kind: None },
         ];
         a
     }
