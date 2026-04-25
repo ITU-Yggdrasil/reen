@@ -78,7 +78,7 @@ Emit your findings as a structured markdown list. Each finding must include ALL 
 ```
 ### Finding <N>
 
-- **kind**: <one of: role_method_responsibility_missing | functionality_divergent_flow | invariant_not_enforced | code_not_in_spec>
+- **kind**: <one of: role_method_responsibility_missing | functionality_divergent_flow | invariant_not_enforced | code_not_in_spec | context_could_be_projection>
 - **severity**: <low | medium | high>
 - **spec_citation**: <draft or YAML reference, e.g. "game_loop.md, Role Methods / snake / read_body">
 - **code_citation**: <file:line, e.g. "contexts/game_loop.rs:42">
@@ -120,3 +120,21 @@ For every Brand artefact with an emitted CSS module:
 - Scan for unfilled tokens (`--token-name: ;` or `--token-name: /* TODO */;`).
 - Flag per unfilled token with severity medium.
 - Also check token role faithfulness — e.g. "the brand declares `primary-action` as a call-to-action accent colour but the emitted value is pure grey, which undermines the role." Severity: low.
+
+### 7. Context-Could-Be-Projection
+
+For each context, examine whether any role method or functionality mutates a role player or any field marked as state:
+
+- Every functionality takes `&self` (not `&mut self`).
+- No role method body writes through a role player (no `self.<role_field>.<mutating_method>(...)`, no field assignment that overwrites a role-player's state).
+- No role method takes a role player as `&mut`.
+
+If all three hold — the context is observably read-only — flag it as a candidate projection. Severity: warning (medium).
+
+This is a soft warning, not a verdict. The user may have a deliberate reason to keep something as a context (anticipated future mutation, conceptual placement in DCI vocabulary). Phrase the finding as a question that surfaces the design choice. Note that the migration is mechanical: change the file location to `drafts/projections/`, change the `# Context: <Name>` heading to `# Projection: <Name>`, and confirm the role players are all data or projections (no contexts).
+
+Example wording:
+
+> The context `account_balance_summary` defines functionalities that all take `&self` and never mutate role players. Consider authoring it as a projection instead — projection drafts share the same six sections as contexts, so the migration is mechanical: move the file to `drafts/projections/`, change the `# Context:` heading to `# Projection:`, and confirm the role players are all data or projections.
+
+Use finding kind `context_could_be_projection`.
