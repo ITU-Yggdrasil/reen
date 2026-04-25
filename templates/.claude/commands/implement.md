@@ -25,3 +25,17 @@ Steps:
 8. Fix any verification or compilation errors before proceeding to the next method.
 9. Stop when the tracker shows no `stale` or `not_implemented` entries (or when all `todo!()` bodies are filled if no tracker exists).
 10. When all bodies are filled, run `cargo test` to confirm synthesised tests pass.
+
+## Kind-specific patterns
+
+The scaffolder emits kind-shaped stubs. Follow the pattern that matches the kind of the body you are filling.
+
+**Filling a Data type's `new()` constructor.** The body takes the declared field values, enforces every invariant from the prepared YAML's `invariants[]` list (returning `Err` with a specific message per failed invariant), and constructs `Self`. Do not do additional work — no logging, no audit emission, no side effects, just validate and construct. If an invariant cannot be expressed in the constructor (e.g. cross-instance uniqueness), state so explicitly with a `// invariant <name> delegated to <where>` comment naming the enforcement site, so verify and audit can recognise the delegation.
+
+**Filling a Data type's getter.** Mechanical — return `&self.<field>` for non-`Copy` types, `self.<field>` for `Copy` types. The scaffolder emits the body fully; only touch a getter if the user has manually deleted or modified it. Never add logic to a getter.
+
+**Filling a Data type's `with_*` operation.** Construct a new instance with the field replaced and re-validate via `Self::new(...)` so the same invariant logic applies. Never mutate `&mut self` — return a new `Self` by value, propagating the constructor's `Result`.
+
+**Filling a Projection's functionalities and role methods.** Identical to the context pattern in every respect except mutability. Functionalities take `&self`, walk their declared role methods, and return computed output. Role methods take the role player as `&` (never `&mut`) and return computed output without writing back. The projection itself is referentially transparent — given the same role-player state, the same functionality returns the same output. No logging, no audits, no mutation. If a projection's intended computation requires mutating its source data, the projection is wrong by design — author it as a context instead.
+
+**Filling a Context's functionality.** Unchanged from the existing guidance above. Compose role methods, mutate role-player state through them where needed, and return the computed result.
