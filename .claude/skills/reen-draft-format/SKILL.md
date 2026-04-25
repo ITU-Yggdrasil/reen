@@ -30,9 +30,13 @@ Six draft kinds, each with a fixed section structure. No types, no signatures, n
 ## Purpose          — one paragraph
 ## Attributes       — bullet list: `- <name>: <description>`
 ## Invariants       — bullet list of prose invariants
-## Operations       — ### subsections with prose descriptions
+## Operations       — ### subsections with prose descriptions (non-default operations only)
 ## Scenarios        — ### subsections with Given:/When:/Then:
 ```
+
+The Operations list is for **non-default** operations only. Every Data type automatically gets a `new(...)` constructor (which enforces the declared Invariants) and a getter per Attribute — these are emitted by the scaffolder and MUST NOT be authored under Operations. List Operations only for behaviours beyond construction and field access.
+
+For non-destructive mutation (returning a new instance with one field replaced), author the operation under **## Operations** with `kind: with` — for example `kind: with` on an operation named `with_currency` instructs the scaffolder to emit `pub fn with_currency(self, currency: ...) -> Result<Self>`. Without the `kind: with` marker, no `with_*` method is emitted.
 
 ## Projection Draft (`drafts/projections/<name>.md`)
 
