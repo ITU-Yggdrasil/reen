@@ -443,27 +443,60 @@ fn generate_data(a: &PreparedArtifact) -> String {
     let name = &a.export.name;
     let mut out = String::new();
 
-    // Struct
+    // Struct — every field private. The kind contract reserves access to the
+    // generated getters; direct field access is a verify violation.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for attr in &a.attributes {
-        writeln!(out, "    pub {}: (), // {}", to_snake_case(&attr.name), attr.description).unwrap();
+        writeln!(out, "    {}: (), // {}", to_snake_case(&attr.name), attr.description).unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // Impl with operations
-    if !a.operations.is_empty() {
-        writeln!(out, "impl {} {{", name).unwrap();
-        for op in &a.operations {
+    writeln!(out, "impl {} {{", name).unwrap();
+
+    // Mandatory new() constructor — body filled by /implement to enforce
+    // every declared invariant and construct Self.
+    let new_params: Vec<String> = a.attributes.iter()
+        .map(|attr| format!("{}: ()", to_snake_case(&attr.name)))
+        .collect();
+    writeln!(out, "    /// Construct a new {}, validating every invariant from the prepared YAML.", name).unwrap();
+    writeln!(out, "    pub fn new({}) -> anyhow::Result<Self> {{", new_params.join(", ")).unwrap();
+    writeln!(out, "        todo!(\"enforce invariants and construct\")").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Getters — one per declared attribute. Bodies are deterministic and
+    // emitted fully; /implement does not touch them.
+    for attr in &a.attributes {
+        let field = to_snake_case(&attr.name);
+        writeln!(out, "    /// {}", attr.description.lines().next().unwrap_or("")).unwrap();
+        writeln!(out, "    pub fn {}(&self) -> &() {{", field).unwrap();
+        writeln!(out, "        &self.{}", field).unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Operations — split between non-destructive mutators (kind: with) and
+    // ordinary read-only operations.
+    for op in &a.operations {
+        let op_name = to_snake_case(&op.name);
+        if op.kind.as_deref() == Some("with") {
+            // with_* signature: by-value self, returns Result<Self>.
             writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
-            writeln!(out, "    pub fn {}(&self) {{", to_snake_case(&op.name)).unwrap();
+            writeln!(out, "    pub fn {}(self, value: ()) -> anyhow::Result<Self> {{", op_name).unwrap();
+            writeln!(out, "        todo!(\"construct via Self::new with the field replaced\")").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        } else {
+            writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
+            writeln!(out, "    pub fn {}(&self) {{", op_name).unwrap();
             writeln!(out, "        todo!()").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
         }
-        writeln!(out, "}}").unwrap();
     }
 
+    writeln!(out, "}}").unwrap();
     out
 }
 
@@ -645,22 +678,62 @@ fn generate_data_surgical(
     let name = &a.export.name;
     let mut out = String::new();
 
-    // Struct — regenerated wholesale
+    // Struct — regenerated wholesale, fields private.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for attr in &a.attributes {
-        writeln!(out, "    pub {}: (), // {}", to_snake_case(&attr.name), attr.description).unwrap();
+        writeln!(out, "    {}: (), // {}", to_snake_case(&attr.name), attr.description).unwrap();
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // Impl
-    if !a.operations.is_empty() {
-        writeln!(out, "impl {} {{", name).unwrap();
-        for op in &a.operations {
-            let key = ArtefactKey::data_operation(name, &op.name);
-            let method_name = to_snake_case(&op.name);
-            let body = resolve_body(&key, &method_name, tracker, preserved);
+    writeln!(out, "impl {} {{", name).unwrap();
 
+    // Constructor.
+    let new_params: Vec<String> = a.attributes.iter()
+        .map(|attr| format!("{}: ()", to_snake_case(&attr.name)))
+        .collect();
+    let constructor_key = ArtefactKey::data_constructor(name);
+    let constructor_body = resolve_body(&constructor_key, "new", tracker, preserved);
+    writeln!(out, "    /// Construct a new {}, validating every invariant from the prepared YAML.", name).unwrap();
+    writeln!(out, "    pub fn new({}) -> anyhow::Result<Self> {{", new_params.join(", ")).unwrap();
+    if constructor_body.trim() == "todo!()" || constructor_body.is_empty() {
+        writeln!(out, "        todo!(\"enforce invariants and construct\")").unwrap();
+    } else {
+        write!(out, "{}", constructor_body).unwrap();
+    }
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Getters — deterministic bodies. The tracker carries an entry per getter
+    // so any change to the underlying attribute set surfaces; the body itself
+    // is not derived from the preserved source.
+    for attr in &a.attributes {
+        let field = to_snake_case(&attr.name);
+        writeln!(out, "    /// {}", attr.description.lines().next().unwrap_or("")).unwrap();
+        writeln!(out, "    pub fn {}(&self) -> &() {{", field).unwrap();
+        writeln!(out, "        &self.{}", field).unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Operations — with_* (kind: with) emit by-value self returning Result<Self>;
+    // others emit pub fn (&self).
+    for op in &a.operations {
+        let key = ArtefactKey::data_operation(name, &op.name);
+        let method_name = to_snake_case(&op.name);
+        let body = resolve_body(&key, &method_name, tracker, preserved);
+
+        if op.kind.as_deref() == Some("with") {
+            writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
+            writeln!(out, "    pub fn {}(self, value: ()) -> anyhow::Result<Self> {{", method_name).unwrap();
+            if body.trim() == "todo!()" || body.is_empty() {
+                writeln!(out, "        todo!(\"construct via Self::new with the field replaced\")").unwrap();
+            } else {
+                write!(out, "{}", body).unwrap();
+            }
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        } else {
             writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
             let receiver = detect_receiver(&method_name, preserved);
             writeln!(out, "    pub fn {}({}) {{", method_name, receiver).unwrap();
@@ -668,9 +741,9 @@ fn generate_data_surgical(
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
         }
-        writeln!(out, "}}").unwrap();
     }
 
+    writeln!(out, "}}").unwrap();
     out
 }
 
@@ -984,17 +1057,60 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_data_has_attributes_and_operations() {
+    fn scaffold_data_emits_private_fields_constructor_and_getters() {
+        // Kind discipline: Data fields are private; new() and per-attribute
+        // getters are auto-emitted; non-default operations become pub fn.
         let mut a = PreparedArtifact::new(
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
-        a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into() }];
+        a.attributes = vec![
+            AttributeSpec { name: "value".into(), description: "cents".into() },
+            AttributeSpec { name: "currency".into(), description: "ISO 4217 code".into() },
+        ];
         a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None }];
 
         let code = generate_rust(&a);
         assert!(code.contains("pub struct Amount"));
-        assert!(code.contains("pub value: ()"));
-        assert!(code.contains("pub fn add("));
+        // Fields are private — no `pub` keyword on field declarations.
+        assert!(code.contains("    value: (),"));
+        assert!(code.contains("    currency: (),"));
+        assert!(!code.contains("pub value:"));
+        assert!(!code.contains("pub currency:"));
+        // Constructor.
+        assert!(code.contains("pub fn new(value: (), currency: ()) -> anyhow::Result<Self>"));
+        // Getters.
+        assert!(code.contains("pub fn value(&self) -> &()"));
+        assert!(code.contains("pub fn currency(&self) -> &()"));
+        // Non-default operation.
+        assert!(code.contains("pub fn add(&self)"));
+    }
+
+    #[test]
+    fn scaffold_data_emits_with_only_when_kind_marker_present() {
+        // An Operation with kind: with produces a by-value `pub fn with_*`
+        // returning Result<Self>. Without the marker, no with_* is emitted.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data, "data/Money.md".into(), "Money".into(), "Money".into(),
+        );
+        a.attributes = vec![AttributeSpec { name: "currency".into(), description: "ISO 4217 code".into() }];
+        a.operations = vec![
+            OperationSpec {
+                name: "with_currency".into(),
+                description: "Return a new Money with the currency replaced.".into(),
+                kind: Some("with".into()),
+            },
+        ];
+
+        let code = generate_rust(&a);
+        assert!(code.contains("pub fn with_currency(self, value: ()) -> anyhow::Result<Self>"));
+
+        // Same operation without the marker: it just renders as a regular
+        // pub fn (&self) — no with_* signature.
+        let mut b = a.clone();
+        b.operations[0].kind = None;
+        let code_b = generate_rust(&b);
+        assert!(!code_b.contains("with_currency(self, value:"));
+        assert!(code_b.contains("pub fn with_currency(&self)"));
     }
 
     #[test]
