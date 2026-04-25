@@ -77,6 +77,8 @@ pub fn verify_file_with_kind(
         .map_err(|e| anyhow::anyhow!("Failed to parse Rust source: {}", e))?;
     let kind_findings = crate::verify_kind::check(&file, artifact, kind_index);
     result.discrepancies.extend(kind_findings);
+    let drift_findings = crate::verify_drift::check(&file, artifact);
+    result.discrepancies.extend(drift_findings);
     Ok(result)
 }
 
