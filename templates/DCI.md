@@ -31,6 +31,33 @@ A context has:
 - **Functionalities** — named use cases that compose role methods
 - **Scenarios** — concrete Given/When/Then enactments
 
+## Artefact-kind hard rules
+
+The three artefact kinds are not naming conventions. Each kind carries a structural contract that the Reen pipeline enforces at scaffold and verify time. Drafts and emitted code MUST conform to the rules below. The structural rules (field visibility, constructor presence, getter presence, field-type containment) are enforced by `reen verify` as hard gates. The inverse Context rule is enforced by `/audit` as a warning.
+
+### Data
+
+- **Immutability.** A Data type MUST be immutable. Once constructed, its attribute values do not change.
+- **Private fields.** All struct fields of a Data type MUST be private. They are accessed only through generated getters.
+- **Constructor.** Every Data type MUST have a `new(...)` constructor that takes the field values, enforces every invariant declared in the prepared YAML, and returns `Err` on any invariant violation. The scaffolder emits the signature; `/implement` fills the invariant-enforcement body.
+- **Getters.** Every declared attribute MUST have a getter method named exactly after the attribute. Getters are auto-emitted by the scaffolder with deterministic bodies; the BA does not author them and `/implement` does not fill them.
+- **Non-destructive mutation.** A Data type MAY expose `with_<field>(self, value) -> Result<Self>` operations that return a new instance with one field replaced. These MUST NOT be auto-emitted — they are emitted only when the draft's Operations list declares an Operation marked `kind: with`. The body re-validates via `Self::new(...)` so the same invariants apply.
+- **Field types.** Every non-primitive field of a Data type MUST reference another Data type. Data MUST NOT have fields whose types are Projections or Contexts.
+
+### Projection
+
+- **Immutability.** A Projection MUST be immutable. Queries observe; they never mutate.
+- **Private fields.** All struct fields of a Projection MUST be private.
+- **Private role methods.** Role methods on a Projection (the per-source-data "how" of a query) MUST be private. They are implementation detail.
+- **Public surface = Queries.** Only methods declared under `## Queries` in the prepared YAML MAY be public. Any other public method on a Projection is a violation.
+- **Field types.** Every non-primitive field of a Projection MUST reference a Data or Projection type. Projections MUST NOT have fields whose types are Contexts.
+
+### Context
+
+- **Mutability.** A Context is the only kind that MAY mutate state. Functionalities default to `&self`; they upgrade to `&mut self` when the prepared YAML signals mutation.
+- **Field types.** A Context MAY reference Data, Projection, or other Context types as fields.
+- **Inverse rule (soft).** A Context whose functionalities all take `&self` and whose role methods never mutate role-player state SHOULD probably be a Projection. This is a design judgement, not a hard rule — the auditor flags it as a warning, the BA decides.
+
 ## Roles vs Role Players
 
 This is the most important DCI distinction.
