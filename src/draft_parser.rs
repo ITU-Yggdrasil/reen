@@ -1206,14 +1206,24 @@ pub fn parse_boundary_draft(api_name: &str, content: &str) -> Result<BoundaryDra
         }
     };
 
-    // Operations whitelist — may be called "Operations" or "Consumed Surface"
-    let ops_section = find_section(&sections, "Operations")
-        .or_else(|| find_section(&sections, "Consumed Surface"));
-    let operations_whitelist = if let Some(s) = ops_section {
-        parse_boundary_operations(&s.body)
-    } else {
-        Vec::new()
-    };
+    // Operations whitelist. The new (Phase A) shape carries it inside a
+    // fenced YAML block under `## Configuration`:
+    //
+    //     ```yaml
+    //     include_operations:
+    //       - GetAccounts
+    //     ```
+    //
+    // The legacy shape carried it as a bullet list under `## Operations`
+    // or `## Consumed Surface`. Both are accepted; the fenced block wins
+    // when both are present.
+    let operations_whitelist = parse_boundary_config_yaml(&sections)
+        .or_else(|| {
+            find_section(&sections, "Operations")
+                .or_else(|| find_section(&sections, "Consumed Surface"))
+                .map(|s| parse_boundary_operations(&s.body))
+        })
+        .unwrap_or_default();
 
     let notes = find_section(&sections, "Notes")
         .map(|s| bullet_lines(Some(&s.body)))
@@ -1265,6 +1275,48 @@ fn strip_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+/// Parse the fenced YAML config block under `## Configuration` (Phase A
+/// boundary-draft shape). Looks for a fenced block tagged ```` ```yaml ```` (or
+/// bare ```` ``` ````) and returns the `include_operations` list when present.
+///
+/// Returns `None` (not `Some(empty)`) when no Configuration section
+/// exists or no fenced YAML block is found inside it — that lets the
+/// caller fall back to the legacy `## Operations` / `## Consumed Surface`
+/// path.
+fn parse_boundary_config_yaml(sections: &[Section]) -> Option<Vec<String>> {
+    let section = find_section(sections, "Configuration")?;
+    let body = &section.body;
+    // Find the first fenced block. Accept ```yaml or ``` (the latter is
+    // YAML by convention here).
+    let body_lines: Vec<&str> = body.lines().collect();
+    let mut start: Option<usize> = None;
+    for (i, line) in body_lines.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("```") {
+            start = Some(i + 1);
+            break;
+        }
+    }
+    let start = start?;
+    let mut end: Option<usize> = None;
+    for (i, line) in body_lines[start..].iter().enumerate() {
+        if line.trim_start().starts_with("```") {
+            end = Some(start + i);
+            break;
+        }
+    }
+    let end = end?;
+    let yaml_body = body_lines[start..end].join("\n");
+
+    #[derive(serde::Deserialize)]
+    struct Config {
+        #[serde(default)]
+        include_operations: Vec<String>,
+    }
+    let config: Config = serde_yaml::from_str(&yaml_body).ok()?;
+    Some(config.include_operations)
 }
 
 fn parse_boundary_operations(body: &str) -> Vec<String> {
@@ -1920,6 +1972,86 @@ Vessel tracking.
             draft.operations_whitelist,
             vec!["PositionReport", "StandardClassBPositionReport"]
         );
+    }
+
+    #[test]
+    fn parse_boundary_draft_with_fenced_yaml_config() {
+        // Phase A boundary-draft shape: include_operations lives inside a
+        // fenced YAML block under `## Configuration`, not in a bullet
+        // list under `## Operations`.
+        let content = r#"# Nordea Open Banking
+
+## Purpose
+Lupa's banking surface.
+
+## Source
+- OpenAPI: ./nordea.yaml
+
+## Configuration
+
+```yaml
+include_operations:
+  - GetAccounts
+  - GetTransactions
+  - InitiateDomesticPayment
+```
+
+## Notes
+- OAuth bearer token required.
+"#;
+        let draft = parse_boundary_draft("nordea", content).unwrap();
+        assert_eq!(
+            draft.operations_whitelist,
+            vec!["GetAccounts", "GetTransactions", "InitiateDomesticPayment"],
+        );
+        // Notes section still parsed.
+        assert_eq!(draft.notes.len(), 1);
+    }
+
+    #[test]
+    fn parse_boundary_draft_fenced_yaml_wins_over_legacy_section() {
+        // When both shapes are present (mid-migration), the fenced YAML
+        // takes precedence — that's the canonical Phase A shape and lets
+        // a draft author migrate at their own pace.
+        let content = r#"# Mixed
+
+## Purpose
+Migration in progress.
+
+## Source
+- OpenAPI: ./api.yaml
+
+## Configuration
+
+```yaml
+include_operations:
+  - NewOnly
+```
+
+## Operations
+- LegacyOnly: a leftover bullet
+"#;
+        let draft = parse_boundary_draft("mixed", content).unwrap();
+        assert_eq!(draft.operations_whitelist, vec!["NewOnly"]);
+    }
+
+    #[test]
+    fn parse_boundary_draft_no_config_section_falls_back_to_legacy() {
+        // No Configuration section → behave exactly as before this PR.
+        let content = r#"# Legacy
+
+## Purpose
+Pre-Phase-A draft.
+
+## Source
+- OpenAPI Local: ./api.yaml
+
+## Operations
+- A
+- B
+"#;
+        let draft = parse_boundary_draft("legacy", content).unwrap();
+        assert_eq!(draft.operations_whitelist, vec!["A", "B"]);
     }
 
     #[test]
