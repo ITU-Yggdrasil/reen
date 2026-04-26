@@ -5,10 +5,10 @@
 
 use crate::build_tracker::{ArtefactState, BuildTracker};
 use crate::build_tracker::keys::ArtefactKey;
-use crate::prepared::{ArtifactKind, PreparedArtifact};
+use crate::prepared::{ArtifactKind, PreparedArtifact, RolePlayerSpec};
 use crate::workspace::{GENERATED_MANIFEST, Workspace};
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::PathBuf;
@@ -388,6 +388,11 @@ fn generate_context(a: &PreparedArtifact) -> String {
     let name = &a.export.name;
     let mut out = String::new();
 
+    // Imports for any role players whose data type is a referencable
+    // crate-local type. Without these the generated file does not compile —
+    // role-method parameters and struct fields name the type unqualified.
+    emit_data_type_imports(&mut out, &a.role_players);
+
     // Struct
     writeln!(out, "pub struct {} {{", name).unwrap();
     for rp in &a.role_players {
@@ -510,6 +515,9 @@ fn generate_projection(a: &PreparedArtifact) -> String {
     let name = &a.export.name;
     let mut out = String::new();
 
+    // Imports for role-player data types — same reason as contexts.
+    emit_data_type_imports(&mut out, &a.role_players);
+
     // Struct — private fields, one per role player and prop.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for rp in &a.role_players {
@@ -608,6 +616,8 @@ fn generate_context_surgical(
 ) -> String {
     let name = &a.export.name;
     let mut out = String::new();
+
+    emit_data_type_imports(&mut out, &a.role_players);
 
     // Struct — regenerated wholesale
     writeln!(out, "pub struct {} {{", name).unwrap();
@@ -757,6 +767,8 @@ fn generate_projection_surgical(
     // their existing implementation and stale entries reset to todo!().
     let name = &a.export.name;
     let mut out = String::new();
+
+    emit_data_type_imports(&mut out, &a.role_players);
 
     // Struct — regenerated wholesale, private fields.
     writeln!(out, "pub struct {} {{", name).unwrap();
@@ -952,6 +964,69 @@ fn extract_method_bodies(source: &str) -> BTreeMap<String, String> {
 
 // ── Helpers ───────────────────────────────────────────────────────
 
+/// Emit `use crate::data::<snake>::<T>;` lines for every unique referencable
+/// data type appearing as a role player. Sorted alphabetically by type name.
+/// Emits a trailing blank line if any imports were produced.
+fn emit_data_type_imports(out: &mut String, role_players: &[RolePlayerSpec]) {
+    let mut types: BTreeSet<String> = BTreeSet::new();
+    for rp in role_players {
+        let ty = sanitize_rust_type(&rp.data_type);
+        if !is_referencable_data_type(ty) {
+            continue;
+        }
+        types.insert(ty.to_string());
+    }
+    if types.is_empty() {
+        return;
+    }
+    for ty in &types {
+        writeln!(out, "use crate::data::{}::{};", to_snake_case(ty), ty).unwrap();
+    }
+    writeln!(out).unwrap();
+}
+
+/// True iff `ty` is a bare PascalCase type that should be imported from
+/// `crate::data::<snake>`. Unit, primitives, qualified paths, and generic
+/// shapes are filtered out.
+fn is_referencable_data_type(ty: &str) -> bool {
+    if ty.is_empty() || ty == "()" {
+        return false;
+    }
+    if ty.contains("::") || ty.contains('<') || ty.contains('>') || ty.contains('(') || ty.contains(')') {
+        return false;
+    }
+    if is_rust_primitive(ty) {
+        return false;
+    }
+    // Must start with an ASCII uppercase letter — anything else is not a
+    // PascalCase data-type identifier we want to import.
+    ty.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+}
+
+fn is_rust_primitive(ty: &str) -> bool {
+    matches!(
+        ty,
+        "bool"
+            | "char"
+            | "str"
+            | "String"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    )
+}
+
 fn role_player_type<'a>(artifact: &'a PreparedArtifact, role_name: &str) -> &'a str {
     artifact
         .role_players
@@ -1041,6 +1116,120 @@ mod tests {
             },
         ];
         a
+    }
+
+    #[test]
+    fn scaffold_context_emits_use_statements_for_role_player_types() {
+        // Bug 3 regression: contexts reference role-player types directly in
+        // struct fields and role-method parameters. Without a use statement
+        // per unique data type, the generated file does not compile.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Context,
+            "contexts/transfer.md".into(),
+            "Transfer".into(),
+            "Transfer".into(),
+        );
+        a.role_players = vec![
+            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw".into() },
+            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit".into() },
+            RolePlayerSpec { name: "amount".into(), data_type: "Money".into(), responsibility: "the amount".into() },
+        ];
+
+        let code = generate_rust(&a);
+        assert!(
+            code.contains("use crate::data::account::Account;"),
+            "expected use statement for Account, got:\n{}", code,
+        );
+        assert!(
+            code.contains("use crate::data::money::Money;"),
+            "expected use statement for Money, got:\n{}", code,
+        );
+        // Account appears exactly once even though two role players share it.
+        assert_eq!(
+            code.matches("use crate::data::account::Account;").count(),
+            1,
+            "Account import is deduped, got:\n{}", code,
+        );
+        // Imports appear before the struct.
+        let imports_pos = code.find("use crate::data::account::Account;").unwrap();
+        let struct_pos = code.find("pub struct Transfer").unwrap();
+        assert!(imports_pos < struct_pos, "imports before struct, got:\n{}", code);
+        // Alphabetical order: account < money.
+        let acc_pos = code.find("use crate::data::account::Account;").unwrap();
+        let money_pos = code.find("use crate::data::money::Money;").unwrap();
+        assert!(acc_pos < money_pos, "imports sorted alphabetically, got:\n{}", code);
+    }
+
+    #[test]
+    fn scaffold_projection_emits_use_statements_for_role_player_types() {
+        // Bug 3 regression for projections.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Projection,
+            "projections/transaction_list.md".into(),
+            "TransactionList".into(),
+            "TransactionList".into(),
+        );
+        a.role_players = vec![
+            RolePlayerSpec {
+                name: "transactions".into(),
+                data_type: "Transaction".into(),
+                responsibility: "the transactions".into(),
+            },
+        ];
+        let code = generate_rust(&a);
+        assert!(
+            code.contains("use crate::data::transaction::Transaction;"),
+            "expected use for Transaction, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn scaffold_skips_use_for_prose_role_player_types() {
+        // Prose role players sanitise to () and must not produce a use
+        // statement (would emit `use crate::data::::();`).
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Context,
+            "contexts/game.md".into(),
+            "Game".into(),
+            "Game".into(),
+        );
+        a.role_players = vec![
+            RolePlayerSpec {
+                name: "rng".into(),
+                data_type: "a random number generator".into(),
+                responsibility: "rng".into(),
+            },
+        ];
+        let code = generate_rust(&a);
+        assert!(
+            !code.contains("use crate::data::"),
+            "no use for unit type, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn scaffold_skips_use_for_rust_primitives() {
+        // Primitive types (String, bool, …) live in the prelude or std; they
+        // must not be imported from crate::data.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Context,
+            "contexts/echo.md".into(),
+            "Echo".into(),
+            "Echo".into(),
+        );
+        a.role_players = vec![
+            RolePlayerSpec { name: "label".into(), data_type: "String".into(), responsibility: "label".into() },
+            RolePlayerSpec { name: "active".into(), data_type: "bool".into(), responsibility: "flag".into() },
+        ];
+        let code = generate_rust(&a);
+        assert!(
+            !code.contains("use crate::data::string"),
+            "primitives must not be imported from crate::data, got:\n{}", code,
+        );
+        assert!(
+            !code.contains("use crate::data::bool"),
+            "primitives must not be imported from crate::data, got:\n{}", code,
+        );
     }
 
     #[test]
