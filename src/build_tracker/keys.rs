@@ -4,13 +4,335 @@
 //! the scaffold (AST matching from generated Rust). Keys are derivable from
 //! both directions.
 //!
-//! Examples:
+//! # Tracker entry kinds — state table
+//!
+//! Every entry tracked in `.reen/build.json` is keyed by an
+//! [`ArtefactKey`] variant, classified by an [`ArtefactEntryKind`] tag,
+//! and carries a state ([`ArtefactState`](super::ArtefactState):
+//! `fresh` | `stale` | `not_implemented`). When the prepared YAML
+//! changes, `reen prepare` recomputes a kind-specific *fragment hash*
+//! from the prepared YAML; any hash change marks the entry stale and
+//! cascades through the dependency graph (entries with this entry in
+//! their `upstream` list). `reen scaffold` resets stale method bodies
+//! to `todo!()` (and, for tracker-backed types, resets stale fields to
+//! `()`). `/implement` flips stale to fresh by writing real content.
+//! `/audit` can flip fresh back to stale with a finding attached.
+//!
+//! Each kind below is documented with five sub-headings:
+//!
+//! - **Path:** the canonical key string stored in `build.json`.
+//! - **Tracks:** what concrete piece of generated source the entry
+//!   corresponds to.
+//! - **Fragment:** the prepared-YAML fields that go into the hash; any
+//!   change here marks the entry stale.
+//! - **State semantics:** how `fresh` / `stale` / `not_implemented`
+//!   should be interpreted for this kind.
+//! - **Consumed by:** which codegen / verify / audit paths read the
+//!   entry.
+//!
+//! ## DCI kinds (data, context, projection)
+//!
+//! ### `Functionality { context, name }`
+//!
+//! - **Path:** `contexts/<context>/functionality/<name>`
+//! - **Tracks:** the body of `pub fn <name>(&[mut] self, …)` in a
+//!   context's emitted `impl` block.
+//! - **Fragment:** context name, functionality name, prose
+//!   description, and the `role_method_refs` slice (canonical role
+//!   method names referenced by this functionality).
+//! - **State semantics:** `fresh` once `/implement` writes a body that
+//!   passes verify; `stale` after a draft edit cascades through;
+//!   `not_implemented` on initial scaffold.
+//! - **Consumed by:** `generate_context_surgical` (`src/codegen.rs`)
+//!   to decide whether to preserve the existing body across
+//!   re-scaffolds; `verify::flip_fresh_for_passing_methods`
+//!   (`src/verify.rs`); `audit_persist::keys_for_finding`
+//!   (`src/audit_persist.rs`).
+//!
+//! ### `RoleMethod { context, role, method }`
+//!
+//! - **Path:** `contexts/<context>/role/<role>/<method>`
+//! - **Tracks:** the body of `fn <role>_<method>(&self, <role>: &T)`
+//!   in a context's `impl` block.
+//! - **Fragment:** context name, role, method name, canonical name
+//!   (`<role>_<method>`), the role-method citation, and the optional
+//!   `signature_hint`.
+//! - **State semantics:** same lifecycle as `Functionality`.
+//! - **Consumed by:** `generate_context_surgical`, `verify`,
+//!   `audit_persist`, and `audit::collect_keys_for_finding`
+//!   (`src/audit.rs`).
+//!
+//! ### `RoleType { context, role }`
+//!
+//! - **Path:** `contexts/<context>/role/<role>/type`
+//! - **Tracks:** the role-player struct field declaration plus the
+//!   role-type's class within the context (the type a role player is
+//!   bound to).
+//! - **Fragment:** context name, role, the data-type the role binds
+//!   to, and the role's responsibility prose.
+//! - **State semantics:** `fresh` once the field type is in place;
+//!   stale when the role player is renamed, retyped, or its
+//!   responsibility prose changes — cascades to every role method on
+//!   that role.
+//! - **Consumed by:** the cascade graph in
+//!   `BuildTracker::cascade_stale` (every role method depends on its
+//!   role type).
+//!
+//! ### `DataOperation { data, name }`
+//!
+//! - **Path:** `data/<data>/operation/<name>`
+//! - **Tracks:** the body of `pub fn <name>(&self, …)` in a Data
+//!   type's `impl` block.
+//! - **Fragment:** data name, operation name, prose description.
+//! - **State semantics:** `fresh` once `/implement` fills the body;
+//!   `stale` after a description edit; `not_implemented` initially.
+//! - **Consumed by:** `generate_data_surgical` (`src/codegen.rs`),
+//!   `verify`, `audit_persist`.
+//!
+//! ### `DataConstructor { data }`
+//!
+//! - **Path:** `data/<data>/constructor`
+//! - **Tracks:** the body of the mandatory
+//!   `pub fn new(...) -> anyhow::Result<Self>` constructor.
+//! - **Fragment:** data name, the literal `"new"`, the attribute
+//!   names, and the invariant prose. Editing any attribute or
+//!   invariant marks the constructor stale (the body's invariant
+//!   enforcement may need to change).
+//! - **State semantics:** `fresh` once the constructor enforces every
+//!   invariant; `stale` after attribute or invariant edits.
+//! - **Consumed by:** `generate_data_surgical`, `audit_persist`.
+//!
+//! ### `DataGetter { data, field }`
+//!
+//! - **Path:** `data/<data>/getter/<field>`
+//! - **Tracks:** the deterministic
+//!   `pub fn <field>(&self) -> &T` getter per declared attribute.
+//! - **Fragment:** data name, attribute name, attribute description.
+//! - **State semantics:** getters are emitted fully by the
+//!   scaffolder, so `fresh` is the steady state; renaming or removing
+//!   the attribute marks the getter stale and the next scaffold drops
+//!   it. `/implement` rarely touches getter bodies.
+//! - **Consumed by:** `generate_data_surgical`; `audit_persist`
+//!   pairs getter and operation lookup.
+//!
+//! ### `DataType { data }`
+//!
+//! - **Path:** `data/<data>/type`
+//! - **Tracks:** the `pub struct <Data> { … }` declaration itself.
+//! - **Fragment:** data name, attribute-name list, invariant list.
+//! - **State semantics:** stale on attribute add/remove/rename or
+//!   invariant edit; cascades to every constructor, getter, operation,
+//!   and per-attribute type entry on this data type.
+//! - **Consumed by:** the cascade graph (every other Data-kind entry
+//!   has this in its `upstream`); `audit_persist::keys_for_finding`.
+//!
+//! ### `DataAttributeType { data, attribute }`
+//!
+//! - **Path:** `data/<data>/attribute/<attribute>`
+//! - **Tracks:** the Rust type chosen by `/implement` for the
+//!   attribute's struct field. The actual type fragment lives in the
+//!   scaffolded source; the entry only records whether the choice is
+//!   still valid.
+//! - **Fragment:** data name, attribute name, attribute description,
+//!   multiplicity (`single` | `list`). A description edit or
+//!   single↔list flip invalidates the chosen type.
+//! - **State semantics:** `fresh` after `/implement` writes a real
+//!   type and verify passes; `stale` reverts the field to `()` plus
+//!   a TODO comment on the next scaffold; `not_implemented` is the
+//!   initial state.
+//! - **Consumed by:** `attribute_types_from_tracker_and_source`
+//!   (`src/codegen.rs`) — preserves the previously-chosen type only
+//!   when the entry is `fresh`.
+//!
+//! ### `DataVariantAttributeType { data, variant, attribute }`
+//!
+//! - **Path:** `data/<data>/variant/<variant>/attribute/<attribute>`
+//! - **Tracks:** the Rust type chosen by `/implement` for one
+//!   per-variant attribute inside `<Data>Payload`. Variant analogue
+//!   of `DataAttributeType`.
+//! - **Fragment:** data name, variant name, attribute name,
+//!   description, multiplicity. Renaming the variant invalidates the
+//!   type choice (the key changes), as does any description /
+//!   multiplicity edit.
+//! - **State semantics:** identical lifecycle to `DataAttributeType`.
+//! - **Consumed by:**
+//!   `variant_attribute_types_from_tracker_and_source`
+//!   (`src/codegen.rs`).
+//!
+//! ### `ProjectionFunctionality { projection, name }`
+//!
+//! - **Path:** `projections/<projection>/functionality/<name>`
+//! - **Tracks:** the body of `pub fn <name>(&self, …)` in a
+//!   projection's `impl` block (queries are projection
+//!   functionalities).
+//! - **Fragment:** projection name, functionality name, description,
+//!   `role_method_refs` slice.
+//! - **State semantics:** same lifecycle as `Functionality`; verify
+//!   additionally enforces `&self` (no `&mut self`).
+//! - **Consumed by:** `generate_projection_surgical`, `verify`,
+//!   `audit_persist`.
+//!
+//! ### `ProjectionRoleMethod { projection, role, method }`
+//!
+//! - **Path:** `projections/<projection>/role/<role>/<method>`
+//! - **Tracks:** the body of a projection's private role method.
+//! - **Fragment:** projection name, role, method name, canonical
+//!   name, citation, optional signature hint.
+//! - **State semantics:** same lifecycle as `RoleMethod`.
+//! - **Consumed by:** `generate_projection_surgical`, `verify`,
+//!   `audit_persist`.
+//!
+//! ### `ProjectionRoleType { projection, role }`
+//!
+//! - **Path:** `projections/<projection>/role/<role>/type`
+//! - **Tracks:** the projection's role-player field declaration.
+//! - **Fragment:** projection name, role, data type, responsibility.
+//! - **State semantics:** same lifecycle as `RoleType`; cascades to
+//!   every projection role method on that role.
+//! - **Consumed by:** the cascade graph; the projection scaffold
+//!   reads no body for this kind.
+//!
+//! ## Web-app kinds (Phase 10 multi-crate emission)
+//!
+//! Web kinds are seeded by `seed_web_tracker_entries`
+//! (`src/web_codegen.rs`) at scaffold time with an empty
+//! `prepared_hash` and `state: not_implemented`. They model code that
+//! `scaffold_web_app` emits on top of the DCI kinds (router dispatch,
+//! server entry, RPC stubs, brand CSS, component render bodies, …).
+//! Today their fragment is degenerate (empty string) — they exist as
+//! tracker placeholders so `/implement` and `/audit` can target them.
+//! A future change might give them real fragments derived from
+//! routing-table or component prose.
+//!
+//! ### `RouterArm { route }`
+//!
+//! - **Path:** `web/router/<route>`
+//! - **Tracks:** one match arm in the generated `Router::dispatch`
+//!   function (`<components-crate>/src/router.rs`). One entry per
+//!   unique route component.
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** initial scaffold seeds
+//!   `not_implemented`; `/implement` is not expected to edit router
+//!   bodies (they're deterministic from the routing table) but
+//!   `/audit` can mark them stale with a finding.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`
+//!   (`src/web_codegen.rs:222`); not yet read by codegen body
+//!   preservation.
+//!
+//! ### `ServerRoute { route }`
+//!
+//! - **Path:** `web/server/<route>`
+//! - **Tracks:** one route handler in the generated server `main.rs`.
+//!   The route name is the path with `/` substituted for `_`
+//!   (`/accounts/{id}` → `_accounts_{id}`).
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** identical to `RouterArm`.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`.
+//!
+//! ### `RpcServer { context, functionality }`
+//!
+//! - **Path:** `web/rpc/server/<context>/<functionality>`
+//! - **Tracks:** one server-side RPC stub for a component-event-to-
+//!   server-context binding.
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** identical to `RouterArm`.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`.
+//!
+//! ### `RpcClient { context, functionality }`
+//!
+//! - **Path:** `web/rpc/client/<context>/<functionality>`
+//! - **Tracks:** one client-side RPC stub matching `RpcServer` —
+//!   only emitted when the project has a client crate.
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** identical to `RouterArm`.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`.
+//!
+//! ### `ClientInit { component }`
+//!
+//! - **Path:** `web/client/<component>`
+//! - **Tracks:** one client-side init function per component that
+//!   declares events.
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** identical to `RouterArm`.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`.
+//!
+//! ### `BrandCss { brand }`
+//!
+//! - **Path:** `web/brand/<brand>`
+//! - **Tracks:** the generated CSS file for one brand artefact.
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** identical to `RouterArm`.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`.
+//!
+//! ### `ServerMain`
+//!
+//! - **Path:** `web/server/main`
+//! - **Tracks:** the server crate's `main.rs` entry point. Singular
+//!   (no per-instance fields).
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** identical to `RouterArm`.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`.
+//!
+//! ### `ComponentRender { component }`
+//!
+//! - **Path:** `web/component/<component>/render`
+//! - **Tracks:** one component's `render` method body — the central
+//!   unit of UI implementation work.
+//! - **Fragment:** empty — placeholder.
+//! - **State semantics:** identical to `RouterArm`; the
+//!   `templates/.claude/commands/implement.md` contract section
+//!   describes how `/implement` should fill render bodies.
+//! - **Consumed by:** seeded by `seed_web_tracker_entries`. The
+//!   tracker entry is read indirectly via the `audit_persist` →
+//!   `extract_artefacts` flow, but body preservation for component
+//!   render is owned by `write_generated_file`'s `@generated`-marker
+//!   gate, not by tracker state.
+//!
+//! ### `SessionGuard { route }`
+//!
+//! - **Path:** `web/server/guard/<route>`
+//! - **Tracks:** a placeholder for a per-route session guard
+//!   middleware. Currently declared but never constructed by any
+//!   codegen path — kept in the enum so the wire format absorbs
+//!   future additions without a tracker schema bump.
+//! - **Fragment:** N/A — no entries created.
+//! - **State semantics:** N/A.
+//! - **Consumed by:** parsed by the `FromStr` impl so historical
+//!   `.reen/build.json` files survive a load if any user happened to
+//!   write the key by hand. No production code constructs this kind.
+//!
+//! ## Lifecycle invariants (cross-kind)
+//!
+//! These four rules hold for every kind above:
+//!
+//! 1. **Initial state is `not_implemented`.** New entries (no
+//!    matching key in the previous tracker) start `not_implemented`
+//!    with `reason: InitialScaffold`.
+//! 2. **Draft edits cascade.** When a draft change marks one entry
+//!    stale (`reason: DraftChanged`), every entry with that key in
+//!    its `upstream` is also marked stale (`reason:
+//!    UpstreamChanged`). `cascade_stale` is BFS — each entry is
+//!    reached at most once and keeps its first-seen reason.
+//! 3. **`reen scaffold` resets stale, preserves fresh.** Stale
+//!    method bodies become `todo!()` again; fresh ones survive byte-
+//!    identically through the surgical re-emit. The tracker's state
+//!    decides; the body lives in the source file.
+//! 4. **`/audit` can flip fresh back to stale.** When the auditor
+//!    finds a semantic-alignment violation it calls
+//!    `mark_stale_audit(key, finding)` which sets `reason:
+//!    AuditFinding` and attaches the finding text to the entry.
+//!    `/implement` reads the finding to know what to repair.
+//!
+//! Examples of fully-formed key strings:
+//!
 //! - `contexts/money_transfer/functionality/transfer`
 //! - `contexts/money_transfer/role/source/withdraw`
 //! - `contexts/money_transfer/role/source/type`
 //! - `data/account/operation/deposit`
 //! - `data/account/type`
-//! - `projections/balance/query/current_balance`
+//! - `data/money/attribute/amount`
+//! - `data/chat_turn/variant/tool_call/attribute/tool_input`
+//! - `projections/balance/functionality/current_balance`
 
 use std::fmt;
 use std::str::FromStr;
