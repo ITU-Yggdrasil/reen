@@ -1,4 +1,4 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v3
 kind: projection
 source:
   path: projections/string_renderer.md
@@ -6,13 +6,26 @@ source:
   title: 'Projection: StringRenderer'
 export:
   name: StringRenderer
-source_data: Board
-queries:
-- name: new
-  description: Stores the board as the source to query for on-screen symbols. No other collaborators are fetched.
+role_players:
+- name: board
+  data_type: Board
+  responsibility: provides the cells the renderer reads symbols from
+role_methods:
+- role: board
+  methods:
+  - name: read_dimensions
+    canonical_name: board_read_dimensions
+    citation: provides the row and column counts of the board picture
+  - name: read_symbol_at
+    canonical_name: board_read_symbol_at
+    citation: provides the symbol at a given row-and-column coordinate
+props:
+- name: score
+  description: the numeric score to display in the score line
+functionalities:
 - name: render
   description: |-
-    Produces a complete text frame from the board and a given score.
+    Produces a complete text frame from the board and the bound score.
 
     Iterates rows from top to bottom. Within each row, iterates columns from left to right, collecting the symbol at each coordinate. Each row is followed by a newline. After the last row, a score line in the format "Score: <score>" followed by a newline is included. Returns the complete text.
 scenarios:
@@ -36,26 +49,34 @@ synthesised_tests:
   then: the interior rows contain only spaces between the wall symbols
   citation: Scenarios / empty interior shows spaces
 - source: invariant
-  given: a StringRenderer instance is created with a board
-  when: the instance is constructed via new
-  then: the board is stored as the source for querying on-screen symbols and no other collaborators are instantiated
-  citation: 'query `new`: Stores the board as the source to query for on-screen symbols. No other collaborators are fetched.'
-- source: invariant
-  given: a 3 by 3 board with specific symbols at known coordinates
+  given: a board with a single row and a score of 0
   when: render is called
-  then: symbols are collected in row-major order (top to bottom, left to right) matching the board's coordinates
-  citation: 'query `render`: Iterates rows from top to bottom. Within each row, iterates columns from left to right, collecting the symbol at each coordinate.'
+  then: 'the returned text contains the row''s symbols followed by a newline, then "Score: 0" and a newline'
+  citation: 'Iterates rows from top to bottom... After the last row, a score line in the format "Score: <score>" followed by a newline is included.'
 - source: invariant
-  given: a board with 3 rows and a score of 42
+  given: a board with columns containing mixed symbols (walls, spaces, and game pieces) and a score of 42
   when: render is called
-  then: 'the output ends with a newline after the score line formatted as ''Score: 42\n'''
-  citation: 'query `render`: After the last row, a score line in the format ''Score: <score>'' followed by a newline is included.'
+  then: the returned text collects symbols from left to right within each row and preserves the order of all symbols
+  citation: Within each row, iterates columns from left to right, collecting the symbol at each coordinate.
 - source: invariant
-  given: a board with variable row lengths and a score of 0
+  given: a 3 by 3 board with distinct symbols in each cell and a score of 99
   when: render is called
-  then: each row in the output is terminated by a newline character before the score line
-  citation: 'query `render`: Each row is followed by a newline.'
+  then: the returned text contains all rows separated by newlines, with the final newline appearing after the score line
+  citation: Each row is followed by a newline... After the last row, a score line... followed by a newline is included. Returns the complete text.
 vocabulary_bindings:
+- name: board
+  resolution: role_player
+  resolved_to: Board
 - name: Board
   resolution: data
   resolved_to: Board
+- name: score
+  resolution: prop
+- name: board_read_dimensions
+  resolution: role_method
+  resolved_to: board.read_dimensions
+- name: board_read_symbol_at
+  resolution: role_method
+  resolved_to: board.read_symbol_at
+- name: board
+  resolution: role

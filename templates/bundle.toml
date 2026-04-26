@@ -26,3 +26,8 @@
 "drafts/projections/.gitkeep" = "seed"
 "drafts/contexts/.gitkeep" = "seed"
 "drafts/apis/.gitkeep" = "seed"
+# Phase 9 — web-app drafts / Phase 12 — multi-app directory
+"drafts/components/.gitkeep" = "seed"
+"drafts/brands/.gitkeep" = "seed"
+"drafts/routes/.gitkeep" = "seed"
+"drafts/apps/.gitkeep" = "seed"

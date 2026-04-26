@@ -6,11 +6,15 @@ Defines the top-level navigation structure of the Lupa banking application. All 
 
 ## Routes
 
+- path: /
+  component: LoginScreen
+  auth: none
+
 - path: /login
   component: LoginScreen
   auth: none
 
-- path: /
+- path: /accounts
   component: AccountsScreen
   auth: required
 

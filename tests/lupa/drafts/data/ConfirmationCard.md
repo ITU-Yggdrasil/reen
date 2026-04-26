@@ -13,6 +13,7 @@ Represents a short-lived, single-use confirmation prompt shown to the customer b
 - signed token: a cryptographically signed text value binding the card contents to prevent modification after rendering
 - valid until: the moment after which the card can no longer be accepted, a date-and-time value with timezone
 - used: whether this card has already been accepted or rejected — initially negative
+- customer id: the identifier of the customer for whom this card was issued, a text value
 
 ## Invariants
 - All display fields must be non-empty

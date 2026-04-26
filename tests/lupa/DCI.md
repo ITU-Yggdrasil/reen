@@ -2,6 +2,8 @@
 
 DCI (Data, Context, Interaction) is the authoring model for Reen. Every draft you write uses DCI vocabulary. This document teaches you to think in DCI so your drafts are clear, complete, and ready for the pipeline.
 
+**Drafts speak BA.** Every context and every projection IS a use case; every data draft is a domain concept described in domain language. You may reference other data types by their capitalised name (Money, Transaction, Account) anywhere prose calls for it — that's a domain reference, not a type annotation. You must NEVER write parameter lists, return types, multiplicity notation (`list of T`, `[T]`), or any other formal signature shape. The Reen pipeline derives all of that from your prose and scenarios. See `DRAFT_FORMAT.md` for the full rule.
+
 ## The Three Artefact Kinds
 
 ### Data
@@ -30,6 +32,37 @@ A context has:
 - **Role methods** — what each role does in *this* scenario
 - **Functionalities** — named use cases that compose role methods
 - **Scenarios** — concrete Given/When/Then enactments
+
+## Artefact-kind hard rules
+
+The three artefact kinds are not naming conventions. Each kind carries a structural contract that the Reen pipeline enforces at scaffold and verify time. Drafts and emitted code MUST conform to the rules below. The structural rules (field visibility, constructor presence, getter presence, field-type containment) are enforced by `reen verify` as hard gates. The inverse Context rule is enforced by `/audit` as a warning.
+
+### Data
+
+- **Immutability.** A Data type MUST be immutable. Once constructed, its attribute values do not change.
+- **Private fields.** All struct fields of a Data type MUST be private. They are accessed only through generated getters.
+- **Constructor.** Every Data type MUST have a `new(...)` constructor that takes the field values, enforces every invariant declared in the prepared YAML, and returns `Err` on any invariant violation. The scaffolder emits the signature; `/implement` fills the invariant-enforcement body.
+- **Getters.** Every declared attribute MUST have a getter method named exactly after the attribute. Getters are auto-emitted by the scaffolder with deterministic bodies; the BA does not author them and `/implement` does not fill them.
+- **Non-destructive mutation.** A Data type MAY expose `with_<field>(self, value) -> Result<Self>` operations that return a new instance with one field replaced. These MUST NOT be auto-emitted — they are emitted only when the draft's Operations list declares an Operation marked `kind: with`. The body re-validates via `Self::new(...)` so the same invariants apply.
+- **Field types.** Every non-primitive field of a Data type MUST reference another Data type. Data MUST NOT have fields whose types are Projections or Contexts.
+
+### Projection
+
+A Projection is **structurally identical to a Context** — same six draft sections (Purpose, Role Players, Props, Role Methods, Functionalities, Scenarios), same prepared-YAML shape, same emission pattern. The single difference is **immutability**: nothing on a projection writes through its role players.
+
+- **Immutability.** Every Projection functionality MUST take `&self` (never `&mut self`). Every Projection role method MUST take its role player as `&` (never `&mut`). Role-method bodies MUST NOT write through role-player state.
+- **Private fields.** All struct fields of a Projection MUST be private.
+- **Public surface = Functionalities.** The set of public methods on a Projection MUST equal its declared Functionalities (plus the `pub fn new` constructor). There is no separate "Query" concept.
+- **Private role methods.** Role methods on a Projection MUST be private. They are the per-role-player "how" of the projection's read-only computation.
+- **Field types.** Every non-primitive field of a Projection MUST reference a Data or Projection type. Projections MUST NOT have fields whose types are Contexts.
+
+Projection drafts use the same template as Contexts: declare role players (typically the data the projection reads), declare their role methods, and compose them into functionalities. The legacy `## Source` / `## Queries` shape is rejected at parse time with a migration error pointing at the new shape.
+
+### Context
+
+- **Mutability.** A Context is the only kind that MAY mutate state. Functionalities default to `&self`; they upgrade to `&mut self` when the prepared YAML signals mutation.
+- **Field types.** A Context MAY reference Data, Projection, or other Context types as fields.
+- **Inverse rule (soft).** A Context whose functionalities all take `&self` and whose role methods never mutate role-player state SHOULD probably be a Projection. This is a design judgement, not a hard rule — the auditor flags it as a warning, the BA decides.
 
 ## Roles vs Role Players
 

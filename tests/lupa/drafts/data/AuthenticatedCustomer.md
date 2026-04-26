@@ -8,6 +8,7 @@ Represents a role-bindable view of a customer derived from a valid, non-expired 
 - customer name: the full legal name of the customer, a text value
 - session reference: a reference to the active Session from which this view was derived
 - accounts: a list of references to the Accounts the customer is authorised to access
+- scopes: a list of consent scope identifiers granted by the session, used to verify operation permissions
 
 ## Invariants
 - The session reference must point to a non-expired session

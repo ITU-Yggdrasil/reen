@@ -12,6 +12,7 @@ Represents an authenticated banking session for a customer, carrying the OAuth t
 - chat state: the current state of the chat interface — one of "idle", "awaiting-input", "processing", or "confirming"
 - created at: the moment the session was established, a date-and-time value with timezone
 - last activity at: the moment of the most recent interaction, a date-and-time value with timezone
+- scopes: the consent scope identifiers granted during authentication, a list of text values
 
 ## Invariants
 - Customer id must be non-empty
@@ -19,8 +20,22 @@ Represents an authenticated banking session for a customer, carrying the OAuth t
 - Expiry must be after the created-at timestamp
 - Refresh token must be non-empty
 - CSRF token must be non-empty
-- Chat state must be one of the recognised states
+- Chat state must be one of the recognised states "idle", "awaiting-input", "processing", or "confirming"
+- A chat-state change is permitted only if it appears in the chat-state transition table below; every other transition is invalid
 - Last activity must not be before created-at
+
+## Chat State Transitions
+The chat state moves through a finite state machine. The complete set of valid transitions is:
+
+- "idle" → "awaiting-input" (the session begins accepting user input)
+- "awaiting-input" → "processing" (the user submits a message)
+- "awaiting-input" → "idle" (the user closes the prompt without sending)
+- "processing" → "awaiting-input" (the assistant produces a plain reply that needs no confirmation)
+- "processing" → "confirming" (the assistant produces a confirmation card requiring approval)
+- "confirming" → "processing" (the user approves the card and the operation continues)
+- "confirming" → "awaiting-input" (the user rejects the card and returns to free input)
+
+Any transition not listed above is rejected. In particular, "idle" → "confirming", "idle" → "processing", and "confirming" → "idle" are not valid transitions.
 
 ## Operations
 ### is expired
@@ -62,3 +77,33 @@ Then: the chat state becomes "awaiting-input"
 Given: a Session with chat state "idle"
 When: transition chat state to "confirming" is performed
 Then: the transition is rejected because "idle" to "confirming" is not a valid state change
+
+### Awaiting-input returns to idle on cancel
+Given: a Session with chat state "awaiting-input"
+When: transition chat state to "idle" is performed
+Then: the chat state becomes "idle"
+
+### Processing produces a confirmation card
+Given: a Session with chat state "processing"
+When: transition chat state to "confirming" is performed
+Then: the chat state becomes "confirming"
+
+### Processing produces a plain reply
+Given: a Session with chat state "processing"
+When: transition chat state to "awaiting-input" is performed
+Then: the chat state becomes "awaiting-input"
+
+### Confirming proceeds on approval
+Given: a Session with chat state "confirming"
+When: transition chat state to "processing" is performed
+Then: the chat state becomes "processing"
+
+### Confirming returns to awaiting-input on rejection
+Given: a Session with chat state "confirming"
+When: transition chat state to "awaiting-input" is performed
+Then: the chat state becomes "awaiting-input"
+
+### Confirming cannot return directly to idle
+Given: a Session with chat state "confirming"
+When: transition chat state to "idle" is performed
+Then: the transition is rejected because "confirming" to "idle" is not a valid state change

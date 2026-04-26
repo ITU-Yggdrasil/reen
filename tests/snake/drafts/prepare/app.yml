@@ -1,4 +1,4 @@
-schema: reen.prepare/v2
+schema: reen.prepare/v3
 kind: app
 source:
   path: app.md

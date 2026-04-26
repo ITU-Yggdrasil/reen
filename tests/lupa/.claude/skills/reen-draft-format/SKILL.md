@@ -11,13 +11,15 @@ triggers:
 
 Six draft kinds, each with a fixed section structure. No types, no signatures, no Rust tokens.
 
+> **Migration note (Projection rename).** Projection drafts that still use `## Source` / `## Queries` are stale and rejected by `reen prepare`. Rewrite them to the context-aligned template below: `## Source` becomes `## Role Players`, `## Queries` becomes `## Functionalities`, and add `## Role Methods` describing what each role player provides. The prose can stay verbatim.
+
 ## Context Draft (`drafts/contexts/<name>.md`)
 
 ```
 # Context: <Name>
 ## Purpose          — one paragraph, business terms
 ## Role Players     — bullet list: `- <role>: <DataType> — <responsibility>`
-## Props            — bullet list: `- <name>: <description>` (scalar config only)
+## Props            — bullet list: `- <name>: <description>` (values the context uses as-is, without extending them with role methods — scalars, tokens, identifiers, small value types)
 ## Role Methods     — ### subsections per role, each with `- <method>: <description>` bullets
 ## Functionalities  — ### subsections, each with prose describing the enactment
 ## Scenarios        — ### subsections, each with Given:/When:/Then: lines
@@ -30,17 +32,26 @@ Six draft kinds, each with a fixed section structure. No types, no signatures, n
 ## Purpose          — one paragraph
 ## Attributes       — bullet list: `- <name>: <description>`
 ## Invariants       — bullet list of prose invariants
-## Operations       — ### subsections with prose descriptions
+## Operations       — ### subsections with prose descriptions (non-default operations only)
 ## Scenarios        — ### subsections with Given:/When:/Then:
 ```
 
+The Operations list is for **non-default** operations only. Every Data type automatically gets a `new(...)` constructor (which enforces the declared Invariants) and a getter per Attribute — these are emitted by the scaffolder and MUST NOT be authored under Operations. List Operations only for behaviours beyond construction and field access.
+
+For non-destructive mutation (returning a new instance with one field replaced), author the operation under **## Operations** with `kind: with` — for example `kind: with` on an operation named `with_currency` instructs the scaffolder to emit `pub fn with_currency(self, currency: ...) -> Result<Self>`. Without the `kind: with` marker, no `with_*` method is emitted.
+
 ## Projection Draft (`drafts/projections/<name>.md`)
+
+A Projection is **structurally identical to a Context** — same six sections, same vocabulary. The difference is immutability: every functionality takes `&self`, every role method takes its role player as `&` (never `&mut`), and role-method bodies do not write through role-player state. References Data and Projection types only.
 
 ```
 # Projection: <Name>
 ## Purpose          — one paragraph
-## Source           — bullet list referencing underlying data
-## Queries          — ### subsections with prose descriptions
+## Role Players     — bullet list: `- <role>: <DataType or ProjectionType> — <responsibility>`
+## Props            — bullet list: `- <name>: <description>`
+## Role Methods     — ### subsections per role, each with `- <method>: <description>` bullets
+                      (Read-only — describe what each role provides, not what it changes.)
+## Functionalities  — ### subsections, each with prose describing the read-only enactment
 ## Scenarios        — ### subsections with Given:/When:/Then:
 ```
 
@@ -206,8 +217,77 @@ Create a board, snake, food dropper, game state, and GameLoop...
 - **Sneaking types into drafts**: No `u32`, `String`, `Vec<>`. Types are inferred during prepare.
 - **Mixing role and role player**: "Account withdraws" is wrong. "The source withdraws" is correct — the role does the action.
 - **Putting role methods on data**: If a method only makes sense in a specific scenario, it's a role method on the context, not an operation on the data type.
-- **Missing scenarios**: Every functionality and operation should have at least one concrete Given/When/Then scenario.
+- **Missing scenarios**: Scenarios are required where behaviour is declared (see "When are scenarios required?" below).
 - **Mutation in projections**: Projections are read-only. The parser will reject mutation-shaped prose.
+
+## Spec vs. implementation — what does not belong in a draft
+
+> **If the draft needs to name it, it is not an implementation detail.**
+
+Every capitalised type name referenced in a draft (role player types, projection sources, component bindings, route components) must resolve to a declared artefact — a data, projection, context, component, brand, or routing table draft. `reen prepare` and `reen refine` reject unresolved references.
+
+### Implementation-speak patterns
+
+Names ending with any of these suffixes are almost certainly implementation-speak:
+
+`Client`, `Store`, `Sink`, `Ledger`, `Repository`, `Service`, `Manager`, `Handler`, `Adapter`, `Gateway`, `Connection`, `Pool`, `Registry`, `Cache`, `Queue`, `Bus`, `Clock`, `Timer`
+
+These name mechanisms, not domain concepts. The fix is to name what the domain cares about:
+
+| Implementation-speak | Domain rewrite |
+|---------------------|----------------|
+| `SessionStore` | The user's session is a data concept — author `drafts/data/Session.md` with real attributes and invariants |
+| `Clock` | Express time in domain units ("valid for 15 minutes", "expires after the session timeout"). Do not name a time source |
+| `AuditSink` | If auditing is a domain requirement, author `drafts/contexts/AuditRecording.md`. If it is cross-cutting infrastructure, omit it from drafts |
+| `NordeaClient` | The Nordea integration is a context — author `drafts/contexts/OpenBanking.md` with DCI-native roles. The HTTP client lives inside the context implementation |
+| `IdempotencyLedger` | The domain concept is "requests we've already accepted" or "deduplicated attempts" — author a data draft |
+| `IncomingRequest` | Author `drafts/data/IncomingRequest.md` with actual attributes (path, headers, session cookie), or rename to the existing domain concept |
+| `DateRangeFilter` | Author `drafts/data/DateRange.md`, or use the domain term directly ("the reporting period") |
+
+### Litmus test
+
+Before naming a type in a draft, ask: **"would a non-technical domain stakeholder recognise this name?"** If the answer is no, it is probably implementation-speak. Name what the business cares about; leave the mechanism to the implementer.
+
+## When are scenarios required?
+
+Scenarios track behaviour, not structure. `reen refine` requires scenarios only where behaviour is declared:
+
+| Kind | Scenarios required when… |
+|------|--------------------------|
+| **Context** | Always — contexts *are* behaviour |
+| **Component** | The component declares **Events** or has a **Composition** section. Pure-display components (Props and Slots only) do not need scenarios |
+| **Data** | The data draft declares **Operations**. Pure value types (attributes + invariants only) do not need scenarios |
+| **Projection** | The projection declares **Queries** (in practice, nearly always) |
+| **Brand** | Never |
+| **Routing table** | Never |
+
+## Roles vs. props
+
+In DCI, **a role is an object extended with role methods inside a context**. Role methods exist only in the scope of the enactment and typically call other role methods on other roles. What distinguishes a role from a prop is that the context declares role methods for it, adding context-specific behaviour.
+
+**Methods being called on an object does not make it a role.** A prop can have its own methods called on it (e.g. `amount.add(other)` is a data operation, not a role method). The test is whether the context declares *new* behaviour for the name via role methods.
+
+Every role player must have role methods — there is no opt-out. When a role player has no methods, `reen refine` emits: "role player `<name>` has no role methods — a role is extended with role methods inside a context; if `<name>` is used as-is without extension, declare it under ## Props instead."
+
+**Role player** (the context extends it with new behaviour):
+```
+## Role Players
+- source: Account — the account to debit
+
+## Role Methods
+### source
+- verify_sufficient_funds: checks that the balance covers the amount
+```
+
+**Prop** (the context uses it as-is, without extending it):
+```
+## Props
+- amount: the sum to transfer, a Money value
+- idempotency_token: the client-supplied unique token preventing duplicate execution
+- required_scope: payments-initiate-own
+```
+
+Props can be scalars, tokens, identifiers, or small value types — anything the context uses without declaring role methods for it.
 
 ## What not to put in a draft
 

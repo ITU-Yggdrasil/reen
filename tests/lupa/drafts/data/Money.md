@@ -1,14 +1,15 @@
 # Data: Money
 
 ## Purpose
-Represents a monetary value in a specific currency. Money is the fundamental unit of financial measurement throughout the banking domain, combining an amount with its denomination so that arithmetic across currencies is never silently mixed.
+Represents a monetary value in a specific currency. Money is the fundamental unit of financial measurement throughout the banking domain, combining an amount with its denomination so that arithmetic across currencies is never silently mixed. The same shape is used both for account balances and for transaction movements; the sign of the amount carries the distinction (positive for credits and balances, negative for debit movements).
 
 ## Attributes
-- amount: the quantity in minor units (hundredths of the currency unit), always a whole number
+- amount: the quantity in minor units (hundredths of the currency unit), always a whole number; the sign carries semantic meaning (positive for credits and balances, negative for debit movements)
 - currency: the ISO 4217 currency code, a three-letter text value (e.g. "DKK", "EUR", "USD")
 
 ## Invariants
-- Amount must never be negative for balances; it may be negative only when representing a debit movement
+- Amount may be any whole number, positive, zero, or negative; the type does not enforce a non-negative bound because the same shape is used for transaction movements that can legitimately be negative
+- Callers using a Money value to represent an account balance are responsible for ensuring the amount is non-negative; this is a caller-side discipline, not a type-level invariant
 - Currency must be a recognised ISO 4217 three-letter code
 - Two Money values can only be added or subtracted when their currencies match
 - Arithmetic operations must preserve the currency of the operands
@@ -48,3 +49,8 @@ Then: the result is "100.50 DKK"
 Given: a Money of 0 in USD
 When: the Money is created
 Then: the Money is accepted with amount 0 and currency "USD"
+
+### Negative amount is valid (debit movement)
+Given: a Money of -2500 in DKK representing a debit movement
+When: the Money is created
+Then: the Money is accepted with amount -2500 and currency "DKK"
