@@ -29,6 +29,10 @@ pub enum ArtefactEntryKind {
     ProjectionRoleType,
     RoleType,
     DataType,
+    /// The Rust type chosen for a data attribute. Decided by `/implement`,
+    /// preserved across re-scaffolds, marked stale when the attribute's
+    /// description changes.
+    DataAttributeType,
     // Web-specific kinds (Phase 10)
     RouterArm,
     ServerRoute,
@@ -54,6 +58,7 @@ impl ArtefactEntryKind {
             Self::ProjectionRoleType => "projection_role_type",
             Self::RoleType => "role_type",
             Self::DataType => "data_type",
+            Self::DataAttributeType => "data_attribute_type",
             Self::RouterArm => "router_arm",
             Self::ServerRoute => "server_route",
             Self::RpcServer => "rpc_server",
@@ -106,6 +111,15 @@ pub enum ArtefactKey {
     DataType {
         data: String,
     },
+    /// `data/<data>/attribute/<name>` — the Rust type chosen by `/implement`
+    /// for one declared attribute. The actual type fragment lives in the
+    /// scaffolded source; this entry only records whether the choice is
+    /// `fresh` (use it), `stale` (description changed, re-implement), or
+    /// `not_implemented` (initial state).
+    DataAttributeType {
+        data: String,
+        attribute: String,
+    },
     /// `projections/<projection>/functionality/<name>`
     ProjectionFunctionality {
         projection: String,
@@ -153,6 +167,7 @@ impl ArtefactKey {
             Self::DataConstructor { .. } => ArtefactEntryKind::DataConstructor,
             Self::DataGetter { .. } => ArtefactEntryKind::DataGetter,
             Self::DataType { .. } => ArtefactEntryKind::DataType,
+            Self::DataAttributeType { .. } => ArtefactEntryKind::DataAttributeType,
             Self::ProjectionFunctionality { .. } => ArtefactEntryKind::ProjectionFunctionality,
             Self::ProjectionRoleMethod { .. } => ArtefactEntryKind::ProjectionRoleMethod,
             Self::ProjectionRoleType { .. } => ArtefactEntryKind::ProjectionRoleType,
@@ -215,6 +230,13 @@ impl ArtefactKey {
     pub fn data_type(data: &str) -> Self {
         Self::DataType {
             data: crate::codegen::to_snake_case(data),
+        }
+    }
+
+    pub fn data_attribute_type(data: &str, attribute: &str) -> Self {
+        Self::DataAttributeType {
+            data: crate::codegen::to_snake_case(data),
+            attribute: crate::codegen::to_snake_case(attribute),
         }
     }
 
@@ -336,6 +358,9 @@ impl fmt::Display for ArtefactKey {
             Self::DataType { data } => {
                 write!(f, "data/{}/type", data)
             }
+            Self::DataAttributeType { data, attribute } => {
+                write!(f, "data/{}/attribute/{}", data, attribute)
+            }
             Self::ProjectionFunctionality { projection, name } => {
                 write!(f, "projections/{}/functionality/{}", projection, name)
             }
@@ -394,6 +419,10 @@ impl FromStr for ArtefactKey {
             }),
             ["data", data, "type"] => Ok(Self::DataType {
                 data: data.to_string(),
+            }),
+            ["data", data, "attribute", attribute] => Ok(Self::DataAttributeType {
+                data: data.to_string(),
+                attribute: attribute.to_string(),
             }),
             ["projections", proj, "functionality", name] => Ok(Self::ProjectionFunctionality {
                 projection: proj.to_string(),
@@ -457,6 +486,7 @@ mod tests {
             ArtefactKey::data_constructor("Account"),
             ArtefactKey::data_getter("Account", "balance"),
             ArtefactKey::data_type("Account"),
+            ArtefactKey::data_attribute_type("Account", "balance"),
             ArtefactKey::projection_functionality("AccountBalance", "current_balance"),
         ];
 
@@ -465,6 +495,17 @@ mod tests {
             let parsed: ArtefactKey = s.parse().unwrap();
             assert_eq!(&parsed, key, "round-trip failed for {}", s);
         }
+    }
+
+    #[test]
+    fn data_attribute_type_key_format() {
+        // Bug 2.5c regression: the key shape is `data/<snake>/attribute/<snake>`.
+        let key = ArtefactKey::data_attribute_type("Money", "amount");
+        assert_eq!(key.to_string(), "data/money/attribute/amount");
+        assert_eq!(key.kind(), ArtefactEntryKind::DataAttributeType);
+
+        let parsed: ArtefactKey = "data/money/attribute/amount".parse().unwrap();
+        assert_eq!(parsed, key);
     }
 
     #[test]

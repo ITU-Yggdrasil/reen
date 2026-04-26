@@ -2,6 +2,29 @@
 
 Three draft kinds. No types, no signatures, no Rust tokens. DCI terms only, expressed in domain language.
 
+## Drafts speak BA — non-negotiable
+
+Drafts are BA artefacts. They read like a use case being narrated by a domain expert. Every context and every projection IS a use case; every data draft is a domain concept described in domain language.
+
+A draft may name another data type by its capitalised name (e.g. `Money`, `Transaction`, `Account`) wherever the prose calls for it — in role-player declarations, attribute descriptions, scenario `Given:` / `When:` / `Then:` lines, operation prose, and invariants. That's a domain reference, not a type annotation.
+
+What a draft must NEVER contain:
+
+- Parameter lists, parameter notation, or anything that looks like a function signature. No `Parameters:`, no `Returns:`, no `(x, y) -> Z`, no method-call shape, no `&` / `&mut`, no generic brackets.
+- Multiplicity notation: no `list of T`, no `[T]`, no `optional T`, no `Vec<T>`. Plural intent is conveyed by writing in the plural ("the transactions", "five transactions with amounts ...") and by the shape of scenario `Given:` clauses.
+- Type-system vocabulary: no nullability markers, no enum syntax, no struct syntax, no inheritance language. If a value is one of an enumeration, write the enumeration in prose ("must be one of \"idle\", \"awaiting-input\", \"processing\", or \"confirming\"").
+- Implementation language of any kind — no mention of Rust, Vec, String, Option, Result, traits, modules, or files.
+
+What a draft MUST do:
+
+- Reference data types by their domain name when prose calls for it. "The source's withdraw role method takes the amount" is correct.
+- Describe operations and functionalities as business actions. "Combines two Money values with the same currency, producing a new Money whose amount is the sum" is correct — it tells the reader what the operation means without prescribing arity in formal notation.
+- Use scenarios with concrete domain values to pin down behaviour. Scenarios are how the BA conveys arity, multiplicity, and result shape: "Given: a Money of 5000 in DKK and a Money of 2500 in DKK / When: add is performed / Then: the result is a Money of 7500 in DKK" is the BA's way of saying "binary, returns Money" without ever writing `(other: Money) -> Money`.
+
+The Reen pipeline derives signatures, parameter counts, return types, and multiplicities from this prose at prepare time. Anything that looks like signature notation in a draft is a bug — surfaced by `reen refine` as a blocking finding and by the Phase 3.5 code-token lint where applicable.
+
+If a draft cannot express something in BA prose, that is a signal the draft is wrong — not that the rule should be relaxed.
+
 ## Context (`drafts/contexts/<name>.md`)
 
 ```

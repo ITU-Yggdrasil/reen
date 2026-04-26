@@ -202,6 +202,31 @@ fn extract_data(a: &PreparedArtifact) -> Vec<ExtractedArtefact> {
         });
     }
 
+    // Data attribute types — one per declared attribute. The type itself is
+    // chosen by `/implement` and lives in the scaffolded source; this entry
+    // tracks whether the description has changed (in which case the
+    // previously-chosen type goes stale and the field reverts to `()`).
+    // Fragment includes the multiplicity so a single→list change also
+    // invalidates the type choice.
+    for attr in &a.attributes {
+        let key = ArtefactKey::data_attribute_type(data_name, &attr.name);
+        let multiplicity = match attr.multiplicity {
+            crate::prepared::Multiplicity::Single => "single",
+            crate::prepared::Multiplicity::List => "list",
+        };
+        let fragment = canonical_yaml(&BTreeMap::from([
+            ("data", data_name.as_str()),
+            ("attribute", attr.name.as_str()),
+            ("description", attr.description.as_str()),
+            ("multiplicity", multiplicity),
+        ]));
+        result.push(ExtractedArtefact {
+            key,
+            canonical_fragment: fragment,
+            upstream: vec![type_key.clone()],
+        });
+    }
+
     // Data operations
     for op in &a.operations {
         let key = ArtefactKey::data_operation(data_name, &op.name);
@@ -460,12 +485,80 @@ mod tests {
     // ── Data edge tests ──────────────────────────────────────────
 
     #[test]
+    fn data_extracts_attribute_type_entries() {
+        // Bug 2.5c regression: every declared attribute also produces a
+        // `data_attribute_type` entry whose fragment includes the
+        // description and multiplicity. When either changes, the entry
+        // hashes differently and the previously-chosen Rust type is marked
+        // stale (so the field reverts to ()).
+        let data = account_data();
+        let extracted = extract_artefacts(&data, &[]);
+
+        let balance_attr = extracted.iter()
+            .find(|e| e.key.to_string() == "data/account/attribute/balance")
+            .expect("expected a data_attribute_type entry for balance");
+        assert_eq!(balance_attr.upstream, vec![ArtefactKey::data_type("Account")]);
+        assert!(balance_attr.canonical_fragment.contains("balance"));
+        assert!(balance_attr.canonical_fragment.contains("current balance"));
+        assert!(balance_attr.canonical_fragment.contains("single"));
+
+        let owner_attr = extracted.iter()
+            .find(|e| e.key.to_string() == "data/account/attribute/owner")
+            .expect("expected a data_attribute_type entry for owner");
+        assert!(owner_attr.canonical_fragment.contains("account owner"));
+    }
+
+    #[test]
+    fn data_attribute_type_fragment_changes_when_description_changes() {
+        // Same shape, different description → different hash → the entry
+        // goes stale on next prepare.
+        let mut data = account_data();
+        let original = extract_artefacts(&data, &[]);
+        let original_balance = original.iter()
+            .find(|e| e.key.to_string() == "data/account/attribute/balance")
+            .unwrap();
+
+        data.attributes[0].description = "the running balance, in cents".into();
+        let after = extract_artefacts(&data, &[]);
+        let new_balance = after.iter()
+            .find(|e| e.key.to_string() == "data/account/attribute/balance")
+            .unwrap();
+
+        assert_ne!(
+            original_balance.canonical_fragment,
+            new_balance.canonical_fragment,
+            "fragment must change when description changes",
+        );
+    }
+
+    #[test]
+    fn data_attribute_type_fragment_changes_when_multiplicity_changes() {
+        let mut data = account_data();
+        let original = extract_artefacts(&data, &[]);
+        let original_balance = original.iter()
+            .find(|e| e.key.to_string() == "data/account/attribute/balance")
+            .unwrap();
+
+        data.attributes[0].multiplicity = crate::prepared::Multiplicity::List;
+        let after = extract_artefacts(&data, &[]);
+        let new_balance = after.iter()
+            .find(|e| e.key.to_string() == "data/account/attribute/balance")
+            .unwrap();
+
+        assert_ne!(
+            original_balance.canonical_fragment,
+            new_balance.canonical_fragment,
+            "single → list invalidates the previously-chosen attribute type",
+        );
+    }
+
+    #[test]
     fn data_extracts_type_and_operations() {
         let data = account_data();
         let extracted = extract_artefacts(&data, &[]);
 
-        // Should have: data_type + constructor + 2 getters + 2 operations = 6 entries
-        assert_eq!(extracted.len(), 6);
+        // Should have: data_type + constructor + 2 getters + 2 attribute types + 2 operations = 8 entries
+        assert_eq!(extracted.len(), 8);
 
         let type_entry = extracted.iter().find(|e| matches!(e.key, ArtefactKey::DataType { .. })).unwrap();
         assert_eq!(type_entry.key.to_string(), "data/account/type");
@@ -707,10 +800,10 @@ mod tests {
         let proj_artefacts = extract_artefacts(&proj, &siblings);
 
         // Verify the total count
-        // Data: 1 type + 1 constructor + 2 getters + 2 ops = 6
+        // Data: 1 type + 1 constructor + 2 getters + 2 attribute types + 2 ops = 8
         // Context: 2 role types + 2 role methods + 1 functionality = 5
         // Projection (context-shape): 1 role type + 1 functionality = 2
-        assert_eq!(data_artefacts.len(), 6);
+        assert_eq!(data_artefacts.len(), 8);
         assert_eq!(ctx_artefacts.len(), 5);
         assert_eq!(proj_artefacts.len(), 2);
 

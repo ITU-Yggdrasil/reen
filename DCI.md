@@ -2,6 +2,8 @@
 
 DCI (Data, Context, Interaction) is the authoring model for Reen. Every draft you write uses DCI vocabulary. This document teaches you to think in DCI so your drafts are clear, complete, and ready for the pipeline.
 
+**Drafts speak BA.** Every context and every projection IS a use case; every data draft is a domain concept described in domain language. You may reference other data types by their capitalised name (Money, Transaction, Account) anywhere prose calls for it — that's a domain reference, not a type annotation. You must NEVER write parameter lists, return types, multiplicity notation (`list of T`, `[T]`), or any other formal signature shape. The Reen pipeline derives all of that from your prose and scenarios. See `DRAFT_FORMAT.md` for the full rule.
+
 ## The Three Artefact Kinds
 
 ### Data

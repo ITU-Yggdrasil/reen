@@ -588,6 +588,13 @@ fn generate_context(a: &PreparedArtifact) -> String {
 }
 
 fn generate_data(a: &PreparedArtifact) -> String {
+    generate_data_with_preserved(a, &BTreeMap::new())
+}
+
+fn generate_data_with_preserved(
+    a: &PreparedArtifact,
+    preserved_attr_types: &BTreeMap<String, String>,
+) -> String {
     let name = &a.export.name;
     let mut out = String::new();
 
@@ -595,7 +602,10 @@ fn generate_data(a: &PreparedArtifact) -> String {
     // generated getters; direct field access is a verify violation.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for attr in &a.attributes {
-        emit_attribute_field(&mut out, attr);
+        let preserved = preserved_attr_types
+            .get(&to_snake_case(&attr.name))
+            .map(String::as_str);
+        emit_attribute_field_with_preserved(&mut out, attr, preserved);
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -603,9 +613,15 @@ fn generate_data(a: &PreparedArtifact) -> String {
     writeln!(out, "impl {} {{", name).unwrap();
 
     // Mandatory new() constructor — body filled by /implement to enforce
-    // every declared invariant and construct Self.
+    // every declared invariant and construct Self. Parameter types match
+    // the struct field types so multiplicity-list fields take a Vec.
     let new_params: Vec<String> = a.attributes.iter()
-        .map(|attr| format!("{}: ()", to_snake_case(&attr.name)))
+        .map(|attr| {
+            let preserved = preserved_attr_types
+                .get(&to_snake_case(&attr.name))
+                .map(String::as_str);
+            format!("{}: {}", to_snake_case(&attr.name), attribute_full_type(attr, preserved))
+        })
         .collect();
     writeln!(out, "    /// Construct a new {}, validating every invariant from the prepared YAML.", name).unwrap();
     writeln!(out, "    pub fn new({}) -> anyhow::Result<Self> {{", new_params.join(", ")).unwrap();
@@ -614,11 +630,16 @@ fn generate_data(a: &PreparedArtifact) -> String {
     writeln!(out).unwrap();
 
     // Getters — one per declared attribute. Bodies are deterministic and
-    // emitted fully; /implement does not touch them.
+    // emitted fully; /implement does not touch them. Return type matches
+    // the field type so `&self.<field>` typechecks for both `T` and `Vec<T>`.
     for attr in &a.attributes {
+        let preserved = preserved_attr_types
+            .get(&to_snake_case(&attr.name))
+            .map(String::as_str);
         let field = to_snake_case(&attr.name);
+        let ty = attribute_full_type(attr, preserved);
         writeln!(out, "    /// {}", attr.description.lines().next().unwrap_or("")).unwrap();
-        writeln!(out, "    pub fn {}(&self) -> &() {{", field).unwrap();
+        writeln!(out, "    pub fn {}(&self) -> &{} {{", field, ty).unwrap();
         writeln!(out, "        &self.{}", field).unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -745,9 +766,59 @@ fn generate_rust_surgical(
 
     match artifact.kind {
         ArtifactKind::Context => generate_context_surgical(artifact, tracker, &preserved),
-        ArtifactKind::Data => generate_data_surgical(artifact, tracker, &preserved),
+        ArtifactKind::Data => {
+            // Attribute Rust types are recovered from the existing struct
+            // declaration when the tracker says they're still fresh — see
+            // `attribute_types_from_tracker_and_source` for the gating rule.
+            let attr_types = attribute_types_from_tracker_and_source(
+                artifact,
+                tracker,
+                existing_source,
+            );
+            generate_data_surgical(artifact, tracker, &preserved, &attr_types)
+        }
         ArtifactKind::Projection => generate_projection_surgical(artifact, tracker, &preserved),
         _ => generate_rust(artifact),
+    }
+}
+
+/// Decide which attribute Rust types from `existing_source` we're allowed to
+/// preserve. The tracker's `data_attribute_type` entry per attribute decides:
+/// `Fresh` → keep; `Stale` / `NotImplemented` / absent → drop (the field
+/// reverts to `()` plus a TODO comment for `/implement`).
+fn attribute_types_from_tracker_and_source(
+    artifact: &PreparedArtifact,
+    tracker: &BuildTracker,
+    existing_source: Option<&str>,
+) -> BTreeMap<String, String> {
+    let Some(source) = existing_source else {
+        return BTreeMap::new();
+    };
+    let extracted = extract_attribute_types(source);
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    let data_name = &artifact.export.name;
+    for attr in &artifact.attributes {
+        let snake = to_snake_case(&attr.name);
+        let key = ArtefactKey::data_attribute_type(data_name, &attr.name);
+        let state = tracker.artefacts.get(&key).map(|e| e.state);
+        if state == Some(ArtefactState::Fresh) {
+            if let Some(ty) = extracted.get(&snake) {
+                out.insert(snake.clone(), strip_multiplicity_wrap(ty));
+            }
+        }
+    }
+    out
+}
+
+/// `extract_attribute_types` returns the *full* declared type, but the
+/// `attribute_full_type` helper expects the *bare* type (it re-applies the
+/// multiplicity wrap). Strip a leading `Vec<` and trailing `>` so the
+/// roundtrip is idempotent.
+fn strip_multiplicity_wrap(ty: &str) -> String {
+    if let Some(inner) = ty.strip_prefix("Vec<").and_then(|s| s.strip_suffix('>')) {
+        inner.to_string()
+    } else {
+        ty.to_string()
     }
 }
 
@@ -830,23 +901,41 @@ fn generate_data_surgical(
     a: &PreparedArtifact,
     tracker: &BuildTracker,
     preserved: &BTreeMap<String, String>,
+    preserved_attr_types: &BTreeMap<String, String>,
 ) -> String {
     let name = &a.export.name;
     let mut out = String::new();
 
-    // Struct — regenerated wholesale, fields private.
+    // Struct — regenerated wholesale, fields private. When the tracker says
+    // an attribute's type is still `fresh`, the type from the previous
+    // scaffold is preserved; otherwise the field reverts to `()` plus a
+    // `// TODO: type to be filled by /implement` comment.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for attr in &a.attributes {
-        emit_attribute_field(&mut out, attr);
+        let preserved_ty = preserved_attr_types
+            .get(&to_snake_case(&attr.name))
+            .map(String::as_str);
+        emit_attribute_field_with_preserved(&mut out, attr, preserved_ty);
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
     writeln!(out, "impl {} {{", name).unwrap();
 
-    // Constructor.
+    // Constructor — parameter types match the struct field types so a
+    // `Vec<…>` field takes a `Vec<…>` parameter. /implement still owns the
+    // body.
     let new_params: Vec<String> = a.attributes.iter()
-        .map(|attr| format!("{}: ()", to_snake_case(&attr.name)))
+        .map(|attr| {
+            let preserved_ty = preserved_attr_types
+                .get(&to_snake_case(&attr.name))
+                .map(String::as_str);
+            format!(
+                "{}: {}",
+                to_snake_case(&attr.name),
+                attribute_full_type(attr, preserved_ty),
+            )
+        })
         .collect();
     let constructor_key = ArtefactKey::data_constructor(name);
     let constructor_body = resolve_body(&constructor_key, "new", tracker, preserved);
@@ -860,13 +949,16 @@ fn generate_data_surgical(
     writeln!(out, "    }}").unwrap();
     writeln!(out).unwrap();
 
-    // Getters — deterministic bodies. The tracker carries an entry per getter
-    // so any change to the underlying attribute set surfaces; the body itself
-    // is not derived from the preserved source.
+    // Getters — deterministic bodies. Return type tracks the field type so
+    // `&self.<field>` typechecks for `Vec<T>` and bare `T` alike.
     for attr in &a.attributes {
+        let preserved_ty = preserved_attr_types
+            .get(&to_snake_case(&attr.name))
+            .map(String::as_str);
         let field = to_snake_case(&attr.name);
+        let ty = attribute_full_type(attr, preserved_ty);
         writeln!(out, "    /// {}", attr.description.lines().next().unwrap_or("")).unwrap();
-        writeln!(out, "    pub fn {}(&self) -> &() {{", field).unwrap();
+        writeln!(out, "    pub fn {}(&self) -> &{} {{", field, ty).unwrap();
         writeln!(out, "        &self.{}", field).unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -1044,6 +1136,69 @@ pub fn extract_method_bodies_from_source(source: &str) -> BTreeMap<String, Strin
     extract_method_bodies(source)
 }
 
+/// Extract `field_name -> rust_type` for the first `pub struct …` block in
+/// `source`. Used by surgical data emitters to preserve the per-attribute
+/// Rust type chosen by `/implement` across re-scaffolds. The bracket-balanced
+/// scan stops at the matching `}` so nested inline tuple types parse cleanly.
+pub fn extract_attribute_types(source: &str) -> BTreeMap<String, String> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    let Some(struct_start) = source.find("pub struct ") else {
+        return out;
+    };
+    let after = &source[struct_start..];
+    let Some(brace_open) = after.find('{') else {
+        return out;
+    };
+    // Find the matching closing brace.
+    let mut depth = 1i32;
+    let mut idx = brace_open + 1;
+    let bytes = after.as_bytes();
+    while idx < bytes.len() && depth > 0 {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            break;
+        }
+        idx += 1;
+    }
+    let body = &after[brace_open + 1..idx];
+
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        // Strip trailing comma + inline `// ...` comment.
+        let no_comment = match line.split_once("//") {
+            Some((before, _)) => before.trim_end(),
+            None => line,
+        };
+        let no_comma = no_comment.trim_end_matches(',').trim();
+        // Field declarations look like `name: Type` (the first `:` separates).
+        let Some((name, ty)) = no_comma.split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let ty = ty.trim();
+        // `pub` prefix would only appear on tuple-struct-y things; data
+        // emitters never emit `pub` on fields, so skip if seen.
+        let name = name.strip_prefix("pub ").unwrap_or(name);
+        if name.is_empty() || ty.is_empty() {
+            continue;
+        }
+        // Only capture identifier-looking field names (rules out anything
+        // weird in a comment or doc block).
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        out.insert(name.to_string(), ty.to_string());
+    }
+    out
+}
+
 fn extract_method_bodies(source: &str) -> BTreeMap<String, String> {
     let mut bodies = BTreeMap::new();
     let lines: Vec<&str> = source.lines().collect();
@@ -1136,16 +1291,56 @@ fn emit_role_player_field(out: &mut String, rp: &crate::prepared::RolePlayerSpec
     }
 }
 
-fn emit_attribute_field(out: &mut String, attr: &crate::prepared::AttributeSpec) {
-    let snake = to_snake_case(&attr.name);
-    match attr.multiplicity {
-        crate::prepared::Multiplicity::List => {
-            writeln!(out, "    {}: Vec<()>, // {}", snake, attr.description).unwrap();
-        }
-        crate::prepared::Multiplicity::Single => {
-            writeln!(out, "    {}: (), // {}", snake, attr.description).unwrap();
-        }
+/// Compute the bare Rust type for an attribute — i.e. what goes into the
+/// struct field, the constructor parameter, and the getter return (sans `&`)
+/// before any multiplicity wrapping.
+///
+/// Default is `()`. When a tracker-preserved type is available (from a
+/// prior `/implement` decision recorded in `.reen/build.json`), that type
+/// wins. Multiplicity wrapping (`Vec<T>`) is applied separately by
+/// [`attribute_full_type`].
+fn attribute_bare_type(
+    _attr: &crate::prepared::AttributeSpec,
+    preserved: Option<&str>,
+) -> String {
+    match preserved {
+        Some(ty) if !ty.is_empty() && ty != "()" => ty.to_string(),
+        _ => "()".to_string(),
     }
+}
+
+/// Compute the full Rust type for an attribute: the bare type wrapped in
+/// `Vec<…>` when multiplicity is `List`. Used by struct field, constructor
+/// parameter, and getter return — keeping the three in lockstep so the
+/// generated code compiles.
+fn attribute_full_type(
+    attr: &crate::prepared::AttributeSpec,
+    preserved: Option<&str>,
+) -> String {
+    let bare = attribute_bare_type(attr, preserved);
+    match attr.multiplicity {
+        crate::prepared::Multiplicity::List => format!("Vec<{}>", bare),
+        crate::prepared::Multiplicity::Single => bare,
+    }
+}
+
+fn emit_attribute_field(out: &mut String, attr: &crate::prepared::AttributeSpec) {
+    emit_attribute_field_with_preserved(out, attr, None);
+}
+
+fn emit_attribute_field_with_preserved(
+    out: &mut String,
+    attr: &crate::prepared::AttributeSpec,
+    preserved: Option<&str>,
+) {
+    let snake = to_snake_case(&attr.name);
+    let ty = attribute_full_type(attr, preserved);
+    let trailing = if preserved.is_some_and(|p| !p.is_empty() && p != "()") {
+        format!(" // {}", attr.description)
+    } else {
+        format!(" // TODO: type to be filled by /implement — {}", attr.description)
+    };
+    writeln!(out, "    {}: {},{}", snake, ty, trailing).unwrap();
 }
 
 /// Render the full method signature line `    <vis> fn <name>(<recv>, <params>) -> <ret> {`.
@@ -1593,6 +1788,205 @@ mod tests {
         assert!(code.contains("fn source_withdraw("), "role method canonical");
         assert!(code.contains("fn sink_deposit("), "role method canonical");
         assert!(code.contains("source_: &Account"), "role player param");
+    }
+
+    #[test]
+    fn data_field_with_list_multiplicity_emits_vec_getter() {
+        // Bug 2.5a regression: when an attribute is List, the getter must
+        // return `&Vec<…>`, not `&…` — otherwise `&self.<field>` is a
+        // type error.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/Session.md".into(),
+            "Session".into(),
+            "Session".into(),
+        );
+        a.attributes = vec![AttributeSpec {
+            name: "scopes".into(),
+            description: "consent scopes".into(),
+            multiplicity: Multiplicity::List,
+        }];
+        let code = generate_rust(&a);
+        assert!(
+            code.contains("pub fn scopes(&self) -> &Vec<()>"),
+            "list-multiplicity getter must return &Vec<…>, got:\n{}", code,
+        );
+        // Sanity: the bare-getter shape is NOT emitted.
+        assert!(
+            !code.contains("pub fn scopes(&self) -> &()"),
+            "stray bare-getter shape, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn data_field_with_list_multiplicity_emits_vec_constructor_parameter() {
+        // The constructor parameter type must match the field type.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/Session.md".into(),
+            "Session".into(),
+            "Session".into(),
+        );
+        a.attributes = vec![AttributeSpec {
+            name: "scopes".into(),
+            description: "consent scopes".into(),
+            multiplicity: Multiplicity::List,
+        }];
+        let code = generate_rust(&a);
+        assert!(
+            code.contains("pub fn new(scopes: Vec<()>)"),
+            "constructor param must match Vec<()> field type, got:\n{}", code,
+        );
+        assert!(
+            !code.contains("pub fn new(scopes: ())"),
+            "stray bare-param shape, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn data_field_with_single_multiplicity_unchanged() {
+        // Regression-guard: single-valued attributes still emit the bare
+        // type for field, constructor param, and getter.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/Money.md".into(),
+            "Money".into(),
+            "Money".into(),
+        );
+        a.attributes = vec![AttributeSpec {
+            name: "amount".into(),
+            description: "amount in minor units".into(),
+            multiplicity: Multiplicity::Single,
+        }];
+        let code = generate_rust(&a);
+        assert!(
+            code.contains("pub fn new(amount: ())"),
+            "single-multiplicity constructor param unchanged, got:\n{}", code,
+        );
+        assert!(
+            code.contains("pub fn amount(&self) -> &()"),
+            "single-multiplicity getter unchanged, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn data_field_uses_preserved_attribute_type_when_fresh() {
+        // Bug 2.5c regression: when /implement has chosen a Rust type for an
+        // attribute and recorded it as fresh, the surgical scaffold must
+        // preserve it across regeneration.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/Money.md".into(),
+            "Money".into(),
+            "Money".into(),
+        );
+        a.attributes = vec![
+            AttributeSpec {
+                name: "amount".into(),
+                description: "amount in minor units".into(),
+                multiplicity: Multiplicity::Single,
+            },
+            AttributeSpec {
+                name: "currency".into(),
+                description: "ISO 4217 code".into(),
+                multiplicity: Multiplicity::Single,
+            },
+        ];
+        let existing = "pub struct Money {\n    amount: i64, // amount in minor units\n    currency: String, // ISO 4217 code\n}\n\nimpl Money {\n    pub fn new(amount: i64, currency: String) -> anyhow::Result<Self> {\n        todo!()\n    }\n}\n";
+        let tracker = tracker_with_entries(&[
+            ("data/money/attribute/amount", ArtefactState::Fresh),
+            ("data/money/attribute/currency", ArtefactState::Fresh),
+        ]);
+        let code = generate_rust_surgical(&a, &tracker, Some(existing));
+        assert!(
+            code.contains("amount: i64,"),
+            "preserved type for fresh attribute, got:\n{}", code,
+        );
+        assert!(
+            code.contains("currency: String,"),
+            "preserved type for fresh attribute, got:\n{}", code,
+        );
+        assert!(
+            code.contains("pub fn amount(&self) -> &i64"),
+            "getter return matches preserved type, got:\n{}", code,
+        );
+        assert!(
+            code.contains("pub fn new(amount: i64, currency: String)"),
+            "constructor params match preserved types, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn data_field_resets_to_unit_when_tracker_is_stale() {
+        // Bug 2.5c: when the attribute description changed (tracker says
+        // stale), the previously-chosen type is dropped — the field reverts
+        // to () plus a TODO comment so /implement re-decides.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/Money.md".into(),
+            "Money".into(),
+            "Money".into(),
+        );
+        a.attributes = vec![AttributeSpec {
+            name: "amount".into(),
+            description: "amount in minor units".into(),
+            multiplicity: Multiplicity::Single,
+        }];
+        let existing = "pub struct Money {\n    amount: i64,\n}\n";
+        let tracker = tracker_with_entries(&[
+            ("data/money/attribute/amount", ArtefactState::Stale),
+        ]);
+        let code = generate_rust_surgical(&a, &tracker, Some(existing));
+        assert!(
+            code.contains("amount: ()"),
+            "stale attribute type reset to (), got:\n{}", code,
+        );
+        assert!(
+            code.contains("TODO: type to be filled by /implement"),
+            "TODO comment present, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn data_field_emits_todo_comment_when_no_tracker_entry() {
+        // Initial scaffold: no tracker entry yet — emit () + TODO so the
+        // implementer knows /implement still owes a type decision.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/Money.md".into(),
+            "Money".into(),
+            "Money".into(),
+        );
+        a.attributes = vec![AttributeSpec {
+            name: "amount".into(),
+            description: "amount in minor units".into(),
+            multiplicity: Multiplicity::Single,
+        }];
+        let code = generate_rust(&a);
+        assert!(
+            code.contains("amount: ()"),
+            "initial scaffold defaults to (), got:\n{}", code,
+        );
+        assert!(
+            code.contains("TODO: type to be filled by /implement"),
+            "TODO comment guides /implement, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn extract_attribute_types_parses_struct_fields() {
+        let source = r#"pub struct Money {
+    amount: i64, // amount in minor units
+    currency: String, // ISO 4217
+    scopes: Vec<String>,
+}
+
+impl Money { }
+"#;
+        let map = extract_attribute_types(source);
+        assert_eq!(map.get("amount").map(String::as_str), Some("i64"));
+        assert_eq!(map.get("currency").map(String::as_str), Some("String"));
+        assert_eq!(map.get("scopes").map(String::as_str), Some("Vec<String>"));
     }
 
     #[test]
