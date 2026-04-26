@@ -760,23 +760,25 @@ fn generate_router(
                 write!(out, " else if ").unwrap();
             }
 
-            // Emit match condition
+            // Emit match condition. Param segments (`{name}` or `<name>`)
+            // accept any value, so they get no equality check; only literal
+            // segments are compared.
             if route.path == "/" {
                 write!(out, "path == \"/\" || segments == [\"\"]").unwrap();
             } else {
                 write!(out, "segments.len() == {}", pattern_segments.len()).unwrap();
                 for (i, seg) in pattern_segments.iter().enumerate() {
-                    if !seg.starts_with('<') {
+                    if path_param_name(seg).is_none() {
                         write!(out, " && segments[{}] == \"{}\"", i, seg).unwrap();
                     }
                 }
             }
             writeln!(out, " {{").unwrap();
 
-            // Extract path params
+            // Bind a local for each path parameter so the variant
+            // construction below can name it via struct shorthand.
             for (i, seg) in pattern_segments.iter().enumerate() {
-                if seg.starts_with('<') {
-                    let param_name = &seg[1..seg.len() - 1];
+                if let Some(param_name) = path_param_name(seg) {
                     writeln!(
                         out,
                         "            let {} = segments[{}].to_string();",
@@ -913,6 +915,21 @@ fn route_pattern_segments(path: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect()
+}
+
+/// If `seg` is a path-parameter pattern (`{name}` or `<name>`), return the
+/// inner name. Otherwise None. Both delimiters are accepted: `{name}` is the
+/// URL-template syntax most BAs reach for, `<name>` is the legacy notation
+/// already in test fixtures.
+fn path_param_name(seg: &str) -> Option<&str> {
+    let bytes = seg.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'{' && bytes[bytes.len() - 1] == b'}' {
+        return Some(&seg[1..seg.len() - 1]);
+    }
+    if bytes.len() >= 3 && bytes[0] == b'<' && bytes[bytes.len() - 1] == b'>' {
+        return Some(&seg[1..seg.len() - 1]);
+    }
+    None
 }
 
 // ── Server crate ────────────────────────────────────────────────
@@ -1294,6 +1311,85 @@ mod tests {
         assert!(code.contains("ProductScreen"), "product variant");
         assert!(code.contains("pub fn dispatch"), "dispatch method");
         assert!(code.contains("pub fn render"), "render method");
+    }
+
+    #[test]
+    fn router_binds_curly_brace_path_params() {
+        // Bug 4 regression: BAs author paths in URL-template syntax (`{id}`).
+        // The dispatch matcher must (a) NOT contain the literal segment
+        // `"{id}"` as a string compare, and (b) bind a local `id` variable
+        // before constructing the Route variant.
+        let mut rt = PreparedArtifact::new(
+            ArtifactKind::RoutingTable,
+            "routes/main.md".into(),
+            "Routes: main".into(),
+            "main".into(),
+        );
+        rt.routes = vec![
+            RouteSpec {
+                path: "/accounts".into(),
+                component: "AccountsScreen".into(),
+                params: vec![],
+            },
+            RouteSpec {
+                path: "/accounts/{id}".into(),
+                component: "AccountDetailScreen".into(),
+                params: vec![RouteParamSpec {
+                    name: "id".into(),
+                    data_type: "Account".into(),
+                }],
+            },
+        ];
+
+        let code = generate_router(&[&rt], &[]);
+        assert!(
+            code.contains("let id = segments[1].to_string();"),
+            "param `id` must be bound from segments[1], got:\n{}",
+            code,
+        );
+        assert!(
+            !code.contains("\"{id}\""),
+            "matcher must not compare against the literal string \"{{id}}\", got:\n{}",
+            code,
+        );
+        // Literal segment `accounts` is still required to match.
+        assert!(
+            code.contains("segments[0] == \"accounts\""),
+            "literal segment must still match, got:\n{}",
+            code,
+        );
+    }
+
+    #[test]
+    fn router_binds_angle_bracket_path_params() {
+        // Backwards compatibility: drafts authored with the legacy `<id>`
+        // notation should still bind the param.
+        let mut rt = PreparedArtifact::new(
+            ArtifactKind::RoutingTable,
+            "routes/main.md".into(),
+            "Routes: main".into(),
+            "main".into(),
+        );
+        rt.routes = vec![RouteSpec {
+            path: "/products/<id>".into(),
+            component: "ProductScreen".into(),
+            params: vec![RouteParamSpec {
+                name: "id".into(),
+                data_type: "Product".into(),
+            }],
+        }];
+
+        let code = generate_router(&[&rt], &[]);
+        assert!(
+            code.contains("let id = segments[1].to_string();"),
+            "param `id` must be bound from segments[1], got:\n{}",
+            code,
+        );
+        assert!(
+            !code.contains("\"<id>\""),
+            "matcher must not compare against the literal string \"<id>\", got:\n{}",
+            code,
+        );
     }
 
     #[test]

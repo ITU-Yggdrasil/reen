@@ -75,7 +75,9 @@ Add a unit test under `src/codegen.rs` `#[cfg(test)]` that emits a context with 
 
 Risk: low. Mechanical change with a clear test path.
 
-## 4. Router has literal `{id}` matcher and unbound variable
+## 4. Router has literal `{id}` matcher and unbound variable — DONE
+
+Resolved on `claude-code-native`: `src/web_codegen.rs` adds a `path_param_name(seg)` helper that recognises both `{name}` (URL-template, what BAs author) and `<name>` (legacy fixture syntax) as parameter segments. The dispatch matcher now skips equality checks for param segments and binds `let <name> = segments[i].to_string();` before constructing the variant. Regression tests live in `src/web_codegen.rs` (`router_binds_curly_brace_path_params`, `router_binds_angle_bracket_path_params`). `tests/lupa/crates/lupa-components/src/router.rs` regenerated; the `/accounts/{id}` arm now binds `id` correctly and contains no literal `"{id}"` segment compare.
 
 **Symptom.** `crates/lupa-components/src/router.rs` contains:
 
@@ -198,7 +200,7 @@ A separate session should treat the apis pipeline as a unit: the ingest path, wh
 Groups land one at a time. Each group ends with a **review break**: the implementer stops, hands back, and waits for explicit go-ahead before starting the next. No group spans more than one PR.
 
 1. **Bug 3 — `use` statements.** DONE. (Ref: four tests in `src/codegen.rs`; `tests/lupa` regenerated.)
-2. **Bug 4 — router `{id}` binding.** Localised to `src/web_codegen.rs`; small enough to ship right after bug 3.
+2. **Bug 4 — router `{id}` binding.** DONE. (Ref: `path_param_name` helper in `src/web_codegen.rs`; two tests covering `{id}` and `<id>`.)
 3. **Bug 2 — Phase 10 layout detection.** Pure mechanics, no draft-side implications. Unblocks the duplicate `src/` orphan that's currently confusing every `git status`. → REVIEW BREAK.
 4. **Bugs 5 + 6 — signature and multiplicity inference (one PR).** Both are scenario-driven inference passes in `src/prepare.rs`; both bump the prepared schema; both emit findings the same way. They land together so the schema bump happens once and `tests/lupa` regenerates once. The BA-speak rule is the dominant constraint here — drafts must not change. → REVIEW BREAK.
 5. **Bug 7 — test-synth validation.** Independent; lives in `src/test_synth.rs`. Can be done before or after bugs 5/6 if the schedule shifts, but follows them in this plan because the synth bugs are visible in the current `tests/lupa` prepared YAML and the validation pass closes them out cleanly. → REVIEW BREAK.
