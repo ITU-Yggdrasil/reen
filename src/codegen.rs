@@ -544,12 +544,7 @@ fn generate_context(a: &PreparedArtifact) -> String {
     // Struct
     writeln!(out, "pub struct {} {{", name).unwrap();
     for rp in &a.role_players {
-        let rust_type = sanitize_rust_type(&rp.data_type);
-        if rust_type == "()" {
-            writeln!(out, "    {}: (), // {}", to_snake_case(&rp.name), rp.data_type).unwrap();
-        } else {
-            writeln!(out, "    {}: {},", to_snake_case(&rp.name), rust_type).unwrap();
-        }
+        emit_role_player_field(&mut out, rp);
     }
     for prop in &a.props {
         // Props are scalar config — we don't know the type, so use a placeholder
@@ -564,7 +559,7 @@ fn generate_context(a: &PreparedArtifact) -> String {
     // Public methods = functionalities (default to &self; implementer upgrades to &mut self)
     for func in &a.functionalities {
         writeln!(out, "    /// {}", func.description.lines().next().unwrap_or("")).unwrap();
-        writeln!(out, "    pub fn {}(&self) {{", to_snake_case(&func.name)).unwrap();
+        emit_method_signature(&mut out, "pub", &to_snake_case(&func.name), func.derived_signature.as_ref());
         writeln!(out, "        todo!()").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -600,7 +595,7 @@ fn generate_data(a: &PreparedArtifact) -> String {
     // generated getters; direct field access is a verify violation.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for attr in &a.attributes {
-        writeln!(out, "    {}: (), // {}", to_snake_case(&attr.name), attr.description).unwrap();
+        emit_attribute_field(&mut out, attr);
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -642,7 +637,7 @@ fn generate_data(a: &PreparedArtifact) -> String {
             writeln!(out).unwrap();
         } else {
             writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
-            writeln!(out, "    pub fn {}(&self) {{", op_name).unwrap();
+            emit_method_signature(&mut out, "pub", &op_name, op.derived_signature.as_ref());
             writeln!(out, "        todo!()").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
@@ -669,12 +664,7 @@ fn generate_projection(a: &PreparedArtifact) -> String {
     // Struct — private fields, one per role player and prop.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for rp in &a.role_players {
-        let rust_type = sanitize_rust_type(&rp.data_type);
-        if rust_type == "()" {
-            writeln!(out, "    {}: (), // {}", to_snake_case(&rp.name), rp.data_type).unwrap();
-        } else {
-            writeln!(out, "    {}: {},", to_snake_case(&rp.name), rust_type).unwrap();
-        }
+        emit_role_player_field(&mut out, rp);
     }
     for prop in &a.props {
         writeln!(out, "    {}: (), // prop: {}", to_snake_case(&prop.name), prop.description).unwrap();
@@ -689,7 +679,7 @@ fn generate_projection(a: &PreparedArtifact) -> String {
     if !a.role_players.is_empty() || !a.props.is_empty() {
         let params: Vec<String> = a.role_players.iter()
             .map(|rp| {
-                let ty = sanitize_rust_type(&rp.data_type);
+                let ty = role_player_field_type(rp);
                 format!("{}: {}", to_snake_case(&rp.name), ty)
             })
             .chain(a.props.iter().map(|p| format!("{}: ()", to_snake_case(&p.name))))
@@ -701,10 +691,14 @@ fn generate_projection(a: &PreparedArtifact) -> String {
         writeln!(out).unwrap();
     }
 
-    // Functionalities — pub, always &self (immutable).
+    // Functionalities — pub, always &self (immutable). Projection-specific
+    // constraint: even when the derived signature suggests `&mut self`, the
+    // verifier rejects it. We honour the derived shape only for params and
+    // return type.
     for func in &a.functionalities {
         writeln!(out, "    /// {}", func.description.lines().next().unwrap_or("")).unwrap();
-        writeln!(out, "    pub fn {}(&self) {{", to_snake_case(&func.name)).unwrap();
+        let sig = projection_safe_signature(func.derived_signature.as_ref());
+        emit_method_signature(&mut out, "pub", &to_snake_case(&func.name), sig.as_ref());
         writeln!(out, "        todo!()").unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -770,12 +764,7 @@ fn generate_context_surgical(
     // Struct — regenerated wholesale
     writeln!(out, "pub struct {} {{", name).unwrap();
     for rp in &a.role_players {
-        let rust_type = sanitize_rust_type(&rp.data_type);
-        if rust_type == "()" {
-            writeln!(out, "    {}: (), // {}", to_snake_case(&rp.name), rp.data_type).unwrap();
-        } else {
-            writeln!(out, "    {}: {},", to_snake_case(&rp.name), rust_type).unwrap();
-        }
+        emit_role_player_field(&mut out, rp);
     }
     for prop in &a.props {
         writeln!(out, "    {}: (), // prop: {}", to_snake_case(&prop.name), prop.description).unwrap();
@@ -793,9 +782,18 @@ fn generate_context_surgical(
         let body = resolve_body(&key, &method_name, tracker, preserved);
 
         writeln!(out, "    /// {}", func.description.lines().next().unwrap_or("")).unwrap();
-        // Detect receiver from preserved body's method signature
-        let receiver = detect_receiver(&method_name, preserved);
-        writeln!(out, "    pub fn {}({}) {{", method_name, receiver).unwrap();
+        // Receiver: prefer derived signature; otherwise inspect preserved
+        // body. For derived signatures with parameters / non-unit return,
+        // the helper renders the full shape.
+        match func.derived_signature.as_ref() {
+            Some(sig) => {
+                emit_method_signature(&mut out, "pub", &method_name, Some(sig));
+            }
+            None => {
+                let receiver = detect_receiver(&method_name, preserved);
+                writeln!(out, "    pub fn {}({}) {{", method_name, receiver).unwrap();
+            }
+        }
         write!(out, "{}", body).unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -839,7 +837,7 @@ fn generate_data_surgical(
     // Struct — regenerated wholesale, fields private.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for attr in &a.attributes {
-        writeln!(out, "    {}: (), // {}", to_snake_case(&attr.name), attr.description).unwrap();
+        emit_attribute_field(&mut out, attr);
     }
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -893,8 +891,15 @@ fn generate_data_surgical(
             writeln!(out).unwrap();
         } else {
             writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
-            let receiver = detect_receiver(&method_name, preserved);
-            writeln!(out, "    pub fn {}({}) {{", method_name, receiver).unwrap();
+            match op.derived_signature.as_ref() {
+                Some(sig) => {
+                    emit_method_signature(&mut out, "pub", &method_name, Some(sig));
+                }
+                None => {
+                    let receiver = detect_receiver(&method_name, preserved);
+                    writeln!(out, "    pub fn {}({}) {{", method_name, receiver).unwrap();
+                }
+            }
             write!(out, "{}", body).unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out).unwrap();
@@ -921,12 +926,7 @@ fn generate_projection_surgical(
     // Struct — regenerated wholesale, private fields.
     writeln!(out, "pub struct {} {{", name).unwrap();
     for rp in &a.role_players {
-        let rust_type = sanitize_rust_type(&rp.data_type);
-        if rust_type == "()" {
-            writeln!(out, "    {}: (), // {}", to_snake_case(&rp.name), rp.data_type).unwrap();
-        } else {
-            writeln!(out, "    {}: {},", to_snake_case(&rp.name), rust_type).unwrap();
-        }
+        emit_role_player_field(&mut out, rp);
     }
     for prop in &a.props {
         writeln!(out, "    {}: (), // prop: {}", to_snake_case(&prop.name), prop.description).unwrap();
@@ -940,7 +940,7 @@ fn generate_projection_surgical(
     if !a.role_players.is_empty() || !a.props.is_empty() {
         let params: Vec<String> = a.role_players.iter()
             .map(|rp| {
-                let ty = sanitize_rust_type(&rp.data_type);
+                let ty = role_player_field_type(rp);
                 format!("{}: {}", to_snake_case(&rp.name), ty)
             })
             .chain(a.props.iter().map(|p| format!("{}: ()", to_snake_case(&p.name))))
@@ -952,15 +952,15 @@ fn generate_projection_surgical(
         writeln!(out).unwrap();
     }
 
-    // Functionalities — pub, always &self.
+    // Functionalities — pub, always &self (immutable).
     for func in &a.functionalities {
         let key = ArtefactKey::projection_functionality(name, &func.name);
         let method_name = to_snake_case(&func.name);
         let body = resolve_body(&key, &method_name, tracker, preserved);
 
         writeln!(out, "    /// {}", func.description.lines().next().unwrap_or("")).unwrap();
-        // Force &self; projection functionalities never upgrade to &mut self.
-        writeln!(out, "    pub fn {}(&self) {{", method_name).unwrap();
+        let sig = projection_safe_signature(func.derived_signature.as_ref());
+        emit_method_signature(&mut out, "pub", &method_name, sig.as_ref());
         write!(out, "{}", body).unwrap();
         writeln!(out, "    }}").unwrap();
         writeln!(out).unwrap();
@@ -1111,6 +1111,97 @@ fn extract_method_bodies(source: &str) -> BTreeMap<String, String> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
+
+/// Render the Rust field type for a role player, accounting for inferred
+/// multiplicity. `Multiplicity::List` wraps the bare type in `Vec<T>`.
+/// Prose role players (data type doesn't sanitise) still fall back to `()`.
+fn role_player_field_type(rp: &crate::prepared::RolePlayerSpec) -> String {
+    let bare = sanitize_rust_type(&rp.data_type);
+    if bare == "()" {
+        return "()".into();
+    }
+    match rp.multiplicity {
+        crate::prepared::Multiplicity::List => format!("Vec<{}>", bare),
+        crate::prepared::Multiplicity::Single => bare.to_string(),
+    }
+}
+
+fn emit_role_player_field(out: &mut String, rp: &crate::prepared::RolePlayerSpec) {
+    let snake = to_snake_case(&rp.name);
+    let ty = role_player_field_type(rp);
+    if ty == "()" {
+        writeln!(out, "    {}: (), // {}", snake, rp.data_type).unwrap();
+    } else {
+        writeln!(out, "    {}: {},", snake, ty).unwrap();
+    }
+}
+
+fn emit_attribute_field(out: &mut String, attr: &crate::prepared::AttributeSpec) {
+    let snake = to_snake_case(&attr.name);
+    match attr.multiplicity {
+        crate::prepared::Multiplicity::List => {
+            writeln!(out, "    {}: Vec<()>, // {}", snake, attr.description).unwrap();
+        }
+        crate::prepared::Multiplicity::Single => {
+            writeln!(out, "    {}: (), // {}", snake, attr.description).unwrap();
+        }
+    }
+}
+
+/// Render the full method signature line `    <vis> fn <name>(<recv>, <params>) -> <ret> {`.
+/// When `sig` is None, falls back to `(&self)` returning unit.
+fn emit_method_signature(
+    out: &mut String,
+    visibility: &str,
+    method_name: &str,
+    sig: Option<&crate::prepared::DerivedSignature>,
+) {
+    let prefix = if visibility.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", visibility)
+    };
+    match sig {
+        Some(sig) => {
+            let params: Vec<String> = sig
+                .parameters
+                .iter()
+                .map(|p| format!("{}: {}", to_snake_case(&p.name), p.rust_type))
+                .collect();
+            let ret = if sig.returns == "()" {
+                String::new()
+            } else {
+                format!(" -> {}", sig.returns)
+            };
+            let recv = if sig.receiver.is_empty() { "&self".into() } else { sig.receiver.clone() };
+            let mut sig_line = format!("    {}fn {}({}", prefix, method_name, recv);
+            for p in &params {
+                sig_line.push_str(", ");
+                sig_line.push_str(p);
+            }
+            sig_line.push(')');
+            sig_line.push_str(&ret);
+            sig_line.push_str(" {");
+            writeln!(out, "{}", sig_line).unwrap();
+        }
+        None => {
+            writeln!(out, "    {}fn {}(&self) {{", prefix, method_name).unwrap();
+        }
+    }
+}
+
+/// Projection functionalities are required to take `&self` (verifier rejects
+/// `&mut self`). Strip an upgraded receiver from the derived signature so
+/// the emitted method matches the kind contract.
+fn projection_safe_signature(
+    sig: Option<&crate::prepared::DerivedSignature>,
+) -> Option<crate::prepared::DerivedSignature> {
+    sig.map(|s| {
+        let mut clone = s.clone();
+        clone.receiver = "&self".into();
+        clone
+    })
+}
 
 /// Emit `use crate::data::<snake>::<T>;` lines for every unique referencable
 /// data type appearing as a role player. Sorted alphabetically by type name.
@@ -1345,14 +1436,14 @@ mod tests {
             "MoneyTransfer".into(),
         );
         a.role_players = vec![
-            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw from".into() },
-            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit to".into() },
+            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw from".into(), ..Default::default() },
+            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit to".into(), ..Default::default() },
         ];
         a.props = vec![
             PropSpec { name: "amount".into(), description: "transfer amount".into() },
         ];
         a.functionalities = vec![
-            FunctionalitySpec { name: "transfer".into(), description: "Execute the transfer.".into(), role_method_refs: vec!["source_withdraw".into(), "sink_deposit".into()] },
+            FunctionalitySpec { name: "transfer".into(), description: "Execute the transfer.".into(), role_method_refs: vec!["source_withdraw".into(), "sink_deposit".into()], ..Default::default() },
         ];
         a.role_methods = vec![
             RoleMethodGroupSpec {
@@ -1389,9 +1480,9 @@ mod tests {
             "Transfer".into(),
         );
         a.role_players = vec![
-            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw".into() },
-            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit".into() },
-            RolePlayerSpec { name: "amount".into(), data_type: "Money".into(), responsibility: "the amount".into() },
+            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw".into(), ..Default::default() },
+            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit".into(), ..Default::default() },
+            RolePlayerSpec { name: "amount".into(), data_type: "Money".into(), responsibility: "the amount".into(), ..Default::default() },
         ];
 
         let code = generate_rust(&a);
@@ -1432,7 +1523,7 @@ mod tests {
             RolePlayerSpec {
                 name: "transactions".into(),
                 data_type: "Transaction".into(),
-                responsibility: "the transactions".into(),
+                responsibility: "the transactions".into(), ..Default::default()
             },
         ];
         let code = generate_rust(&a);
@@ -1456,7 +1547,7 @@ mod tests {
             RolePlayerSpec {
                 name: "rng".into(),
                 data_type: "a random number generator".into(),
-                responsibility: "rng".into(),
+                responsibility: "rng".into(), ..Default::default()
             },
         ];
         let code = generate_rust(&a);
@@ -1477,8 +1568,8 @@ mod tests {
             "Echo".into(),
         );
         a.role_players = vec![
-            RolePlayerSpec { name: "label".into(), data_type: "String".into(), responsibility: "label".into() },
-            RolePlayerSpec { name: "active".into(), data_type: "bool".into(), responsibility: "flag".into() },
+            RolePlayerSpec { name: "label".into(), data_type: "String".into(), responsibility: "label".into(), ..Default::default() },
+            RolePlayerSpec { name: "active".into(), data_type: "bool".into(), responsibility: "flag".into(), ..Default::default() },
         ];
         let code = generate_rust(&a);
         assert!(
@@ -1512,10 +1603,10 @@ mod tests {
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
         a.attributes = vec![
-            AttributeSpec { name: "value".into(), description: "cents".into() },
-            AttributeSpec { name: "currency".into(), description: "ISO 4217 code".into() },
+            AttributeSpec { name: "value".into(), description: "cents".into(), ..Default::default() },
+            AttributeSpec { name: "currency".into(), description: "ISO 4217 code".into(), ..Default::default() },
         ];
-        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None }];
+        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None, ..Default::default() }];
 
         let code = generate_rust(&a);
         assert!(code.contains("pub struct Amount"));
@@ -1540,12 +1631,12 @@ mod tests {
         let mut a = PreparedArtifact::new(
             ArtifactKind::Data, "data/Money.md".into(), "Money".into(), "Money".into(),
         );
-        a.attributes = vec![AttributeSpec { name: "currency".into(), description: "ISO 4217 code".into() }];
+        a.attributes = vec![AttributeSpec { name: "currency".into(), description: "ISO 4217 code".into(), ..Default::default() }];
         a.operations = vec![
             OperationSpec {
                 name: "with_currency".into(),
                 description: "Return a new Money with the currency replaced.".into(),
-                kind: Some("with".into()),
+                kind: Some("with".into()), ..Default::default()
             },
         ];
 
@@ -1573,14 +1664,14 @@ mod tests {
             RolePlayerSpec {
                 name: "account".into(),
                 data_type: "Account".into(),
-                responsibility: "the account being viewed".into(),
+                responsibility: "the account being viewed".into(), ..Default::default()
             },
         ];
         a.functionalities = vec![
             FunctionalitySpec {
                 name: "current_balance".into(),
                 description: "Returns the current balance.".into(),
-                role_method_refs: vec![],
+                role_method_refs: vec![], ..Default::default()
             },
         ];
 
@@ -1626,7 +1717,7 @@ mod tests {
             RolePlayerSpec {
                 name: "rng".into(),
                 data_type: "a random number generator".into(),
-                responsibility: "picks random positions".into(),
+                responsibility: "picks random positions".into(), ..Default::default()
             },
         ];
         a.role_methods = vec![RoleMethodGroupSpec {
@@ -1641,7 +1732,7 @@ mod tests {
         a.functionalities = vec![FunctionalitySpec {
             name: "play".into(),
             description: "Play the game.".into(),
-            role_method_refs: vec![],
+            role_method_refs: vec![], ..Default::default()
         }];
 
         let code = generate_rust(&a);
@@ -1777,8 +1868,8 @@ impl Amount {
         let mut a = PreparedArtifact::new(
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
-        a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into() }];
-        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None }];
+        a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into(), ..Default::default() }];
+        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None, ..Default::default() }];
 
         let tracker = tracker_with_entries(&[
             ("data/amount/type", ArtefactState::Fresh),
@@ -1810,8 +1901,8 @@ impl Amount {
         let mut a = PreparedArtifact::new(
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
-        a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into() }];
-        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None }];
+        a.attributes = vec![AttributeSpec { name: "value".into(), description: "cents".into(), ..Default::default() }];
+        a.operations = vec![OperationSpec { name: "add".into(), description: "Add two amounts.".into(), kind: None, ..Default::default() }];
 
         let tracker = tracker_with_entries(&[
             ("data/amount/type", ArtefactState::Stale),

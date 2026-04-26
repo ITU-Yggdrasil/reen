@@ -376,13 +376,13 @@ mod tests {
             "Account".into(),
         );
         a.attributes = vec![
-            AttributeSpec { name: "balance".into(), description: "current balance".into() },
-            AttributeSpec { name: "owner".into(), description: "account owner".into() },
+            AttributeSpec { name: "balance".into(), description: "current balance".into(), ..Default::default() },
+            AttributeSpec { name: "owner".into(), description: "account owner".into(), ..Default::default() },
         ];
         a.invariants = vec!["balance >= 0".into()];
         a.operations = vec![
-            OperationSpec { name: "deposit".into(), description: "Add funds.".into(), kind: None },
-            OperationSpec { name: "withdraw".into(), description: "Remove funds.".into(), kind: None },
+            OperationSpec { name: "deposit".into(), description: "Add funds.".into(), kind: None, ..Default::default() },
+            OperationSpec { name: "withdraw".into(), description: "Remove funds.".into(), kind: None, ..Default::default() },
         ];
         a
     }
@@ -395,8 +395,8 @@ mod tests {
             "MoneyTransfer".into(),
         );
         a.role_players = vec![
-            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw from".into() },
-            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit to".into() },
+            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw from".into(), ..Default::default() },
+            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit to".into(), ..Default::default() },
         ];
         a.props = vec![
             PropSpec { name: "amount".into(), description: "transfer amount".into() },
@@ -405,7 +405,7 @@ mod tests {
             FunctionalitySpec {
                 name: "transfer".into(),
                 description: "Execute the transfer.".into(),
-                role_method_refs: vec!["source_withdraw".into(), "sink_deposit".into()],
+                role_method_refs: vec!["source_withdraw".into(), "sink_deposit".into()], ..Default::default()
             },
         ];
         a.role_methods = vec![
@@ -444,14 +444,14 @@ mod tests {
             RolePlayerSpec {
                 name: "account".into(),
                 data_type: "Account".into(),
-                responsibility: "the account being viewed".into(),
+                responsibility: "the account being viewed".into(), ..Default::default()
             },
         ];
         a.functionalities = vec![
             FunctionalitySpec {
                 name: "current_balance".into(),
                 description: "Returns the account's current balance.".into(),
-                role_method_refs: vec![],
+                role_method_refs: vec![], ..Default::default()
             },
         ];
         a

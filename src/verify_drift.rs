@@ -531,7 +531,7 @@ mod tests {
         artifact.role_players = vec![RolePlayerSpec {
             name: "audit_entry".into(),
             data_type: "AuditEntry".into(),
-            responsibility: "the entry".into(),
+            responsibility: "the entry".into(), ..Default::default()
         }];
         let src = r#"
             pub struct record_audit_entry {
@@ -553,7 +553,7 @@ mod tests {
         artifact.role_players = vec![RolePlayerSpec {
             name: "session".into(),
             data_type: "Session".into(),
-            responsibility: "the session".into(),
+            responsibility: "the session".into(), ..Default::default()
         }];
         let src = r#"
             pub struct session_manager {
@@ -577,7 +577,7 @@ mod tests {
         artifact.role_players = vec![RolePlayerSpec {
             name: "idempotency_ledger".into(),
             data_type: "IdempotencyLedger".into(),
-            responsibility: "ledger".into(),
+            responsibility: "ledger".into(), ..Default::default()
         }];
         artifact.role_methods = vec![RoleMethodGroupSpec {
             role: "idempotency_ledger".into(),
@@ -591,7 +591,7 @@ mod tests {
         artifact.functionalities = vec![FunctionalitySpec {
             name: "enforce".into(),
             description: "enforces".into(),
-            role_method_refs: vec!["idempotency_ledger_lookup".into()],
+            role_method_refs: vec!["idempotency_ledger_lookup".into()], ..Default::default()
         }];
         let src = r#"
             pub struct enforce_idempotency { idempotency_ledger: IdempotencyLedger }
@@ -616,7 +616,7 @@ mod tests {
         artifact.role_players = vec![RolePlayerSpec {
             name: "audit_sink".into(),
             data_type: "AuditSink".into(),
-            responsibility: "audit sink".into(),
+            responsibility: "audit sink".into(), ..Default::default()
         }];
         artifact.role_methods = vec![RoleMethodGroupSpec {
             role: "audit_sink".into(),
@@ -630,7 +630,7 @@ mod tests {
         artifact.functionalities = vec![FunctionalitySpec {
             name: "revoke".into(),
             description: "revoke".into(),
-            role_method_refs: vec!["audit_sink_record".into()],
+            role_method_refs: vec!["audit_sink_record".into()], ..Default::default()
         }];
         let src = r#"
             pub struct revoke_session { audit_sink: AuditSink }
@@ -653,7 +653,7 @@ mod tests {
         artifact.functionalities = vec![FunctionalitySpec {
             name: "list".into(),
             description: "lists accounts; refuses on missing scope".into(),
-            role_method_refs: vec![],
+            role_method_refs: vec![], ..Default::default()
         }];
         artifact.scenarios = vec![ScenarioSpec {
             name: "scope denied".into(),
@@ -685,7 +685,7 @@ mod tests {
         artifact.functionalities = vec![FunctionalitySpec {
             name: "list".into(),
             description: "lists accounts; refuses on missing scope".into(),
-            role_method_refs: vec![],
+            role_method_refs: vec![], ..Default::default()
         }];
         artifact.scenarios = vec![ScenarioSpec {
             name: "scope denied".into(),

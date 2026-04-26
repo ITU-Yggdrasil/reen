@@ -491,6 +491,7 @@ mod tests {
             .map(|n| AttributeSpec {
                 name: n.to_string(),
                 description: format!("the {}", n),
+                ..Default::default()
             })
             .collect();
         a
@@ -510,7 +511,7 @@ mod tests {
         a.role_players = vec![RolePlayerSpec {
             name: role_player.0.to_string(),
             data_type: role_player.1.to_string(),
-            responsibility: "provides data".to_string(),
+            responsibility: "provides data".to_string(), ..Default::default()
         }];
         a.role_methods = vec![RoleMethodGroupSpec {
             role: role_player.0.to_string(),
@@ -527,6 +528,7 @@ mod tests {
                 name: n.to_string(),
                 description: format!("computes {}", n),
                 role_method_refs: vec![],
+                ..Default::default()
             })
             .collect();
         a

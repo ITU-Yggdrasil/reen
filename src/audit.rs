@@ -386,7 +386,7 @@ mod tests {
         artifact.functionalities = vec![FunctionalitySpec {
             name: "play".into(),
             description: "Play the game.".into(),
-            role_method_refs: vec![],
+            role_method_refs: vec![], ..Default::default()
         }];
 
         // Medium severity finding with High threshold — should not flip

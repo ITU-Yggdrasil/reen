@@ -959,14 +959,14 @@ mod tests {
             "MoneyTransfer".into(),
         );
         a.role_players = vec![
-            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw".into() },
-            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit".into() },
+            RolePlayerSpec { name: "source".into(), data_type: "Account".into(), responsibility: "withdraw".into(), ..Default::default() },
+            RolePlayerSpec { name: "sink".into(), data_type: "Account".into(), responsibility: "deposit".into(), ..Default::default() },
         ];
         a.props = vec![
             PropSpec { name: "amount".into(), description: "transfer amount".into() },
         ];
         a.functionalities = vec![
-            FunctionalitySpec { name: "transfer".into(), description: "do it".into(), role_method_refs: vec![] },
+            FunctionalitySpec { name: "transfer".into(), description: "do it".into(), role_method_refs: vec![], ..Default::default() },
         ];
         a.role_methods = vec![
             RoleMethodGroupSpec {
@@ -1066,7 +1066,7 @@ impl MoneyTransfer {
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
         a.attributes = vec![
-            AttributeSpec { name: "value".into(), description: "cents".into() },
+            AttributeSpec { name: "value".into(), description: "cents".into(), ..Default::default() },
         ];
 
         let source = r#"
@@ -1131,10 +1131,10 @@ impl MoneyTransfer {
             ArtifactKind::Data, "data/Amount.md".into(), "Amount".into(), "Amount".into(),
         );
         a.attributes = vec![
-            AttributeSpec { name: "value".into(), description: "cents".into() },
+            AttributeSpec { name: "value".into(), description: "cents".into(), ..Default::default() },
         ];
         a.operations = vec![
-            OperationSpec { name: "add".into(), description: "add".into(), kind: None },
+            OperationSpec { name: "add".into(), description: "add".into(), kind: None, ..Default::default() },
         ];
 
         let source = r#"

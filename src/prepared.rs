@@ -1,9 +1,20 @@
 use serde::{Deserialize, Serialize};
 
-pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v3";
+pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v4";
 /// Retained for code that historically distinguished v2 from v3 — both now point
 /// at the unified v3 schema after the projection-adopts-context-shape rename.
 pub const PREPARED_SCHEMA_V3_VERSION: &str = "reen.prepare/v3";
+
+// Schema migration notes
+// ──────────────────────
+// v3 → v4 (Group 2 / bugs 5+6):
+//   * Added `derived_signature: Option<DerivedSignature>` to `OperationSpec`
+//     and `FunctionalitySpec`. Populated by the scenario-driven inference pass
+//     in `prepare`. Absent fields → codegen falls back to `(&self)` stub.
+//   * Added `multiplicity: Multiplicity` to `RolePlayerSpec` and
+//     `AttributeSpec`. Default `Single`. `List` causes codegen to wrap the
+//     field type in `Vec<T>`. v3 documents without the field deserialise
+//     successfully (the default kicks in).
 
 /// DCI artifact kinds plus the operation kind for external API consumption.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,12 +142,19 @@ pub struct ExportInfo {
 
 // ── Context types ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RolePlayerSpec {
     pub name: String,
     /// Data or projection name from the manifest.
     pub data_type: String,
     pub responsibility: String,
+    /// Whether the role binds a single value or a collection of them.
+    /// Inferred at prepare time from the role player's name plurality, the
+    /// description prose, and (decisively) the shape of `Given:` clauses
+    /// across scenarios. Defaults to `Single` so v3-era prepared YAML stays
+    /// valid.
+    #[serde(default, skip_serializing_if = "Multiplicity::is_single")]
+    pub multiplicity: Multiplicity,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,7 +181,7 @@ pub struct PropSpec {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FunctionalitySpec {
     pub name: String,
     /// Prose describing the enactment.
@@ -171,17 +189,65 @@ pub struct FunctionalitySpec {
     /// Role method names referenced in this functionality's prose.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub role_method_refs: Vec<String>,
+    /// Inferred from scenarios at prepare time. Absent when no scenario
+    /// invokes this functionality or when scenarios disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_signature: Option<DerivedSignature>,
+}
+
+// ── Inference outputs (v4) ───────────────────────────────────────
+
+/// Cardinality of a role player or attribute. Inferred at prepare time.
+/// `List` causes codegen to wrap the field type in `Vec<T>`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Multiplicity {
+    #[default]
+    Single,
+    List,
+}
+
+impl Multiplicity {
+    pub fn is_single(&self) -> bool {
+        matches!(self, Multiplicity::Single)
+    }
+}
+
+/// A signature derived from prose + scenarios. The fields hold pre-rendered
+/// Rust fragments so codegen can splice them directly. Absence is the
+/// fallback; codegen then emits `pub fn <name>(&self) { todo!() }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DerivedSignature {
+    /// "&self" or "&mut self" or "self".
+    pub receiver: String,
+    pub parameters: Vec<ParamSpec>,
+    /// Rust return type fragment, e.g. "()", "bool", "String", "Money",
+    /// "Vec<Transaction>". The codegen splices this verbatim.
+    pub returns: String,
+    /// Always "derived" today; reserved for future "authored" sources.
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ParamSpec {
+    pub name: String,
+    /// Rust type fragment, e.g. "&Money", "String", "i64".
+    pub rust_type: String,
 }
 
 // ── Data types ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttributeSpec {
     pub name: String,
     pub description: String,
+    /// Whether the attribute holds a single value or a collection. Same
+    /// inference rules as role-player multiplicity; defaults to `Single`.
+    #[serde(default, skip_serializing_if = "Multiplicity::is_single")]
+    pub multiplicity: Multiplicity,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationSpec {
     pub name: String,
     pub description: String,
@@ -191,6 +257,10 @@ pub struct OperationSpec {
     /// Additive field; absent in legacy prepared YAML.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Signature inferred from scenarios at prepare time. Absent when no
+    /// scenario invokes this operation or when scenarios disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_signature: Option<DerivedSignature>,
 }
 
 // ── Component types (v3) ─────────────────────────────────────────
