@@ -33,6 +33,7 @@ pub enum ArtefactEntryKind {
     /// preserved across re-scaffolds, marked stale when the attribute's
     /// description changes.
     DataAttributeType,
+    DataVariantAttributeType,
     // Web-specific kinds (Phase 10)
     RouterArm,
     ServerRoute,
@@ -59,6 +60,7 @@ impl ArtefactEntryKind {
             Self::RoleType => "role_type",
             Self::DataType => "data_type",
             Self::DataAttributeType => "data_attribute_type",
+            Self::DataVariantAttributeType => "data_variant_attribute_type",
             Self::RouterArm => "router_arm",
             Self::ServerRoute => "server_route",
             Self::RpcServer => "rpc_server",
@@ -120,6 +122,16 @@ pub enum ArtefactKey {
         data: String,
         attribute: String,
     },
+    /// `data/<data>/variant/<variant>/attribute/<name>` — variant analogue
+    /// of `DataAttributeType`. Variant attributes live inside the
+    /// `<Name>Payload` enum and follow the same lifecycle (Fresh entries
+    /// preserve `/implement`'s type; Stale/NotImplemented revert to `()`
+    /// + TODO).
+    DataVariantAttributeType {
+        data: String,
+        variant: String,
+        attribute: String,
+    },
     /// `projections/<projection>/functionality/<name>`
     ProjectionFunctionality {
         projection: String,
@@ -168,6 +180,7 @@ impl ArtefactKey {
             Self::DataGetter { .. } => ArtefactEntryKind::DataGetter,
             Self::DataType { .. } => ArtefactEntryKind::DataType,
             Self::DataAttributeType { .. } => ArtefactEntryKind::DataAttributeType,
+            Self::DataVariantAttributeType { .. } => ArtefactEntryKind::DataVariantAttributeType,
             Self::ProjectionFunctionality { .. } => ArtefactEntryKind::ProjectionFunctionality,
             Self::ProjectionRoleMethod { .. } => ArtefactEntryKind::ProjectionRoleMethod,
             Self::ProjectionRoleType { .. } => ArtefactEntryKind::ProjectionRoleType,
@@ -236,6 +249,14 @@ impl ArtefactKey {
     pub fn data_attribute_type(data: &str, attribute: &str) -> Self {
         Self::DataAttributeType {
             data: crate::codegen::to_snake_case(data),
+            attribute: crate::codegen::to_snake_case(attribute),
+        }
+    }
+
+    pub fn data_variant_attribute_type(data: &str, variant: &str, attribute: &str) -> Self {
+        Self::DataVariantAttributeType {
+            data: crate::codegen::to_snake_case(data),
+            variant: crate::codegen::to_snake_case(variant),
             attribute: crate::codegen::to_snake_case(attribute),
         }
     }
@@ -361,6 +382,9 @@ impl fmt::Display for ArtefactKey {
             Self::DataAttributeType { data, attribute } => {
                 write!(f, "data/{}/attribute/{}", data, attribute)
             }
+            Self::DataVariantAttributeType { data, variant, attribute } => {
+                write!(f, "data/{}/variant/{}/attribute/{}", data, variant, attribute)
+            }
             Self::ProjectionFunctionality { projection, name } => {
                 write!(f, "projections/{}/functionality/{}", projection, name)
             }
@@ -424,6 +448,13 @@ impl FromStr for ArtefactKey {
                 data: data.to_string(),
                 attribute: attribute.to_string(),
             }),
+            ["data", data, "variant", variant, "attribute", attribute] => {
+                Ok(Self::DataVariantAttributeType {
+                    data: data.to_string(),
+                    variant: variant.to_string(),
+                    attribute: attribute.to_string(),
+                })
+            }
             ["projections", proj, "functionality", name] => Ok(Self::ProjectionFunctionality {
                 projection: proj.to_string(),
                 name: name.to_string(),
@@ -505,6 +536,23 @@ mod tests {
         assert_eq!(key.kind(), ArtefactEntryKind::DataAttributeType);
 
         let parsed: ArtefactKey = "data/money/attribute/amount".parse().unwrap();
+        assert_eq!(parsed, key);
+    }
+
+    #[test]
+    fn data_variant_attribute_type_key_format() {
+        // Group 4 regression: the key shape is
+        // `data/<snake>/variant/<snake>/attribute/<snake>`.
+        let key = ArtefactKey::data_variant_attribute_type(
+            "ChatTurn",
+            "tool_call",
+            "tool_input",
+        );
+        assert_eq!(key.to_string(), "data/chat_turn/variant/tool_call/attribute/tool_input");
+        assert_eq!(key.kind(), ArtefactEntryKind::DataVariantAttributeType);
+
+        let parsed: ArtefactKey =
+            "data/chat_turn/variant/tool_call/attribute/tool_input".parse().unwrap();
         assert_eq!(parsed, key);
     }
 

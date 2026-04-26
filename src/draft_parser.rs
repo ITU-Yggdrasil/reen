@@ -134,6 +134,19 @@ pub struct AttributeDraft {
     pub description: String,
 }
 
+/// One variant of a sum-typed Data draft. Authored under `## Attributes` as a
+/// `### <name> attributes` H3 sub-section. Top-level attributes (those above
+/// the first H3) remain on `DataDraft.attributes` and are shared across
+/// variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataVariantDraft {
+    /// Canonical variant name (snake_case). Derived from the H3 heading by
+    /// lowercasing, stripping a trailing ` attributes` suffix (BA convenience),
+    /// and replacing spaces and dashes with underscores.
+    pub name: String,
+    pub attributes: Vec<AttributeDraft>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationDraft {
     pub name: String,
@@ -151,6 +164,9 @@ pub struct DataDraft {
     pub invariants: Vec<String>,
     pub operations: Vec<OperationDraft>,
     pub scenarios: Vec<ScenarioDraft>,
+    /// Variants modelled as `### <name> attributes` H3 sub-sections under
+    /// `## Attributes`. Empty for non-variant data types.
+    pub variants: Vec<DataVariantDraft>,
 }
 
 // ── Projection draft ──────────────────────────────────────────────
@@ -500,6 +516,7 @@ fn parse_data_draft(info: DraftInfo, content: &str) -> Result<DataDraft> {
 
     let purpose = require_section_text(&info.relative_path, &sections, "Purpose")?;
     let attributes = parse_attribute_bullets(&sections);
+    let variants = parse_data_variants(&sections);
     let invariants = bullet_lines(find_section(&sections, "Invariants").map(|s| s.body.as_str()));
     let operations = parse_operation_subsections(&sections);
     let scenarios = parse_scenarios(&sections);
@@ -511,6 +528,7 @@ fn parse_data_draft(info: DraftInfo, content: &str) -> Result<DataDraft> {
         invariants,
         operations,
         scenarios,
+        variants,
     })
 }
 
@@ -518,13 +536,67 @@ fn parse_attribute_bullets(sections: &[Section]) -> Vec<AttributeDraft> {
     let Some(section) = find_section(sections, "Attributes") else {
         return Vec::new();
     };
-    parse_named_bullets(&section.body)
+    // Top-level attributes are bullets above the first `### …` H3 marker.
+    // Anything past the H3 belongs to a variant and is parsed by
+    // `parse_data_variants`.
+    let top_level = body_before_first_h3(&section.body);
+    parse_named_bullets(&top_level)
         .into_iter()
         .map(|(name, desc)| AttributeDraft {
             name,
             description: desc,
         })
         .collect()
+}
+
+/// Extract `### …` H3 sub-sections under `## Attributes` as variant groups.
+/// Each variant's attributes are the bullets inside its block. The variant
+/// name is derived by lowercasing the heading, stripping a trailing
+/// ` attributes` suffix (BA-convenience), and converting to snake_case.
+fn parse_data_variants(sections: &[Section]) -> Vec<DataVariantDraft> {
+    let Some(section) = find_section(sections, "Attributes") else {
+        return Vec::new();
+    };
+    parse_subsections(&section.body)
+        .into_iter()
+        .map(|sub| DataVariantDraft {
+            name: canonicalise_variant_name(&sub.title),
+            attributes: parse_named_bullets(&sub.body)
+                .into_iter()
+                .map(|(name, description)| AttributeDraft { name, description })
+                .collect(),
+        })
+        .collect()
+}
+
+fn body_before_first_h3(body: &str) -> String {
+    let mut out = String::new();
+    for line in body.lines() {
+        if line.trim_start().starts_with("### ") {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn canonicalise_variant_name(title: &str) -> String {
+    let trimmed = title.trim().to_lowercase();
+    let without_suffix = trimmed
+        .strip_suffix(" attributes")
+        .unwrap_or(&trimmed);
+    let mut out: String = without_suffix
+        .chars()
+        .map(|c| if c == ' ' || c == '-' { '_' } else { c })
+        .collect();
+    while out.starts_with('_') {
+        out.remove(0);
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    out
 }
 
 fn parse_operation_subsections(sections: &[Section]) -> Vec<OperationDraft> {
@@ -1588,6 +1660,128 @@ Then: a Money of 100 EUR
         assert_eq!(data.operations[0].kind, Some("with".to_string()));
         assert_eq!(data.operations[1].name, "normalise");
         assert_eq!(data.operations[1].kind, None);
+    }
+
+    #[test]
+    fn parse_data_draft_extracts_variants_from_h3_sub_sections() {
+        // Bug 1 long-term regression: variant data types model sum types via
+        // `### <variant> attributes` H3 sub-sections under `## Attributes`.
+        let content = r#"# Data: ChatTurn
+
+## Purpose
+A turn in the chat conversation.
+
+## Attributes
+- kind: the variant classification — one of "user-utterance", "agent-response"
+- timestamp: the moment the turn was recorded
+
+### User-utterance attributes
+- text: the customer's message
+
+### Agent-response attributes
+- text: the agent's reply
+
+### Tool-call attributes
+- tool name: the tool being invoked
+- tool input: the tool input
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/data/chat_turn.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+        let DraftDocument::Data(data) = doc else {
+            panic!("expected Data draft");
+        };
+
+        // Top-level (shared) attributes are kind + timestamp; variant
+        // attributes don't leak into the top-level list.
+        assert_eq!(data.attributes.len(), 2, "shared attributes only, got {:?}", data.attributes);
+        assert_eq!(data.attributes[0].name, "kind");
+        assert_eq!(data.attributes[1].name, "timestamp");
+
+        // Three variants in source order.
+        assert_eq!(data.variants.len(), 3, "expected three variants");
+        assert_eq!(data.variants[0].name, "user_utterance");
+        assert_eq!(data.variants[0].attributes.len(), 1);
+        assert_eq!(data.variants[0].attributes[0].name, "text");
+        assert_eq!(data.variants[1].name, "agent_response");
+        assert_eq!(data.variants[1].attributes[0].name, "text");
+        assert_eq!(data.variants[2].name, "tool_call");
+        assert_eq!(data.variants[2].attributes.len(), 2);
+        assert_eq!(data.variants[2].attributes[0].name, "tool name");
+        assert_eq!(data.variants[2].attributes[1].name, "tool input");
+    }
+
+    #[test]
+    fn parse_data_draft_keeps_top_level_bullets_as_shared_attributes() {
+        let content = r#"# Data: TransferRequest
+
+## Purpose
+A request to transfer money.
+
+## Attributes
+- kind: variant classification
+- source account: the originating account
+
+### Own-transfer attributes
+- destination account: the destination of the transfer
+
+### Domestic-transfer attributes
+- recipient name: the name of the receiving party
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/data/transfer_request.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+        let DraftDocument::Data(data) = doc else {
+            panic!("expected Data draft");
+        };
+
+        // Shared attributes survive — they're not absorbed into a variant.
+        let shared_names: Vec<&str> = data.attributes.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(shared_names, vec!["kind", "source account"]);
+        // Per-variant bullets sit under their variant.
+        assert_eq!(data.variants.len(), 2);
+        assert_eq!(data.variants[0].name, "own_transfer");
+        assert_eq!(data.variants[1].name, "domestic_transfer");
+    }
+
+    #[test]
+    fn parse_data_draft_no_variants_unchanged() {
+        // Regression-guard: a Money-style draft (no H3 inside Attributes)
+        // still parses with empty `variants` and the existing attribute set.
+        let content = r#"# Data: Money
+
+## Purpose
+A monetary amount.
+
+## Attributes
+- amount: the value in minor units
+- currency: the ISO code
+"#;
+        let doc = parse_draft_file(
+            Path::new("drafts/data/money.md"),
+            Path::new("drafts"),
+            content,
+        )
+        .unwrap();
+        let DraftDocument::Data(data) = doc else {
+            panic!("expected Data draft");
+        };
+        assert_eq!(data.attributes.len(), 2);
+        assert!(data.variants.is_empty(), "no variants for plain data, got {:?}", data.variants);
+    }
+
+    #[test]
+    fn canonicalise_variant_name_normalises_dashes_spaces_and_suffix() {
+        assert_eq!(canonicalise_variant_name("User-utterance attributes"), "user_utterance");
+        assert_eq!(canonicalise_variant_name("Tool call attributes"), "tool_call");
+        assert_eq!(canonicalise_variant_name("Own-transfer"), "own_transfer");
+        assert_eq!(canonicalise_variant_name("Confirmation-card-rejected attributes"), "confirmation_card_rejected");
     }
 
     #[test]

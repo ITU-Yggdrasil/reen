@@ -98,6 +98,46 @@ fn check_data(
         return;
     };
     let impl_methods = collect_impl_methods(file, name);
+    let is_variant = !artifact.data_variants.is_empty();
+
+    // Variant-data preflight: when a Data draft declares variants, the
+    // emission shape is wrapper struct + `<Name>Kind` enum + `<Name>Payload`
+    // enum. Verify each shape element is present before falling through to
+    // the per-attribute checks.
+    if is_variant {
+        let kind_enum = format!("{}Kind", name);
+        if find_enum(file, &kind_enum).is_none() {
+            findings.push(Discrepancy {
+                kind: DiscrepancyKind::MissingMethod,
+                message: format!(
+                    "the variant data type `{}` is missing its discriminator enum `{}` — variant data must emit a `<Name>Kind` enum mirroring the variant list.",
+                    name, kind_enum,
+                ),
+            });
+        }
+        let payload_enum = format!("{}Payload", name);
+        if find_enum(file, &payload_enum).is_none() {
+            findings.push(Discrepancy {
+                kind: DiscrepancyKind::MissingMethod,
+                message: format!(
+                    "the variant data type `{}` is missing its payload enum `{}` — per-variant attributes live inside `<Name>Payload`.",
+                    name, payload_enum,
+                ),
+            });
+        }
+        let has_payload_getter = impl_methods.iter().any(|(method_name, vis, _)| {
+            method_name == "payload" && matches!(vis, syn::Visibility::Public(_))
+        });
+        if !has_payload_getter {
+            findings.push(Discrepancy {
+                kind: DiscrepancyKind::MissingMethod,
+                message: format!(
+                    "the variant data type `{}` is missing its `payload()` getter — callers reach per-variant data through the payload getter.",
+                    name,
+                ),
+            });
+        }
+    }
 
     // (4) Data field visibility — every field must be private.
     let pub_fields: Vec<String> = struct_item
@@ -131,14 +171,28 @@ fn check_data(
         });
     }
 
-    // (6) Getter presence — every declared attribute must have a pub getter.
+    // (6) Getter presence — every declared *top-level* attribute must have a
+    // pub getter. Variant attributes do NOT require top-level getters; they
+    // live inside the payload enum and callers pattern-match on
+    // `payload()`.
     let pub_method_names: BTreeSet<&String> = impl_methods
         .iter()
         .filter(|(_, vis, _)| matches!(vis, syn::Visibility::Public(_)))
         .map(|(n, _, _)| n)
         .collect();
+    let variant_attr_snakes: BTreeSet<String> = artifact
+        .data_variants
+        .iter()
+        .flat_map(|v| v.attributes.iter().map(|a| crate::codegen::to_snake_case(&a.name)))
+        .collect();
     for attr in &artifact.attributes {
         let snake = crate::codegen::to_snake_case(&attr.name);
+        // Skip attributes that only appear as variant payload fields (and
+        // would also appear on a different variant's payload). They have no
+        // top-level emission and therefore no top-level getter.
+        if is_variant && variant_attr_snakes.contains(&snake) && !pub_method_names.contains(&snake) {
+            continue;
+        }
         if !pub_method_names.contains(&snake) {
             findings.push(Discrepancy {
                 kind: DiscrepancyKind::MissingMethod,
@@ -343,6 +397,17 @@ fn find_struct<'f>(file: &'f syn::File, name: &str) -> Option<&'f syn::ItemStruc
     })
 }
 
+fn find_enum<'f>(file: &'f syn::File, name: &str) -> Option<&'f syn::ItemEnum> {
+    file.items.iter().find_map(|item| {
+        if let syn::Item::Enum(e) = item {
+            if e.ident == name {
+                return Some(e);
+            }
+        }
+        None
+    })
+}
+
 /// Collect (method_name, visibility, signature) tuples from every impl block
 /// matching `target` (skipping trait impls).
 fn collect_impl_methods<'f>(
@@ -536,6 +601,131 @@ mod tests {
 
     fn parse(src: &str) -> syn::File {
         syn::parse_str(src).expect("parse")
+    }
+
+    // ── Data: variant data (Group 4 / bug 1 long-term) ───────────
+
+    fn variant_data_artifact() -> PreparedArtifact {
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/ChatTurn.md".into(),
+            "ChatTurn".into(),
+            "ChatTurn".into(),
+        );
+        a.attributes = vec![
+            AttributeSpec { name: "kind".into(), description: "tag".into(), ..Default::default() },
+            AttributeSpec { name: "timestamp".into(), description: "when".into(), ..Default::default() },
+        ];
+        a.data_variants = vec![
+            crate::prepared::DataVariantSpec {
+                name: "user_utterance".into(),
+                attributes: vec![AttributeSpec {
+                    name: "text".into(),
+                    description: "user msg".into(),
+                    ..Default::default()
+                }],
+            },
+            crate::prepared::DataVariantSpec {
+                name: "agent_response".into(),
+                attributes: vec![AttributeSpec {
+                    name: "text".into(),
+                    description: "agent reply".into(),
+                    ..Default::default()
+                }],
+            },
+        ];
+        a
+    }
+
+    #[test]
+    fn verify_accepts_variant_data_emission() {
+        let src = r#"
+            pub enum ChatTurnKind { UserUtterance, AgentResponse }
+            pub enum ChatTurnPayload {
+                UserUtterance { text: String },
+                AgentResponse { text: String },
+            }
+            pub struct ChatTurn {
+                kind: ChatTurnKind,
+                timestamp: i64,
+                payload: ChatTurnPayload,
+            }
+            impl ChatTurn {
+                pub fn new(timestamp: i64, payload: ChatTurnPayload) -> anyhow::Result<Self> { todo!() }
+                pub fn kind(&self) -> &ChatTurnKind { &self.kind }
+                pub fn timestamp(&self) -> &i64 { &self.timestamp }
+                pub fn payload(&self) -> &ChatTurnPayload { &self.payload }
+            }
+        "#;
+        let artifact = variant_data_artifact();
+        let findings = check(&parse(src), &artifact, &KindIndex::empty());
+        assert!(
+            findings.is_empty(),
+            "expected no findings for canonical variant data emission, got {:?}",
+            findings,
+        );
+    }
+
+    #[test]
+    fn verify_rejects_missing_payload_enum() {
+        // Wrapper struct + Kind enum present but Payload enum missing.
+        let src = r#"
+            pub enum ChatTurnKind { UserUtterance, AgentResponse }
+            pub struct ChatTurn { kind: ChatTurnKind, timestamp: i64 }
+            impl ChatTurn {
+                pub fn new(timestamp: i64) -> anyhow::Result<Self> { todo!() }
+                pub fn kind(&self) -> &ChatTurnKind { &self.kind }
+                pub fn timestamp(&self) -> &i64 { &self.timestamp }
+                pub fn payload(&self) -> &() { &() }
+            }
+        "#;
+        let artifact = variant_data_artifact();
+        let findings = check(&parse(src), &artifact, &KindIndex::empty());
+        assert!(
+            findings.iter().any(|f| f.message.contains("missing its payload enum `ChatTurnPayload`")),
+            "expected missing-payload-enum finding, got {:?}",
+            findings,
+        );
+    }
+
+    #[test]
+    fn verify_rejects_missing_payload_getter() {
+        let src = r#"
+            pub enum ChatTurnKind { UserUtterance, AgentResponse }
+            pub enum ChatTurnPayload {
+                UserUtterance { text: String },
+                AgentResponse { text: String },
+            }
+            pub struct ChatTurn { kind: ChatTurnKind, timestamp: i64, payload: ChatTurnPayload }
+            impl ChatTurn {
+                pub fn new(timestamp: i64, payload: ChatTurnPayload) -> anyhow::Result<Self> { todo!() }
+                pub fn kind(&self) -> &ChatTurnKind { &self.kind }
+                pub fn timestamp(&self) -> &i64 { &self.timestamp }
+            }
+        "#;
+        let artifact = variant_data_artifact();
+        let findings = check(&parse(src), &artifact, &KindIndex::empty());
+        assert!(
+            findings.iter().any(|f| f.message.contains("missing its `payload()` getter")),
+            "expected missing-payload-getter finding, got {:?}",
+            findings,
+        );
+    }
+
+    #[test]
+    fn verify_unchanged_for_non_variant_data() {
+        // Regression-guard: a plain Money-shaped data file (no variants)
+        // still passes the existing checks unchanged.
+        let src = r#"
+            pub struct Money { amount: i64 }
+            impl Money {
+                pub fn new(amount: i64) -> anyhow::Result<Self> { todo!() }
+                pub fn amount(&self) -> &i64 { &self.amount }
+            }
+        "#;
+        let artifact = data_artifact("Money", &["amount"]);
+        let findings = check(&parse(src), &artifact, &KindIndex::empty());
+        assert!(findings.is_empty(), "non-variant data unchanged, got {:?}", findings);
     }
 
     // ── Data: check 4 (field visibility) ─────────────────────────

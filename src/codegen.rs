@@ -5,7 +5,7 @@
 
 use crate::build_tracker::{ArtefactState, BuildTracker};
 use crate::build_tracker::keys::ArtefactKey;
-use crate::prepared::{ArtifactKind, PreparedArtifact, RolePlayerSpec};
+use crate::prepared::{ArtifactKind, AttributeSpec, PreparedArtifact, RolePlayerSpec};
 use crate::workspace::{GENERATED_MANIFEST, ProjectLayout, Workspace};
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
@@ -588,13 +588,22 @@ fn generate_context(a: &PreparedArtifact) -> String {
 }
 
 fn generate_data(a: &PreparedArtifact) -> String {
-    generate_data_with_preserved(a, &BTreeMap::new())
+    generate_data_with_preserved(a, &BTreeMap::new(), &BTreeMap::new())
 }
 
 fn generate_data_with_preserved(
     a: &PreparedArtifact,
     preserved_attr_types: &BTreeMap<String, String>,
+    preserved_variant_attr_types: &BTreeMap<(String, String), String>,
 ) -> String {
+    if !a.data_variants.is_empty() {
+        return generate_variant_data_with_preserved(
+            a,
+            preserved_attr_types,
+            preserved_variant_attr_types,
+        );
+    }
+
     let name = &a.export.name;
     let mut out = String::new();
 
@@ -667,6 +676,194 @@ fn generate_data_with_preserved(
 
     writeln!(out, "}}").unwrap();
     out
+}
+
+/// Emit the wrapper-struct + `<Name>Kind` enum + `<Name>Payload` enum shape
+/// for a sum-typed data draft. The `kind` shared attribute is special: its
+/// type is `<Name>Kind` (derived from the variant list, not from prose), so
+/// it does not appear in the per-attribute getter loop and is omitted from
+/// the constructor parameters (the constructor derives the kind from the
+/// payload variant tag).
+fn generate_variant_data_with_preserved(
+    a: &PreparedArtifact,
+    preserved_attr_types: &BTreeMap<String, String>,
+    preserved_variant_attr_types: &BTreeMap<(String, String), String>,
+) -> String {
+    let name = &a.export.name;
+    let mut out = String::new();
+
+    // Discriminator enum — exactly one variant per data_variant in source order.
+    writeln!(out, "/// Variant discriminator for {}.", name).unwrap();
+    writeln!(out, "#[derive(Debug, Clone, Copy, PartialEq, Eq)]").unwrap();
+    writeln!(out, "pub enum {}Kind {{", name).unwrap();
+    for v in &a.data_variants {
+        writeln!(out, "    {},", to_pascal_case(&v.name)).unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // Payload enum — per-variant fields. Per-variant attribute types come
+    // from the tracker (or default to `()` with a TODO comment when /implement
+    // hasn't picked one yet).
+    writeln!(out, "/// Variant payload for {}. Per-variant fields.", name).unwrap();
+    writeln!(out, "pub enum {}Payload {{", name).unwrap();
+    for v in &a.data_variants {
+        let pascal = to_pascal_case(&v.name);
+        if v.attributes.is_empty() {
+            writeln!(out, "    {},", pascal).unwrap();
+            continue;
+        }
+        writeln!(out, "    {} {{", pascal).unwrap();
+        for attr in &v.attributes {
+            let key = (v.name.clone(), to_snake_case(&attr.name));
+            let preserved = preserved_variant_attr_types
+                .get(&key)
+                .map(String::as_str);
+            let ty = attribute_full_type(attr, preserved);
+            let trail = if preserved.is_some_and(|p| !p.is_empty() && p != "()") {
+                String::new()
+            } else {
+                " // TODO: type to be filled by /implement".to_string()
+            };
+            writeln!(
+                out,
+                "        {}: {},{}",
+                to_snake_case(&attr.name),
+                ty,
+                trail,
+            ).unwrap();
+        }
+        writeln!(out, "    }},").unwrap();
+    }
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // Wrapper struct. The `kind` attribute (if declared) maps to `<Name>Kind`;
+    // every other shared attribute uses the standard preserved-type path; a
+    // mandatory `payload` field carries the variant payload.
+    writeln!(out, "pub struct {} {{", name).unwrap();
+    let mut shared_non_kind: Vec<&AttributeSpec> = Vec::new();
+    let mut has_kind = false;
+    for attr in &a.attributes {
+        if is_kind_attribute(&attr.name) {
+            has_kind = true;
+            writeln!(
+                out,
+                "    kind: {}Kind, // {}",
+                name,
+                attr.description,
+            ).unwrap();
+            continue;
+        }
+        let preserved = preserved_attr_types
+            .get(&to_snake_case(&attr.name))
+            .map(String::as_str);
+        emit_attribute_field_with_preserved(&mut out, attr, preserved);
+        shared_non_kind.push(attr);
+    }
+    if !has_kind {
+        // No explicit `kind` attribute in the draft — synthesise the field
+        // anyway so the discriminator is reachable.
+        writeln!(out, "    kind: {}Kind, // synthesised variant discriminator", name).unwrap();
+    }
+    writeln!(out, "    payload: {}Payload,", name).unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "impl {} {{", name).unwrap();
+
+    // Constructor — takes every shared non-kind attribute plus the payload.
+    // The constructor derives `kind` from the payload variant tag, so the
+    // caller does not pass it.
+    let new_params: Vec<String> = shared_non_kind
+        .iter()
+        .map(|attr| {
+            let preserved = preserved_attr_types
+                .get(&to_snake_case(&attr.name))
+                .map(String::as_str);
+            format!(
+                "{}: {}",
+                to_snake_case(&attr.name),
+                attribute_full_type(attr, preserved),
+            )
+        })
+        .chain(std::iter::once(format!("payload: {}Payload", name)))
+        .collect();
+    writeln!(out, "    /// Construct a new {}, validating every invariant from the prepared YAML.", name).unwrap();
+    writeln!(out, "    /// Derives `kind` from the payload variant tag — callers don't pass it.").unwrap();
+    writeln!(out, "    pub fn new({}) -> anyhow::Result<Self> {{", new_params.join(", ")).unwrap();
+    writeln!(out, "        todo!(\"enforce invariants and construct\")").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Kind getter — always emitted; references the wrapper field.
+    writeln!(out, "    /// The variant discriminant.").unwrap();
+    writeln!(out, "    pub fn kind(&self) -> &{}Kind {{", name).unwrap();
+    writeln!(out, "        &self.kind").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Shared non-kind getters.
+    for attr in &shared_non_kind {
+        let preserved = preserved_attr_types
+            .get(&to_snake_case(&attr.name))
+            .map(String::as_str);
+        let field = to_snake_case(&attr.name);
+        let ty = attribute_full_type(attr, preserved);
+        writeln!(out, "    /// {}", attr.description.lines().next().unwrap_or("")).unwrap();
+        writeln!(out, "    pub fn {}(&self) -> &{} {{", field, ty).unwrap();
+        writeln!(out, "        &self.{}", field).unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out).unwrap();
+    }
+
+    // Payload getter — callers pattern-match on this for variant-specific data.
+    writeln!(out, "    /// The variant payload — callers pattern-match for variant-specific data.").unwrap();
+    writeln!(out, "    pub fn payload(&self) -> &{}Payload {{", name).unwrap();
+    writeln!(out, "        &self.payload").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out).unwrap();
+
+    // Operations — same shape as non-variant data emission.
+    for op in &a.operations {
+        let op_name = to_snake_case(&op.name);
+        if op.kind.as_deref() == Some("with") {
+            writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
+            writeln!(out, "    pub fn {}(self, value: ()) -> anyhow::Result<Self> {{", op_name).unwrap();
+            writeln!(out, "        todo!(\"construct via Self::new with the field replaced\")").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        } else {
+            writeln!(out, "    /// {}", op.description.lines().next().unwrap_or("")).unwrap();
+            emit_method_signature(&mut out, "pub", &op_name, op.derived_signature.as_ref());
+            writeln!(out, "        todo!()").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out).unwrap();
+        }
+    }
+
+    writeln!(out, "}}").unwrap();
+    out
+}
+
+fn is_kind_attribute(name: &str) -> bool {
+    to_snake_case(name) == "kind"
+}
+
+/// `user_utterance` → `UserUtterance`, `confirmation_card_rejected` →
+/// `ConfirmationCardRejected`. Used to map snake-cased variant names from
+/// the prepared YAML into Rust enum variant identifiers.
+pub fn to_pascal_case(name: &str) -> String {
+    name.split(|c: char| c == '_' || c == '-' || c == ' ')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => format!("{}{}", c.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect()
 }
 
 fn generate_projection(a: &PreparedArtifact) -> String {
@@ -775,7 +972,20 @@ fn generate_rust_surgical(
                 tracker,
                 existing_source,
             );
-            generate_data_surgical(artifact, tracker, &preserved, &attr_types)
+            if !artifact.data_variants.is_empty() {
+                let variant_attr_types = variant_attribute_types_from_tracker_and_source(
+                    artifact,
+                    tracker,
+                    existing_source,
+                );
+                generate_variant_data_with_preserved(
+                    artifact,
+                    &attr_types,
+                    &variant_attr_types,
+                )
+            } else {
+                generate_data_surgical(artifact, tracker, &preserved, &attr_types)
+            }
         }
         ArtifactKind::Projection => generate_projection_surgical(artifact, tracker, &preserved),
         _ => generate_rust(artifact),
@@ -804,6 +1014,43 @@ fn attribute_types_from_tracker_and_source(
         if state == Some(ArtefactState::Fresh) {
             if let Some(ty) = extracted.get(&snake) {
                 out.insert(snake.clone(), strip_multiplicity_wrap(ty));
+            }
+        }
+    }
+    out
+}
+
+/// Variant analogue of `attribute_types_from_tracker_and_source`. Walks the
+/// existing `pub enum <Name>Payload { … }` block and recovers per-variant
+/// attribute types; only `Fresh` `data_variant_attribute_type` tracker
+/// entries are kept.
+fn variant_attribute_types_from_tracker_and_source(
+    artifact: &PreparedArtifact,
+    tracker: &BuildTracker,
+    existing_source: Option<&str>,
+) -> BTreeMap<(String, String), String> {
+    let mut out: BTreeMap<(String, String), String> = BTreeMap::new();
+    let Some(source) = existing_source else {
+        return out;
+    };
+    let extracted = extract_variant_attribute_types(source);
+    let data_name = &artifact.export.name;
+    for variant in &artifact.data_variants {
+        for attr in &variant.attributes {
+            let attr_snake = to_snake_case(&attr.name);
+            let key = ArtefactKey::data_variant_attribute_type(
+                data_name,
+                &variant.name,
+                &attr.name,
+            );
+            let state = tracker.artefacts.get(&key).map(|e| e.state);
+            if state == Some(ArtefactState::Fresh) {
+                if let Some(ty) = extracted.get(&(variant.name.clone(), attr_snake.clone())) {
+                    out.insert(
+                        (variant.name.clone(), attr_snake),
+                        strip_multiplicity_wrap(ty),
+                    );
+                }
             }
         }
     }
@@ -1136,6 +1383,118 @@ pub fn extract_method_bodies_from_source(source: &str) -> BTreeMap<String, Strin
     extract_method_bodies(source)
 }
 
+/// Parse the first `pub enum <…>Payload { … }` block in `source` and return
+/// `(variant_snake, attribute_snake) -> rust_type` for every named-field
+/// variant. Used by the surgical data emitter to preserve `/implement`-chosen
+/// types for variant attributes across re-scaffolds.
+pub fn extract_variant_attribute_types(source: &str) -> BTreeMap<(String, String), String> {
+    let mut out: BTreeMap<(String, String), String> = BTreeMap::new();
+    let Some(payload_start) = source.find("Payload {") else {
+        return out;
+    };
+    // Anchor on the `pub enum …Payload {` line — find the opening brace then
+    // walk variants until the matching closing brace.
+    let after = &source[payload_start..];
+    let Some(brace_open) = after.find('{') else {
+        return out;
+    };
+    let bytes = after.as_bytes();
+    let mut idx = brace_open + 1;
+    let mut depth = 1i32;
+    while idx < bytes.len() && depth > 0 {
+        match bytes[idx] {
+            b'{' => depth += 1,
+            b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 {
+            break;
+        }
+        idx += 1;
+    }
+    let body = &after[brace_open + 1..idx];
+
+    // Walk lines, tracking the current variant name. A line beginning with a
+    // PascalCase identifier opens a variant; if it ends with `{`, named-field
+    // form follows.
+    let mut current_variant: Option<String> = None;
+    let mut variant_depth = 0i32;
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        // A new top-level variant declaration.
+        if variant_depth == 0 {
+            // `Name {` or `Name,` or `Name`. Strip trailing `,` / `{`.
+            let trimmed = line.trim_end_matches(['{', ',']).trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // First word should be a PascalCase identifier.
+            let first = trimmed.split_whitespace().next().unwrap_or("");
+            if first.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false) {
+                current_variant = Some(pascal_to_snake(first));
+                if line.ends_with('{') {
+                    variant_depth = 1;
+                }
+                continue;
+            }
+        } else {
+            // Inside a named-field variant body.
+            if line == "}," || line == "}" {
+                variant_depth -= 1;
+                if variant_depth == 0 {
+                    current_variant = None;
+                }
+                continue;
+            }
+            // `name: Type,` line.
+            let cleaned = line
+                .split_once("//")
+                .map(|(b, _)| b.trim_end())
+                .unwrap_or(line)
+                .trim_end_matches(',')
+                .trim();
+            let Some((field, ty)) = cleaned.split_once(':') else {
+                continue;
+            };
+            let field = field.trim();
+            let ty = ty.trim();
+            if field.is_empty() || ty.is_empty() {
+                continue;
+            }
+            if !field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            if let Some(variant) = current_variant.as_ref() {
+                out.insert((variant.clone(), field.to_string()), ty.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Convert a PascalCase identifier to snake_case. `UserUtterance` →
+/// `user_utterance`; `ConfirmationCardRejected` →
+/// `confirmation_card_rejected`. Used by the variant-payload extractor to
+/// match enum variant identifiers back to the snake-cased names in the
+/// prepared YAML.
+pub fn pascal_to_snake(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, c) in name.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Extract `field_name -> rust_type` for the first `pub struct …` block in
 /// `source`. Used by surgical data emitters to preserve the per-attribute
 /// Rust type chosen by `/implement` across re-scaffolds. The bracket-balanced
@@ -1322,10 +1681,6 @@ fn attribute_full_type(
         crate::prepared::Multiplicity::List => format!("Vec<{}>", bare),
         crate::prepared::Multiplicity::Single => bare,
     }
-}
-
-fn emit_attribute_field(out: &mut String, attr: &crate::prepared::AttributeSpec) {
-    emit_attribute_field_with_preserved(out, attr, None);
 }
 
 fn emit_attribute_field_with_preserved(
@@ -1971,6 +2326,194 @@ mod tests {
             code.contains("TODO: type to be filled by /implement"),
             "TODO comment guides /implement, got:\n{}", code,
         );
+    }
+
+    #[test]
+    fn variant_data_emits_kind_enum_payload_enum_and_wrapper_struct() {
+        // Group 4 regression: a Data artifact with `data_variants` populated
+        // emits the wrapper-struct + Kind enum + Payload enum shape, with
+        // per-variant fields living inside the Payload enum.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/ChatTurn.md".into(),
+            "ChatTurn".into(),
+            "ChatTurn".into(),
+        );
+        a.attributes = vec![
+            AttributeSpec {
+                name: "kind".into(),
+                description: "variant classification".into(),
+                ..Default::default()
+            },
+            AttributeSpec {
+                name: "timestamp".into(),
+                description: "when the turn was recorded".into(),
+                ..Default::default()
+            },
+        ];
+        a.data_variants = vec![
+            crate::prepared::DataVariantSpec {
+                name: "user_utterance".into(),
+                attributes: vec![AttributeSpec {
+                    name: "text".into(),
+                    description: "customer message".into(),
+                    ..Default::default()
+                }],
+            },
+            crate::prepared::DataVariantSpec {
+                name: "tool_call".into(),
+                attributes: vec![
+                    AttributeSpec {
+                        name: "tool name".into(),
+                        description: "tool".into(),
+                        ..Default::default()
+                    },
+                    AttributeSpec {
+                        name: "tool input".into(),
+                        description: "input".into(),
+                        ..Default::default()
+                    },
+                ],
+            },
+        ];
+
+        let code = generate_rust(&a);
+
+        // Kind enum exists with PascalCase variants in source order.
+        assert!(code.contains("pub enum ChatTurnKind {"), "Kind enum, got:\n{}", code);
+        assert!(code.contains("    UserUtterance,"));
+        assert!(code.contains("    ToolCall,"));
+        // Payload enum exists with named-field variants.
+        assert!(code.contains("pub enum ChatTurnPayload {"));
+        assert!(code.contains("    UserUtterance {"));
+        assert!(code.contains("    ToolCall {"));
+        // Wrapper struct has kind + timestamp + payload — no duplicate
+        // top-level fields, no `text:` at top level.
+        let struct_pos = code.find("pub struct ChatTurn {").expect("struct present");
+        let after = &code[struct_pos..];
+        let close = after.find('}').unwrap();
+        let body = &after[..close];
+        assert!(body.contains("kind: ChatTurnKind"));
+        assert!(body.contains("timestamp:"));
+        assert!(body.contains("payload: ChatTurnPayload"));
+        assert!(!body.contains("text:"), "variant-only field leaked into wrapper struct, got:\n{}", body);
+        // No top-level getter for variant attributes.
+        assert!(!code.contains("pub fn text(&self)"));
+        // Constructor takes (timestamp, payload) — kind is derived, not passed.
+        assert!(code.contains("pub fn new(timestamp:"), "constructor signature: {}", code);
+        assert!(code.contains("payload: ChatTurnPayload)"), "constructor signature: {}", code);
+        // payload() and kind() getters exist.
+        assert!(code.contains("pub fn payload(&self) -> &ChatTurnPayload"));
+        assert!(code.contains("pub fn kind(&self) -> &ChatTurnKind"));
+    }
+
+    #[test]
+    fn variant_data_no_duplicate_fields_in_struct() {
+        // Repro of the original lupa ChatTurn / TransferRequest bug — the
+        // previous flat-attribute parsing created `text: (), text: ()` etc.
+        // The wrapper-struct emission must not exhibit that.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/ChatTurn.md".into(),
+            "ChatTurn".into(),
+            "ChatTurn".into(),
+        );
+        a.attributes = vec![AttributeSpec {
+            name: "kind".into(),
+            description: "tag".into(),
+            ..Default::default()
+        }];
+        a.data_variants = vec![
+            crate::prepared::DataVariantSpec {
+                name: "user_utterance".into(),
+                attributes: vec![AttributeSpec {
+                    name: "text".into(),
+                    description: "user msg".into(),
+                    ..Default::default()
+                }],
+            },
+            crate::prepared::DataVariantSpec {
+                name: "agent_response".into(),
+                attributes: vec![AttributeSpec {
+                    name: "text".into(),
+                    description: "agent reply".into(),
+                    ..Default::default()
+                }],
+            },
+        ];
+        let code = generate_rust(&a);
+        let struct_pos = code.find("pub struct ChatTurn {").unwrap();
+        let after = &code[struct_pos..];
+        let close = after.find('}').unwrap();
+        let body = &after[..close];
+        // The two `text:` declarations live inside the Payload enum, not
+        // in the wrapper struct.
+        assert_eq!(body.matches("text:").count(), 0, "wrapper has no `text:` field, got:\n{}", body);
+    }
+
+    #[test]
+    fn variant_data_preserves_per_variant_types_when_fresh() {
+        // Group 4 + 2.5c interaction: a Fresh tracker entry on a variant
+        // attribute keeps its previously-chosen type.
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/ChatTurn.md".into(),
+            "ChatTurn".into(),
+            "ChatTurn".into(),
+        );
+        a.attributes = vec![AttributeSpec {
+            name: "kind".into(),
+            description: "tag".into(),
+            ..Default::default()
+        }];
+        a.data_variants = vec![crate::prepared::DataVariantSpec {
+            name: "user_utterance".into(),
+            attributes: vec![AttributeSpec {
+                name: "text".into(),
+                description: "user msg".into(),
+                ..Default::default()
+            }],
+        }];
+        let existing = "pub enum ChatTurnPayload {\n    UserUtterance {\n        text: String,\n    },\n}\n\npub struct ChatTurn {\n    kind: ChatTurnKind,\n    payload: ChatTurnPayload,\n}\n";
+        let tracker = tracker_with_entries(&[
+            ("data/chat_turn/variant/user_utterance/attribute/text", ArtefactState::Fresh),
+        ]);
+        let code = generate_rust_surgical(&a, &tracker, Some(existing));
+        // The previously-chosen `String` survives the regeneration.
+        assert!(
+            code.contains("text: String,"),
+            "preserved variant attribute type, got:\n{}", code,
+        );
+    }
+
+    #[test]
+    fn extract_variant_attribute_types_parses_enum_body() {
+        let source = r#"pub enum ChatTurnPayload {
+    UserUtterance {
+        text: String,
+    },
+    ToolCall {
+        tool_name: String,
+        tool_input: serde_json::Value,
+    },
+    ConfirmationCardRendered,
+}
+"#;
+        let map = extract_variant_attribute_types(source);
+        assert_eq!(
+            map.get(&("user_utterance".into(), "text".into())).map(String::as_str),
+            Some("String"),
+        );
+        assert_eq!(
+            map.get(&("tool_call".into(), "tool_name".into())).map(String::as_str),
+            Some("String"),
+        );
+        assert_eq!(
+            map.get(&("tool_call".into(), "tool_input".into())).map(String::as_str),
+            Some("serde_json::Value"),
+        );
+        // Field-less variant produces no entries.
+        assert!(map.get(&("confirmation_card_rendered".into(), "anything".into())).is_none());
     }
 
     #[test]

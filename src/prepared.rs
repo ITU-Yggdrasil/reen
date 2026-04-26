@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v4";
+pub const PREPARED_SCHEMA_VERSION: &str = "reen.prepare/v5";
 /// Retained for code that historically distinguished v2 from v3 — both now point
 /// at the unified v3 schema after the projection-adopts-context-shape rename.
 pub const PREPARED_SCHEMA_V3_VERSION: &str = "reen.prepare/v3";
@@ -15,6 +15,13 @@ pub const PREPARED_SCHEMA_V3_VERSION: &str = "reen.prepare/v3";
 //     `AttributeSpec`. Default `Single`. `List` causes codegen to wrap the
 //     field type in `Vec<T>`. v3 documents without the field deserialise
 //     successfully (the default kicks in).
+// v4 → v5 (Group 4 / bug 1 long-term):
+//   * Added `data_variants: Vec<DataVariantSpec>` on `PreparedArtifact`,
+//     populated for variant data types (sum types modelled as `### <name>
+//     attributes` H3 sub-sections under `## Attributes`). Empty for non-
+//     variant data types. `DataVariantSpec` carries a name and a list of
+//     `AttributeSpec` (the variant's own attributes). v4 documents without
+//     the field deserialise unchanged.
 
 /// DCI artifact kinds plus the operation kind for external API consumption.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +80,11 @@ pub struct PreparedArtifact {
     pub invariants: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<OperationSpec>,
+    /// Variant groups for sum-typed data drafts (e.g. ChatTurn, TransferRequest).
+    /// Empty for ordinary data types — the wrapper-struct + payload-enum codegen
+    /// only fires when this list is non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_variants: Vec<DataVariantSpec>,
 
     // ── Projection (v3+) ──────────────────────────────────────────
     // Projections share the context-shaped fields above (role_players,
@@ -245,6 +257,17 @@ pub struct AttributeSpec {
     /// inference rules as role-player multiplicity; defaults to `Single`.
     #[serde(default, skip_serializing_if = "Multiplicity::is_single")]
     pub multiplicity: Multiplicity,
+}
+
+/// One variant of a sum-typed data type. `name` is canonical snake_case
+/// (e.g. `user_utterance`, `confirmation_card_rejected`); `attributes` are the
+/// variant's own per-instance fields. Top-level shared attributes live on the
+/// surrounding `PreparedArtifact.attributes`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataVariantSpec {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<AttributeSpec>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -474,6 +497,7 @@ impl PreparedArtifact {
             attributes: Vec::new(),
             invariants: Vec::new(),
             operations: Vec::new(),
+            data_variants: Vec::new(),
             scenarios: Vec::new(),
             synthesised_tests: Vec::new(),
             vocabulary_bindings: Vec::new(),

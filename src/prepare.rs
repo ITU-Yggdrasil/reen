@@ -6,9 +6,9 @@ use crate::draft_refine::{DraftReview, review_raw_drafts};
 use crate::manifest::DciVocabulary;
 use crate::test_synth::synthesise_tests;
 use crate::prepared::{
-    Ambiguity, ArtifactKind, AttributeSpec, ChildBindingSpec, CompositionSpec, DerivedSignature,
-    EventBindingSpec, EventSpec, FunctionalitySpec, Multiplicity, OperationSpec, ParamSpec,
-    PreparedArtifact, ProseSectionSpec, PropSpec, RoleMethodGroupSpec, RoleMethodSpec,
+    Ambiguity, ArtifactKind, AttributeSpec, ChildBindingSpec, CompositionSpec, DataVariantSpec,
+    DerivedSignature, EventBindingSpec, EventSpec, FunctionalitySpec, Multiplicity, OperationSpec,
+    ParamSpec, PreparedArtifact, ProseSectionSpec, PropSpec, RoleMethodGroupSpec, RoleMethodSpec,
     RolePlayerSpec, RouteParamSpec, RouteSpec, ScenarioSpec, SlotSpec, SynthesisedTest,
     TokenGroupSpec, TokenSpec, VariantSpec, VocabularyBinding,
 };
@@ -642,6 +642,36 @@ fn prepare_data(data: &DataDraft, vocab: &DciVocabulary) -> Result<PreparedArtif
             resolution: "attribute".to_string(),
             resolved_to: None,
         });
+    }
+
+    // Variants — promote DataDraft.variants to DataVariantSpec entries with
+    // their own attribute lists. The shared attributes above stay on the
+    // surrounding PreparedArtifact; per-variant attributes get their own
+    // multiplicity inference downstream.
+    for v in &data.variants {
+        let mut variant = DataVariantSpec {
+            name: v.name.clone(),
+            attributes: v
+                .attributes
+                .iter()
+                .map(|attr| AttributeSpec {
+                    name: attr.name.clone(),
+                    description: attr.description.clone(),
+                    multiplicity: Multiplicity::Single,
+                })
+                .collect(),
+        };
+        for attr in &variant.attributes {
+            bindings.push(VocabularyBinding {
+                name: format!("{}::{}", v.name, attr.name),
+                resolution: "variant_attribute".to_string(),
+                resolved_to: None,
+            });
+        }
+        // Stable scope: keep the spec ordering source-faithful so codegen
+        // matches the draft ordering.
+        let _ = &mut variant; // silence unused-mut warning if any
+        artifact.data_variants.push(variant);
     }
 
     artifact.invariants = data.invariants.clone();
@@ -1965,6 +1995,32 @@ fn derive_multiplicity(artifact: &mut PreparedArtifact) {
         }
     }
 
+    // Per-variant attributes get the same inference. Scenarios are shared at
+    // the data-draft level, so a multi-instance phrase in any scenario can
+    // still inform a variant attribute's multiplicity.
+    for variant in &mut artifact.data_variants {
+        for attr in &mut variant.attributes {
+            let name_cue = name_plurality(&attr.name);
+            let prose_cue = prose_plurality(&attr.description);
+            let scenario_cue = scenario_plurality(&attr.name, &scenarios);
+            let resolved = combine_multiplicity_cues(scenario_cue, name_cue, prose_cue);
+            attr.multiplicity = resolved.multiplicity;
+            if let Some(message) = resolved.disagreement {
+                findings.push(Ambiguity {
+                    message: format!(
+                        "variant `{}` attribute `{}` has conflicting multiplicity cues: {}",
+                        variant.name, attr.name, message,
+                    ),
+                    severity: "low".to_string(),
+                    suggested_resolution: Some(
+                        "add a scenario that makes the cardinality unambiguous".into(),
+                    ),
+                    source_line: None,
+                });
+            }
+        }
+    }
+
     artifact.ambiguities.extend(findings);
 }
 
@@ -3082,7 +3138,7 @@ Then: pressed event fires
         let vocab = empty_vocab();
         let prepared = prepare_document(&doc, &vocab).unwrap();
 
-        assert_eq!(prepared.schema, "reen.prepare/v4");
+        assert_eq!(prepared.schema, "reen.prepare/v5");
         assert_eq!(prepared.kind, ArtifactKind::Component);
         assert_eq!(prepared.export.name, "Button");
         assert_eq!(prepared.props.len(), 1);
@@ -3119,7 +3175,7 @@ Professional experience.
 
         let prepared = prepare_document(&doc, &empty_vocab()).unwrap();
 
-        assert_eq!(prepared.schema, "reen.prepare/v4");
+        assert_eq!(prepared.schema, "reen.prepare/v5");
         assert_eq!(prepared.kind, ArtifactKind::Brand);
         assert_eq!(prepared.export.name, "Acme");
         assert_eq!(prepared.token_groups.len(), 3); // colours, typography, motion
@@ -3155,7 +3211,7 @@ Main routes.
         ]);
         let prepared = prepare_document(&doc, &vocab).unwrap();
 
-        assert_eq!(prepared.schema, "reen.prepare/v4");
+        assert_eq!(prepared.schema, "reen.prepare/v5");
         assert_eq!(prepared.kind, ArtifactKind::RoutingTable);
         assert_eq!(prepared.routes.len(), 2);
         assert_eq!(prepared.routes[0].path, "/");
@@ -3194,7 +3250,7 @@ Then: value is 100
         .unwrap();
 
         let prepared = prepare_document(&doc, &empty_vocab()).unwrap();
-        assert_eq!(prepared.schema, "reen.prepare/v4");
+        assert_eq!(prepared.schema, "reen.prepare/v5");
     }
 
     // ── Classification tests ─────────────────────────────────────

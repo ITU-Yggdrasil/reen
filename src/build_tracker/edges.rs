@@ -227,6 +227,35 @@ fn extract_data(a: &PreparedArtifact) -> Vec<ExtractedArtefact> {
         });
     }
 
+    // Variant attribute types — one per declared per-variant attribute.
+    // Same lifecycle as `DataAttributeType` but keyed on the variant too,
+    // so renaming a variant invalidates the previously-chosen type.
+    for variant in &a.data_variants {
+        for attr in &variant.attributes {
+            let key = ArtefactKey::data_variant_attribute_type(
+                data_name,
+                &variant.name,
+                &attr.name,
+            );
+            let multiplicity = match attr.multiplicity {
+                crate::prepared::Multiplicity::Single => "single",
+                crate::prepared::Multiplicity::List => "list",
+            };
+            let fragment = canonical_yaml(&BTreeMap::from([
+                ("data", data_name.as_str()),
+                ("variant", variant.name.as_str()),
+                ("attribute", attr.name.as_str()),
+                ("description", attr.description.as_str()),
+                ("multiplicity", multiplicity),
+            ]));
+            result.push(ExtractedArtefact {
+                key,
+                canonical_fragment: fragment,
+                upstream: vec![type_key.clone()],
+            });
+        }
+    }
+
     // Data operations
     for op in &a.operations {
         let key = ArtefactKey::data_operation(data_name, &op.name);
@@ -529,6 +558,112 @@ mod tests {
             new_balance.canonical_fragment,
             "fragment must change when description changes",
         );
+    }
+
+    fn variant_data() -> PreparedArtifact {
+        let mut a = PreparedArtifact::new(
+            ArtifactKind::Data,
+            "data/ChatTurn.md".into(),
+            "ChatTurn".into(),
+            "ChatTurn".into(),
+        );
+        a.attributes = vec![
+            AttributeSpec { name: "kind".into(), description: "variant tag".into(), ..Default::default() },
+            AttributeSpec { name: "timestamp".into(), description: "when".into(), ..Default::default() },
+        ];
+        a.data_variants = vec![
+            crate::prepared::DataVariantSpec {
+                name: "tool_call".into(),
+                attributes: vec![
+                    AttributeSpec { name: "tool_name".into(), description: "the tool".into(), ..Default::default() },
+                    AttributeSpec { name: "tool_input".into(), description: "the input".into(), ..Default::default() },
+                ],
+            },
+            crate::prepared::DataVariantSpec {
+                name: "user_utterance".into(),
+                attributes: vec![
+                    AttributeSpec { name: "text".into(), description: "the message".into(), ..Default::default() },
+                ],
+            },
+        ];
+        a
+    }
+
+    #[test]
+    fn data_extracts_variant_attribute_type_entries() {
+        // Group 4 regression: per-variant attributes get their own tracker
+        // entries keyed `data/<>/variant/<>/attribute/<>`.
+        let data = variant_data();
+        let extracted = extract_artefacts(&data, &[]);
+
+        let tool_input = extracted.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/tool_call/attribute/tool_input")
+            .expect("expected entry for tool_call.tool_input");
+        assert_eq!(tool_input.upstream, vec![ArtefactKey::data_type("ChatTurn")]);
+        assert!(tool_input.canonical_fragment.contains("tool_call"));
+        assert!(tool_input.canonical_fragment.contains("the input"));
+
+        let text = extracted.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/user_utterance/attribute/text")
+            .expect("expected entry for user_utterance.text");
+        assert!(text.canonical_fragment.contains("user_utterance"));
+    }
+
+    #[test]
+    fn data_variant_attribute_type_fragment_changes_when_description_changes() {
+        let mut data = variant_data();
+        let original = extract_artefacts(&data, &[]);
+        let original_text = original.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/user_utterance/attribute/text")
+            .unwrap();
+
+        data.data_variants[1].attributes[0].description = "the *typed* message".into();
+        let after = extract_artefacts(&data, &[]);
+        let new_text = after.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/user_utterance/attribute/text")
+            .unwrap();
+
+        assert_ne!(original_text.canonical_fragment, new_text.canonical_fragment);
+    }
+
+    #[test]
+    fn data_variant_attribute_type_fragment_changes_when_multiplicity_changes() {
+        let mut data = variant_data();
+        let original = extract_artefacts(&data, &[]);
+        let original_text = original.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/user_utterance/attribute/text")
+            .unwrap();
+
+        data.data_variants[1].attributes[0].multiplicity = crate::prepared::Multiplicity::List;
+        let after = extract_artefacts(&data, &[]);
+        let new_text = after.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/user_utterance/attribute/text")
+            .unwrap();
+
+        assert_ne!(original_text.canonical_fragment, new_text.canonical_fragment);
+    }
+
+    #[test]
+    fn data_variant_attribute_type_fragment_changes_when_variant_renamed() {
+        // Renaming the surrounding variant must invalidate the entry — same
+        // attribute name + description, different variant.
+        let mut data = variant_data();
+        let original = extract_artefacts(&data, &[]);
+        let original_text = original.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/user_utterance/attribute/text")
+            .unwrap();
+
+        data.data_variants[1].name = "user_message".into();
+        let after = extract_artefacts(&data, &[]);
+        // Entry under the old key disappears, new key appears with a different fragment.
+        assert!(
+            !after.iter().any(|e| e.key.to_string() == "data/chat_turn/variant/user_utterance/attribute/text"),
+            "old variant key must be gone after rename",
+        );
+        let renamed = after.iter()
+            .find(|e| e.key.to_string() == "data/chat_turn/variant/user_message/attribute/text")
+            .expect("new variant key should appear");
+        assert_ne!(original_text.canonical_fragment, renamed.canonical_fragment);
     }
 
     #[test]

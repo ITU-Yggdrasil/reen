@@ -134,7 +134,7 @@ fn prepare_success_writes_yaml() {
     assert!(prepared_path.is_file(), "prepared YAML should exist");
 
     let yaml = fs::read_to_string(&prepared_path).unwrap();
-    assert!(yaml.contains("reen.prepare/v4"));
+    assert!(yaml.contains("reen.prepare/v5"));
     assert!(yaml.contains("kind: context"));
     assert!(yaml.contains("source_withdraw"));
     assert!(yaml.contains("sink_deposit"));
