@@ -87,14 +87,53 @@ pub fn synthesise_tests(artifact: &PreparedArtifact) -> SynthesisOutcome {
 // — when the test's prose doesn't match any known shape, we simply pass
 // the test through unchanged. We only reject when simulation contradicts.
 
-/// Validate one synthesised test against simulation. Returns `Ok(())` when
-/// the test either matches simulation or has a shape we don't know how to
-/// simulate. Returns `Err(reason)` only when the simulation contradicts
-/// the test's claim.
+/// Validate one synthesised test against simulation and the
+/// declared-functionality allow-list. Returns `Ok(())` when the test
+/// passes both checks. Returns `Err(reason)` when:
+///
+/// * the test's `When:` invokes zero declared functionalities (the LLM
+///   invented a name), or invokes more than one (the LLM combined
+///   independent functionalities into a fictitious composite), or
+/// * the simulation of a recognised projection-query shape contradicts
+///   the test's claim.
 pub fn validate_synthesised_test(
     artifact: &PreparedArtifact,
     test: &SynthesisedTest,
 ) -> Result<(), String> {
+    // Functionality-name allow-list (bug 7.2). The When clause must invoke
+    // exactly one declared functionality / operation / query — zero means
+    // the LLM invented a name, more than one means it combined independents
+    // into a fictitious composite. We exempt tests whose When has no
+    // snake_case identifiers at all (free prose like "the operation is
+    // performed"), because there's nothing for the allow-list to check.
+    let invoked = invoked_function_names(&test.when);
+    let allow_list = declared_function_names(artifact);
+    let known: Vec<&String> = invoked
+        .iter()
+        .filter(|name| allow_list.contains(*name))
+        .collect();
+    let unknown: Vec<&String> = invoked
+        .iter()
+        .filter(|name| !allow_list.contains(*name))
+        .collect();
+    if !invoked.is_empty() {
+        if !unknown.is_empty() {
+            return Err(format!(
+                "the test's When clause invokes `{}`, which is not declared on `{}` (declared names: [{}])",
+                unknown[0],
+                artifact.export.name,
+                allow_list.iter().cloned().collect::<Vec<_>>().join(", "),
+            ));
+        }
+        if known.len() > 1 {
+            return Err(format!(
+                "the test's When clause combines multiple declared functionalities ({}), but `{}` declares each one independently — there is no composite",
+                known.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                artifact.export.name,
+            ));
+        }
+    }
+
     if artifact.kind != ArtifactKind::Projection {
         return Ok(());
     }
@@ -106,6 +145,56 @@ pub fn validate_synthesised_test(
         return result;
     }
     Ok(())
+}
+
+/// Collect the snake_case identifiers (two or more underscore-joined
+/// segments, e.g. `by_amount_range`, `is_expired`) that appear in `when`.
+/// Single-word verbs like "performed" are not function-name candidates and
+/// are skipped — the allow-list check only fires on identifier-shaped
+/// tokens that look like the canonical method names produced by codegen.
+fn invoked_function_names(when: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in when.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+        if raw.is_empty() {
+            continue;
+        }
+        // Lowercase identifier with at least one underscore separating
+        // word segments — this matches every canonical method name our
+        // codegen emits (`by_amount_range`, `is_expired`,
+        // `transition_chat_state`).
+        if !raw.contains('_') {
+            continue;
+        }
+        if raw.chars().any(|c| c.is_ascii_uppercase()) {
+            continue;
+        }
+        if !raw
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            continue;
+        }
+        // Discard duplicate occurrences in the same When.
+        let s = raw.to_string();
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+/// Collect declared names from the artefact: data operations, context
+/// functionalities, projection queries (functionalities). Each is
+/// snake-cased to match the codegen output.
+fn declared_function_names(artifact: &PreparedArtifact) -> std::collections::BTreeSet<String> {
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for op in &artifact.operations {
+        set.insert(crate::codegen::to_snake_case(&op.name));
+    }
+    for func in &artifact.functionalities {
+        set.insert(crate::codegen::to_snake_case(&func.name));
+    }
+    set
 }
 
 /// Recognise and simulate `Given: <noun> with amounts X, Y, Z / When: …
@@ -586,12 +675,23 @@ mod tests {
     // ── Bug 7.1: simulation tests ────────────────────────────────
 
     fn projection_artifact(name: &str) -> PreparedArtifact {
-        PreparedArtifact::new(
+        let mut a = PreparedArtifact::new(
             ArtifactKind::Projection,
             format!("projections/{}.md", name),
             name.into(),
             name.into(),
-        )
+        );
+        // Populate the canonical projection-query allow-list so simulation
+        // tests aren't intercepted by the bug 7.2 allow-list check first.
+        for fn_name in ["filtered", "by_counterparty", "by_amount_range"] {
+            a.functionalities.push(crate::prepared::FunctionalitySpec {
+                name: fn_name.into(),
+                description: "test".into(),
+                role_method_refs: vec![],
+                ..Default::default()
+            });
+        }
+        a
     }
 
     fn invariant_test(given: &str, when: &str, then: &str) -> SynthesisedTest {
@@ -680,20 +780,121 @@ mod tests {
     }
 
     #[test]
-    fn validation_skipped_for_non_projection_kinds() {
-        // Validation only fires for Projection artefacts; data and context
-        // synthesised tests are not simulated.
+    fn simulation_skipped_for_non_projection_kinds() {
+        // Simulation (range / substring) only fires for Projection
+        // artefacts. The allow-list check (bug 7.2) still applies — see
+        // `validation_drops_test_referencing_undeclared_functionality_on_data`
+        // — but here we use prose-only When so the allow-list has nothing
+        // to gate on.
         let artifact = PreparedArtifact::new(
             ArtifactKind::Data, "data/X.md".into(), "X".into(), "X".into(),
         );
         let test = invariant_test(
-            "transactions with amounts 1, 2, 3",
-            "by_amount_range is queried with minimum 1 and maximum 2",
-            "returns all five transactions",
+            "an instance of X",
+            "the operation is performed",
+            "the post-condition holds",
         );
-        // Even though the claim is wrong, we don't simulate non-projection
-        // tests — leaves room for data-specific validation in a later group.
         assert!(validate_synthesised_test(&artifact, &test).is_ok());
+    }
+
+    #[test]
+    fn validation_drops_test_referencing_undeclared_functionality_on_data() {
+        // Allow-list check applies to all artefact kinds — a Data artefact
+        // with no declared `add` operation rejects a test that invokes it.
+        let artifact = PreparedArtifact::new(
+            ArtifactKind::Data, "data/Money.md".into(), "Money".into(), "Money".into(),
+        );
+        let test = invariant_test(
+            "two amounts in DKK",
+            "deep_arithmetic_combine is performed",
+            "the result is correct",
+        );
+        let result = validate_synthesised_test(&artifact, &test);
+        assert!(result.is_err());
+    }
+
+    // ── Bug 7.2: functionality-name allow-list ───────────────────
+
+    #[test]
+    fn validation_drops_test_referencing_undeclared_functionality() {
+        // Lupa's TransactionList declares `filtered`, `by_counterparty`,
+        // and `by_amount_range`. A test invoking `by_total_value` is
+        // outside the allow-list — reject.
+        let artifact = projection_artifact("TransactionList");
+        let test = invariant_test(
+            "transactions with amounts 100, 200, 300",
+            "by_total_value is queried with threshold 100",
+            "returns the three transactions",
+        );
+        let result = validate_synthesised_test(&artifact, &test);
+        assert!(result.is_err(), "expected rejection, got Ok");
+        assert!(
+            result.as_ref().unwrap_err().contains("by_total_value"),
+            "rejection should name the unknown functionality, got: {:?}",
+            result,
+        );
+    }
+
+    #[test]
+    fn validation_drops_test_combining_multiple_declared_functionalities() {
+        // The "combined filter" case from the FIX_PLAN: each name is
+        // declared, but the projection has no composite — invoking three
+        // in one When fabricates behaviour.
+        let artifact = projection_artifact("TransactionList");
+        let test = invariant_test(
+            "transactions with amounts 100, 200, 300",
+            "filtered AND by_counterparty AND by_amount_range are queried together",
+            "returns the matching subset",
+        );
+        let result = validate_synthesised_test(&artifact, &test);
+        assert!(result.is_err(), "expected rejection, got Ok");
+        assert!(
+            result.as_ref().unwrap_err().contains("combines multiple"),
+            "rejection should mention the combination, got: {:?}",
+            result,
+        );
+    }
+
+    #[test]
+    fn validation_keeps_test_referencing_declared_functionality() {
+        let artifact = projection_artifact("TransactionList");
+        let test = invariant_test(
+            "transactions with amounts 100, 200, 300, 500",
+            "by_amount_range is queried with minimum 100 and maximum 300",
+            "returns the three transactions with amounts 100, 200, 300",
+        );
+        let result = validate_synthesised_test(&artifact, &test);
+        assert!(result.is_ok(), "expected pass-through, got: {:?}", result);
+    }
+
+    #[test]
+    fn validation_keeps_test_with_no_function_identifier() {
+        // The When clause may be free prose ("the operation is performed")
+        // rather than a name-shaped invocation. We can't allow-list-check
+        // such tests, so they pass through.
+        let artifact = projection_artifact("TransactionList");
+        let test = invariant_test(
+            "an empty transaction list",
+            "the projection is queried",
+            "the result is empty",
+        );
+        let result = validate_synthesised_test(&artifact, &test);
+        assert!(result.is_ok(), "expected pass-through, got: {:?}", result);
+    }
+
+    #[test]
+    fn invoked_function_names_picks_snake_case_only() {
+        // Single-word verbs ("queried", "performed") are skipped — they
+        // don't match the canonical method-name shape.
+        let names = invoked_function_names(
+            "by_amount_range is queried with minimum 100 and maximum 250",
+        );
+        assert_eq!(names, vec!["by_amount_range".to_string()]);
+
+        // CamelCase identifiers are skipped (we never emit those as method
+        // names).
+        let names = invoked_function_names("ByAmountRange is queried");
+        assert!(names.is_empty(), "got {:?}", names);
     }
 
     #[test]
