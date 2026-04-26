@@ -4,6 +4,8 @@ DCI (Data, Context, Interaction) is the authoring model for Reen. Every draft yo
 
 **Drafts speak BA.** Every context and every projection IS a use case; every data draft is a domain concept described in domain language. You may reference other data types by their capitalised name (Money, Transaction, Account) anywhere prose calls for it — that's a domain reference, not a type annotation. You must NEVER write parameter lists, return types, multiplicity notation (`list of T`, `[T]`), or any other formal signature shape. The Reen pipeline derives all of that from your prose and scenarios. See `DRAFT_FORMAT.md` for the full rule.
 
+**Generated artefacts are not part of the spec.** The pipeline regenerates `src/`, `crates/*/src/`, the workspace `Cargo.toml`, `drafts/prepare/`, and `.reen/` from your drafts every time it runs. They are gitignored — you won't see them in `git status`, and you will never be asked to read or edit them. If something looks wrong in the generated code, the answer is always to edit the draft and re-run the pipeline. Do not edit generated files directly; the next scaffold will overwrite them.
+
 ## The Three Artefact Kinds
 
 ### Data
