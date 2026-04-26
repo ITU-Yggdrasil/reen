@@ -8,6 +8,7 @@ pub mod audit;
 pub mod codegen;
 pub mod draft_parser;
 pub mod draft_refine;
+pub mod inference;
 pub mod manifest;
 pub mod prepare;
 pub mod prepared;
