@@ -135,9 +135,13 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
         derive_multiplicity(&mut prepared);
         derive_signatures(&mut prepared, &vocabulary);
 
-        // LLM-backed test synthesis from prose invariants/descriptions
+        // LLM-backed test synthesis from prose invariants/descriptions.
+        // Validation drops candidates that contradict simulation; rejected
+        // tests surface as informational findings on the artefact so the
+        // BA sees which invariants couldn't be auto-tested.
         let synth = synthesise_tests(&prepared);
-        prepared.synthesised_tests.extend(synth);
+        prepared.synthesised_tests.extend(synth.tests);
+        prepared.ambiguities.extend(synth.findings);
 
         all_prepared.push((output_path, prepared));
     }
