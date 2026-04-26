@@ -782,16 +782,22 @@ fn run_clear(
 
 fn run_clean_cmd(args: CleanArgs, workspace: &Workspace) -> Result<()> {
     use std::io::{self, Write};
+    use reen::workspace::ProjectLayout;
 
     let build_json = workspace.state_dir.join("build.json");
     let prepared_dir = &workspace.prepared_dir;
     let src_dir = workspace.root.join("src");
+    let crates_dir = match &workspace.layout {
+        ProjectLayout::MultiCrate { crates_dir } => Some(crates_dir.clone()),
+        ProjectLayout::SingleCrate { .. } => None,
+    };
 
     let has_tracker = build_json.is_file();
     let has_prepared = prepared_dir.is_dir();
     let has_src = src_dir.is_dir();
+    let has_crates = crates_dir.as_ref().map(|d| d.is_dir()).unwrap_or(false);
 
-    if !has_tracker && !has_prepared && !has_src {
+    if !has_tracker && !has_prepared && !has_src && !has_crates {
         println!("Nothing to clean.");
         return Ok(());
     }
@@ -805,6 +811,9 @@ fn run_clean_cmd(args: CleanArgs, workspace: &Workspace) -> Result<()> {
     }
     if has_src {
         println!("  src/");
+    }
+    if has_crates {
+        println!("  crates/");
     }
 
     // Confirm unless --force
@@ -831,6 +840,12 @@ fn run_clean_cmd(args: CleanArgs, workspace: &Workspace) -> Result<()> {
     if has_src {
         std::fs::remove_dir_all(&src_dir)?;
         println!("Removed src/");
+    }
+    if let Some(crates_dir) = &crates_dir {
+        if crates_dir.is_dir() {
+            std::fs::remove_dir_all(crates_dir)?;
+            println!("Removed crates/");
+        }
     }
 
     // Also remove the generated files manifest

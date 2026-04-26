@@ -17,6 +17,42 @@ pub struct Workspace {
     pub drafts_dir: PathBuf,
     pub prepared_dir: PathBuf,
     pub state_dir: PathBuf,
+    pub layout: ProjectLayout,
+}
+
+/// Where generated source code lives in this project.
+///
+/// Detected at workspace-discovery time by inspecting `Cargo.toml`. A
+/// `[workspace]`-only Cargo.toml (no `[package]`) with a sibling `crates/`
+/// directory is a multi-crate layout; everything else is single-crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectLayout {
+    SingleCrate { src_dir: PathBuf },
+    MultiCrate { crates_dir: PathBuf },
+}
+
+impl ProjectLayout {
+    /// Inspect `Cargo.toml` at `root` and decide which layout this project
+    /// uses. Falls back to `SingleCrate` whenever Cargo.toml is missing,
+    /// unparseable, or doesn't match the multi-crate shape.
+    pub fn detect(root: &Path) -> Self {
+        let cargo_path = root.join("Cargo.toml");
+        if let Ok(raw) = fs::read_to_string(&cargo_path) {
+            if let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() {
+                let has_workspace = doc.get("workspace").is_some();
+                let has_package = doc.get("package").is_some();
+                if has_workspace && !has_package {
+                    let crates_dir = root.join("crates");
+                    return ProjectLayout::MultiCrate { crates_dir };
+                }
+            }
+        }
+        ProjectLayout::SingleCrate { src_dir: root.join("src") }
+    }
+
+    pub fn is_multi_crate(&self) -> bool {
+        matches!(self, ProjectLayout::MultiCrate { .. })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,10 +228,12 @@ impl Selection {
 
 impl Workspace {
     pub fn discover(root: PathBuf) -> Result<Self> {
+        let layout = ProjectLayout::detect(&root);
         Ok(Self {
             drafts_dir: root.join(DRAFTS_DIR),
             prepared_dir: root.join(PREPARED_DIR),
             state_dir: root.join(STATE_DIR),
+            layout,
             root,
         })
     }
@@ -386,4 +424,79 @@ fn collect_prepared_artifacts(
 
 fn normalize_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_cargo(dir: &Path, contents: &str) {
+        let path = dir.join("Cargo.toml");
+        let mut f = fs::File::create(&path).expect("create Cargo.toml");
+        f.write_all(contents.as_bytes()).expect("write Cargo.toml");
+    }
+
+    #[test]
+    fn layout_detects_single_crate_from_package_toml() {
+        let tmp = tempdir();
+        write_cargo(
+            tmp.path(),
+            "[package]\nname = \"snake\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        );
+        let layout = ProjectLayout::detect(tmp.path());
+        match layout {
+            ProjectLayout::SingleCrate { src_dir } => {
+                assert_eq!(src_dir, tmp.path().join("src"));
+            }
+            other => panic!("expected SingleCrate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn layout_detects_multi_crate_from_workspace_only_toml() {
+        let tmp = tempdir();
+        write_cargo(
+            tmp.path(),
+            "[workspace]\nresolver = \"2\"\nmembers = [\n    \"crates/lupa-core\",\n    \"crates/lupa-server\",\n]\n",
+        );
+        // crates/ doesn't need to exist for detection.
+        let layout = ProjectLayout::detect(tmp.path());
+        match layout {
+            ProjectLayout::MultiCrate { crates_dir } => {
+                assert_eq!(crates_dir, tmp.path().join("crates"));
+            }
+            other => panic!("expected MultiCrate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn layout_treats_workspace_with_top_level_package_as_single_crate() {
+        // When Cargo.toml carries BOTH [workspace] and [package] (a workspace
+        // root that is itself a package), we treat the project as
+        // SingleCrate. The codegen contract is "machine-owns top-level src/",
+        // and that file lives at the package root in this configuration.
+        let tmp = tempdir();
+        write_cargo(
+            tmp.path(),
+            "[workspace]\nmembers = [\".\"]\n\n[package]\nname = \"hybrid\"\nversion = \"0.1.0\"\n",
+        );
+        let layout = ProjectLayout::detect(tmp.path());
+        assert!(
+            matches!(layout, ProjectLayout::SingleCrate { .. }),
+            "expected SingleCrate when [package] coexists with [workspace], got {:?}",
+            layout,
+        );
+    }
+
+    #[test]
+    fn layout_falls_back_to_single_crate_when_cargo_missing() {
+        let tmp = tempdir();
+        let layout = ProjectLayout::detect(tmp.path());
+        assert!(matches!(layout, ProjectLayout::SingleCrate { .. }));
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("create tempdir")
+    }
 }
