@@ -82,6 +82,27 @@ pub fn review_raw_drafts(workspace: &Workspace, paths: &[PathBuf]) -> Result<Dra
             .to_string_lossy()
             .replace('\\', "/");
 
+        // Auto-generated `.api/` drafts (Phase A) carry a whole-file
+        // marker. Refine compares the on-disk content against what
+        // `apis_ingest` would re-emit from the OpenAPI sidecar; mismatch
+        // means the BA edited the file (or the OpenAPI source drifted).
+        // Either way: blocking finding pointing at `reen apis ingest`.
+        // When the marker is present and the content matches, the
+        // remaining lint passes are skipped — the file is by definition
+        // BA-untouchable.
+        let is_api_subfolder = relative.contains("/.api/") || relative.contains("\\.api\\");
+        if is_api_subfolder && is_auto_generated_marker(&content) {
+            if let Some(finding) =
+                check_api_draft_drift(workspace, &relative, &content)
+            {
+                report.findings.push(finding);
+            }
+            // Skip the rest of the lints regardless: auto-generated drafts
+            // are not subject to BA-speak rules. The drift check is the
+            // only enforcement that matters for them.
+            continue;
+        }
+
         // Code-token lint (runs on raw content, before parsing)
         // Exempt generated files under drafts/.apis/ — they contain code-level tokens by design
         let is_generated_api = relative.contains("drafts/.apis/") || relative.contains(".apis/");
@@ -115,6 +136,87 @@ pub fn review_raw_drafts(workspace: &Workspace, paths: &[PathBuf]) -> Result<Dra
 
     sort_and_dedup_findings(&mut report.findings);
     Ok(report)
+}
+
+/// True when `content` opens with the auto-generated marker emitted by
+/// `reen apis ingest`. The marker is a `<!-- reen:auto-generated … -->`
+/// HTML comment on the first line.
+fn is_auto_generated_marker(content: &str) -> bool {
+    content
+        .lines()
+        .next()
+        .map(|l| l.trim_start().starts_with("<!-- reen:auto-generated"))
+        .unwrap_or(false)
+}
+
+/// For an auto-generated `.api/` draft, recompute what `reen apis ingest`
+/// would emit from the current OpenAPI sidecar and compare to disk. A
+/// mismatch means either:
+///
+/// - the BA edited the file directly, or
+/// - the OpenAPI sidecar changed and `reen apis ingest` hasn't been
+///   re-run.
+///
+/// Both cases produce the same blocking finding pointing at
+/// `reen apis ingest <name>`.
+fn check_api_draft_drift(
+    workspace: &Workspace,
+    relative: &str,
+    on_disk: &str,
+) -> Option<DraftReviewFinding> {
+    use crate::apis_ingest::reproduce_api_draft;
+
+    // The marker line names the api source; extract the name and the
+    // canonical re-emission target.
+    let api_name = api_name_from_marker(on_disk)?;
+    match reproduce_api_draft(workspace, &api_name, relative) {
+        Ok(Some(canonical)) => {
+            if canonical == on_disk {
+                None
+            } else {
+                Some(DraftReviewFinding {
+                    draft_path: relative.to_string(),
+                    source_line: None,
+                    category: DraftReviewCategory::Concreteness,
+                    message: format!(
+                        "`{}` is out of sync with `drafts/apis/{}.yaml`. Run `reen apis ingest {}` to regenerate. \
+                         If you intended to edit this file, delete the auto-generated header first — but note that \
+                         doing so detaches the draft from the OpenAPI source.",
+                        relative, api_name, api_name,
+                    ),
+                    severity: None,
+                })
+            }
+        }
+        Ok(None) => {
+            // The draft references an api/operation/schema that no
+            // longer exists in the OpenAPI sidecar. Same finding,
+            // different reason.
+            Some(DraftReviewFinding {
+                draft_path: relative.to_string(),
+                source_line: None,
+                category: DraftReviewCategory::Concreteness,
+                message: format!(
+                    "`{}` references a schema or operation that no longer exists in `drafts/apis/{}.yaml`. \
+                     Re-run `reen apis ingest {}` to bring the .api/ subfolder back in sync.",
+                    relative, api_name, api_name,
+                ),
+                severity: None,
+            })
+        }
+        Err(_) => None, // missing sidecar etc. — not a refine concern
+    }
+}
+
+/// Extract the api name from an auto-generated draft's first line. The
+/// marker shape is
+/// `<!-- reen:auto-generated from drafts/apis/<name>.yaml#... -->`.
+fn api_name_from_marker(content: &str) -> Option<String> {
+    let first = content.lines().next()?;
+    let prefix = "<!-- reen:auto-generated from drafts/apis/";
+    let after = first.trim_start().strip_prefix(prefix)?;
+    let end = after.find(".yaml")?;
+    Some(after[..end].to_string())
 }
 
 pub fn sort_and_dedup_findings(findings: &mut Vec<DraftReviewFinding>) {
@@ -759,6 +861,33 @@ mod tests {
     /// Helper: scan a fragment and return whether any code-token findings were produced.
     fn flags(content: &str) -> bool {
         !scan_code_tokens(content, "test.md").is_empty()
+    }
+
+    // ── Phase A: hand-edits to .api/ drafts surface as findings ──
+
+    #[test]
+    fn auto_generated_marker_recognition() {
+        // True positives.
+        assert!(is_auto_generated_marker(
+            "<!-- reen:auto-generated from drafts/apis/x.yaml#components/schemas/Y -->\n",
+        ));
+        assert!(is_auto_generated_marker(
+            "<!-- reen:auto-generated from drafts/apis/x.yaml#operations/foo -->\n",
+        ));
+
+        // True negatives.
+        assert!(!is_auto_generated_marker("# Data: AccountSummary\n"));
+        assert!(!is_auto_generated_marker("<!-- some unrelated comment -->\n"));
+        assert!(!is_auto_generated_marker(""));
+    }
+
+    #[test]
+    fn api_name_extracted_from_marker() {
+        let content = "<!-- reen:auto-generated from drafts/apis/nordea-openbanking.yaml#operations/getAccounts -->\n# Projection: GetAccounts\n";
+        assert_eq!(api_name_from_marker(content).as_deref(), Some("nordea-openbanking"));
+
+        // Lines without the marker shape produce None.
+        assert_eq!(api_name_from_marker("# Projection: Whatever\n"), None);
     }
 
     /// Helper: scan a fragment and return all code-token finding messages.

@@ -27,6 +27,62 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Re-emit one specific auto-generated draft from the current OpenAPI
+/// sidecar without writing to disk, returning the canonical bytes.
+///
+/// Used by refine's `.api/`-drift check to compare a draft on disk
+/// against what `apis ingest` would produce. The `relative` argument is
+/// the draft's workspace-relative path (e.g.
+/// `drafts/data/.api/AccountSummary.md` or
+/// `drafts/projections/.api/get_accounts.md`).
+///
+/// Returns `Ok(None)` when the relative path doesn't match a
+/// reproducible target (e.g. the OpenAPI source no longer declares
+/// that schema or operation). Returns `Err` only for unrecoverable
+/// IO / parse failures.
+pub fn reproduce_api_draft(
+    workspace: &Workspace,
+    api_name: &str,
+    relative: &str,
+) -> Result<Option<String>> {
+    let yaml_path = workspace
+        .drafts_dir
+        .join("apis")
+        .join(format!("{}.yaml", api_name));
+    if !yaml_path.is_file() {
+        return Ok(None);
+    }
+    let openapi_raw = fs::read_to_string(&yaml_path)
+        .with_context(|| format!("Failed to read {}", yaml_path.display()))?;
+    let openapi: Value = serde_yaml::from_str(&openapi_raw)
+        .context("Failed to parse OpenAPI YAML")?;
+
+    let schemas = extract_schemas(&openapi);
+    let operations = extract_operations(&openapi);
+
+    // Path-shape: drafts/data/.api/<Type>.md or drafts/projections/.api/<op>.md
+    let normalised = relative.replace('\\', "/");
+    if let Some(stem) = normalised
+        .strip_prefix("drafts/data/.api/")
+        .and_then(|s| s.strip_suffix(".md"))
+    {
+        let Some(schema) = schemas.get(stem) else {
+            return Ok(None);
+        };
+        return Ok(Some(render_data_draft(api_name, stem, schema)));
+    }
+    if let Some(stem) = normalised
+        .strip_prefix("drafts/projections/.api/")
+        .and_then(|s| s.strip_suffix(".md"))
+    {
+        let Some(op) = operations.iter().find(|o| to_snake_case(&o.operation_id) == stem) else {
+            return Ok(None);
+        };
+        return Ok(Some(render_projection_draft(api_name, op, &schemas)));
+    }
+    Ok(None)
+}
+
 /// Ingest all boundary drafts in `drafts/apis/`, or a specific one by name.
 pub fn ingest_apis(workspace: &Workspace, api_name: Option<&str>, verbose: bool) -> Result<()> {
     let apis_dir = workspace.drafts_dir.join("apis");
