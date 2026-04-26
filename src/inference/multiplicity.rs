@@ -17,6 +17,8 @@
 
 use crate::prepared::{Ambiguity, Multiplicity, PreparedArtifact, ScenarioSpec};
 
+use super::phrases::multiplicity::{COUNT_WORDS, IRREGULAR_PLURALS, matches_prose_collection};
+
 pub fn derive_multiplicity(artifact: &mut PreparedArtifact) {
     let scenarios: Vec<ScenarioSpec> = artifact.scenarios.clone();
 
@@ -145,17 +147,6 @@ pub(super) fn combine_multiplicity_cues(
     }
 }
 
-const IRREGULAR_PLURALS: &[(&str, &str)] = &[
-    ("children", "child"),
-    ("people", "person"),
-    ("men", "man"),
-    ("women", "woman"),
-    ("feet", "foot"),
-    ("teeth", "tooth"),
-    ("mice", "mouse"),
-    ("geese", "goose"),
-];
-
 pub(super) fn name_plurality(name: &str) -> Cue {
     let lower = name.to_ascii_lowercase();
     let last_word = lower
@@ -182,16 +173,11 @@ pub(super) fn name_plurality(name: &str) -> Cue {
 }
 
 pub(super) fn prose_plurality(prose: &str) -> Cue {
-    let lower = prose.to_ascii_lowercase();
-    if lower.contains("a list of")
-        || lower.contains("the list of")
-        || lower.contains("the ordered ")
-        || lower.contains("the collection of")
-        || lower.contains("all the ")
-    {
-        return Cue::List;
+    if matches_prose_collection(prose) {
+        Cue::List
+    } else {
+        Cue::Unknown
     }
-    Cue::Unknown
 }
 
 pub(super) fn scenario_plurality(role_name: &str, scenarios: &[ScenarioSpec]) -> Cue {
@@ -230,11 +216,6 @@ pub(super) fn scenario_plurality(role_name: &str, scenarios: &[ScenarioSpec]) ->
         Cue::Unknown
     }
 }
-
-const COUNT_WORDS: &[&str] = &[
-    "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    "eleven", "twelve", "many", "several",
-];
 
 pub(super) fn depluralise(word: &str) -> String {
     if word.ends_with("ies") && word.len() > 3 {

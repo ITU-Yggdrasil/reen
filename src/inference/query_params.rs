@@ -17,6 +17,8 @@
 
 use crate::prepared::ParamSpec;
 
+use super::phrases::query::{AND_DELIMITER, NO_FILTER_PREFIX, WITH_MARKER};
+
 /// `queried with minimum 100 and maximum 250` → two i64 params.
 /// `queried with "alice"` → one &str param named `query`.
 /// `queried with no date range` → no params.
@@ -26,16 +28,16 @@ pub fn parse_query_parameters(when: &str) -> Vec<ParamSpec> {
     let mut params: Vec<ParamSpec> = Vec::new();
 
     // "queried with no <X>" → nothing
-    if when_lower.contains("with no ") {
+    if when_lower.contains(NO_FILTER_PREFIX) {
         return params;
     }
 
-    let Some(rest) = when_lower.split_once(" with ").map(|(_, b)| b) else {
+    let Some(rest) = when_lower.split_once(WITH_MARKER).map(|(_, b)| b) else {
         return params;
     };
 
     let mut emitted_query = false;
-    for chunk in rest.split(" and ") {
+    for chunk in rest.split(AND_DELIMITER) {
         let chunk = chunk.trim();
         if chunk.is_empty() {
             continue;

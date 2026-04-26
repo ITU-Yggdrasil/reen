@@ -1,6 +1,51 @@
-//! Result-phrase classifiers and small string helpers shared by the
-//! signature inference pass. Every classifier here is an explicit
-//! substring allow-list; see `super::mod` for the design rationale.
+//! Phrase registry for inference passes.
+//!
+//! Every English-idiom allow-list used by signature inference,
+//! multiplicity inference, or query-parameter parsing lives in one of
+//! the sub-modules below. The classifier functions stay here so the
+//! existing `crate::inference::phrases::is_rejection_then` /
+//! `classify_return_shape` / `count_phrase` paths keep working without
+//! caller updates.
+//!
+//! ## Why an explicit allow-list, no regex
+//!
+//! Every classifier here is an explicit substring allow-list. New
+//! shapes get added by extending the list, not by widening a pattern.
+//! BA prose drifts in small ways across drafts; a regex that "almost"
+//! matches is hard to audit when it produces a wrong inference. An
+//! explicit list:
+//!
+//! - makes the supported shapes legible at review time;
+//! - forces a deliberate decision when the vocabulary expands;
+//! - lets each constant carry doc-tests that pin both accept and
+//!   reject cases — the doc-test IS the corpus.
+//!
+//! When no shape matches, the classifier returns the safe default
+//! (unit return, single multiplicity, empty parameter list) and
+//! codegen falls back to its existing `(&self)` stub. The BA sees no
+//! error; the implementer sees a `// TODO` in the scaffolded code.
+//!
+//! ## How to add a new phrase
+//!
+//! 1. Pick the right sub-module (return shape, projection, rejection,
+//!    multiplicity, query).
+//! 2. Append the phrase to the `pub const …_PHRASES` slice (or the
+//!    relevant marker / delimiter constant).
+//! 3. Add at least one accept and one reject doc-test exercising the
+//!    new phrase.
+//! 4. Run `cargo test --doc` and the compile gate.
+//!
+//! Out of scope here: numeric / shape-based validation in
+//! `src/test_synth.rs` (those are simulators, not phrase lists) and
+//! anything in `codegen` that reads structural markers (those moved
+//! into named constants in 7d, but they are codegen contracts not
+//! phrase classifications).
+
+pub mod multiplicity;
+pub mod projection;
+pub mod query;
+pub mod rejection;
+pub mod return_shape;
 
 /// Classify the return type a projection query produces. Recognises the
 /// "returns the …" / "are returned" / "all the …" wording that lupa-style
@@ -10,16 +55,8 @@
 /// `element_type` is the projection's first role-player data type — the
 /// canonical list element. Empty element types skip the `Vec<…>` wrap.
 pub fn classify_projection_return(then: &str, element_type: &str) -> String {
-    let lower = then.to_ascii_lowercase();
-    if lower.contains("returns the ")
-        || lower.contains("are returned")
-        || lower.contains("only transactions")
-        || lower.contains("all five")
-        || lower.contains("all the")
-    {
-        if !element_type.is_empty() {
-            return format!("Vec<{}>", element_type);
-        }
+    if projection::matches_collection(then) && !element_type.is_empty() {
+        return format!("Vec<{}>", element_type);
     }
     classify_return_shape(then, element_type)
 }
@@ -33,20 +70,15 @@ pub fn classify_projection_return(then: &str, element_type: &str) -> String {
 ///  * rejection / acceptance / state-change phrases → `()`
 ///  * absence → `()`
 pub fn classify_return_shape(then: &str, host_type: &str) -> String {
-    let lower = then.to_ascii_lowercase();
-
-    // Boolean: "the answer is affirmative|negative|yes|no"
-    if lower.contains("the answer is affirmative")
-        || lower.contains("the answer is negative")
-        || lower.contains("the answer is yes")
-        || lower.contains("the answer is no")
-    {
+    if return_shape::matches_boolean(then) {
         return "bool".into();
     }
 
+    let lower = then.to_ascii_lowercase();
+
     // Quoted text: `the result is "100.50 DKK"` → String
-    if let Some(idx) = lower.find("the result is") {
-        let tail = &then[idx + "the result is".len()..];
+    if let Some(idx) = lower.find(return_shape::RESULT_ANCHOR) {
+        let tail = &then[idx + return_shape::RESULT_ANCHOR.len()..];
         let trimmed = tail.trim_start();
         if trimmed.starts_with('"') || trimmed.starts_with('\'') {
             return "String".into();
@@ -61,11 +93,8 @@ pub fn classify_return_shape(then: &str, host_type: &str) -> String {
         }
     }
 
-    // Rejection / acceptance: leave as unit (callers can upgrade to Result).
-    if lower.contains("is rejected")
-        || lower.contains("is accepted")
-        || lower.contains("becomes ")
-    {
+    // Rejection / acceptance / state-change: leave as unit (callers can upgrade to Result).
+    if return_shape::matches_state_change(then) {
         return "()".into();
     }
 
@@ -78,11 +107,7 @@ pub fn classify_return_shape(then: &str, host_type: &str) -> String {
 /// Used by signature inference to exclude rejection scenarios from the
 /// happy-path aggregate so the derived return type isn't degraded to `()`.
 pub fn is_rejection_then(then: &str) -> bool {
-    let lower = then.to_ascii_lowercase();
-    lower.contains("is rejected")
-        || lower.contains("returns an error")
-        || lower.contains("with a currency mismatch")
-        || lower.contains("transition is rejected")
+    rejection::matches(then)
 }
 
 /// Count case-insensitive occurrences of `needle` in `haystack`. Returns 0
