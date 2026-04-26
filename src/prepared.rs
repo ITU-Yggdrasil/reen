@@ -115,6 +115,14 @@ pub struct PreparedArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realisation_target: Option<String>,
 
+    // ── Auto-generated api projection (Phase A) ──────────────────
+    /// Populated for projections emitted by `reen apis ingest` from an
+    /// OpenAPI sidecar. Carries the structured HTTP shape so signature
+    /// inference can derive the projection's `derived_signature`
+    /// directly, without scenarios.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_source: Option<ApiSourceSpec>,
+
     // ── App-only ─────────────────────────────────────────────────
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_kind: Option<String>,
@@ -205,6 +213,46 @@ pub struct FunctionalitySpec {
     /// invokes this functionality or when scenarios disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub derived_signature: Option<DerivedSignature>,
+}
+
+// ── API source (Phase A) ─────────────────────────────────────────
+
+/// The structured `## Source` block emitted by `reen apis ingest` into
+/// auto-generated projection drafts under `drafts/projections/.api/`.
+/// Carries the HTTP shape (method, path, parameters, return type) that
+/// would otherwise have to be reconstructed from prose. Signature
+/// inference reads this directly when present, bypassing scenario
+/// walking — auto-generated drafts have no scenarios by design.
+///
+/// Optional on `PreparedArtifact`; absent for hand-authored projections.
+/// v5 documents that don't carry the field deserialise unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiSourceSpec {
+    /// The OpenAPI sidecar reference, e.g.
+    /// `nordea-openbanking#operations/getAccounts`. Informational only;
+    /// signature inference does not parse it.
+    pub openapi_ref: String,
+    /// HTTP method (`GET`, `POST`, etc.).
+    pub method: String,
+    /// Path with `{param}` placeholders.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<ApiParamSpec>,
+    /// Pre-rendered return type fragment, e.g. `Vec<AccountSummary>`,
+    /// `String`, `Vec<u8>`. Empty string means unit return.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub returns: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApiParamSpec {
+    pub name: String,
+    /// One of `path`, `query`, `header`, `body`.
+    pub location: String,
+    pub required: bool,
+    /// Pre-rendered Rust type fragment, e.g. `&str`, `i64`,
+    /// `&AccountSummary`.
+    pub rust_type: String,
 }
 
 // ── Inference outputs (v4) ───────────────────────────────────────
@@ -514,6 +562,7 @@ impl PreparedArtifact {
             routes: Vec::new(),
             // Context classification
             realisation_target: None,
+            api_source: None,
             // App-only
             application_kind: None,
             entry_context: None,

@@ -1,12 +1,23 @@
-//! API ingestion: OpenAPI snapshot → generated data drafts + operation specs.
+//! API ingestion (Phase A).
 //!
-//! Deterministic: same OpenAPI snapshot → byte-identical output.
+//! Reads `drafts/apis/<name>.md` (boundary draft, config-shaped) and
+//! `drafts/apis/<name>.yaml` (OpenAPI sidecar), then emits:
+//!
+//!   * `drafts/data/.api/<Type>.md` — one per schema referenced by an
+//!     included operation.
+//!   * `drafts/projections/.api/<operation>.md` — one per included
+//!     operation.
+//!
+//! Each emitted draft is auto-generated and carries a three-line header:
+//! the OpenAPI source pointer, a `DO NOT EDIT` line, and a
+//! `<source-hash>` of the OpenAPI fragment that produced it. `reen
+//! refine` uses the hash to detect hand-edits.
+//!
+//! Hard-regenerate semantics: every emit overwrites whatever was there.
+//! The `.api/` subfolders are cleaned before emission so a removed
+//! operation or schema doesn't leave a stale draft behind.
 
-use crate::draft_parser::{parse_boundary_draft, BoundaryDraft};
-use crate::prepared::{
-    ApiManifest, ApiManifestEntry, ApiOperationSpec, AuthSpec, IoSpec, TransportSpec,
-    API_MANIFEST_SCHEMA, OPERATION_SCHEMA_VERSION,
-};
+use crate::draft_parser::parse_boundary_draft;
 use crate::workspace::Workspace;
 use anyhow::{Context, Result, bail};
 use serde_yaml::Value;
@@ -32,14 +43,23 @@ pub fn ingest_apis(workspace: &Workspace, api_name: Option<&str>, verbose: bool)
         }
     }
 
-    let mut manifest_entries = Vec::new();
+    let data_api_dir = workspace.drafts_dir.join("data").join(".api");
+    let proj_api_dir = workspace.drafts_dir.join("projections").join(".api");
+    fs::create_dir_all(&data_api_dir)
+        .with_context(|| format!("Failed to create {}", data_api_dir.display()))?;
+    fs::create_dir_all(&proj_api_dir)
+        .with_context(|| format!("Failed to create {}", proj_api_dir.display()))?;
+
+    // Hard-regenerate: clean the `.api/` subfolders before emitting so a
+    // removed operation or schema doesn't leave a stale draft on disk.
+    clean_api_subfolder(&data_api_dir)?;
+    clean_api_subfolder(&proj_api_dir)?;
 
     for (name, md_path) in &boundary_drafts {
         let content = fs::read_to_string(md_path)
             .with_context(|| format!("Failed to read {}", md_path.display()))?;
         let draft = parse_boundary_draft(name, &content)?;
 
-        // Load the OpenAPI snapshot
         let yaml_path = apis_dir.join(format!("{}.yaml", name));
         if !yaml_path.is_file() {
             bail!(
@@ -50,30 +70,22 @@ pub fn ingest_apis(workspace: &Workspace, api_name: Option<&str>, verbose: bool)
         }
         let openapi_raw = fs::read_to_string(&yaml_path)
             .with_context(|| format!("Failed to read {}", yaml_path.display()))?;
+        let openapi: Value = serde_yaml::from_str(&openapi_raw)
+            .context("Failed to parse OpenAPI YAML")?;
 
-        let entry = ingest_single_api(workspace, name, &draft, &openapi_raw, verbose)?;
-        manifest_entries.push(entry);
-    }
-
-    // Write the unified manifest
-    let manifest = ApiManifest {
-        schema: API_MANIFEST_SCHEMA.to_string(),
-        apis: manifest_entries,
-    };
-    let manifest_dir = workspace.drafts_dir.join(".apis");
-    fs::create_dir_all(&manifest_dir)
-        .with_context(|| format!("Failed to create {}", manifest_dir.display()))?;
-    let manifest_yaml = serde_yaml::to_string(&manifest)?;
-    fs::write(manifest_dir.join("manifest.yml"), manifest_yaml)?;
-
-    if verbose {
-        println!("API manifest written to drafts/.apis/manifest.yml");
+        emit_drafts(
+            name,
+            &draft.operations_whitelist,
+            &openapi,
+            &data_api_dir,
+            &proj_api_dir,
+            verbose,
+        )?;
     }
 
     Ok(())
 }
 
-/// Discover boundary drafts: `drafts/apis/<name>.md` files.
 fn discover_boundary_drafts(
     apis_dir: &Path,
     filter_name: Option<&str>,
@@ -99,469 +111,673 @@ fn discover_boundary_drafts(
         }
         drafts.push((name, path));
     }
-    // Sort for deterministic order
     drafts.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(drafts)
 }
 
-/// Ingest a single API from its boundary draft and OpenAPI snapshot.
-fn ingest_single_api(
-    workspace: &Workspace,
-    api_name: &str,
-    draft: &BoundaryDraft,
-    openapi_raw: &str,
-    verbose: bool,
-) -> Result<ApiManifestEntry> {
-    let openapi: Value = serde_yaml::from_str(openapi_raw)
-        .context("Failed to parse OpenAPI YAML")?;
-
-    // Validate basic OpenAPI shape
-    validate_openapi_shape(&openapi)?;
-
-    // Compute hash for determinism tracking
-    let mut hasher = Sha256::new();
-    hasher.update(openapi_raw.as_bytes());
-    let openapi_hash = format!("{:x}", hasher.finalize());
-
-    // Extract schemas from components/schemas
-    let schemas = extract_schemas(&openapi)?;
-
-    // Determine which operations to emit and which schemas they reference
-    let (operations, referenced_types) =
-        build_operations(api_name, draft, &openapi, &schemas)?;
-
-    // Validate whitelist coherence: every whitelisted name must match something
-    validate_whitelist(draft, &operations, &schemas)?;
-
-    // Create output directories
-    let data_dir = workspace
-        .drafts_dir
-        .join(".apis/data")
-        .join(api_name);
-    let ops_dir = workspace
-        .drafts_dir
-        .join(".apis/operations")
-        .join(api_name);
-    fs::create_dir_all(&data_dir)
-        .with_context(|| format!("Failed to create {}", data_dir.display()))?;
-    fs::create_dir_all(&ops_dir)
-        .with_context(|| format!("Failed to create {}", ops_dir.display()))?;
-
-    // Clean existing generated files for determinism
-    clean_dir(&data_dir)?;
-    clean_dir(&ops_dir)?;
-
-    // Emit data drafts for referenced schemas
-    let mut emitted_types: Vec<String> = Vec::new();
-    for type_name in &referenced_types {
-        if let Some(schema) = schemas.get(type_name.as_str()) {
-            let md = generate_data_draft(api_name, type_name, schema);
-            let path = data_dir.join(format!("{}.md", type_name));
-            fs::write(&path, &md)
-                .with_context(|| format!("Failed to write {}", path.display()))?;
-            emitted_types.push(type_name.clone());
-            if verbose {
-                println!("  data: {}/{}", api_name, type_name);
-            }
+/// Clean any pre-existing `.md` files under an `.api/` subfolder.
+fn clean_api_subfolder(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
         }
     }
-
-    // Emit operation specs
-    let mut emitted_ops: Vec<String> = Vec::new();
-    for op in &operations {
-        let yaml = serde_yaml::to_string(op)?;
-        let path = ops_dir.join(format!("{}.yml", op.name));
-        fs::write(&path, &yaml)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
-        emitted_ops.push(op.name.clone());
-        if verbose {
-            println!("  operation: {}/{}", api_name, op.name);
-        }
-    }
-
-    Ok(ApiManifestEntry {
-        name: api_name.to_string(),
-        openapi_hash,
-        data_types: emitted_types,
-        operations: emitted_ops,
-    })
-}
-
-fn validate_openapi_shape(openapi: &Value) -> Result<()> {
-    let mapping = openapi
-        .as_mapping()
-        .ok_or_else(|| anyhow::anyhow!("OpenAPI document must be a YAML mapping"))?;
-
-    // Check for openapi version field
-    let version = mapping
-        .get(Value::String("openapi".to_string()))
-        .and_then(Value::as_str);
-    match version {
-        Some(v) if v.starts_with("3.") => {}
-        Some(v) => bail!("Unsupported OpenAPI version: {}", v),
-        None => bail!("Missing `openapi` version field in OpenAPI document"),
-    }
-
     Ok(())
 }
 
-/// Extract all schemas from components/schemas as a BTreeMap for deterministic order.
-fn extract_schemas(openapi: &Value) -> Result<BTreeMap<String, Value>> {
-    let mut schemas = BTreeMap::new();
-    let components = openapi
-        .as_mapping()
-        .and_then(|m| m.get(Value::String("components".to_string())))
-        .and_then(Value::as_mapping);
-    let schema_map = components
-        .and_then(|c| c.get(Value::String("schemas".to_string())))
-        .and_then(Value::as_mapping);
-    if let Some(map) = schema_map {
-        for (key, value) in map {
-            if let Some(name) = key.as_str() {
-                schemas.insert(name.to_string(), value.clone());
+// ── Emission ─────────────────────────────────────────────────────────
+
+fn emit_drafts(
+    api_name: &str,
+    whitelist: &[String],
+    openapi: &Value,
+    data_dir: &Path,
+    proj_dir: &Path,
+    verbose: bool,
+) -> Result<()> {
+    let schemas = extract_schemas(openapi);
+    let operations = extract_operations(openapi);
+
+    // Determine which operations to emit.
+    let included: Vec<&Operation> = if whitelist.is_empty() {
+        operations.iter().collect()
+    } else {
+        operations
+            .iter()
+            .filter(|op| whitelist.iter().any(|w| w == &op.operation_id))
+            .collect()
+    };
+    if included.is_empty() {
+        bail!(
+            "{}: no operations matched the whitelist {:?}",
+            api_name,
+            whitelist,
+        );
+    }
+
+    // Walk every included operation to collect referenced schemas (transitively).
+    let mut referenced: BTreeMap<String, ()> = BTreeMap::new();
+    for op in &included {
+        for sch in op.referenced_schemas() {
+            if !referenced.contains_key(&sch) {
+                referenced.insert(sch.clone(), ());
+                collect_transitive_refs(&sch, &schemas, &mut referenced);
             }
         }
     }
-    Ok(schemas)
-}
 
-/// Build operation specs from the OpenAPI document and boundary draft whitelist.
-///
-/// For AISStream and similar WebSocket APIs with no REST paths, we synthesize
-/// operations from the schema types referenced in the whitelist.
-fn build_operations(
-    api_name: &str,
-    draft: &BoundaryDraft,
-    openapi: &Value,
-    schemas: &BTreeMap<String, Value>,
-) -> Result<(Vec<ApiOperationSpec>, Vec<String>)> {
-    let mut operations = Vec::new();
-    let mut referenced_types = BTreeMap::new(); // BTreeMap for deterministic order
-
-    // Check if there are REST paths
-    let paths = openapi
-        .as_mapping()
-        .and_then(|m| m.get(Value::String("paths".to_string())))
-        .and_then(Value::as_mapping);
-
-    let has_rest_paths = paths.is_some_and(|p| !p.is_empty());
-
-    if has_rest_paths {
-        // Standard REST API: build operations from paths
-        if let Some(paths) = paths {
-            build_rest_operations(
-                api_name,
-                draft,
-                paths,
-                schemas,
-                &mut operations,
-                &mut referenced_types,
-            )?;
+    // Emit data drafts.
+    for type_name in referenced.keys() {
+        let Some(schema) = schemas.get(type_name) else {
+            continue;
+        };
+        let path = data_dir.join(format!("{}.md", type_name));
+        let body = render_data_draft(api_name, type_name, schema);
+        fs::write(&path, &body)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        if verbose {
+            println!("  emitted: {}", relative_to_workspace(&path));
         }
-    } else {
-        // No REST paths — likely WebSocket or similar. Build from schemas + draft hints.
-        build_schema_operations(
-            api_name,
-            draft,
-            schemas,
-            &mut operations,
-            &mut referenced_types,
-        )?;
     }
 
-    let type_list: Vec<String> = referenced_types.into_keys().collect();
-    Ok((operations, type_list))
+    // Emit projection drafts.
+    for op in &included {
+        let snake = to_snake_case(&op.operation_id);
+        let path = proj_dir.join(format!("{}.md", snake));
+        let body = render_projection_draft(api_name, op, &schemas);
+        fs::write(&path, &body)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+        if verbose {
+            println!("  emitted: {}", relative_to_workspace(&path));
+        }
+    }
+
+    if verbose {
+        println!(
+            "API `{}`: emitted {} data draft(s) and {} projection draft(s)",
+            api_name,
+            referenced.len(),
+            included.len(),
+        );
+    }
+    Ok(())
 }
 
-fn build_rest_operations(
-    api_name: &str,
-    draft: &BoundaryDraft,
-    paths: &serde_yaml::Mapping,
-    schemas: &BTreeMap<String, Value>,
-    operations: &mut Vec<ApiOperationSpec>,
-    referenced_types: &mut BTreeMap<String, ()>,
-) -> Result<()> {
-    let whitelist = &draft.operations_whitelist;
+fn relative_to_workspace(path: &Path) -> String {
+    // Best-effort relative path for verbose output.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    path.strip_prefix(&cwd)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
 
+// ── Data draft rendering ─────────────────────────────────────────────
+
+fn render_data_draft(api_name: &str, type_name: &str, schema: &Value) -> String {
+    let mut out = String::new();
+    let openapi_ref = format!(
+        "drafts/apis/{}.yaml#components/schemas/{}",
+        api_name, type_name,
+    );
+    let hash = stable_hash(schema);
+    writeln!(out, "<!-- reen:auto-generated from {} -->", openapi_ref).unwrap();
+    writeln!(out, "<!-- DO NOT EDIT — regenerated by `reen apis ingest`. -->").unwrap();
+    writeln!(out, "<!-- source-hash: {} -->", hash).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "# Data: {}", type_name).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "## Purpose").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Wire shape of the {0} schema as exposed by the {1} API. \
+         Domain rules attach in BA-authored contexts that consume this type — \
+         this draft carries only the OpenAPI shape.",
+        type_name, api_name,
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "## Attributes").unwrap();
+    writeln!(out).unwrap();
+    let mut sorted_props: BTreeMap<String, &Value> = BTreeMap::new();
+    if let Some(props) = schema
+        .as_mapping()
+        .and_then(|m| m.get(Value::String("properties".to_string())))
+        .and_then(Value::as_mapping)
+    {
+        for (key, val) in props {
+            if let Some(name) = key.as_str() {
+                sorted_props.insert(name.to_string(), val);
+            }
+        }
+    }
+    let enum_values = schema
+        .as_mapping()
+        .and_then(|m| m.get(Value::String("enum".to_string())))
+        .and_then(Value::as_sequence);
+    if let Some(values) = enum_values {
+        let listed: Vec<&str> = values.iter().filter_map(Value::as_str).collect();
+        writeln!(
+            out,
+            "- value: enumerated text — one of {}",
+            listed
+                .iter()
+                .map(|s| format!("\"{}\"", s))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+        .unwrap();
+    } else if sorted_props.is_empty() {
+        // oneOf or unmodelled — emit a placeholder so prepare doesn't bail.
+        writeln!(out, "- value: an opaque value (schema has no declared properties)").unwrap();
+    } else {
+        for (name, val) in &sorted_props {
+            let ba_name = camel_to_ba(name);
+            writeln!(out, "- {}: {}", ba_name, attribute_description(val)).unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+
+    writeln!(out, "## Invariants").unwrap();
+    writeln!(out).unwrap();
+    let required = schema
+        .as_mapping()
+        .and_then(|m| m.get(Value::String("required".to_string())))
+        .and_then(Value::as_sequence);
+    if let Some(req) = required {
+        for name in req.iter().filter_map(Value::as_str) {
+            let ba_name = camel_to_ba(name);
+            writeln!(out, "- {} must be present", ba_name).unwrap();
+        }
+    }
+    if let Some(values) = enum_values {
+        let listed: Vec<&str> = values.iter().filter_map(Value::as_str).collect();
+        if !listed.is_empty() {
+            writeln!(
+                out,
+                "- value must be one of {}",
+                listed
+                    .iter()
+                    .map(|s| format!("\"{}\"", s))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out).unwrap();
+    out
+}
+
+fn attribute_description(val: &Value) -> String {
+    let map = match val.as_mapping() {
+        Some(m) => m,
+        None => return "an opaque value".into(),
+    };
+    let ty = map
+        .get(Value::String("type".to_string()))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let format = map
+        .get(Value::String("format".to_string()))
+        .and_then(Value::as_str);
+    let reference = map
+        .get(Value::String("$ref".to_string()))
+        .and_then(Value::as_str)
+        .map(ref_to_type_name);
+
+    if let Some(name) = reference {
+        return format!("a value of {}", name);
+    }
+    match ty {
+        "string" => match format {
+            Some("date") | Some("date-time") => "a date-and-time value".into(),
+            Some(other) => format!("a text value (format `{}`)", other),
+            None => "a text value".into(),
+        },
+        "integer" => "a whole number".into(),
+        "number" => "a numeric value".into(),
+        "boolean" => "a boolean value (true or false)".into(),
+        "array" => {
+            let item_ty = map
+                .get(Value::String("items".to_string()))
+                .map(attribute_description)
+                .unwrap_or_else(|| "values".into());
+            format!("a list of {}", item_ty.trim_start_matches("a ").trim_start_matches("an "))
+        }
+        "" => "an opaque value".into(),
+        other => format!("a value of OpenAPI type `{}`", other),
+    }
+}
+
+// ── Projection draft rendering ───────────────────────────────────────
+
+fn render_projection_draft(api_name: &str, op: &Operation, schemas: &BTreeMap<String, Value>) -> String {
+    let mut out = String::new();
+    let openapi_ref = format!(
+        "drafts/apis/{}.yaml#operations/{}",
+        api_name, op.operation_id,
+    );
+    let hash = stable_hash(&op.fragment);
+    writeln!(out, "<!-- reen:auto-generated from {} -->", openapi_ref).unwrap();
+    writeln!(out, "<!-- DO NOT EDIT — regenerated by `reen apis ingest`. -->").unwrap();
+    writeln!(out, "<!-- source-hash: {} -->", hash).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "# Projection: {}", op.operation_id).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "## Purpose").unwrap();
+    writeln!(out).unwrap();
+    let summary = op.summary.as_deref().unwrap_or(&op.operation_id);
+    writeln!(
+        out,
+        "{}. Wire-level projection over the {} API; domain rules attach in \
+         BA-authored contexts that compose this projection.",
+        summary, api_name,
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+
+    // Structured Source block — the canonical Phase A shape that signature
+    // inference parses to derive the projection's signature.
+    writeln!(out, "## Source").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "- OpenAPI: {}#operations/{}", api_name, op.operation_id).unwrap();
+    writeln!(out, "- Method: {} {}", op.method, op.path).unwrap();
+    writeln!(out, "- Parameters:").unwrap();
+    if op.parameters.is_empty() {
+        writeln!(out, "  - (none)").unwrap();
+    } else {
+        for p in &op.parameters {
+            let req = if p.required { ", required" } else { "" };
+            writeln!(
+                out,
+                "  - {} ({}{}): {}",
+                p.name, p.location, req, p.rust_type,
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out, "- Returns: {}", op.return_type(schemas)).unwrap();
+    writeln!(out).unwrap();
+
+    // Role Players: one role player carrying the response shape (when the
+    // operation returns data).
+    writeln!(out, "## Role Players").unwrap();
+    writeln!(out).unwrap();
+    if let Some(role) = op.response_role_player(schemas) {
+        writeln!(
+            out,
+            "- {}: {} — {}",
+            role.name, role.data_type, role.responsibility,
+        )
+        .unwrap();
+    } else {
+        writeln!(out, "- response: () — the operation returns no data").unwrap();
+    }
+    writeln!(out).unwrap();
+
+    // Functionalities: one per operation, named `call` (deterministic).
+    writeln!(out, "## Functionalities").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "### call").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Invokes the {} operation against the {} API and returns the response shape \
+         declared in `## Source`. The implementer wires the HTTP transport via the \
+         project's ambient client; this projection's contract is the signature.",
+        op.operation_id, api_name,
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    out
+}
+
+struct ResponseRole {
+    name: String,
+    data_type: String,
+    responsibility: String,
+}
+
+// ── OpenAPI domain model ─────────────────────────────────────────────
+
+struct Operation {
+    operation_id: String,
+    summary: Option<String>,
+    method: String,
+    path: String,
+    parameters: Vec<OpParam>,
+    /// The 200-response schema (a `$ref` target, or `None` for no body).
+    response_schema: Option<String>,
+    /// Whether the response body is an array wrapping `response_schema`.
+    response_is_list: bool,
+    /// Verbatim YAML fragment for hashing.
+    fragment: Value,
+}
+
+struct OpParam {
+    name: String,
+    location: String,
+    required: bool,
+    rust_type: String,
+}
+
+impl Operation {
+    fn referenced_schemas(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for r in find_all_refs(&self.fragment) {
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+        out
+    }
+
+    fn return_type(&self, schemas: &BTreeMap<String, Value>) -> String {
+        match (&self.response_schema, self.response_is_list) {
+            (Some(schema), true) => {
+                // If the schema itself wraps an `array` field, that's the list.
+                // Otherwise the response_is_list flag captures the array nature.
+                format!("Vec<{}>", primary_payload(schema, schemas).unwrap_or_else(|| schema.clone()))
+            }
+            (Some(schema), false) => primary_payload(schema, schemas).unwrap_or_else(|| schema.clone()),
+            (None, _) => "()".to_string(),
+        }
+    }
+
+    fn response_role_player(&self, schemas: &BTreeMap<String, Value>) -> Option<ResponseRole> {
+        let schema = self.response_schema.as_ref()?;
+        let payload = primary_payload(schema, schemas).unwrap_or_else(|| schema.clone());
+        let (role_name, responsibility) = if self.response_is_list {
+            (
+                snake_plural(&payload),
+                format!("the {} list returned by the API", payload),
+            )
+        } else {
+            (
+                to_snake_case(&payload),
+                format!("the {} returned by the API", payload),
+            )
+        };
+        Some(ResponseRole {
+            name: role_name,
+            data_type: payload,
+            responsibility,
+        })
+    }
+}
+
+/// If `schema` is an envelope that wraps a single payload (e.g.
+/// `{ response: { accounts: array<AccountInfo> } }` or
+/// `{ response: $ref: AccountInfo }`), return the payload's type name.
+/// Otherwise return None and callers fall back to the envelope name.
+fn primary_payload(schema_name: &str, schemas: &BTreeMap<String, Value>) -> Option<String> {
+    let schema = schemas.get(schema_name)?;
+    let mapping = schema.as_mapping()?;
+    let response_field = mapping.get(Value::String("response".to_string()))?;
+
+    // Direct $ref under `response`.
+    if let Some(rf) = response_field
+        .as_mapping()
+        .and_then(|m| m.get(Value::String("$ref".to_string())))
+        .and_then(Value::as_str)
+    {
+        return Some(ref_to_type_name(rf));
+    }
+    // `response` is itself an object whose first property is the payload
+    // (e.g. `accounts: array<AccountInfo>`).
+    let inner = response_field.as_mapping()?;
+    let props = inner
+        .get(Value::String("properties".to_string()))?
+        .as_mapping()?;
+    for (_, val) in props {
+        let m = val.as_mapping()?;
+        if let Some(items) = m.get(Value::String("items".to_string())) {
+            if let Some(rf) = items
+                .as_mapping()
+                .and_then(|im| im.get(Value::String("$ref".to_string())))
+                .and_then(Value::as_str)
+            {
+                return Some(ref_to_type_name(rf));
+            }
+        }
+        if let Some(rf) = m
+            .get(Value::String("$ref".to_string()))
+            .and_then(Value::as_str)
+        {
+            return Some(ref_to_type_name(rf));
+        }
+    }
+    None
+}
+
+fn extract_schemas(openapi: &Value) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    if let Some(components) = openapi
+        .as_mapping()
+        .and_then(|m| m.get(Value::String("components".to_string())))
+        .and_then(Value::as_mapping)
+    {
+        if let Some(schemas) = components
+            .get(Value::String("schemas".to_string()))
+            .and_then(Value::as_mapping)
+        {
+            for (k, v) in schemas {
+                if let Some(name) = k.as_str() {
+                    out.insert(name.to_string(), v.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn extract_operations(openapi: &Value) -> Vec<Operation> {
+    let mut out = Vec::new();
+    let Some(paths) = openapi
+        .as_mapping()
+        .and_then(|m| m.get(Value::String("paths".to_string())))
+        .and_then(Value::as_mapping)
+    else {
+        return out;
+    };
     for (path_key, path_item) in paths {
-        let path_str = path_key.as_str().unwrap_or_default();
+        let path_str = path_key.as_str().unwrap_or_default().to_string();
         let Some(path_map) = path_item.as_mapping() else {
             continue;
         };
         for method in &["get", "post", "put", "delete", "patch"] {
-            let Some(op_value) = path_map.get(Value::String(method.to_string())) else {
+            let Some(op_value) = path_map.get(Value::String((*method).to_string())) else {
                 continue;
             };
             let Some(op_map) = op_value.as_mapping() else {
                 continue;
             };
-            let op_id = op_map
+            let operation_id = op_map
                 .get(Value::String("operationId".to_string()))
                 .and_then(Value::as_str)
-                .unwrap_or_default();
-
-            // Apply whitelist
-            if !whitelist.is_empty() && !whitelist.iter().any(|w| w == op_id) {
+                .unwrap_or_default()
+                .to_string();
+            if operation_id.is_empty() {
                 continue;
             }
-
-            let (input, input_types) = extract_rest_input(op_map, schemas);
-            let (output, output_types) = extract_rest_output(op_map, schemas);
-
-            for t in &input_types {
-                referenced_types.insert(t.clone(), ());
-                collect_transitive_refs(t, schemas, referenced_types);
-            }
-            for t in &output_types {
-                referenced_types.insert(t.clone(), ());
-                collect_transitive_refs(t, schemas, referenced_types);
-            }
-
-            operations.push(ApiOperationSpec {
-                schema: OPERATION_SCHEMA_VERSION.to_string(),
-                api: api_name.to_string(),
-                name: op_id.to_string(),
-                transport: TransportSpec {
-                    kind: "rest".to_string(),
-                    url: None,
-                    method: Some(method.to_ascii_uppercase()),
-                    path: Some(path_str.to_string()),
-                },
-                auth: AuthSpec {
-                    kind: "none".to_string(),
-                    field: None,
-                },
-                input,
-                output,
-                errors: Vec::new(),
-                notes: Vec::new(),
+            let summary = op_map
+                .get(Value::String("summary".to_string()))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let parameters = extract_op_parameters(op_map);
+            let (response_schema, response_is_list) = extract_op_response(op_map);
+            out.push(Operation {
+                operation_id,
+                summary,
+                method: method.to_uppercase(),
+                path: path_str.clone(),
+                parameters,
+                response_schema,
+                response_is_list,
+                fragment: op_value.clone(),
             });
         }
     }
-    Ok(())
+    out
 }
 
-fn build_schema_operations(
-    api_name: &str,
-    draft: &BoundaryDraft,
-    schemas: &BTreeMap<String, Value>,
-    operations: &mut Vec<ApiOperationSpec>,
-    referenced_types: &mut BTreeMap<String, ()>,
-) -> Result<()> {
-    // For WebSocket APIs, look for a SubscriptionMessage schema and build
-    // Subscribe + stream operations from the whitelist.
-
-    // Detect auth from SubscriptionMessage schema
-    let auth = if let Some(sub_schema) = schemas.get("SubscriptionMessage") {
-        let has_api_key = sub_schema
-            .as_mapping()
-            .and_then(|m| m.get(Value::String("properties".to_string())))
-            .and_then(Value::as_mapping)
-            .is_some_and(|props| props.contains_key(Value::String("APIKey".to_string())));
-        if has_api_key {
-            AuthSpec {
-                kind: "api_key_body".to_string(),
-                field: Some("APIKey".to_string()),
-            }
-        } else {
-            AuthSpec {
-                kind: "none".to_string(),
-                field: None,
-            }
-        }
-    } else {
-        AuthSpec {
-            kind: "none".to_string(),
-            field: None,
-        }
+fn extract_op_parameters(op_map: &serde_yaml::Mapping) -> Vec<OpParam> {
+    let mut out = Vec::new();
+    let Some(params) = op_map
+        .get(Value::String("parameters".to_string()))
+        .and_then(Value::as_sequence)
+    else {
+        return out;
     };
-
-    // Detect WebSocket URL from draft notes
-    let ws_url = draft
-        .notes
-        .iter()
-        .find(|n| n.to_ascii_lowercase().contains("websocket") || n.to_ascii_lowercase().contains("wss://"))
-        .cloned();
-
-    // Add SubscriptionMessage as a referenced type if it exists
-    if schemas.contains_key("SubscriptionMessage") {
-        referenced_types.insert("SubscriptionMessage".to_string(), ());
-        collect_transitive_refs("SubscriptionMessage", schemas, referenced_types);
-    }
-
-    // Build a Subscribe operation
-    let subscribe_input = if schemas.contains_key("SubscriptionMessage") {
-        IoSpec {
-            kind: "data".to_string(),
-            data_type: Some("SubscriptionMessage".to_string()),
-        }
-    } else {
-        IoSpec {
-            kind: "none".to_string(),
-            data_type: None,
-        }
-    };
-
-    // Determine the output envelope type
-    let envelope_type = if schemas.contains_key("AisStreamMessage") {
-        referenced_types.insert("AisStreamMessage".to_string(), ());
-        collect_transitive_refs("AisStreamMessage", schemas, referenced_types);
-        Some("AisStreamMessage".to_string())
-    } else {
-        None
-    };
-
-    // Collect all whitelisted schema types as referenced
-    for type_name in &draft.operations_whitelist {
-        if schemas.contains_key(type_name.as_str()) {
-            referenced_types.insert(type_name.clone(), ());
-            collect_transitive_refs(type_name, schemas, referenced_types);
-        }
-    }
-
-    // Also collect AisMessageTypes enum if it exists
-    if schemas.contains_key("AisMessageTypes") {
-        referenced_types.insert("AisMessageTypes".to_string(), ());
-    }
-
-    // Collect BoundingBox and SubscriptionFilters if referenced
-    for aux_type in &["BoundingBox", "SubscriptionFilters"] {
-        if schemas.contains_key(*aux_type) {
-            // Check if it's transitively referenced
-            if referenced_types.contains_key(*aux_type) {
-                // Already collected
-            }
-        }
-    }
-
-    let notes = draft.notes.clone();
-    if let Some(url) = &ws_url {
-        if !notes.iter().any(|n| n == url) {
-            // URL is already in notes from draft
-        }
-    }
-
-    // Build the Subscribe operation
-    operations.push(ApiOperationSpec {
-        schema: OPERATION_SCHEMA_VERSION.to_string(),
-        api: api_name.to_string(),
-        name: "Subscribe".to_string(),
-        transport: TransportSpec {
-            kind: "websocket".to_string(),
-            url: Some("wss://stream.aisstream.io/v0/stream".to_string()),
-            method: None,
-            path: None,
-        },
-        auth: auth.clone(),
-        input: subscribe_input,
-        output: IoSpec {
-            kind: "stream_of".to_string(),
-            data_type: envelope_type,
-        },
-        errors: Vec::new(),
-        notes,
-    });
-
-    Ok(())
-}
-
-fn extract_rest_input(
-    op_map: &serde_yaml::Mapping,
-    _schemas: &BTreeMap<String, Value>,
-) -> (IoSpec, Vec<String>) {
-    let mut types = Vec::new();
-    let body = op_map
-        .get(Value::String("requestBody".to_string()))
-        .and_then(Value::as_mapping)
-        .and_then(|rb| rb.get(Value::String("content".to_string())))
-        .and_then(Value::as_mapping)
-        .and_then(|content| content.get(Value::String("application/json".to_string())))
-        .and_then(Value::as_mapping)
-        .and_then(|media| media.get(Value::String("schema".to_string())))
-        .and_then(Value::as_mapping);
-
-    if let Some(schema) = body {
-        if let Some(ref_str) = schema
-            .get(Value::String("$ref".to_string()))
+    for entry in params {
+        let Some(m) = entry.as_mapping() else { continue };
+        let name = m
+            .get(Value::String("name".to_string()))
             .and_then(Value::as_str)
-        {
-            let type_name = ref_to_type_name(ref_str);
-            types.push(type_name.clone());
-            return (
-                IoSpec {
-                    kind: "data".to_string(),
-                    data_type: Some(type_name),
-                },
-                types,
-            );
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() {
+            continue;
         }
+        let location = m
+            .get(Value::String("in".to_string()))
+            .and_then(Value::as_str)
+            .unwrap_or("query")
+            .to_string();
+        let required = m
+            .get(Value::String("required".to_string()))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let schema = m
+            .get(Value::String("schema".to_string()))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let rust_type = openapi_to_rust(&schema, true);
+        // Header parameters (X-IBM-Client-Id, etc.) are infrastructure
+        // concerns; the projection signature exposes path + query params
+        // only. Headers stay implicit (handled by the ambient HTTP client).
+        if location == "header" {
+            continue;
+        }
+        out.push(OpParam {
+            name: snake_case_param(&name),
+            location,
+            required,
+            rust_type,
+        });
     }
-
-    (
-        IoSpec {
-            kind: "none".to_string(),
-            data_type: None,
-        },
-        types,
-    )
+    out
 }
 
-fn extract_rest_output(
-    op_map: &serde_yaml::Mapping,
-    _schemas: &BTreeMap<String, Value>,
-) -> (IoSpec, Vec<String>) {
-    let mut types = Vec::new();
-    let responses = op_map
+fn extract_op_response(op_map: &serde_yaml::Mapping) -> (Option<String>, bool) {
+    let Some(responses) = op_map
         .get(Value::String("responses".to_string()))
-        .and_then(Value::as_mapping);
-    if let Some(responses) = responses {
-        // Look at 200 or 201 response
-        for code in &["200", "201"] {
-            let response = responses
-                .get(Value::String(code.to_string()))
-                .and_then(Value::as_mapping);
-            if let Some(resp) = response {
-                let schema = resp
-                    .get(Value::String("content".to_string()))
-                    .and_then(Value::as_mapping)
-                    .and_then(|c| c.get(Value::String("application/json".to_string())))
-                    .and_then(Value::as_mapping)
-                    .and_then(|m| m.get(Value::String("schema".to_string())))
-                    .and_then(Value::as_mapping);
-                if let Some(schema) = schema {
-                    if let Some(ref_str) = schema
-                        .get(Value::String("$ref".to_string()))
-                        .and_then(Value::as_str)
-                    {
-                        let type_name = ref_to_type_name(ref_str);
-                        types.push(type_name.clone());
-                        return (
-                            IoSpec {
-                                kind: "single".to_string(),
-                                data_type: Some(type_name),
-                            },
-                            types,
-                        );
-                    }
+        .and_then(Value::as_mapping)
+    else {
+        return (None, false);
+    };
+    // Prefer 200; fall back to the first 2xx.
+    let mut chosen: Option<&Value> = responses
+        .get(Value::String("200".to_string()));
+    if chosen.is_none() {
+        for (k, v) in responses {
+            if let Some(code) = k.as_str() {
+                if code.starts_with('2') {
+                    chosen = Some(v);
+                    break;
                 }
             }
         }
     }
-    (
-        IoSpec {
-            kind: "none".to_string(),
-            data_type: None,
-        },
-        types,
-    )
+    let Some(resp) = chosen else { return (None, false) };
+    let Some(content) = resp
+        .as_mapping()
+        .and_then(|m| m.get(Value::String("content".to_string())))
+        .and_then(Value::as_mapping)
+    else {
+        return (None, false);
+    };
+    // Take the first content entry's schema.
+    for (_, ct_val) in content {
+        if let Some(schema) = ct_val
+            .as_mapping()
+            .and_then(|m| m.get(Value::String("schema".to_string())))
+        {
+            // Direct $ref.
+            if let Some(rf) = schema
+                .as_mapping()
+                .and_then(|m| m.get(Value::String("$ref".to_string())))
+                .and_then(Value::as_str)
+            {
+                return (Some(ref_to_type_name(rf)), false);
+            }
+            // Array of $ref.
+            if schema
+                .as_mapping()
+                .and_then(|m| m.get(Value::String("type".to_string())))
+                .and_then(Value::as_str)
+                == Some("array")
+            {
+                if let Some(rf) = schema
+                    .as_mapping()
+                    .and_then(|m| m.get(Value::String("items".to_string())))
+                    .and_then(|i| i.as_mapping())
+                    .and_then(|im| im.get(Value::String("$ref".to_string())))
+                    .and_then(Value::as_str)
+                {
+                    return (Some(ref_to_type_name(rf)), true);
+                }
+            }
+        }
+    }
+    (None, false)
 }
 
-/// Extract type name from a `$ref` like `#/components/schemas/TypeName`.
+fn openapi_to_rust(schema: &Value, by_ref: bool) -> String {
+    let Some(map) = schema.as_mapping() else {
+        return "()".into();
+    };
+    if let Some(rf) = map
+        .get(Value::String("$ref".to_string()))
+        .and_then(Value::as_str)
+    {
+        let name = ref_to_type_name(rf);
+        return if by_ref { format!("&{}", name) } else { name };
+    }
+    let ty = map
+        .get(Value::String("type".to_string()))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    match ty {
+        "string" => if by_ref { "&str".into() } else { "String".into() },
+        "integer" => "i64".into(),
+        "number" => "f64".into(),
+        "boolean" => "bool".into(),
+        "array" => {
+            let item = map
+                .get(Value::String("items".to_string()))
+                .map(|v| openapi_to_rust(v, false))
+                .unwrap_or_else(|| "()".into());
+            format!("Vec<{}>", item)
+        }
+        _ => "()".into(),
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
 fn ref_to_type_name(ref_str: &str) -> String {
     ref_str.rsplit('/').next().unwrap_or(ref_str).to_string()
 }
 
-/// Collect all schema types transitively referenced by a given type.
 fn collect_transitive_refs(
     type_name: &str,
     schemas: &BTreeMap<String, Value>,
@@ -570,25 +786,23 @@ fn collect_transitive_refs(
     let Some(schema) = schemas.get(type_name) else {
         return;
     };
-    // Scan for $ref values
-    let refs = find_all_refs(schema);
-    for ref_name in refs {
-        if !collected.contains_key(&ref_name) {
-            collected.insert(ref_name.clone(), ());
-            collect_transitive_refs(&ref_name, schemas, collected);
+    for r in find_all_refs(schema) {
+        if !collected.contains_key(&r) {
+            collected.insert(r.clone(), ());
+            collect_transitive_refs(&r, schemas, collected);
         }
     }
 }
 
-/// Find all `$ref` type names in a YAML value tree.
 fn find_all_refs(value: &Value) -> Vec<String> {
     let mut refs = Vec::new();
     match value {
         Value::Mapping(map) => {
-            if let Some(ref_val) = map.get(Value::String("$ref".to_string())) {
-                if let Some(ref_str) = ref_val.as_str() {
-                    refs.push(ref_to_type_name(ref_str));
-                }
+            if let Some(rf) = map
+                .get(Value::String("$ref".to_string()))
+                .and_then(Value::as_str)
+            {
+                refs.push(ref_to_type_name(rf));
             }
             for (_, v) in map {
                 refs.extend(find_all_refs(v));
@@ -604,358 +818,177 @@ fn find_all_refs(value: &Value) -> Vec<String> {
     refs
 }
 
-/// Validate that every whitelisted operation name matches something in the spec.
-fn validate_whitelist(
-    draft: &BoundaryDraft,
-    operations: &[ApiOperationSpec],
-    schemas: &BTreeMap<String, Value>,
-) -> Result<()> {
-    for name in &draft.operations_whitelist {
-        let in_ops = operations.iter().any(|op| op.name == *name);
-        let in_schemas = schemas.contains_key(name.as_str());
-        if !in_ops && !in_schemas {
-            bail!(
-                "Boundary draft for `{}` whitelists `{}` which is not in the OpenAPI spec \
-                 (not found as an operationId or schema name)",
-                draft.api_name,
-                name
-            );
-        }
+/// Convert a YAML `Value` to a stable byte string and hash it. The
+/// canonical serialiser sorts mapping keys, so the hash is reproducible
+/// across runs even if the source YAML's key order changes.
+fn stable_hash(value: &Value) -> String {
+    let yaml = serde_yaml::to_string(value).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(yaml.as_bytes());
+    let bytes = hasher.finalize();
+    // Hex-encode the first 12 bytes for compactness.
+    let mut out = String::with_capacity(24);
+    for b in &bytes[..12] {
+        write!(out, "{:02x}", b).unwrap();
     }
-    Ok(())
-}
-
-/// Generate a data draft markdown for an ingested OpenAPI schema.
-fn generate_data_draft(api_name: &str, type_name: &str, schema: &Value) -> String {
-    let mut out = String::new();
-
-    writeln!(out, "# Data: {}", type_name).unwrap();
-    writeln!(out).unwrap();
-
-    // Purpose cites the OpenAPI $ref path
-    writeln!(out, "## Purpose").unwrap();
-    writeln!(
-        out,
-        "Ingested from the {} API. OpenAPI schema reference: #/components/schemas/{}",
-        api_name, type_name
-    )
-    .unwrap();
-    writeln!(out).unwrap();
-
-    // Attributes from properties
-    writeln!(out, "## Attributes").unwrap();
-    let properties = schema
-        .as_mapping()
-        .and_then(|m| m.get(Value::String("properties".to_string())))
-        .and_then(Value::as_mapping);
-
-    // Use BTreeMap to ensure deterministic order of properties
-    let mut sorted_props: BTreeMap<String, &Value> = BTreeMap::new();
-    if let Some(props) = properties {
-        for (key, val) in props {
-            if let Some(name) = key.as_str() {
-                sorted_props.insert(name.to_string(), val);
-            }
-        }
-    }
-
-    // Also handle enum types
-    let enum_values = schema
-        .as_mapping()
-        .and_then(|m| m.get(Value::String("enum".to_string())))
-        .and_then(Value::as_sequence);
-
-    if let Some(enum_vals) = enum_values {
-        let type_str = schema
-            .as_mapping()
-            .and_then(|m| m.get(Value::String("type".to_string())))
-            .and_then(Value::as_str)
-            .unwrap_or("string");
-        writeln!(
-            out,
-            "- value: one of {} ({})",
-            enum_vals
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", "),
-            type_str
-        )
-        .unwrap();
-    } else if sorted_props.is_empty() {
-        // oneOf or other complex schema
-        let has_one_of = schema
-            .as_mapping()
-            .and_then(|m| m.get(Value::String("oneOf".to_string())))
-            .and_then(Value::as_sequence);
-        if let Some(one_of) = has_one_of {
-            let variants: Vec<String> = one_of
-                .iter()
-                .filter_map(|v| {
-                    v.as_mapping()
-                        .and_then(|m| m.get(Value::String("$ref".to_string())))
-                        .and_then(Value::as_str)
-                        .map(ref_to_type_name)
-                })
-                .collect();
-            writeln!(out, "- variant: one of {}", variants.join(", ")).unwrap();
-        }
-
-        // additionalProperties
-        let additional = schema
-            .as_mapping()
-            .and_then(|m| m.get(Value::String("additionalProperties".to_string())));
-        if additional.is_some() {
-            writeln!(out, "- content: arbitrary key-value pairs").unwrap();
-        }
-    } else {
-        for (name, val) in &sorted_props {
-            let type_str = property_description(val);
-            writeln!(out, "- {}: {}", name, type_str).unwrap();
-        }
-    }
-    writeln!(out).unwrap();
-
-    // Invariants from constraints
-    writeln!(out, "## Invariants").unwrap();
-    let required = schema
-        .as_mapping()
-        .and_then(|m| m.get(Value::String("required".to_string())))
-        .and_then(Value::as_sequence);
-    if let Some(req) = required {
-        let names: Vec<&str> = req.iter().filter_map(Value::as_str).collect();
-        if !names.is_empty() {
-            writeln!(out, "- required fields: {}", names.join(", ")).unwrap();
-        }
-    }
-    if let Some(enum_vals) = enum_values {
-        let vals: Vec<&str> = enum_vals.iter().filter_map(Value::as_str).collect();
-        if !vals.is_empty() {
-            writeln!(out, "- value must be one of: {}", vals.join(", ")).unwrap();
-        }
-    }
-    writeln!(out).unwrap();
-
-    // Empty Operations and Scenarios (ingested data is vocabulary, not behavioural)
-    writeln!(out, "## Operations").unwrap();
-    writeln!(out).unwrap();
-    writeln!(out, "## Scenarios").unwrap();
-
     out
 }
 
-/// Describe a property for the data draft attributes section.
-fn property_description(val: &Value) -> String {
-    let map = match val.as_mapping() {
-        Some(m) => m,
-        None => return "unknown".to_string(),
-    };
-    let type_str = map
-        .get(Value::String("type".to_string()))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-
-    // Check for $ref
-    if let Some(ref_str) = map
-        .get(Value::String("$ref".to_string()))
-        .and_then(Value::as_str)
-    {
-        return format!("reference to {}", ref_to_type_name(ref_str));
-    }
-
-    // Check for array with items
-    if type_str == "array" {
-        let items_ref = map
-            .get(Value::String("items".to_string()))
-            .and_then(Value::as_mapping)
-            .and_then(|m| m.get(Value::String("$ref".to_string())))
-            .and_then(Value::as_str);
-        if let Some(ref_str) = items_ref {
-            return format!("list of {}", ref_to_type_name(ref_str));
+fn camel_to_ba(name: &str) -> String {
+    // `holderName` → `holder name`; `_id` → `id`; `account_type` → `account type`.
+    let trimmed = name.trim_start_matches('_');
+    let mut out = String::with_capacity(name.len() + 4);
+    let mut prev_lower = false;
+    for ch in trimmed.chars() {
+        if ch == '_' || ch == '-' {
+            out.push(' ');
+            prev_lower = false;
+            continue;
         }
-        return "list".to_string();
-    }
-
-    // Check for oneOf
-    if let Some(one_of) = map
-        .get(Value::String("oneOf".to_string()))
-        .and_then(Value::as_sequence)
-    {
-        let variants: Vec<String> = one_of
-            .iter()
-            .filter_map(|v| {
-                v.as_mapping()
-                    .and_then(|m| m.get(Value::String("$ref".to_string())))
-                    .and_then(Value::as_str)
-                    .map(ref_to_type_name)
-            })
-            .collect();
-        if !variants.is_empty() {
-            return format!("one of {}", variants.join(", "));
+        if ch.is_ascii_uppercase() {
+            if prev_lower {
+                out.push(' ');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_lower = false;
+        } else {
+            out.push(ch);
+            prev_lower = ch.is_ascii_lowercase();
         }
     }
-
-    // Check for additionalProperties (generic object)
-    if type_str == "object" {
-        if map.contains_key(Value::String("additionalProperties".to_string())) {
-            return "arbitrary key-value pairs".to_string();
-        }
-        return "structured object".to_string();
-    }
-
-    type_str.to_string()
+    out
 }
 
-/// Remove all files in a directory (but not subdirectories).
-fn clean_dir(dir: &Path) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
+fn to_snake_case(name: &str) -> String {
+    crate::codegen::to_snake_case(name)
+}
+
+fn snake_case_param(name: &str) -> String {
+    // Path/query params: keep the OpenAPI name (often camelCase) but produce
+    // a Rust-friendly snake_case form for the generated code.
+    to_snake_case(name)
+}
+
+fn snake_plural(payload: &str) -> String {
+    // `AccountSummary` → `account_summaries`; `Transaction` → `transactions`.
+    let snake = to_snake_case(payload);
+    if snake.ends_with('y') && snake.len() > 1 {
+        let base = &snake[..snake.len() - 1];
+        format!("{}ies", base)
+    } else {
+        format!("{}s", snake)
     }
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            fs::remove_file(&path)?;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_root(prefix: &str) -> PathBuf {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos();
-        std::env::temp_dir().join(format!("reen_ingest_{prefix}_{stamp}"))
-    }
-
-    fn setup_api_project(root: &Path, boundary_md: &str, openapi_yaml: &str) {
-        let apis_dir = root.join("drafts/apis");
-        fs::create_dir_all(&apis_dir).unwrap();
-        fs::write(apis_dir.join("testapi.md"), boundary_md).unwrap();
-        fs::write(apis_dir.join("testapi.yaml"), openapi_yaml).unwrap();
-    }
-
-    const MINIMAL_OPENAPI: &str = r#"openapi: "3.1.0"
-info:
-  title: Test API
-  version: "1.0.0"
-paths: {}
-components:
-  schemas:
-    Widget:
-      type: object
-      properties:
-        Name:
-          type: string
-        Size:
-          type: integer
-      required:
-        - Name
-"#;
-
-    const MINIMAL_BOUNDARY: &str = r#"# Test API
-
-## Purpose
-A test API for unit testing.
-
-## Source
-- OpenAPI Local: ./testapi.yaml
-
-## Operations
-- Widget
-
-## Notes
-- This is a test
-"#;
-
-    #[test]
-    fn ingest_produces_deterministic_output() {
-        let root = temp_root("determinism");
-        setup_api_project(&root, MINIMAL_BOUNDARY, MINIMAL_OPENAPI);
-        let workspace = Workspace::discover(root.clone()).unwrap();
-
-        // First ingest
-        ingest_apis(&workspace, Some("testapi"), false).unwrap();
-        let manifest1 = fs::read_to_string(root.join("drafts/.apis/manifest.yml")).unwrap();
-        let data1 = fs::read_to_string(root.join("drafts/.apis/data/testapi/Widget.md")).unwrap();
-
-        // Second ingest — must be byte-identical
-        ingest_apis(&workspace, Some("testapi"), false).unwrap();
-        let manifest2 = fs::read_to_string(root.join("drafts/.apis/manifest.yml")).unwrap();
-        let data2 = fs::read_to_string(root.join("drafts/.apis/data/testapi/Widget.md")).unwrap();
-
-        assert_eq!(manifest1, manifest2, "manifest must be deterministic");
-        assert_eq!(data1, data2, "data draft must be deterministic");
-
-        let _ = fs::remove_dir_all(root);
+    fn parse(yaml: &str) -> Value {
+        serde_yaml::from_str(yaml).expect("parse yaml")
     }
 
     #[test]
-    fn ingest_creates_expected_files() {
-        let root = temp_root("files");
-        setup_api_project(&root, MINIMAL_BOUNDARY, MINIMAL_OPENAPI);
-        let workspace = Workspace::discover(root.clone()).unwrap();
-
-        ingest_apis(&workspace, Some("testapi"), false).unwrap();
-
-        assert!(root.join("drafts/.apis/manifest.yml").is_file());
-        assert!(root.join("drafts/.apis/data/testapi/Widget.md").is_file());
-
-        // Check data draft content
-        let content = fs::read_to_string(root.join("drafts/.apis/data/testapi/Widget.md")).unwrap();
-        assert!(content.contains("# Data: Widget"));
-        assert!(content.contains("## Purpose"));
-        assert!(content.contains("#/components/schemas/Widget"));
-        assert!(content.contains("## Attributes"));
-        assert!(content.contains("Name:"));
-        assert!(content.contains("## Invariants"));
-        assert!(content.contains("required fields: Name"));
-
-        let _ = fs::remove_dir_all(root);
+    fn ref_to_type_name_extracts_last_segment() {
+        assert_eq!(
+            ref_to_type_name("#/components/schemas/AccountSummary"),
+            "AccountSummary",
+        );
     }
 
     #[test]
-    fn ingest_fails_on_missing_openapi() {
-        let root = temp_root("missing_yaml");
-        let apis_dir = root.join("drafts/apis");
-        fs::create_dir_all(&apis_dir).unwrap();
-        fs::write(apis_dir.join("testapi.md"), MINIMAL_BOUNDARY).unwrap();
-        // No .yaml file
-        let workspace = Workspace::discover(root.clone()).unwrap();
-        let result = ingest_apis(&workspace, Some("testapi"), false);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("snapshot not found"));
-        let _ = fs::remove_dir_all(root);
+    fn camel_to_ba_normalises_field_names() {
+        assert_eq!(camel_to_ba("holderName"), "holder name");
+        assert_eq!(camel_to_ba("account_type"), "account type");
+        assert_eq!(camel_to_ba("_id"), "id");
+        assert_eq!(camel_to_ba("availableBalance"), "available balance");
     }
 
     #[test]
-    fn ingest_fails_on_bad_whitelist() {
-        let root = temp_root("bad_whitelist");
-        let boundary = r#"# Test API
+    fn stable_hash_is_deterministic() {
+        let v: Value = parse("a: 1\nb: [2, 3]\n");
+        let h1 = stable_hash(&v);
+        let h2 = stable_hash(&v);
+        assert_eq!(h1, h2);
+        // Different content → different hash.
+        let v2: Value = parse("a: 2\nb: [2, 3]\n");
+        assert_ne!(h1, stable_hash(&v2));
+    }
 
-## Purpose
-A test API.
+    #[test]
+    fn render_data_draft_carries_header_and_attributes() {
+        let schema: Value = parse(
+            "type: object\nproperties:\n  iban:\n    type: string\n  balance:\n    type: integer\nrequired:\n  - iban\n",
+        );
+        let body = render_data_draft("nordea-openbanking", "AccountSummary", &schema);
+        assert!(body.starts_with("<!-- reen:auto-generated from drafts/apis/nordea-openbanking.yaml#components/schemas/AccountSummary -->"));
+        assert!(body.contains("DO NOT EDIT"));
+        assert!(body.contains("source-hash: "));
+        assert!(body.contains("# Data: AccountSummary"));
+        assert!(body.contains("- iban: a text value"));
+        assert!(body.contains("- balance: a whole number"));
+        assert!(body.contains("- iban must be present"));
+    }
 
-## Source
-- OpenAPI Local: ./testapi.yaml
+    #[test]
+    fn render_projection_draft_carries_source_block() {
+        let yaml = "
+operationId: GetAccounts
+summary: List the customer's accounts
+parameters:
+  - name: customerId
+    in: path
+    required: true
+    schema:
+      type: string
+responses:
+  \"200\":
+    description: ok
+    content:
+      application/json:
+        schema:
+          $ref: \"#/components/schemas/AccountListResponse\"
+";
+        let op_value: Value = serde_yaml::from_str(yaml).unwrap();
+        let op = Operation {
+            operation_id: "GetAccounts".into(),
+            summary: Some("List the customer's accounts".into()),
+            method: "GET".into(),
+            path: "/accounts/{customerId}".into(),
+            parameters: vec![OpParam {
+                name: "customer_id".into(),
+                location: "path".into(),
+                required: true,
+                rust_type: "&str".into(),
+            }],
+            response_schema: Some("AccountListResponse".into()),
+            response_is_list: false,
+            fragment: op_value,
+        };
+        let body = render_projection_draft("nordea-openbanking", &op, &BTreeMap::new());
+        assert!(body.contains("# Projection: GetAccounts"));
+        assert!(body.contains("## Source"));
+        assert!(body.contains("- Method: GET /accounts/{customerId}"));
+        assert!(body.contains("- customer_id (path, required): &str"));
+        assert!(body.contains("- Returns: "));
+        assert!(body.contains("### call"));
+    }
 
-## Operations
-- NonExistentType
+    #[test]
+    fn snake_plural_handles_y_ending() {
+        assert_eq!(snake_plural("AccountSummary"), "account_summaries");
+        assert_eq!(snake_plural("Transaction"), "transactions");
+    }
 
-## Notes
-- test
-"#;
-        setup_api_project(&root, boundary, MINIMAL_OPENAPI);
-        let workspace = Workspace::discover(root.clone()).unwrap();
-        let result = ingest_apis(&workspace, Some("testapi"), false);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("NonExistentType"));
-        let _ = fs::remove_dir_all(root);
+    #[test]
+    fn openapi_to_rust_handles_primitives_and_refs() {
+        assert_eq!(openapi_to_rust(&parse("type: string"), false), "String");
+        assert_eq!(openapi_to_rust(&parse("type: string"), true), "&str");
+        assert_eq!(openapi_to_rust(&parse("type: integer"), false), "i64");
+        assert_eq!(openapi_to_rust(&parse("type: array\nitems:\n  type: string"), false), "Vec<String>");
+        assert_eq!(
+            openapi_to_rust(&parse("$ref: \"#/components/schemas/AccountInfo\""), false),
+            "AccountInfo",
+        );
     }
 }

@@ -734,6 +734,29 @@ fn prepare_projection(proj: &ProjectionDraft, vocab: &DciVocabulary) -> Result<P
         export_name,
     );
 
+    // Auto-generated api projections carry a structured Source block.
+    // Pass it through to the prepared YAML so signature inference can
+    // derive the projection's signature directly from the OpenAPI shape
+    // (no scenarios on auto-generated projections).
+    if let Some(src) = &proj.api_source {
+        artifact.api_source = Some(crate::prepared::ApiSourceSpec {
+            openapi_ref: src.openapi_ref.clone(),
+            method: src.method.clone(),
+            path: src.path.clone(),
+            parameters: src
+                .parameters
+                .iter()
+                .map(|p| crate::prepared::ApiParamSpec {
+                    name: p.name.clone(),
+                    location: p.location.clone(),
+                    required: p.required,
+                    rust_type: p.rust_type.clone(),
+                })
+                .collect(),
+            returns: src.returns.clone(),
+        });
+    }
+
     let mut bindings = Vec::new();
     let mut ambiguities = Vec::new();
 

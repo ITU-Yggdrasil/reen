@@ -8,8 +8,8 @@
 
 use crate::manifest::DciVocabulary;
 use crate::prepared::{
-    Ambiguity, ArtifactKind, AttributeSpec, DerivedSignature, ParamSpec, PreparedArtifact,
-    RolePlayerSpec, ScenarioSpec,
+    Ambiguity, ApiSourceSpec, ArtifactKind, AttributeSpec, DerivedSignature, ParamSpec,
+    PreparedArtifact, RolePlayerSpec, ScenarioSpec,
 };
 
 use super::phrases::{
@@ -54,13 +54,21 @@ pub fn derive_signatures(artifact: &mut PreparedArtifact, vocab: &DciVocabulary)
             }
         }
         ArtifactKind::Projection => {
+            // Auto-generated api projections carry a structured Source block;
+            // signature inference reads it directly. Hand-authored projections
+            // walk scenarios as before.
+            let api_source = artifact.api_source.clone();
             for func in &mut artifact.functionalities {
-                let (sig, finding) = infer_for_projection_query(
-                    &func.name,
-                    &scenarios,
-                    &role_players,
-                    vocab,
-                );
+                let (sig, finding) = if let Some(src) = api_source.as_ref() {
+                    (Some(infer_from_api_source(src)), None)
+                } else {
+                    infer_for_projection_query(
+                        &func.name,
+                        &scenarios,
+                        &role_players,
+                        vocab,
+                    )
+                };
                 func.derived_signature = sig;
                 if let Some(f) = finding {
                     findings.push(f);
@@ -242,6 +250,31 @@ fn infer_for_projection_query(
         });
     }
     aggregate_signatures(op_name, sigs)
+}
+
+/// Derive a projection's signature directly from an OpenAPI-shaped
+/// [`ApiSourceSpec`]. The Source block is the source of truth for
+/// auto-generated projections; no scenario walking, no aggregation.
+fn infer_from_api_source(source: &ApiSourceSpec) -> DerivedSignature {
+    let parameters = source
+        .parameters
+        .iter()
+        .map(|p| ParamSpec {
+            name: p.name.clone(),
+            rust_type: p.rust_type.clone(),
+        })
+        .collect();
+    let returns = if source.returns.is_empty() {
+        "()".to_string()
+    } else {
+        source.returns.clone()
+    };
+    DerivedSignature {
+        receiver: "&self".into(),
+        parameters,
+        returns,
+        source: "api_source".into(),
+    }
 }
 
 fn aggregate_signatures(
