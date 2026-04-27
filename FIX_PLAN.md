@@ -218,14 +218,58 @@ Risk: tightening the synthesiser may reduce coverage of invariants that the LLM 
 
 Implementation lives entirely in `src/test_synth.rs` plus a small extension to `src/prepare.rs` to surface no-synthesis-possible findings.
 
-## TBD: API boundary code reachability
+## APIs as DCI artefacts (replaces "TBD: API boundary code reachability")
 
-Deferred per current scope. Two related issues to investigate together:
+The original TBD section catalogued two divergences: api scaffold output orphaned at top-level `src/apis/`, and `apis_ingest` producing hidden `drafts/.apis/` content that the rest of the pipeline doesn't see. Discussion in late April 2026 settled on a different framing entirely — **the apis pipeline dissolves into the regular DCI pipeline**. The divergences below stop being divergences because there is no separate apis pipeline.
 
-- **`src/apis/nordea-openbanking/*.rs` is generated under top-level `src/`** but no Cargo crate has an `apis` module, so the generated boundary types (`GetAccounts`, `InitiateDomesticPayment`, etc.) are unreachable. They need a home in the multi-crate layout — likely `crates/lupa-core/src/apis/` or a separate `crates/lupa-apis/` with its own module declaration in `lupa-core/src/lib.rs`.
-- **`drafts/apis/nordea-openbanking.md` has no `drafts/prepare/apis/...yml`** because boundary drafts go through `apis_ingest.rs`, not the regular prepare path. The relationship between boundary draft, ingested artefact (`drafts/.apis/`), and emitted code needs an end-to-end review before fixing the reachability problem — there appears to be drift between the apis pipeline and the rest.
+### The new model
 
-A separate session should treat the apis pipeline as a unit: the ingest path, where its prepared artefacts live, where its scaffold emits, how `reen verify` reaches it, and how `/implement` interacts with it. Until that's done, fix-plan items 1–7 should not assume the apis path works the same way as data/contexts/projections.
+- **An OpenAPI schema becomes a Data draft.** `components.schemas.AccountSummary` from `nordea-openbanking.yaml` produces `drafts/data/.api/AccountSummary.md`. Same shape as a hand-authored data draft (Purpose, Attributes, Invariants). No Operations section (data is immutable, api types expose no domain operations). No Scenarios section (scenarios are BA territory; auto-generated content has none).
+- **Every api operation becomes a Projection draft.** `GET /accounts/{customerId}` produces `drafts/projections/.api/get_accounts.md`. So does `POST /payments/domestic`. The "no mutation" projection rule applies to roles and props — projections must not mutate their role players or props. External I/O (HTTP, database, etc.) is fine; projections that do I/O are still projections. There are no auto-generated context drafts.
+- **Auto-generated drafts live under `.api/` subfolders.** `drafts/data/.api/`, `drafts/projections/.api/`. Dot-prefix marks them machine-owned (consistent with `.git`, `.cargo`, etc.). BAs can see they exist; tooling treats them as untouchable.
+- **Auto-generated drafts carry a whole-file marker** (`<!-- reen:auto-generated from … -->` plus a `DO NOT EDIT` line). Refine rejects any hand-edited `.api/` file with a blocking finding. Prepare hashes the auto-generated content against the OpenAPI source so drift is detectable.
+- **Sync is hard regenerate.** `reen apis ingest <name>` reads `drafts/apis/<name>.yaml` (the OpenAPI sidecar) and overwrites every auto-generated draft. No merge logic. No section markers.
+- **The boundary draft becomes config-shaped.** `drafts/apis/<name>.md` keeps a BA-readable Notes section but its machine-relevant config lives in a fenced YAML block: which operations to expose, which subfolders to write to, anything else the BA needs to declare.
+- **All BA enrichment lives on the BA side.** Domain invariants like "balance must be non-negative for current accounts" attach to role methods on the BA-authored context that uses `AccountSummary`. Never on the auto-generated data draft.
+- **Transport, auth, retry, base URLs live as ambient context.** Not role players. The implementation of an api projection's body (filled in by `/implement`) reaches an `HttpClient` or similar via the implementer's chosen wiring (`crates/lupa-server/src/transport.rs`). The BA never sees it.
+
+### What this dissolves
+
+- No `drafts/.apis/` hidden state. The OpenAPI sidecar at `drafts/apis/<name>.yaml` is the source of truth; the auto-generated drafts under `drafts/<kind>/.api/` are the output.
+- No `src/apis/` orphan tree. Auto-generated projections compile through the regular codegen path into `crates/lupa-core/src/projections/` (alongside hand-authored projections; the `.api/` distinction is a draft-side notion only, not a codegen-side one).
+- No bespoke `apis_codegen`. Regular projection codegen handles the auto-generated projection drafts the same as any other.
+- No `ArtefactKind::Operation`. Operation artefacts go away as a kind; they were the "apis are special" framing.
+- No vocabulary special-casing. A context's `role: GetAccounts` resolves to a projection in `drafts/projections/.api/get_accounts.md` the same way it resolves to a hand-authored projection.
+
+### What it doesn't change
+
+- BA-speak rule still applies to BA-authored drafts. Auto-generated `.api/` drafts are exempt (they're machine-to-machine, no BA reads them).
+- Compile gate, idempotency gate, build tracker, /implement contract, verify gates — all unchanged. The new pipeline produces drafts that the existing infrastructure understands.
+- Schema version stays v5 (the prepared-YAML shape doesn't change; auto-generated drafts produce normal v5 prepared YAMLs).
+
+### Implementation phases
+
+Two PRs, one review break between them. Each is its own engagement.
+
+**Phase A — replace `apis_ingest`; produce drafts under `.api/`.**
+
+- Rewrite `src/apis_ingest.rs` to emit `drafts/data/.api/<Type>.md` and `drafts/projections/.api/<operation>.md` from the OpenAPI sidecar. The old `apis_ingest` produced hidden `drafts/.apis/` content; the new one produces real drafts. Same CLI (`reen apis ingest [name]`).
+- Update boundary-draft format: `drafts/apis/<name>.md` becomes a Markdown file with a fenced YAML config block declaring the OpenAPI source, the operations whitelist, and the auto-generated subfolder paths.
+- Auto-generated drafts carry the `<!-- reen:auto-generated -->` whole-file marker and a hash of their OpenAPI source.
+- Refine refuses to lint hand-edited `.api/` files (compares hashes; blocking finding on mismatch).
+- Old `apis_codegen` stays running for now — its top-level `src/apis/` output is dead code already (orphaned by Group 1 / Phase 10), so leaving it doesn't hurt. Phase B deletes it.
+- Lupa: `reen apis ingest nordea-openbanking` produces the new drafts. `reen prepare && reen scaffold` consumes them via the regular path. Compile gate still passes; idempotency gate still passes.
+- → REVIEW BREAK.
+
+**Phase B — clean up the old pipeline.**
+
+- Delete `src/apis_codegen.rs`. The auto-generated projections in `drafts/projections/.api/` produce Rust under `crates/lupa-core/src/projections/` via the regular codegen path; nothing left to scaffold separately.
+- Delete `drafts/.apis/` from every project (not tracked anyway; just stop generating it).
+- Delete top-level `src/apis/` orphan-cleanup logic from `cleanup_legacy_top_level_src` (or repoint it to also clean any remaining `.apis/` content).
+- Remove `ArtefactKind::Operation` from the schema if it's still there. Migration path: existing v5 prepared YAML doesn't reference Operation directly, so removal is additive.
+- → REVIEW BREAK.
+
+After Phase B, the apis pipeline is exactly the regular DCI pipeline with a draft-emitter front-end. The bug list is fully closed.
 
 ## Order of work — compile-parity sprint
 
@@ -247,4 +291,5 @@ The plan re-prioritised after Group 2 review (bugs 5+6) surfaced the need for a 
    - **7c Centralise pattern allow-lists** — DONE. (Ref: `src/inference/phrases/{return_shape,projection,rejection,multiplicity,query}.rs` registry sub-modules; classifier functions in `src/inference/phrases/mod.rs` delegate to the named constants; 15 doc-tests pin both accept and reject cases for every constant.)
    - **7d Decouple `extract_*_types` from codegen output** — DONE. (Ref: `STRUCT_MARKER` and `PAYLOAD_ENUM_MARKER` in `src/codegen.rs`; both extractors anchor on the marker via `locate_struct_block` / `locate_payload_enum_block`, with the legacy substring fallback retained as a backstop and TODO-tagged for removal once every project has been re-scaffolded; `codegen_round_trip_emits_markers_extractor_recovers_fields` test fails if either marker is removed from emission; `tests/lupa` regenerated with markers visible.)
    → REVIEW BREAK.
-10. **TBD: APIs.** Out of scope until the apis pipeline gets its own end-to-end review. Bugs 1–7 above must not assume the apis path behaves like data/contexts/projections.
+10. **Phase A — APIs as DCI artefacts (replace `apis_ingest`).** The apis pipeline dissolves into the regular DCI pipeline: api types become data drafts, every api operation (read or mutating) becomes a projection. Auto-generated drafts live under `drafts/<kind>/.api/` subfolders, marked machine-owned and BA-untouchable. See the "APIs as DCI artefacts" section above for the full design. → REVIEW BREAK.
+11. **Phase B — clean up the old apis pipeline.** Delete `src/apis_codegen.rs`, the hidden `drafts/.apis/` content, and the top-level `src/apis/` orphan-cleanup logic. Remove `ArtefactKind::Operation` if still present. → REVIEW BREAK.
