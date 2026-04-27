@@ -1,22 +1,23 @@
 # Nordea OpenBanking Personal API
 
-## Purpose
-
 Lupa reads account and transaction data and initiates payments via Nordea's OpenBanking Personal interface. This is the sole external banking surface — Lupa does not hand-author banking primitives, it consumes them from Nordea's API.
 
 ## Source
 
-- OpenAPI Local: nordea-openbanking.yaml
-- Documentation URL: https://developer.nordeaopenbanking.com/
+- OpenAPI: ./nordea-openbanking.yaml
+- Documentation: https://developer.nordeaopenbanking.com/
 
-## Operations
+## Configuration
 
-- GetAccounts: list the authenticated customer's accounts
-- GetAccountById: retrieve a single account by its identifier
-- GetTransactions: list transactions for a specific account, with date-range filtering and pagination
-- InitiateDomesticPayment: transfer to a domestic recipient by account number
-- InitiateSEPAPayment: transfer within the SEPA zone using IBAN (also used for own-account transfers)
-- InitiateInternationalPayment: transfer internationally via IBAN and BIC/SWIFT
+```yaml
+include_operations:
+  - GetAccounts
+  - GetAccountById
+  - GetTransactions
+  - InitiateDomesticPayment
+  - InitiateSEPAPayment
+  - InitiateInternationalPayment
+```
 
 ## Notes
 
