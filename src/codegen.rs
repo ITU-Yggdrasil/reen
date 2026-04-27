@@ -364,8 +364,8 @@ fn package_name_to_crate(workspace: &Workspace) -> String {
 }
 
 /// DCI-kind subdirectories under top-level `src/` that have a multi-crate
-/// counterpart. The apis subdirectory is intentionally absent — that pipeline
-/// still owns top-level `src/apis/` and is parked under TBD.
+/// counterpart and may carry leftover machine output from prior pipeline
+/// shapes.
 const LEGACY_DCI_SUBDIRS: &[&str] = &[
     "data",
     "contexts",
@@ -373,6 +373,7 @@ const LEGACY_DCI_SUBDIRS: &[&str] = &[
     "components",
     "brand",
     "routes",
+    "apis",
 ];
 
 /// Walk legacy DCI subdirectories under top-level `src/` and delete any file
@@ -408,22 +409,7 @@ pub fn cleanup_legacy_top_level_src(workspace: &Workspace, verbose: bool) -> Res
         if !dir.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(&dir)
-            .with_context(|| format!("read_dir {}", dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            if file_is_safe_to_delete(&path, &crates_dir, subdir)? {
-                fs::remove_file(&path)
-                    .with_context(|| format!("remove {}", path.display()))?;
-                deleted += 1;
-            } else {
-                refused.push(path);
-            }
-        }
+        cleanup_legacy_subdir(&dir, &crates_dir, subdir, &mut deleted, &mut refused)?;
         // Drop the now-empty subdir.
         if dir.read_dir().map(|mut it| it.next().is_none()).unwrap_or(false) {
             fs::remove_dir(&dir).ok();
@@ -443,9 +429,7 @@ pub fn cleanup_legacy_top_level_src(workspace: &Workspace, verbose: bool) -> Res
         );
     }
 
-    // If nothing remains under top-level src/ except apis/ (TBD) or nothing
-    // at all, leave it alone. Removing the directory entirely would surprise
-    // anyone tracking the apis pipeline.
+    // Drop top-level src/ if every legacy subdir cleaned up to empty.
     if refused.is_empty() {
         if let Ok(mut it) = top_src.read_dir() {
             if it.next().is_none() {
@@ -454,6 +438,40 @@ pub fn cleanup_legacy_top_level_src(workspace: &Workspace, verbose: bool) -> Res
         }
     }
 
+    Ok(())
+}
+
+/// Walk `dir` (one level for flat DCI kinds, recursively for `apis/<api>/...`)
+/// and apply the same per-file safety check. Empty intermediate directories
+/// are dropped on the way out.
+fn cleanup_legacy_subdir(
+    dir: &Path,
+    crates_dir: &Path,
+    subdir: &str,
+    deleted: &mut usize,
+    refused: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            cleanup_legacy_subdir(&path, crates_dir, subdir, deleted, refused)?;
+            if path.read_dir().map(|mut it| it.next().is_none()).unwrap_or(false) {
+                fs::remove_dir(&path).ok();
+            }
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if file_is_safe_to_delete(&path, crates_dir, subdir)? {
+            fs::remove_file(&path)
+                .with_context(|| format!("remove {}", path.display()))?;
+            *deleted += 1;
+        } else {
+            refused.push(path);
+        }
+    }
     Ok(())
 }
 
@@ -2009,10 +2027,12 @@ mod cleanup_tests {
     }
 
     #[test]
-    fn cleanup_does_not_touch_apis_subdir() {
+    fn cleanup_drops_legacy_apis_orphans() {
         let (_tmp, ws) = make_multi_crate_workspace();
-        // apis/ is parked under TBD; leave its contents alone even when
-        // they would otherwise look deletable.
+        // The old apis_codegen emitted nested `src/apis/<api>/<op>.rs` files.
+        // Now that the new pipeline produces regular projection drafts, those
+        // orphans get the same @generated-marker-or-empty treatment as every
+        // other legacy DCI kind.
         write_file(&ws.root.join("src/apis/foo/get_thing.rs"), "");
         write_file(
             &ws.root.join("src/apis/foo/post_thing.rs"),
@@ -2021,8 +2041,27 @@ mod cleanup_tests {
 
         cleanup_legacy_top_level_src(&ws, false).unwrap();
 
-        assert!(ws.root.join("src/apis/foo/get_thing.rs").exists(), "apis empty kept");
-        assert!(ws.root.join("src/apis/foo/post_thing.rs").exists(), "apis marked kept");
+        assert!(!ws.root.join("src/apis/foo/get_thing.rs").exists(), "empty apis file deleted");
+        assert!(!ws.root.join("src/apis/foo/post_thing.rs").exists(), "marked apis file deleted");
+        assert!(!ws.root.join("src/apis/foo").exists(), "empty api subdir removed");
+        assert!(!ws.root.join("src/apis").exists(), "empty apis dir removed");
+    }
+
+    #[test]
+    fn cleanup_refuses_hand_edited_apis_files() {
+        let (_tmp, ws) = make_multi_crate_workspace();
+        // Hand-edited file under apis/: non-empty, no marker, no counterpart.
+        write_file(
+            &ws.root.join("src/apis/foo/custom.rs"),
+            "// hand-rolled wrapper\npub fn custom() {}\n",
+        );
+
+        cleanup_legacy_top_level_src(&ws, false).unwrap();
+
+        assert!(
+            ws.root.join("src/apis/foo/custom.rs").exists(),
+            "hand-edited apis file must be preserved",
+        );
     }
 
     #[test]
