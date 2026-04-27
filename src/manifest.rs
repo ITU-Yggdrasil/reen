@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Sequence, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── DCI Vocabulary Manifest ───────────────────────────────────────
 
@@ -109,26 +109,37 @@ impl DciVocabulary {
             if !dir.is_dir() {
                 continue;
             }
-            for entry in fs::read_dir(&dir)
-                .with_context(|| format!("read_dir {}", dir.display()))?
-            {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
-                let name = extract_draft_export_name(&path)
-                    .unwrap_or_else(|| {
-                        path.file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or_default()
-                            .to_string()
-                    });
-                if !name.is_empty() {
-                    if kind == "brand" {
-                        brand_names.push(name.clone());
+            // Walk recursively so `drafts/data/.api/<Type>.md` (auto-
+            // generated api drafts under the Phase A `.api/` subfolder)
+            // contribute to the vocabulary alongside hand-authored
+            // drafts at `drafts/data/<Type>.md`.
+            let mut stack: Vec<PathBuf> = vec![dir.clone()];
+            while let Some(current) = stack.pop() {
+                for entry in fs::read_dir(&current)
+                    .with_context(|| format!("read_dir {}", current.display()))?
+                {
+                    let entry = entry?;
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
                     }
-                    self.entries.insert(name, kind.to_string());
+                    if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                        continue;
+                    }
+                    let name = extract_draft_export_name(&path)
+                        .unwrap_or_else(|| {
+                            path.file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or_default()
+                                .to_string()
+                        });
+                    if !name.is_empty() {
+                        if kind == "brand" {
+                            brand_names.push(name.clone());
+                        }
+                        self.entries.insert(name, kind.to_string());
+                    }
                 }
             }
         }

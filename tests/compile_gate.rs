@@ -250,3 +250,116 @@ fn lupa_scaffold_is_deterministic() {
         diff,
     );
 }
+
+/// Drift gate (Phase A — Option C). Auto-generated drafts under
+/// `tests/lupa/drafts/{data,projections}/.api/` are committed to git as
+/// machine-output (treated like `Cargo.lock`). This test ensures the
+/// committed drafts match what `reen apis ingest` would re-emit from
+/// the OpenAPI sidecar — so a hand-edit, an OpenAPI sidecar change
+/// without re-ingest, or an emitter regression all show up here.
+///
+/// On mismatch, the test prints the path and the first differing line
+/// so triage doesn't require running `apis ingest` manually and diffing
+/// the working tree.
+#[test]
+fn lupa_api_drafts_match_openapi() {
+    let _guard = lock_lupa();
+    let lupa = lupa_path();
+
+    // Discover the api name from the boundary draft. Lupa has exactly one;
+    // a future fixture with multiple apis would loop.
+    let api_dir = lupa.join("drafts/apis");
+    let mut api_names: Vec<String> = std::fs::read_dir(&api_dir)
+        .expect("read drafts/apis")
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                p.file_stem().map(|s| s.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    api_names.sort();
+    assert!(!api_names.is_empty(), "no api names found under drafts/apis/");
+
+    // For each api, walk the on-disk `.api/` drafts and compare against
+    // what `reproduce_api_draft` would re-emit.
+    let workspace = reen::workspace::Workspace::discover(lupa.clone())
+        .expect("discover lupa workspace");
+
+    let mut mismatches: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for api_name in &api_names {
+        for kind in &["data", "projections"] {
+            let dir = lupa.join(format!("drafts/{}/.api", kind));
+            if !dir.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&dir).expect("read .api/") {
+                let entry = entry.expect("entry");
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                let on_disk = std::fs::read_to_string(&path).expect("read .api/ file");
+                // The marker line names the api source; only check files
+                // that belong to the api currently being verified.
+                if !on_disk.contains(&format!("drafts/apis/{}.yaml", api_name)) {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&lupa)
+                    .expect("relative")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let expected = match reen::apis_ingest::reproduce_api_draft(
+                    &workspace, api_name, &relative,
+                ) {
+                    Ok(Some(canonical)) => canonical,
+                    Ok(None) => {
+                        mismatches.push(format!(
+                            "{}: schema/operation no longer in OpenAPI sidecar",
+                            relative,
+                        ));
+                        continue;
+                    }
+                    Err(e) => {
+                        mismatches.push(format!("{}: {}", relative, e));
+                        continue;
+                    }
+                };
+                checked += 1;
+                if expected != on_disk {
+                    mismatches.push(format!(
+                        "{}: drift detected — first differing line: {}",
+                        relative,
+                        first_differing_line(&expected, &on_disk),
+                    ));
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "no .api/ drafts checked — fixture missing?");
+    assert!(
+        mismatches.is_empty(),
+        "auto-generated .api/ drafts are out of sync with the OpenAPI sidecar.\n\
+         Run `cd tests/lupa && reen apis ingest <name>` to regenerate.\n\n{}",
+        mismatches.join("\n"),
+    );
+}
+
+fn first_differing_line(expected: &str, actual: &str) -> String {
+    let exp_lines: Vec<&str> = expected.lines().collect();
+    let act_lines: Vec<&str> = actual.lines().collect();
+    let max = exp_lines.len().max(act_lines.len());
+    for i in 0..max {
+        let e = exp_lines.get(i).copied().unwrap_or("<EOF>");
+        let a = act_lines.get(i).copied().unwrap_or("<EOF>");
+        if e != a {
+            return format!("line {}: expected {:?}, got {:?}", i + 1, e, a);
+        }
+    }
+    "(content differs in trailing whitespace)".into()
+}
