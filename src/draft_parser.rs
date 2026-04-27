@@ -1312,16 +1312,15 @@ fn parse_app_draft(info: DraftInfo, content: &str) -> Result<AppDraft> {
 pub fn parse_boundary_draft(api_name: &str, content: &str) -> Result<BoundaryDraft> {
     let sections = parse_sections(content);
 
+    // The Phase A boundary draft is a config file. The Purpose /
+    // Description heading is optional — when omitted, the freeform
+    // paragraph between the `# Title` line and the first `## …`
+    // section serves as the human context. When neither is present,
+    // the purpose is empty (the boundary draft is config-only).
     let purpose = find_section(&sections, "Purpose")
         .or_else(|| find_section(&sections, "Description"))
         .map(|s| s.body.trim().to_string())
-        .unwrap_or_default();
-    if purpose.is_empty() {
-        bail!(
-            "Boundary draft for `{}` must have a ## Purpose or ## Description section",
-            api_name
-        );
-    }
+        .unwrap_or_else(|| extract_lead_paragraph(content));
 
     // Source section — may be called "Source" or "Authoritative Sources"
     let source_section = find_section(&sections, "Source")
@@ -1405,6 +1404,36 @@ fn strip_label<'a>(line: &'a str, label: &str) -> Option<&'a str> {
     } else {
         None
     }
+}
+
+/// Extract the lead paragraph of a Markdown document — the text
+/// between the `# Title` line and the first `## …` heading. Empty
+/// HTML comments (the auto-generated marker) are skipped. Returns an
+/// empty string when no lead text exists.
+fn extract_lead_paragraph(content: &str) -> String {
+    let mut out = String::new();
+    let mut seen_title = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !seen_title {
+            if trimmed.starts_with("# ") {
+                seen_title = true;
+            }
+            continue;
+        }
+        if trimmed.starts_with("## ") {
+            break;
+        }
+        // Skip HTML comments and leading blank lines.
+        if trimmed.starts_with("<!--") || trimmed.is_empty() && out.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out.trim().to_string()
 }
 
 /// Parse the fenced YAML config block under `## Configuration` (Phase A
@@ -2105,6 +2134,80 @@ Vessel tracking.
     }
 
     #[test]
+    fn parse_boundary_draft_purpose_falls_back_to_lead_paragraph() {
+        // Phase A boundary drafts are config files: there is no `## Purpose`
+        // heading. The freeform paragraph between the title and the first
+        // `## …` section becomes the purpose.
+        let content = r#"# Nordea Open Banking
+
+This api gives Lupa access to the customer's Nordea accounts and the
+payment initiation endpoints. Used by the chat agent.
+
+## Source
+- OpenAPI: ./nordea.yaml
+
+## Configuration
+
+```yaml
+include_operations:
+  - GetAccounts
+```
+"#;
+        let draft = parse_boundary_draft("nordea", content).unwrap();
+        assert!(
+            draft.purpose.contains("Nordea accounts"),
+            "lead paragraph should populate purpose, got: {:?}", draft.purpose,
+        );
+        assert!(
+            draft.purpose.contains("chat agent"),
+            "lead paragraph should include the second sentence, got: {:?}", draft.purpose,
+        );
+    }
+
+    #[test]
+    fn parse_boundary_draft_purpose_skips_html_comments_in_lead() {
+        // Lead paragraph extraction must skip the auto-generated `<!-- … -->`
+        // marker if one happens to appear before the title (it shouldn't on a
+        // boundary draft, but the helper is shared).
+        let content = r#"<!-- some comment -->
+# Title
+
+The first real paragraph.
+
+## Source
+"#;
+        let draft = parse_boundary_draft("x", content).unwrap();
+        assert_eq!(draft.purpose, "The first real paragraph.");
+    }
+
+    #[test]
+    fn parse_boundary_draft_purpose_empty_when_no_lead_text() {
+        // Title immediately followed by a `## …` heading: lead is empty.
+        // The boundary draft remains valid (purpose is optional now).
+        let content = "# Bare\n\n## Source\n- OpenAPI: ./x.yaml\n";
+        let draft = parse_boundary_draft("bare", content).unwrap();
+        assert!(draft.purpose.is_empty(), "expected empty purpose, got {:?}", draft.purpose);
+    }
+
+    #[test]
+    fn parse_boundary_draft_purpose_section_still_wins() {
+        // Mixed shape: explicit `## Purpose` plus a lead paragraph above it.
+        // The explicit heading wins (backward compatibility for older drafts).
+        let content = r#"# Title
+
+This lead paragraph should be ignored.
+
+## Purpose
+The canonical purpose statement.
+
+## Source
+- OpenAPI: ./x.yaml
+"#;
+        let draft = parse_boundary_draft("x", content).unwrap();
+        assert_eq!(draft.purpose, "The canonical purpose statement.");
+    }
+
+    #[test]
     fn parse_boundary_draft_with_fenced_yaml_config() {
         // Phase A boundary-draft shape: include_operations lives inside a
         // fenced YAML block under `## Configuration`, not in a bullet
@@ -2185,10 +2288,14 @@ Pre-Phase-A draft.
     }
 
     #[test]
-    fn boundary_draft_requires_purpose() {
+    fn boundary_draft_purpose_no_longer_required() {
+        // Phase A: purpose is optional. A boundary draft with only a title
+        // and a Notes section parses successfully with empty purpose.
+        // (See `parse_boundary_draft_purpose_*` tests for the lead-paragraph
+        // fallback semantics.)
         let content = "# API\n\n## Notes\n- nothing\n";
-        let result = parse_boundary_draft("test", content);
-        assert!(result.is_err());
+        let draft = parse_boundary_draft("test", content).unwrap();
+        assert!(draft.purpose.is_empty());
     }
 
     // ── Component parser tests ───────────────────────────────────
