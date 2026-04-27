@@ -82,9 +82,6 @@ pub fn scaffold_web_app(
                     }
                 }
             }
-            ArtifactKind::Operation => {
-                server_artifacts.push(artifact);
-            }
             ArtifactKind::Component => {
                 component_artifacts.push(artifact);
             }

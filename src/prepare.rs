@@ -148,7 +148,7 @@ pub fn prepare_workspace(workspace: &Workspace, options: &PrepareOptions) -> Res
     }
 
     // Second pass: classify contexts (realisation_target)
-    classify_contexts(&mut all_prepared, workspace);
+    classify_contexts(&mut all_prepared);
 
     // Validation pass: web_app requires a RoutingTable in the same project
     validate_web_app_requirements(&mut all_prepared);
@@ -452,11 +452,7 @@ fn prepare_context(ctx: &ContextDraft, vocab: &DciVocabulary) -> Result<Prepared
 
     // Role players
     for rp in &ctx.role_players {
-        let resolved = if DciVocabulary::is_api_reference(&rp.data_type) {
-            vocab.resolve_api(&rp.data_type)
-        } else {
-            vocab.resolve(&rp.data_type)
-        };
+        let resolved = vocab.resolve(&rp.data_type);
         artifact.role_players.push(RolePlayerSpec {
             name: rp.name.clone(),
             data_type: rp.data_type.clone(),
@@ -469,44 +465,18 @@ fn prepare_context(ctx: &ContextDraft, vocab: &DciVocabulary) -> Result<Prepared
             resolved_to: Some(rp.data_type.clone()),
         });
         if let Some(resolution) = &resolved {
-            // Enforce reference graph: contexts can reference data, projections, operations
-            if resolution == "operation" {
-                // Operations can be referenced by contexts (they are context-level concerns)
-                bindings.push(VocabularyBinding {
-                    name: rp.data_type.clone(),
-                    resolution: resolution.clone(),
-                    resolved_to: Some(rp.data_type.clone()),
-                });
-            } else {
-                bindings.push(VocabularyBinding {
-                    name: rp.data_type.clone(),
-                    resolution: resolution.clone(),
-                    resolved_to: Some(rp.data_type.clone()),
-                });
-            }
-        } else if !is_builtin_primitive(&rp.data_type) {
-            ambiguities.push(if DciVocabulary::is_api_reference(&rp.data_type) {
-                Ambiguity {
-                    message: format!(
-                        "Role player `{}` references `{}` which is not in the API manifest. \
-                         Either add the type to the boundary draft whitelist or correct the name.",
-                        rp.name, rp.data_type
-                    ),
-                    severity: "blocking".to_string(),
-                    suggested_resolution: Some(format!(
-                        "Add `{}` to the API manifest",
-                        rp.data_type
-                    )),
-                    source_line: None,
-                }
-            } else {
-                unresolved_reference_error(
-                    &ctx.info.relative_path,
-                    "role player",
-                    &rp.name,
-                    &rp.data_type,
-                )
+            bindings.push(VocabularyBinding {
+                name: rp.data_type.clone(),
+                resolution: resolution.clone(),
+                resolved_to: Some(rp.data_type.clone()),
             });
+        } else if !is_builtin_primitive(&rp.data_type) {
+            ambiguities.push(unresolved_reference_error(
+                &ctx.info.relative_path,
+                "role player",
+                &rp.name,
+                &rp.data_type,
+            ));
             bindings.push(VocabularyBinding {
                 name: rp.data_type.clone(),
                 resolution: "ambiguous".to_string(),
@@ -618,16 +588,7 @@ fn prepare_data(data: &DataDraft, vocab: &DciVocabulary) -> Result<PreparedArtif
             .collect::<Vec<_>>()
             .join(" ")
     );
-    for api_ref in extract_api_references(&all_prose) {
-        if let Some(kind) = vocab.resolve_api(&api_ref) {
-            if let Some(ambiguity) =
-                check_reference_graph(&data.info.title, "data", &api_ref, &kind)
-            {
-                artifact.ambiguities.push(ambiguity);
-            }
-        }
-    }
-    // Check prose references to non-API vocabulary entries
+    // Check prose references to vocabulary entries
     check_prose_references(
         &all_prose,
         "data",
@@ -1239,10 +1200,9 @@ fn is_reference_allowed(source_kind: &str, target_kind: &str) -> bool {
     match source_kind {
         "data" => target_kind == "data",
         "projection" => matches!(target_kind, "data" | "projection"),
-        "operation" => target_kind == "data",
         "context" => matches!(
             target_kind,
-            "data" | "projection" | "operation" | "context" | "component" | "brand" | "routing_table"
+            "data" | "projection" | "context" | "component" | "brand" | "routing_table"
         ),
         "component" => matches!(
             target_kind,
@@ -1273,7 +1233,6 @@ fn check_reference_graph(
         "component" => "Component",
         "brand" => "Brand",
         "routing_table" => "Routing table",
-        "operation" => "Operation",
         _ => source_kind,
     };
 
@@ -1293,16 +1252,11 @@ fn check_reference_graph(
 
 /// Classify each context's `realisation_target` based on its transitive dependency graph.
 ///
-/// Rules (from PLAN.md Phase 10):
-/// - A context touching only data/projections/brand/other-client_also-contexts → `client_also`
-/// - A context transitively touching an operation with secret-requiring auth → `server_only`
-/// - Anything else → `unknown`
-///
-/// Also checks for cycles in context→context dependencies and reports them as ambiguities.
-fn classify_contexts(
-    artifacts: &mut [(std::path::PathBuf, PreparedArtifact)],
-    workspace: &Workspace,
-) {
+/// Every well-formed context defaults to `client_also`. Cycles in the
+/// context→context reference graph are flagged as `unknown` with a blocking
+/// ambiguity. Server-only classification (re-introduced once api projections
+/// surface their auth requirements) is currently dormant.
+fn classify_contexts(artifacts: &mut [(std::path::PathBuf, PreparedArtifact)]) {
     // Build a map from export name → index for quick lookup
     let name_to_idx: BTreeMap<String, usize> = artifacts
         .iter()
@@ -1312,7 +1266,6 @@ fn classify_contexts(
 
     // Build adjacency: for each context, collect the names it references
     let mut context_deps: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-    let mut touches_operation: BTreeSet<usize> = BTreeSet::new();
 
     for (i, (_, artifact)) in artifacts.iter().enumerate() {
         if artifact.kind != ArtifactKind::Context {
@@ -1333,45 +1286,7 @@ fn classify_contexts(
             }
         }
 
-        // Check if this context touches operations (directly)
-        for binding in &artifact.vocabulary_bindings {
-            if binding.resolution == "operation" {
-                touches_operation.insert(i);
-            }
-        }
-
         context_deps.insert(i, deps);
-    }
-
-    // Also check for operations in the prepared directory (from Phase 7 API ingestion)
-    let ops_dir = workspace.prepared_dir.join("operations");
-    let has_operations = ops_dir.is_dir();
-    let mut operation_names: BTreeSet<String> = BTreeSet::new();
-    let mut server_only_operations: BTreeSet<String> = BTreeSet::new();
-
-    if has_operations {
-        if let Ok(entries) = fs::read_dir(&ops_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("yml") {
-                    if let Ok(content) = fs::read_to_string(&path) {
-                        if let Ok(op) =
-                            serde_yaml::from_str::<crate::prepared::ApiOperationSpec>(&content)
-                        {
-                            operation_names.insert(op.name.clone());
-                            // Operations with secret-requiring auth are server-only
-                            let auth_kind = op.auth.kind.as_str();
-                            if matches!(
-                                auth_kind,
-                                "api_key_header" | "api_key_body" | "bearer"
-                            ) {
-                                server_only_operations.insert(op.name.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // Build kind lookup from artifacts (immutable pass)
@@ -1387,7 +1302,6 @@ fn classify_contexts(
 
         let mut visited = HashSet::new();
         let mut stack = vec![i];
-        let mut is_server_only = false;
         let mut has_cycle = false;
 
         while let Some(current) = stack.pop() {
@@ -1398,19 +1312,12 @@ fn classify_contexts(
                 continue;
             }
 
-            if touches_operation.contains(&current) {
-                is_server_only = true;
-            }
-
             if let Some(deps) = context_deps.get(&current) {
                 for dep in deps {
                     if let Some(&dep_idx) = name_to_idx.get(dep) {
                         if artifact_kinds[dep_idx] == ArtifactKind::Context {
                             stack.push(dep_idx);
                         }
-                    }
-                    if server_only_operations.contains(dep) {
-                        is_server_only = true;
                     }
                 }
             }
@@ -1436,8 +1343,6 @@ fn classify_contexts(
                     }),
                 ),
             );
-        } else if is_server_only {
-            classifications.insert(i, ("server_only".to_string(), None));
         } else {
             classifications.insert(i, ("client_also".to_string(), None));
         }
@@ -1898,34 +1803,6 @@ fn extract_role_method_refs(
     refs.into_iter().collect()
 }
 
-/// Extract `@api/Name` references from prose text.
-fn extract_api_references(text: &str) -> Vec<String> {
-    let mut refs = Vec::new();
-    let mut i = 0;
-    let chars: Vec<char> = text.chars().collect();
-    while i < chars.len() {
-        if chars[i] == '@' {
-            let start = i;
-            i += 1;
-            // Read api name
-            let mut has_slash = false;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '/') {
-                if chars[i] == '/' {
-                    has_slash = true;
-                }
-                i += 1;
-            }
-            if has_slash {
-                let reference: String = chars[start..i].iter().collect();
-                refs.push(reference);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    refs
-}
-
 /// Convert a draft title like "Context: MoneyTransfer" or "Data: Amount" into
 /// a clean PascalCase export name.
 fn sanitize_export_name(title: &str) -> String {
@@ -2174,103 +2051,6 @@ Then: returns 100
         assert_eq!(sanitize_export_name("JustAName"), "JustAName");
     }
 
-    #[test]
-    fn data_draft_referencing_operation_is_rejected() {
-        let content = r#"# Data: Vessel
-
-## Purpose
-Represents a vessel. Uses @aisstream/Subscribe for live updates.
-
-## Attributes
-- mmsi: vessel identifier
-
-## Invariants
-- mmsi is always positive
-
-## Operations
-### update_position
-Updates position from @aisstream/Subscribe operation.
-
-## Scenarios
-### create vessel
-Given: a vessel with mmsi 123456
-When: created
-Then: mmsi is 123456
-"#;
-        let doc = parse_draft_file(
-            Path::new("drafts/data/vessel.md"),
-            Path::new("drafts"),
-            content,
-        )
-        .unwrap();
-
-        let mut vocab = DciVocabulary::empty();
-        // Simulate an API manifest with Subscribe as an operation
-        vocab.add("Vessel", "data");
-        // We need to test with a vocab that has api entries — build manually
-        let prepared = prepare_document(&doc, &vocab).unwrap();
-
-        // Without an API manifest loaded, the @api/ref won't resolve
-        // so no blocking ambiguity about operations. That's fine —
-        // the reference graph is enforced when the manifest IS loaded.
-        // Let's test the extract_api_references helper instead.
-        let refs = extract_api_references("Uses @aisstream/Subscribe for updates");
-        assert_eq!(refs, vec!["@aisstream/Subscribe"]);
-
-        let refs2 = extract_api_references("No api references here");
-        assert!(refs2.is_empty());
-    }
-
-    #[test]
-    fn context_can_reference_api_operation() {
-        // Contexts are allowed to reference operations (they are context-level concerns)
-        let content = r#"# Context: VesselTracker
-
-## Purpose
-Tracks vessels using @aisstream/Subscribe.
-
-## Role Players
-- stream: @aisstream/Subscribe — provides live vessel data
-
-## Props
-- api_key: the authentication key for the stream
-
-## Role Methods
-### stream
-- connect: establishes the streaming connection
-
-## Functionalities
-### track
-Subscribes to vessel updates via the stream's connect role method.
-
-## Scenarios
-### successful tracking
-Given: a valid api key and bounding box
-When: track is invoked
-Then: vessel updates are received
-"#;
-        let doc = parse_draft_file(
-            Path::new("drafts/contexts/vessel_tracker.md"),
-            Path::new("drafts"),
-            content,
-        )
-        .unwrap();
-
-        // Build a vocab with API entries
-        let mut vocab = DciVocabulary::empty();
-        // Manually: we can't call load_api_manifest in a unit test easily,
-        // so we test that the prepare function handles @-prefixed refs
-        let prepared = prepare_document(&doc, &vocab).unwrap();
-
-        // Without the API manifest loaded, @aisstream/Subscribe is unresolved
-        // and will be flagged as an ambiguity referencing the API manifest
-        assert!(
-            prepared.ambiguities.iter().any(|a| a.message.contains("@aisstream/Subscribe")),
-            "expected ambiguity about unresolved API ref: {:?}",
-            prepared.ambiguities
-        );
-    }
-
     // ── Reference graph tests ────────────────────────────────────
 
     #[test]
@@ -2283,7 +2063,6 @@ Then: vessel updates are received
         // contexts → everything except brand (nothing blocks contexts)
         assert!(is_reference_allowed("context", "data"));
         assert!(is_reference_allowed("context", "projection"));
-        assert!(is_reference_allowed("context", "operation"));
         assert!(is_reference_allowed("context", "context"));
         assert!(is_reference_allowed("context", "component"));
         assert!(is_reference_allowed("context", "brand"));
@@ -2301,24 +2080,20 @@ Then: vessel updates are received
 
     #[test]
     fn reference_graph_forbidden_edges() {
-        // data cannot reference context, component, brand, routing_table, operation
+        // data cannot reference context, component, brand, routing_table, projection
         assert!(!is_reference_allowed("data", "context"));
         assert!(!is_reference_allowed("data", "component"));
         assert!(!is_reference_allowed("data", "brand"));
         assert!(!is_reference_allowed("data", "routing_table"));
         assert!(!is_reference_allowed("data", "projection"));
-        assert!(!is_reference_allowed("data", "operation"));
-        // projection cannot reference context, operation, component, brand, routing_table
+        // projection cannot reference context, component, brand, routing_table
         assert!(!is_reference_allowed("projection", "context"));
-        assert!(!is_reference_allowed("projection", "operation"));
         assert!(!is_reference_allowed("projection", "component"));
-        // component cannot reference operation, routing_table
-        assert!(!is_reference_allowed("component", "operation"));
+        // component cannot reference routing_table
         assert!(!is_reference_allowed("component", "routing_table"));
-        // routing_table cannot reference context, projection, operation, brand, routing_table
+        // routing_table cannot reference context, projection, brand, routing_table
         assert!(!is_reference_allowed("routing_table", "context"));
         assert!(!is_reference_allowed("routing_table", "projection"));
-        assert!(!is_reference_allowed("routing_table", "operation"));
         assert!(!is_reference_allowed("routing_table", "brand"));
         // brand → nothing
         assert!(!is_reference_allowed("brand", "data"));
@@ -2644,16 +2419,11 @@ Then: done
         let vocab = vocab_with(&[("Account", "data")]);
         let prepared = prepare_document(&doc, &vocab).unwrap();
 
-        // Simulate classification pass
-        let workspace = crate::workspace::Workspace::discover(
-            std::env::temp_dir().join("reen_classify_test_1"),
-        )
-        .unwrap();
-        let output = workspace
-            .prepared_output_path(Path::new("drafts/contexts/simple_transfer.md"))
-            .unwrap();
-        let mut artifacts = vec![(output, prepared)];
-        classify_contexts(&mut artifacts, &workspace);
+        let mut artifacts = vec![(
+            std::path::PathBuf::from("drafts/prepare/contexts/simple_transfer.yml"),
+            prepared,
+        )];
+        classify_contexts(&mut artifacts);
 
         assert_eq!(
             artifacts[0].1.realisation_target.as_deref(),

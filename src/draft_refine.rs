@@ -103,13 +103,11 @@ pub fn review_raw_drafts(workspace: &Workspace, paths: &[PathBuf]) -> Result<Dra
             continue;
         }
 
-        // Code-token lint (runs on raw content, before parsing)
-        // Exempt generated files under drafts/.apis/ — they contain code-level tokens by design
-        let is_generated_api = relative.contains("drafts/.apis/") || relative.contains(".apis/");
-        if !is_generated_api {
-            let code_token_findings = scan_code_tokens(&content, &relative);
-            report.findings.extend(code_token_findings);
-        }
+        // Code-token lint (runs on raw content, before parsing).
+        // Auto-generated `.api/` drafts are already short-circuited above, so
+        // this lint runs only on hand-authored drafts.
+        let code_token_findings = scan_code_tokens(&content, &relative);
+        report.findings.extend(code_token_findings);
 
         // Web-kind specific lint (stricter rules for component/brand/routing-table)
         let rel_path = std::path::Path::new(&relative);
@@ -725,7 +723,6 @@ pub fn check_unresolved_references(
         DraftDocument::Context(ctx) => {
             for rp in &ctx.role_players {
                 if !crate::prepare::is_builtin_primitive(&rp.data_type)
-                    && !crate::manifest::DciVocabulary::is_api_reference(&rp.data_type)
                     && vocab.resolve(&rp.data_type).is_none()
                 {
                     let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&rp.data_type);
@@ -746,7 +743,6 @@ pub fn check_unresolved_references(
             // Projections now declare role players just like contexts.
             for rp in &proj.role_players {
                 if !crate::prepare::is_builtin_primitive(&rp.data_type)
-                    && !crate::manifest::DciVocabulary::is_api_reference(&rp.data_type)
                     && vocab.resolve(&rp.data_type).is_none()
                 {
                     let (_cat, suggestion) = crate::prepare::classify_unresolved_reference(&rp.data_type);

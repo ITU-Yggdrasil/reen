@@ -8,7 +8,6 @@ pub enum ArtifactKind {
     Data,
     Projection,
     Context,
-    Operation,
     Component,
     Brand,
     RoutingTable,
@@ -21,7 +20,6 @@ impl ArtifactKind {
             ArtifactKind::Data => "data",
             ArtifactKind::Projection => "projection",
             ArtifactKind::Context => "context",
-            ArtifactKind::Operation => "operation",
             ArtifactKind::Component => "component",
             ArtifactKind::Brand => "brand",
             ArtifactKind::RoutingTable => "routing_table",
@@ -54,7 +52,6 @@ impl ArtifactKind {
             "data" => Some(Self::Data),
             "projections" => Some(Self::Projection),
             "contexts" => Some(Self::Context),
-            "operations" => Some(Self::Operation),
             "components" => Some(Self::Component),
             "brands" => Some(Self::Brand),
             "routes" => Some(Self::RoutingTable),
@@ -395,9 +392,6 @@ pub fn parse_draft_file(path: &Path, drafts_root: &Path, content: &str) -> Resul
             parse_routing_table_draft(info, content).map(DraftDocument::RoutingTable)
         }
         ArtifactKind::App => parse_app_draft(info, content).map(DraftDocument::App),
-        ArtifactKind::Operation => {
-            bail!("Operation artifacts are YAML, not markdown drafts: {}", info.relative_path)
-        }
     }
 }
 

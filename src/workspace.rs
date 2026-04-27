@@ -205,7 +205,6 @@ impl Selection {
             ArtifactKind::Context => self.contexts,
             ArtifactKind::Projection => self.projections,
             ArtifactKind::Data => self.data,
-            ArtifactKind::Operation => true, // operations always included when present
             ArtifactKind::Component | ArtifactKind::Brand | ArtifactKind::RoutingTable => {
                 self.app
             }
@@ -347,8 +346,8 @@ fn collect_raw_drafts(
                 .components()
                 .next()
                 .and_then(|component| component.as_os_str().to_str());
-            // Skip prepare/ output and .apis/ generated directories
-            if matches!(first, Some("prepare") | Some(".apis")) {
+            // Skip prepare/ output directory.
+            if matches!(first, Some("prepare")) {
                 continue;
             }
             // Also skip apis/ directory — boundary drafts are not DCI drafts

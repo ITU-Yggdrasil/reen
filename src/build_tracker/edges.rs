@@ -32,8 +32,7 @@ pub fn extract_artefacts(
         ArtifactKind::Context => extract_context(artifact, sibling_artifacts),
         ArtifactKind::Data => extract_data(artifact),
         ArtifactKind::Projection => extract_projection(artifact, sibling_artifacts),
-        ArtifactKind::Operation
-        | ArtifactKind::Component
+        ArtifactKind::Component
         | ArtifactKind::Brand
         | ArtifactKind::RoutingTable
         | ArtifactKind::App => Vec::new(),

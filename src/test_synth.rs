@@ -607,7 +607,6 @@ fn call_api(
         ArtifactKind::Data => "data type",
         ArtifactKind::Projection => "projection",
         ArtifactKind::Context => "context",
-        ArtifactKind::Operation => "operation",
         ArtifactKind::Component => "component",
         ArtifactKind::Brand => "brand",
         ArtifactKind::RoutingTable => "routing table",

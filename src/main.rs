@@ -491,14 +491,7 @@ fn run_scaffold(
         dry_run: bool_setting(globals.dry_run, section.dry_run, config.dry_run),
         no_client: args.no_client,
     };
-    scaffold_workspace(workspace, &options)?;
-
-    // Also scaffold API operation clients if any exist
-    reen::apis_codegen::scaffold_api_operations(
-        workspace,
-        options.verbose,
-        options.dry_run,
-    )
+    scaffold_workspace(workspace, &options)
 }
 
 fn run_verify(args: VerifyArgs, workspace: &Workspace) -> Result<()> {
@@ -537,21 +530,6 @@ fn run_verify(args: VerifyArgs, workspace: &Workspace) -> Result<()> {
             }
             return Ok(());
         }
-    }
-
-    // Check if this is an operation client (under src/apis/)
-    let is_operation = relative_str.starts_with("src/apis/");
-
-    if is_operation {
-        // Verify against an operation spec
-        let result = verify_operation_file(workspace, rs_path)?;
-        if result.is_ok() {
-            println!("{}", result.render());
-        } else {
-            eprint!("{}", result.render());
-            process::exit(1);
-        }
-        return Ok(());
     }
 
     // Find the prepared YAML: explicit --prepared or auto-detect from the .rs path
@@ -593,77 +571,6 @@ fn run_verify(args: VerifyArgs, workspace: &Workspace) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Verify an operation client file against its operation spec.
-fn verify_operation_file(
-    workspace: &Workspace,
-    rs_path: &std::path::Path,
-) -> Result<verify::VerifyResult> {
-    use anyhow::Context;
-    use reen::prepared::ApiOperationSpec;
-
-    let relative = rs_path
-        .strip_prefix(&workspace.root)
-        .unwrap_or(rs_path)
-        .to_string_lossy()
-        .replace('\\', "/");
-
-    // Extract api name and operation name from path: src/apis/<api>/<op>.rs
-    let parts: Vec<&str> = relative.split('/').collect();
-    if parts.len() < 4 {
-        anyhow::bail!("Cannot determine API name from path: {}", relative);
-    }
-    let api_name = parts[2];
-    let op_stem = std::path::Path::new(parts[3])
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-
-    // Find the operation spec under drafts/.apis/operations/<api>/
-    let ops_dir = workspace.drafts_dir.join(".apis/operations").join(api_name);
-    if !ops_dir.is_dir() {
-        anyhow::bail!(
-            "No operation specs found for api `{}` at {}",
-            api_name,
-            ops_dir.display()
-        );
-    }
-
-    // Normalize: try both the stem as-is and PascalCase variants
-    let mut spec_path = None;
-    if let Ok(entries) = std::fs::read_dir(&ops_dir) {
-        let target_norm = normalize_stem(op_stem);
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("yml") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    if normalize_stem(stem) == target_norm {
-                        spec_path = Some(path);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    let spec_path = spec_path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "No operation spec found for `{}` in {}",
-            op_stem,
-            ops_dir.display()
-        )
-    })?;
-
-    let raw = std::fs::read_to_string(&spec_path)
-        .with_context(|| format!("Failed to read {}", spec_path.display()))?;
-    let spec: ApiOperationSpec = serde_yaml::from_str(&raw)
-        .with_context(|| format!("Failed to parse {}", spec_path.display()))?;
-
-    let source = std::fs::read_to_string(rs_path)
-        .with_context(|| format!("Failed to read {}", rs_path.display()))?;
-
-    verify::verify_operation_source(&source, &spec)
 }
 
 /// Auto-detect the prepared YAML for a Rust source file.
