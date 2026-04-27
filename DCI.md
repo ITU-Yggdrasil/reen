@@ -120,15 +120,16 @@ When `reen prepare` encounters an unresolvable name, it raises a blocking ambigu
 
 ---
 
-## Where Operations Fit in the Reference Graph
+## How External APIs Fit In
 
-When a project consumes an external API, Reen introduces **operations** — specifications of API calls generated from an OpenAPI snapshot. Operations are not DCI artifacts: they describe an external boundary, not a domain concept. They sit in the reference graph under strict scoping rules:
+When a project consumes an external API, Reen does not introduce a separate kind for it. `reen apis ingest <name>` reads a boundary draft (`drafts/apis/<name>.md` plus its OpenAPI sidecar) and emits two flavours of regular DCI artefacts:
 
-- **Contexts** can reference operations (and data, and projections). A context coordinates the call.
-- **Data** and **projections** cannot reference operations. An operation is a context-level concern, not an intrinsic capability of a domain object.
-- **Operations** reference data types (for their input, output, and error shapes).
+- one **data** draft per OpenAPI schema, written under `drafts/data/.api/<Type>.md`;
+- one **projection** draft per included operation, written under `drafts/projections/.api/<operation>.md`.
 
-In draft prose, reference an ingested type or operation as `@<api>/<Name>` — for example, `@aisstream/Subscribe` or `@aisstream/PositionReport`. The vocabulary manifest resolves these during prepare.
+These auto-generated drafts carry a `<!-- reen:auto-generated …` whole-file marker and a source-hash header, and are otherwise indistinguishable from hand-authored drafts: they appear in the vocabulary, flow through `reen prepare` and `reen scaffold`, and produce real Rust under `crates/*/src/data/` and `crates/*/src/projections/`.
+
+The reference-graph rules apply unchanged. Contexts may reference api-derived data and projections by their plain capitalised name (e.g. `AccountSummary`, `GetAccounts`); there is no `@<api>/<Name>` namespacing because each generated draft contributes a top-level vocabulary entry.
 
 ---
 

@@ -64,25 +64,13 @@ Failures use DCI-language messages (e.g. "the data type `Money` is missing its r
 3. **Invariant enforcement**: guard clauses and validation logic enforce every draft invariant.
 4. **Code not in spec**: significant logic that has no basis in the draft or prepared YAML.
 
-## Operation Client Scaffold Shape
+## Auto-Generated API Projections
 
-Operation clients are generated under `src/apis/<api>/<operation>.rs` from `reen.operation/v1` specs.
+`reen apis ingest <name>` reads a boundary draft (`drafts/apis/<name>.md`) and an OpenAPI sidecar, then writes ordinary DCI drafts under `drafts/data/.api/<Type>.md` and `drafts/projections/.api/<operation>.md`. Those drafts carry a `<!-- reen:auto-generated …` whole-file marker plus a source-hash header; otherwise they go through the regular prepare → scaffold → verify path and emit Rust into `crates/*/src/data/` and `crates/*/src/projections/`.
 
-**Struct fields** mirror the operation spec:
-- `transport_kind`, `url`, `method`, `path` — transport configuration
-- `auth_<field>` — authentication credential placeholder
-- `input`, `output` — data type placeholders (commented with the spec type name)
-- `error_N` — error type placeholders
+For a projection, `/implement` fills the query method body with the actual HTTP call (the prepared YAML's `api_source` block carries method, path, parameters, and pre-rendered Rust return type). The projection's struct + role-method shape is the same as any hand-authored projection; the verifier enforces it with no special-casing.
 
-**Public method set** depends on the output kind:
-- `{ call }` — for `single`, `list`, or `none` output kinds (request-response)
-- `{ subscribe, next }` — for `stream_of` output kind (streaming/WebSocket)
-
-**What the verifier enforces for operations:**
-- Struct name matches the operation name from the spec
-- All expected fields are present (transport + auth + input/output/error)
-- Public method set matches the kind table above
-- Error messages use DCI-adjacent vocabulary: "the `Subscribe` operation on the aisstream api is missing the `auth_apikey` field"
+Hand edits to files under `drafts/data/.api/` or `drafts/projections/.api/` are blocked by `reen refine` — re-run `reen apis ingest` to update them when the OpenAPI sidecar changes.
 
 ## Web-App Four-Crate Layout
 
@@ -91,7 +79,7 @@ For `web_app` projects, `reen scaffold` emits a Cargo workspace with four crates
 | Crate | Contains | Builds for |
 |-------|----------|------------|
 | `app-core` | Data, projections, `client_also` contexts | native + WASM |
-| `app-server` | `server_only` contexts, operations, server binary | native only |
+| `app-server` | `server_only` contexts, server binary | native only |
 | `app-client` | WASM entry, DOM event bindings, RPC fetch stubs | WASM only |
 | `app-components` | Components, brand, router, `Markup` newtype | native + WASM |
 
