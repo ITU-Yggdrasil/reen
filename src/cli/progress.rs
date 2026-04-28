@@ -5,6 +5,7 @@ use chrono::Local;
 pub struct ProgressIndicator {
     total: usize,
     completed: usize,
+    ambiguous: usize,
     failed: usize,
     start_time: Instant,
 }
@@ -14,6 +15,7 @@ impl ProgressIndicator {
         Self {
             total,
             completed: 0,
+            ambiguous: 0,
             failed: 0,
             start_time: Instant::now(),
         }
@@ -33,7 +35,7 @@ impl ProgressIndicator {
     }
 
     fn start_item_with_label(&self, label: &str, name: &str, estimated_tokens: Option<usize>) {
-        let current = self.completed + self.failed + 1;
+        let current = self.completed + self.ambiguous + self.failed + 1;
         let timestamp = Local::now().format("%H:%M:%S");
         let token_info = estimated_tokens
             .map(|n| format!(" [~{} tokens]", n))
@@ -52,12 +54,17 @@ impl ProgressIndicator {
         }
     }
 
+    pub fn complete_item_ambiguous(&mut self, _name: &str) {
+        self.ambiguous += 1;
+    }
+
     pub fn finish(&self) {
         let elapsed = self.start_time.elapsed();
         println!("\n{}", "=".repeat(60));
         println!("Summary:");
         println!("  Total:     {}", self.total);
         println!("  Succeeded: {}", self.completed);
+        println!("  Ambiguous: {}", self.ambiguous);
         println!("  Failed:    {}", self.failed);
         println!("  Duration:  {:.2}s", elapsed.as_secs_f64());
         println!("{}", "=".repeat(60));

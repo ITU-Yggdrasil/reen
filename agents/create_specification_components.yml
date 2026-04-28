@@ -122,6 +122,7 @@ static_prompt: |
   - `# <Component Name>` when the name is known, otherwise `# Component Specification`
   - `## Clarification Questions (Blocking)`
   - a concise bullet list of precise, answerable questions
+  - nothing else
 
   ## Validation Checklist
 

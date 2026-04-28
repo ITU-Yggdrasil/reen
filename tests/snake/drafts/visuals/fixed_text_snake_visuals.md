@@ -26,7 +26,7 @@ Avoid overly playful, exaggerated, or complex language. The tone should feel nat
 ### Logo and Color System
 
 **Logo**
-The TestCompany icon is a simple, stylized contained within a circle. It should be used consistently and without alteration.
+The TestCompany icon is a simple, stylized S contained within a circle. It should be used consistently and without alteration.
 
 * Maintain clear space around the logo to ensure visibility
 * Do not distort, rotate, or decorate the mark

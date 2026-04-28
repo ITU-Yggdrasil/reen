@@ -166,6 +166,30 @@ fn is_component_draft_path(path: &Path, drafts_dir: &str) -> bool {
         == Some("components")
 }
 
+fn is_component_spec_path(path: &Path, specifications_dir: &str) -> bool {
+    path.strip_prefix(specifications_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("components")
+}
+
+fn is_visual_draft_path(path: &Path, drafts_dir: &str) -> bool {
+    path.strip_prefix(drafts_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("visuals")
+}
+
+fn is_visual_spec_path(path: &Path, specifications_dir: &str) -> bool {
+    path.strip_prefix(specifications_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("visuals")
+}
+
 fn ensure_component_spec_dirs(drafts_dir: &str, specifications_dir: &str) -> Result<()> {
     let drafts_root = PathBuf::from(drafts_dir);
     if drafts_root.exists() {
@@ -186,6 +210,14 @@ fn ensure_component_spec_dirs(drafts_dir: &str, specifications_dir: &str) -> Res
 #[derive(Debug)]
 pub enum ProcessSpecOutcome {
     Success,
+    CreatedWithBlockingAmbiguities {
+        draft_file: PathBuf,
+        draft_name: String,
+        draft_content: String,
+        spec_content: String,
+        actionable: Vec<String>,
+        additional_context: HashMap<String, serde_json::Value>,
+    },
     BlockingAmbiguities {
         draft_file: PathBuf,
         draft_name: String,
@@ -205,6 +237,35 @@ fn print_blocking_items(path: &Path, label: &str, headline: &str, items: &[Strin
         eprintln!("  {}", item);
     }
     eprintln!();
+}
+
+fn ensure_blocking_item_is_bullet(item: &str) -> String {
+    let trimmed = item.trim();
+    if trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+    {
+        trimmed.to_string()
+    } else {
+        format!("- {}", trimmed)
+    }
+}
+
+fn render_blocking_section_only(section_title: &str, items: &[String]) -> String {
+    let mut rendered = format!("## {}", section_title);
+    if !items.is_empty() {
+        rendered.push_str("\n\n");
+        let bullet_lines = items
+            .iter()
+            .map(|item| ensure_blocking_item_is_bullet(item))
+            .collect::<Vec<_>>();
+        rendered.push_str(&bullet_lines.join("\n"));
+    }
+    rendered
 }
 
 fn check_brand_references_in_spec_content(path: &Path, content: &str) -> Result<Vec<String>> {
@@ -489,6 +550,50 @@ fn create_specification_inner(
                             }
                         }
                         Ok((
+                            draft_file,
+                            output_path,
+                            dependency_fingerprint,
+                            ProcessSpecOutcome::CreatedWithBlockingAmbiguities {
+                                draft_file: ba_draft_file,
+                                draft_name: ba_draft_name,
+                                draft_content: ba_draft_content,
+                                spec_content: ba_spec_content,
+                                actionable: ba_actionable,
+                                additional_context: ba_context,
+                            },
+                        )) => {
+                            if fix && fix_attempt < max_fix_attempts {
+                                return try_fix_and_retry(
+                                    &ba_draft_file,
+                                    &ba_draft_name,
+                                    &ba_draft_content,
+                                    &ba_spec_content,
+                                    &ba_actionable,
+                                    ba_context,
+                                    fix_attempt,
+                                    max_fix_attempts,
+                                    &filter,
+                                    rate_limit,
+                                    token_limit,
+                                    &config,
+                                    resources.execution_control.clone(),
+                                )
+                                .await;
+                            }
+
+                            tracker.record(
+                                Stage::Specification,
+                                &draft_name,
+                                &draft_file,
+                                &output_path,
+                                &dependency_fingerprint,
+                            )?;
+                            tracker.save()?;
+                            updated_count += 1;
+                            updated_in_run.insert(draft_name.clone());
+                            progress.complete_item_ambiguous(&draft_name);
+                        }
+                        Ok((
                             _draft_file,
                             _output_path,
                             _dependency_fingerprint,
@@ -585,6 +690,27 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
         let spec_content = fs::read_to_string(&spec_path).with_context(|| {
             format!("Failed to read specification file: {}", spec_path.display())
         })?;
+        if is_visual_spec_path(&spec_path, SPECIFICATIONS_DIR)
+            || is_visual_draft_path(&draft_file, DRAFTS_DIR)
+        {
+            let actionable = extract_actionable_blocking_bullets_from_section(
+                extract_blocking_ambiguities_section(&spec_content),
+            );
+            if !actionable.is_empty() {
+                issues += 1;
+                print_blocking_items(
+                    &draft_file,
+                    "spec:blocking",
+                    &format!(
+                        "Blocking ambiguities detected in specification for '{}'.",
+                        draft_name
+                    ),
+                    &actionable,
+                );
+                continue;
+            }
+        }
+
         if is_brand_spec_path(&spec_path, SPECIFICATIONS_DIR)
             || is_brand_draft_path(&draft_file, DRAFTS_DIR)
         {
@@ -617,20 +743,21 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
             continue;
         }
 
-        if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-            let actionable = extract_actionable_blocking_bullets(&blocking);
-            if !actionable.is_empty() {
-                issues += 1;
-                print_blocking_items(
-                    &draft_file,
-                    "spec:blocking",
-                    &format!(
-                        "Blocking ambiguities detected in specification for '{}'.",
-                        draft_name
-                    ),
-                    &actionable,
-                );
-            }
+        let actionable = extract_actionable_specification_blockers(
+            &spec_content,
+            is_component_draft_path(&draft_file, DRAFTS_DIR),
+        );
+        if !actionable.is_empty() {
+            issues += 1;
+            print_blocking_items(
+                &draft_file,
+                "spec:blocking",
+                &format!(
+                    "Blocking ambiguities detected in specification for '{}'.",
+                    draft_name
+                ),
+                &actionable,
+            );
         }
 
         let unresolved = check_brand_references_in_spec_content(&spec_path, &spec_content)?;
@@ -702,11 +829,41 @@ fn finalize_specification_output(
     let output_path =
         determine_specification_output_path(draft_file, DRAFTS_DIR, SPECIFICATIONS_DIR)?;
 
-    let mut has_blocking_ambiguities = false;
-    let mut actionable = Vec::new();
+    let mut normalized_spec_content = spec_content;
+    let mut actionable;
+    let has_blocking_ambiguities;
 
-    if is_brand_draft_path(draft_file, DRAFTS_DIR) {
-        let validation = validate_brand_spec_content(&spec_content).map_err(|err| {
+    if is_visual_draft_path(draft_file, DRAFTS_DIR) {
+        actionable = extract_actionable_blocking_bullets_from_section(
+            extract_blocking_ambiguities_section(&normalized_spec_content),
+        );
+        if actionable.is_empty() {
+            let validation =
+                validate_brand_spec_content(&normalized_spec_content).map_err(|err| {
+                    anyhow::anyhow!(
+                        "generated brand specification for '{}' is invalid: {}",
+                        draft_name,
+                        err
+                    )
+                })?;
+            actionable = validation.blocking_ambiguities;
+        }
+        has_blocking_ambiguities = !actionable.is_empty();
+        if has_blocking_ambiguities {
+            normalized_spec_content =
+                render_blocking_section_only("Blocking Ambiguities", &actionable);
+            print_blocking_items(
+                draft_file,
+                "spec:blocking",
+                &format!(
+                    "Blocking ambiguities detected in generated specification for '{}'.",
+                    draft_name
+                ),
+                &actionable,
+            );
+        }
+    } else if is_brand_draft_path(draft_file, DRAFTS_DIR) {
+        let validation = validate_brand_spec_content(&normalized_spec_content).map_err(|err| {
             anyhow::anyhow!(
                 "generated brand specification for '{}' is invalid: {}",
                 draft_name,
@@ -728,24 +885,32 @@ fn finalize_specification_output(
             );
         }
     } else {
-        // Report Blocking Ambiguities immediately if present in generated spec
-        if let Some(blocking) = extract_blocking_ambiguities_section(&spec_content) {
-            actionable = extract_actionable_blocking_bullets(&blocking);
-            if !actionable.is_empty() {
-                has_blocking_ambiguities = true;
-                print_blocking_items(
-                    draft_file,
-                    "spec:blocking",
-                    &format!(
-                        "Blocking ambiguities detected in generated specification for '{}'.",
-                        draft_name
-                    ),
-                    &actionable,
-                );
+        actionable = if is_component_draft_path(draft_file, DRAFTS_DIR) {
+            extract_actionable_blocking_bullets_from_section(
+                extract_component_clarification_questions_section(&normalized_spec_content),
+            )
+        } else {
+            extract_actionable_specification_blockers(&normalized_spec_content, false)
+        };
+        has_blocking_ambiguities = !actionable.is_empty();
+        if has_blocking_ambiguities {
+            if is_component_draft_path(draft_file, DRAFTS_DIR) {
+                normalized_spec_content =
+                    render_blocking_section_only("Clarification Questions (Blocking)", &actionable);
             }
+            print_blocking_items(
+                draft_file,
+                "spec:blocking",
+                &format!(
+                    "Blocking ambiguities detected in generated specification for '{}'.",
+                    draft_name
+                ),
+                &actionable,
+            );
         }
 
-        let unresolved = check_brand_references_in_spec_content(&output_path, &spec_content)?;
+        let unresolved =
+            check_brand_references_in_spec_content(&output_path, &normalized_spec_content)?;
         if !unresolved.is_empty() {
             anyhow::bail!(
                 "generated specification for '{}' references undefined brand token(s): {}",
@@ -755,30 +920,34 @@ fn finalize_specification_output(
         }
     }
 
-    if has_blocking_ambiguities && is_component_draft_path(draft_file, DRAFTS_DIR) {
-        return Ok(ProcessSpecOutcome::BlockingAmbiguities {
-            draft_file: draft_file.to_path_buf(),
-            draft_name: draft_name.to_string(),
-            draft_content: draft_content.to_string(),
-            spec_content,
-            actionable,
-            additional_context,
-        });
-    }
-
     // Ensure the output directory exists
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).context("Failed to create specification output directory")?;
     }
 
-    fs::write(&output_path, &spec_content).context("Failed to write specification file")?;
+    fs::write(&output_path, &normalized_spec_content)
+        .context("Failed to write specification file")?;
+
+    if has_blocking_ambiguities
+        && (is_component_draft_path(draft_file, DRAFTS_DIR)
+            || is_visual_draft_path(draft_file, DRAFTS_DIR))
+    {
+        return Ok(ProcessSpecOutcome::CreatedWithBlockingAmbiguities {
+            draft_file: draft_file.to_path_buf(),
+            draft_name: draft_name.to_string(),
+            draft_content: draft_content.to_string(),
+            spec_content: normalized_spec_content,
+            actionable,
+            additional_context,
+        });
+    }
 
     if has_blocking_ambiguities {
         return Ok(ProcessSpecOutcome::BlockingAmbiguities {
             draft_file: draft_file.to_path_buf(),
             draft_name: draft_name.to_string(),
             draft_content: draft_content.to_string(),
-            spec_content,
+            spec_content: normalized_spec_content,
             actionable,
             additional_context,
         });
@@ -1812,11 +1981,11 @@ fn extract_section(content: &str, section_title: &str) -> Option<String> {
 
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        let is_markdown_header = trimmed
-            .strip_prefix('#')
-            .map(|s| s.trim())
-            .map(|s| s.eq_ignore_ascii_case(section_title))
-            .unwrap_or(false);
+        let is_markdown_header = trimmed.starts_with('#')
+            && trimmed
+                .trim_start_matches('#')
+                .trim()
+                .eq_ignore_ascii_case(section_title);
         let is_plain_header = trimmed.eq_ignore_ascii_case(section_title);
         if is_markdown_header || is_plain_header {
             start_idx = Some(i + 1);
@@ -1870,6 +2039,17 @@ fn is_known_section_title(line: &str) -> bool {
 /// Returns None if the section is not present.
 fn extract_blocking_ambiguities_section(content: &str) -> Option<String> {
     extract_section(content, "Blocking Ambiguities")
+}
+
+fn extract_component_clarification_questions_section(content: &str) -> Option<String> {
+    extract_section(content, "Clarification Questions (Blocking)")
+}
+
+fn extract_actionable_blocking_bullets_from_section(section: Option<String>) -> Vec<String> {
+    section
+        .as_deref()
+        .map(extract_actionable_blocking_bullets)
+        .unwrap_or_default()
 }
 
 fn is_numbered_section_heading(line: &str) -> bool {
@@ -1974,6 +2154,34 @@ fn is_layout_specific_physical_blocker(text: &str) -> bool {
         || normalized.contains("container widths and padding")
 }
 
+fn is_precision_only_brand_blocker(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    (normalized.contains("does not specify exact color values")
+        || normalized.contains("does not define exact color values")
+        || normalized.contains("does not define their exact values")
+        || normalized.contains("does not specify exact values")
+        || normalized.contains("named color")
+        || normalized.contains("hex code")
+        || normalized.contains("hex value")
+        || normalized.contains("rgb")
+        || normalized.contains("hsl"))
+        || (normalized.contains("word-spacing")
+            && normalized.contains("normal")
+            && (normalized.contains("does not define")
+                || normalized.contains("ambiguous")
+                || normalized.contains("not specified")))
+        || (normalized.contains("spacing")
+            && normalized.contains("normal")
+            && normalized.contains("relative baseline"))
+}
+
 fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
     let bullets = extract_bullets_with_indent(section);
     if bullets.is_empty() {
@@ -1986,7 +2194,8 @@ fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
     for i in 0..bullets.len() {
         actionable[i] = !is_language_or_paradigm_specific_detail(&bullets[i].1)
             && !is_no_issue_placeholder_bullet(&bullets[i].1)
-            && !is_layout_specific_physical_blocker(&bullets[i].1);
+            && !is_layout_specific_physical_blocker(&bullets[i].1)
+            && !is_precision_only_brand_blocker(&bullets[i].1);
         let parent_indent = bullets[i].0;
         let mut j = i + 1;
         while j < bullets.len() && bullets[j].0 > parent_indent {
@@ -2011,15 +2220,37 @@ fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
         .collect()
 }
 
+fn extract_actionable_specification_blockers(
+    content: &str,
+    allow_component_clarifications: bool,
+) -> Vec<String> {
+    if let Some(blocking) = extract_blocking_ambiguities_section(content) {
+        let actionable = extract_actionable_blocking_bullets(&blocking);
+        if !actionable.is_empty() {
+            return actionable;
+        }
+    }
+
+    if allow_component_clarifications {
+        if let Some(blocking) = extract_component_clarification_questions_section(content) {
+            let actionable = extract_actionable_blocking_bullets(&blocking);
+            if !actionable.is_empty() {
+                return actionable;
+            }
+        }
+    }
+
+    Vec::new()
+}
+
 fn has_unfinished_specification(path: &Path, context_name: &str, stage_name: &str) -> Result<bool> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read context file: {}", path.display()))?;
-    if let Some(blocking) = extract_blocking_ambiguities_section(&content) {
-        let actionable = extract_actionable_blocking_bullets(&blocking);
-        if actionable.is_empty() {
-            return Ok(false);
-        }
-
+    let actionable = extract_actionable_specification_blockers(
+        &content,
+        is_component_spec_path(path, SPECIFICATIONS_DIR),
+    );
+    if !actionable.is_empty() {
         eprintln!("error[spec:blocking]:");
         eprintln!("\u{001b}[31m{}\u{001b}[0m", path.display());
         eprintln!(
@@ -3428,8 +3659,11 @@ fn resolve_input_files(
             }
 
             if !found && filter.include_components() {
-                let component_matches =
-                    resolve_named_input_in_category(&dir_path.join("components"), &name, extension)?;
+                let component_matches = resolve_named_input_in_category(
+                    &dir_path.join("components"),
+                    &name,
+                    extension,
+                )?;
                 if !component_matches.is_empty() {
                     files.extend(component_matches);
                     found = true;
@@ -4124,15 +4358,16 @@ mod tests {
         augment_implementation_generation_context, build_dependency_context,
         build_dependency_drafts_from_context, build_dependency_manifest,
         build_implementation_execution_plan, build_implemented_dependency_manifest,
-        build_specification_context, build_specification_execution_plan, clear_cache,
-        create_implementation, determine_bdd_test_paths, determine_draft_input_path,
+        build_specification_context, build_specification_execution_plan, check_specification,
+        clear_cache, create_implementation, determine_bdd_test_paths, determine_draft_input_path,
         determine_implementation_output_path, determine_specification_agent,
         determine_specification_output_path, ensure_dev_dependency_entry,
-        extract_actionable_blocking_bullets, extract_compile_error_message,
-        generated_project_structure_paths, implementation_agent_name, instructions_model_hash,
-        parse_generated_files, resolve_input_files, sync_managed_block,
+        extract_actionable_blocking_bullets, extract_actionable_specification_blockers,
+        extract_compile_error_message, finalize_specification_output,
+        generated_project_structure_paths, has_unfinished_specification, implementation_agent_name,
+        instructions_model_hash, parse_generated_files, resolve_input_files, sync_managed_block,
         validate_implementation_scaffold_ownership, CacheAgentInput, CategoryFilter, Config,
-        BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, DRAFTS_DIR,
+        ProcessSpecOutcome, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, DRAFTS_DIR,
     };
     use crate::cli::agent_executor::AgentExecutor;
     use crate::cli::brand_scaffold::{
@@ -4601,7 +4836,9 @@ Problem:
         .expect("component-only lookup");
 
         assert_eq!(component_only.len(), 2);
-        assert!(component_only.iter().any(|p| p.ends_with("components/button.md")));
+        assert!(component_only
+            .iter()
+            .any(|p| p.ends_with("components/button.md")));
         assert!(component_only
             .iter()
             .any(|p| p.ends_with("components/forms/input.md")));
@@ -4613,7 +4850,9 @@ Problem:
             .iter()
             .any(|p| p.ends_with("external_apis/stripe.md")));
         assert!(!component_only.iter().any(|p| p.ends_with("brands/acme.md")));
-        assert!(!component_only.iter().any(|p| p.ends_with("visuals/snake.md")));
+        assert!(!component_only
+            .iter()
+            .any(|p| p.ends_with("visuals/snake.md")));
         assert!(!component_only.iter().any(|p| p.ends_with("data/amount.md")));
 
         let _ = fs::remove_dir_all(root);
@@ -5525,12 +5764,349 @@ placeholder
     }
 
     #[test]
+    fn extracts_component_clarification_questions_as_blockers() {
+        let spec = r#"
+# Button
+
+## Clarification Questions (Blocking)
+- What variants does Button support?
+- None
+"#;
+        let actionable = extract_actionable_specification_blockers(spec, true);
+        assert_eq!(
+            actionable,
+            vec!["- What variants does Button support?".to_string()]
+        );
+    }
+
+    fn valid_brand_spec_with_blocker() -> String {
+        r#"# Brand Identity Specification
+
+## Description
+- Structured visual identity for Acme.
+
+## Brand Metadata
+- Brand name: Acme
+- Version: 1.0
+
+## Brand Essence
+### Mission
+- Deliver clear, usable digital experiences.
+
+### Vision
+- Be recognized for calm, accessible product expression.
+
+### Values
+- Clarity over novelty.
+
+## Audience and Positioning
+### Audience
+- Teams that value readability and low-friction workflows.
+
+### Positioning
+- Reliable, modern, and approachable.
+
+## Verbal Identity
+### Personality Attributes
+- Calm
+- Direct
+
+### Tone Guidelines
+- Prefer concise, literal wording over decorative copy.
+
+### Messaging Do/Don't
+- Do: Explain the interface plainly.
+- Don't: Use hype language.
+
+## Logo System
+### Mark Description
+- Primary mark: Circular monogram built from the letterform `T`.
+
+### Clear Space and Sizing
+- `brand.logo.clear_space.default`: `16px`
+
+### Usage Rules
+- Use the icon alone only in compact contexts.
+
+## Color Tokens
+### Primary
+- `brand.colors.primary.default`: `#112233`
+
+### Secondary
+- `brand.colors.secondary.default`: `#445566`
+
+### Semantic
+| Token | Value |
+| --- | --- |
+| `brand.colors.semantic.success` | `#00aa55` |
+
+### Surface
+- `brand.colors.surface.default`: `#ffffff`
+
+### Text and Foreground/Background
+- `brand.colors.text.primary`: `#111111`
+
+## Typography
+### Families
+- `brand.typography.families.primary`: `Fraunces`
+
+### Scales
+- `brand.typography.scales.body.medium.size`: `16px`
+
+### Weights
+- `brand.typography.weights.regular`: `400`
+
+### Line Heights
+- `brand.typography.line_heights.body.medium`: `24px`
+
+### Named Text Styles
+- `brand.typography.text_styles.body.medium`: Uses `brand.typography.scales.body.medium.size`
+
+## Imagery
+### Style Attributes
+- Clean
+- Natural
+
+### Subject Guidance
+- Use scenes that reinforce clarity and focus.
+
+### Avoid
+- Avoid decorative or overly abstract imagery.
+
+## Iconography
+### Style
+- `brand.iconography.style.default`: `outlined`
+
+### Size Set
+- `brand.iconography.size.medium`: `24px`
+
+### Usage Constraints
+- `brand.iconography.usage.actions`: Use for actions and status only.
+
+## Motion
+### Durations
+- `brand.motion.durations.fast`: `150ms`
+
+### Easing
+- `brand.motion.easing.standard`: `cubic-bezier(0.4, 0, 0.2, 1)`
+
+### Usage Principles
+- `brand.motion.usage.state_changes`: Use motion to indicate state changes.
+
+## Composition Principles
+### Hierarchy
+- Prioritize strong contrast and obvious reading order.
+
+### Density
+- Prefer generous whitespace over dense packing.
+
+### Emphasis
+- Use accent color sparingly for focal points.
+
+## Layout Principles
+- Prefer generous whitespace over dense packing.
+
+## Token Reference Rules
+- Downstream specifications must reference tokens by stable dotted token names such as `brand.colors.primary.default`.
+
+## Blocking Ambiguities
+- The draft does not define any semantic color tokens for warning/error states.
+
+## Implementation Choices Left Open
+- Non-blocking: The final design-system package format is left to implementation.
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn component_blockers_write_spec_file_and_return_ambiguous_outcome() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("component_blocker_output");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/components")).expect("mkdir specs");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/button.md");
+        let draft_content = "# Button";
+        fs::write(draft_path, draft_content).expect("write draft");
+
+        let spec_content = r#"# Button
+
+## Clarification Questions (Blocking)
+- What variants does Button support?
+"#
+        .to_string();
+
+        let outcome = finalize_specification_output(
+            draft_content,
+            draft_path,
+            "button",
+            spec_content.clone(),
+            HashMap::new(),
+        )
+        .expect("finalize spec");
+
+        match outcome {
+            ProcessSpecOutcome::CreatedWithBlockingAmbiguities { actionable, .. } => {
+                assert_eq!(
+                    actionable,
+                    vec!["- What variants does Button support?".to_string()]
+                );
+            }
+            other => panic!("expected ambiguous component outcome, got {:?}", other),
+        }
+
+        let written = fs::read_to_string("specifications/components/button.md").expect("read spec");
+        assert_eq!(
+            written,
+            "## Clarification Questions (Blocking)\n\n- What variants does Button support?"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visual_blockers_write_spec_file_and_return_ambiguous_outcome() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("visual_blocker_output");
+        fs::create_dir_all(root.join("drafts/visuals")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir specs");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/visuals/snake.md");
+        let draft_content = "# Snake";
+        fs::write(draft_path, draft_content).expect("write draft");
+
+        let spec_content = valid_brand_spec_with_blocker();
+        let outcome = finalize_specification_output(
+            draft_content,
+            draft_path,
+            "snake",
+            spec_content,
+            HashMap::new(),
+        )
+        .expect("finalize spec");
+
+        match outcome {
+            ProcessSpecOutcome::CreatedWithBlockingAmbiguities { actionable, .. } => {
+                assert_eq!(
+                    actionable,
+                    vec![
+                        "- The draft does not define any semantic color tokens for warning/error states."
+                            .to_string()
+                    ]
+                );
+            }
+            other => panic!("expected ambiguous visual outcome, got {:?}", other),
+        }
+
+        let written = fs::read_to_string("specifications/visuals/snake.md").expect("read spec");
+        assert_eq!(
+            written,
+            "## Blocking Ambiguities\n\n- The draft does not define any semantic color tokens for warning/error states."
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn brand_blockers_keep_full_spec_and_return_blocking_outcome() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_blocker_output");
+        fs::create_dir_all(root.join("drafts/brands")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/brands")).expect("mkdir specs");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/brands/acme.md");
+        let draft_content = "# Acme";
+        fs::write(draft_path, draft_content).expect("write draft");
+
+        let spec_content = valid_brand_spec_with_blocker();
+        let expected_written = spec_content.clone();
+        let outcome = finalize_specification_output(
+            draft_content,
+            draft_path,
+            "acme",
+            spec_content,
+            HashMap::new(),
+        )
+        .expect("finalize spec");
+
+        match outcome {
+            ProcessSpecOutcome::BlockingAmbiguities { actionable, .. } => {
+                assert_eq!(
+                    actionable,
+                    vec![
+                        "The draft does not define any semantic color tokens for warning/error states."
+                            .to_string()
+                    ]
+                );
+            }
+            other => panic!("expected brand blocking outcome, got {:?}", other),
+        }
+
+        let written = fs::read_to_string("specifications/brands/acme.md").expect("read spec");
+        assert_eq!(written, expected_written);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blocker_only_visual_spec_is_treated_as_unfinished_and_fails_check() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("visual_blocker_check");
+        fs::create_dir_all(root.join("drafts/visuals")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir specs");
+
+        fs::write(root.join("drafts/visuals/snake.md"), "# Snake").expect("write draft");
+        fs::write(
+            root.join("specifications/visuals/snake.md"),
+            "## Blocking Ambiguities\n\n- The draft does not define warning/error colors.",
+        )
+        .expect("write spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let err = Runtime::new()
+            .expect("runtime")
+            .block_on(check_specification(
+                vec!["snake".to_string()],
+                &Config {
+                    verbose: false,
+                    dry_run: false,
+                },
+            ))
+            .expect_err("check should fail");
+        assert!(err
+            .to_string()
+            .contains("Specification check failed with 1 issue(s)."));
+
+        let unfinished = has_unfinished_specification(
+            Path::new("specifications/visuals/snake.md"),
+            "snake",
+            "implementation",
+        )
+        .expect("unfinished check");
+        assert!(unfinished);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn ignores_layout_specific_blockers_for_visual_identity_specs() {
         let section = r#"
 - **Layout Margins:** No values specified for layout margins.
 - **Grid System:** No grid system or columns defined.
 - **Breakpoints:** No breakpoints defined for responsive design.
 - **Container Widths and Padding:** No values specified for container widths or padding.
+"#;
+        let actionable = extract_actionable_blocking_bullets(section);
+        assert!(actionable.is_empty());
+    }
+
+    #[test]
+    fn ignores_precision_only_color_and_normal_spacing_blockers() {
+        let section = r#"
+- The draft states the brand uses "red white and blue" but does not specify exact color values or hex codes.
+- The draft specifies "word-spacing double the amount of normal" but does not define what "normal" word-spacing is.
 "#;
         let actionable = extract_actionable_blocking_bullets(section);
         assert!(actionable.is_empty());

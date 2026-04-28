@@ -488,6 +488,7 @@ fn extract_blocking_ambiguities(lines: Option<&Vec<String>>) -> Vec<String> {
     extract_bullets(&lines.join("\n"))
         .into_iter()
         .filter(|item| !is_placeholder_blocker(item))
+        .filter(|item| !is_precision_only_brand_blocker(item))
         .collect()
 }
 
@@ -537,7 +538,35 @@ fn is_placeholder_blocker(text: &str) -> bool {
         normalized.as_str(),
         "none" | "no blocking ambiguities" | "n/a"
     )
-} 
+}
+
+fn is_precision_only_brand_blocker(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    (normalized.contains("does not specify exact color values")
+        || normalized.contains("does not define exact color values")
+        || normalized.contains("does not define their exact values")
+        || normalized.contains("does not specify exact values")
+        || normalized.contains("named color")
+        || normalized.contains("hex code")
+        || normalized.contains("hex value")
+        || normalized.contains("rgb")
+        || normalized.contains("hsl"))
+        || (normalized.contains("word-spacing")
+            && normalized.contains("normal")
+            && (normalized.contains("does not define")
+                || normalized.contains("ambiguous")
+                || normalized.contains("not specified")))
+        || (normalized.contains("spacing")
+            && normalized.contains("normal")
+            && normalized.contains("relative baseline"))
+}
 
 fn collect_defined_tokens(sections: &BTreeMap<String, Section>) -> BTreeSet<String> {
     let token_pattern = Regex::new(r"\bbrand(?:\.[A-Za-z0-9_-]+)+\b").expect("brand token regex");
@@ -876,6 +905,17 @@ Ok.
             validation.blocking_ambiguities,
             vec!["The draft does not define any semantic color tokens.".to_string()]
         );
+    }
+
+    #[test]
+    fn ignores_precision_only_blockers_for_named_colors_and_normal_spacing() {
+        let spec = valid_brand_spec().replace(
+            "## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+            "## Blocking Ambiguities\n- The draft states the brand uses \"red white and blue\" but does not specify exact color values or hex codes.\n- The draft specifies \"word-spacing double the amount of normal\" but does not define what \"normal\" word-spacing is.\n\n## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+        );
+        let validation =
+            validate_brand_spec_content(&spec).expect("valid brand spec with ignored blockers");
+        assert!(validation.blocking_ambiguities.is_empty());
     }
 
     #[test]

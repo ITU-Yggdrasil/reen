@@ -127,10 +127,12 @@ static_prompt: |
   - If a section has no defined token because the draft is missing the information, write `Unspecified from draft.` in that subsection
   - Tokens must remain implementation-neutral; do not emit CSS variables, Tailwind classes, framework config, or component bindings
   - If the draft provides a named color (for example `black`, `red`, `light gray`), treat it as a valid specified token value; do NOT require conversion to hex/RGB/HSL unless the draft explicitly requires that format
+  - When the draft explicitly uses a common named color and does not require another representation, you MAY normalize it to the standard CSS color value in the final specification (for example `red` -> `#FF0000`, `white` -> `#FFFFFF`, `blue` -> `#0000FF`, `green` -> `#008000`, `gray`/`grey` -> `#808080`)
   - If the draft specifies a font family, fallback stacks are OPTIONAL and non-blocking unless the draft explicitly requires fallback families
   - If the draft specifies high-level shapes (for example circular buttons, rounded containers) without numeric geometry values, treat exact border-radius numbers as non-blocking implementation detail unless explicitly required by the draft
   - If the draft establishes a primitive family conceptually but not numerically, preserve the structure and mark exact values as `Unspecified from draft.` rather than treating the absence of precision as blocking
   - Treat identity-level guidance such as "bold headings", "readable body text", "use motion sparingly", "maintain clear space", or "use generous white space" as sufficient to structure the relevant section without inventing numeric values
+  - If the draft uses relative typography spacing language with the word `normal`, treat `normal` as a standard baseline rather than a blocker. Use `1.15` as the default baseline when no other baseline is given, and resolve relative phrases arithmetically (for example `double the amount of normal` -> `2.3`)
 
   ## Allowed Transformations
 
@@ -157,11 +159,20 @@ static_prompt: |
 
   Include `## Blocking Ambiguities` only when the draft is too incomplete, contradictory, or unclear to establish the specification structure itself.
 
+  If the provided draft path/category indicates this draft is under `drafts/visuals/` and blocking ambiguities are required, output ONLY:
+  - `## Blocking Ambiguities`
+  - the blocking bullets
+  - nothing else
+
+  For `drafts/brands/` drafts, keep using the normal canonical brand specification contract even when `## Blocking Ambiguities` is present.
+
   - Each item must be concise and reviewable
   - Keep it business-facing and design-facing, not implementation-facing
   - Omit the section entirely when there are no blocking ambiguities
   - Do NOT add blocking items for missing numeric precision alone when the draft still establishes the intended primitive family or usage rule
   - Do NOT add blocking items for representation precision only (for example named color vs hex), optional fallback stacks, unspecified geometric implementation numbers, missing exact typography sizes, or missing exact motion timings unless the draft explicitly requires that precision
+  - Do NOT add blocking items merely because a draft names a common color without a hex code
+  - Do NOT add blocking items merely because a spacing instruction uses `normal` as its relative baseline
 
   ## Implementation Choices Left Open
 
@@ -187,6 +198,12 @@ static_prompt: |
   - [ ] The result remains implementation-independent
 variable_prompt: |
   ## Input
+
+  Draft path:
+  {{input.draft_path?}}
+
+  Draft category:
+  {{input.draft_category?}}
 
   Draft content:
   {{input.draft_content}}

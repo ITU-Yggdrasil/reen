@@ -20,6 +20,15 @@ fn is_component_draft_path(draft_file: &Path, drafts_dir: &str) -> bool {
         == Some("components")
 }
 
+fn draft_category(draft_file: &Path, drafts_dir: &str) -> Option<String> {
+    draft_file
+        .strip_prefix(drafts_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        .map(|category| category.to_string())
+}
+
 fn collect_markdown_artifacts(root: &Path) -> Result<Vec<serde_json::Value>> {
     fn visit(dir: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
         if !dir.exists() {
@@ -110,9 +119,10 @@ fn add_component_context(
     draft_file: &Path,
     context: &mut HashMap<String, serde_json::Value>,
 ) -> Result<()> {
-    let Some(drafts_root) = draft_file.ancestors().find(|ancestor| {
-        ancestor.file_name().and_then(|s| s.to_str()) == Some("drafts")
-    }) else {
+    let Some(drafts_root) = draft_file
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().and_then(|s| s.to_str()) == Some("drafts"))
+    else {
         return Ok(());
     };
     let Some(project_root) = drafts_root.parent() else {
@@ -247,6 +257,14 @@ pub(super) fn build_specification_context(
     draft_content: &str,
     mut context: HashMap<String, serde_json::Value>,
 ) -> Result<HashMap<String, serde_json::Value>> {
+    context.insert(
+        "draft_path".to_string(),
+        json!(draft_file.to_string_lossy().to_string()),
+    );
+    if let Some(category) = draft_category(draft_file, DRAFTS_DIR) {
+        context.insert("draft_category".to_string(), json!(category));
+    }
+
     if is_component_draft_path(draft_file, DRAFTS_DIR) {
         add_component_context(draft_file, &mut context)?;
     }
