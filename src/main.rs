@@ -127,6 +127,9 @@ enum CreateCommands {
         #[arg(long, help = "Only process drafts from the visuals/ folder")]
         visuals: bool,
 
+        #[arg(long, help = "Only process drafts from the components/ folder")]
+        components: bool,
+
         #[arg(help = "Optional list of draft names (without .md extension)")]
         names: Vec<String>,
 
@@ -242,6 +245,7 @@ async fn main() -> Result<()> {
             match create_args.command {
                 CreateCommands::Specification {
                     visuals,
+                    components,
                     names,
                     fix,
                     max_fix_attempts,
@@ -251,7 +255,7 @@ async fn main() -> Result<()> {
                         data: create_args.data,
                         brands: create_args.brands,
                         visuals,
-                        components: false,
+                        components,
                     };
                     cli::create_specification(
                         names,
@@ -356,4 +360,31 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_specification_parses_components_flag() {
+        let cli = Cli::try_parse_from(["reen", "create", "specification", "--components"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Commands::Create(CreateArgs {
+                command:
+                    CreateCommands::Specification {
+                        components,
+                        visuals,
+                        ..
+                    },
+                ..
+            }) => {
+                assert!(components);
+                assert!(!visuals);
+            }
+            _ => panic!("expected create specification command"),
+        }
+    }
 }

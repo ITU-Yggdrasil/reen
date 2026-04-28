@@ -4568,6 +4568,88 @@ Problem:
     }
 
     #[test]
+    fn resolve_input_files_filters_to_components_only_for_unnamed_runs() {
+        let root = temp_root("components_only_inputs");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+        fs::create_dir_all(drafts.join("external_apis")).expect("mkdir external");
+        fs::create_dir_all(drafts.join("brands")).expect("mkdir brands");
+        fs::create_dir_all(drafts.join("visuals")).expect("mkdir visuals");
+        fs::create_dir_all(drafts.join("components/forms")).expect("mkdir components");
+        fs::create_dir_all(drafts.join("data")).expect("mkdir data");
+        fs::write(drafts.join("app.md"), "# App").expect("write root");
+        fs::write(drafts.join("contexts/account.md"), "# Account").expect("write contexts");
+        fs::write(drafts.join("external_apis/stripe.md"), "# Stripe").expect("write external");
+        fs::write(drafts.join("brands/acme.md"), "# Acme").expect("write brands");
+        fs::write(drafts.join("visuals/snake.md"), "# Snake").expect("write visuals");
+        fs::write(drafts.join("data/amount.md"), "# Amount").expect("write data");
+        fs::write(drafts.join("components/button.md"), "# Button").expect("write button");
+        fs::write(drafts.join("components/forms/input.md"), "# Input").expect("write input");
+
+        let component_only = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            Vec::new(),
+            "md",
+            &CategoryFilter {
+                contexts: false,
+                data: false,
+                brands: false,
+                visuals: false,
+                components: true,
+            },
+        )
+        .expect("component-only lookup");
+
+        assert_eq!(component_only.len(), 2);
+        assert!(component_only.iter().any(|p| p.ends_with("components/button.md")));
+        assert!(component_only
+            .iter()
+            .any(|p| p.ends_with("components/forms/input.md")));
+        assert!(!component_only.iter().any(|p| p.ends_with("app.md")));
+        assert!(!component_only
+            .iter()
+            .any(|p| p.ends_with("contexts/account.md")));
+        assert!(!component_only
+            .iter()
+            .any(|p| p.ends_with("external_apis/stripe.md")));
+        assert!(!component_only.iter().any(|p| p.ends_with("brands/acme.md")));
+        assert!(!component_only.iter().any(|p| p.ends_with("visuals/snake.md")));
+        assert!(!component_only.iter().any(|p| p.ends_with("data/amount.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_input_files_resolves_named_component_in_components_only_mode() {
+        let root = temp_root("named_component_only_inputs");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("contexts")).expect("mkdir contexts");
+        fs::create_dir_all(drafts.join("components")).expect("mkdir components");
+        fs::write(drafts.join("contexts/button.md"), "# Context Button").expect("write context");
+        fs::write(drafts.join("components/button.md"), "# Component Button")
+            .expect("write component");
+
+        let component_only = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["button".to_string()],
+            "md",
+            &CategoryFilter {
+                contexts: false,
+                data: false,
+                brands: false,
+                visuals: false,
+                components: true,
+            },
+        )
+        .expect("named component-only lookup");
+
+        assert_eq!(component_only.len(), 1);
+        assert!(component_only[0].ends_with("components/button.md"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn default_spec_execution_plan_includes_unreferenced_visuals_and_data() {
         let root = temp_root("spec_plan_all");
         let drafts = root.join("drafts");

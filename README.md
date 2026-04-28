@@ -57,6 +57,9 @@ Transform draft documents into formal specifications:
 # Process all drafts
 reen create specification
 
+# Process only component drafts
+reen create specification --components
+
 # Process specific drafts
 reen create specification app agent_runner
 
