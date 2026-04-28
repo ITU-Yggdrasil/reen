@@ -342,6 +342,10 @@ mod tests {
   model: qwen2.5:7b
   parallel: false
   batch: false",
+            "create_specification_components:
+  model: qwen2.5:7b
+  parallel: false
+  batch: false",
             "create_implementation:
   model: qwen2.5:7b
   parallel: false
@@ -380,6 +384,7 @@ create_specifications_context: gpt-4
 create_specifications_main: gpt-4
 create_specifications_external_api: gpt-4
 create_specifications_brand: gpt-4
+create_specification_components: gpt-4
 resolve_compilation_errors: gpt-4
 fix_draft_blockers: gpt-4
 "#;
@@ -428,6 +433,9 @@ create_specifications_external_api:
   model: gpt-4
   parallel: true
 create_specifications_brand:
+  model: gpt-4
+  parallel: true
+create_specification_components:
   model: gpt-4
   parallel: true
 resolve_compilation_errors:

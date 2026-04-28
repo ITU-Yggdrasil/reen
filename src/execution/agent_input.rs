@@ -60,7 +60,8 @@ pub fn build_agent_input(
         | "create_specifications_data"
         | "create_specifications_main"
         | "create_specifications_external_api"
-        | "create_specifications_brand" => AgentInput {
+        | "create_specifications_brand"
+        | "create_specification_components" => AgentInput {
             draft_content: Some(input.to_string()),
             context_content: None,
             openapi_content,

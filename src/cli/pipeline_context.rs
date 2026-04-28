@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
 use std::path::Path;
 
 use super::agent_executor::AgentExecutor;
@@ -9,6 +10,138 @@ use super::openapi_fetcher::{
 };
 use super::stage_runner::estimate_agent_request_tokens;
 use super::DRAFTS_DIR;
+
+fn is_component_draft_path(draft_file: &Path, drafts_dir: &str) -> bool {
+    draft_file
+        .strip_prefix(drafts_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("components")
+}
+
+fn collect_markdown_artifacts(root: &Path) -> Result<Vec<serde_json::Value>> {
+    fn visit(dir: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, out)?;
+                continue;
+            }
+
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+
+            let content = fs::read_to_string(&path)?;
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            out.push(json!({
+                "name": name,
+                "path": path.to_string_lossy().to_string(),
+                "content": content,
+            }));
+        }
+
+        Ok(())
+    }
+
+    let mut artifacts = Vec::new();
+    visit(root, &mut artifacts)?;
+    artifacts.sort_by(|a, b| {
+        let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        a_path.cmp(b_path)
+    });
+    Ok(artifacts)
+}
+
+fn detect_duplicate_component_names(draft_file: &Path) -> Result<Vec<String>> {
+    let Some(components_dir) = draft_file.parent() else {
+        return Ok(Vec::new());
+    };
+    if components_dir.file_name().and_then(|s| s.to_str()) != Some("components") {
+        return Ok(Vec::new());
+    }
+
+    let current_name = draft_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let mut seen = Vec::new();
+    for entry in fs::read_dir(components_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if stem == current_name {
+            seen.push(path);
+        }
+    }
+
+    if seen.len() <= 1 {
+        return Ok(Vec::new());
+    }
+
+    Ok(seen
+        .into_iter()
+        .map(|path| path.to_string_lossy().to_string())
+        .collect())
+}
+
+fn add_component_context(
+    draft_file: &Path,
+    context: &mut HashMap<String, serde_json::Value>,
+) -> Result<()> {
+    let Some(drafts_root) = draft_file.ancestors().find(|ancestor| {
+        ancestor.file_name().and_then(|s| s.to_str()) == Some("drafts")
+    }) else {
+        return Ok(());
+    };
+    let Some(project_root) = drafts_root.parent() else {
+        return Ok(());
+    };
+
+    let existing_specs = collect_markdown_artifacts(&project_root.join("specifications"))?;
+    if !existing_specs.is_empty() {
+        context.insert("existing_specifications".to_string(), json!(existing_specs));
+    }
+
+    let library_refs = collect_markdown_artifacts(&project_root.join("component_drafts"))?;
+    if !library_refs.is_empty() {
+        context.insert(
+            "component_library_references".to_string(),
+            json!(library_refs),
+        );
+    }
+
+    let duplicate_names = detect_duplicate_component_names(draft_file)?;
+    if !duplicate_names.is_empty() {
+        context.insert(
+            "duplicate_component_names".to_string(),
+            json!(duplicate_names),
+        );
+    }
+
+    Ok(())
+}
 
 fn compact_dependency_entries(
     value: &serde_json::Value,
@@ -114,6 +247,10 @@ pub(super) fn build_specification_context(
     draft_content: &str,
     mut context: HashMap<String, serde_json::Value>,
 ) -> Result<HashMap<String, serde_json::Value>> {
+    if is_component_draft_path(draft_file, DRAFTS_DIR) {
+        add_component_context(draft_file, &mut context)?;
+    }
+
     if !is_external_api_draft_path(draft_file, DRAFTS_DIR) {
         return Ok(context);
     }
