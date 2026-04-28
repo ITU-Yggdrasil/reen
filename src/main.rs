@@ -251,6 +251,7 @@ async fn main() -> Result<()> {
                         data: create_args.data,
                         brands: create_args.brands,
                         visuals,
+                        components: false,
                     };
                     cli::create_specification(
                         names,
@@ -275,6 +276,7 @@ async fn main() -> Result<()> {
                         data: create_args.data,
                         brands: create_args.brands,
                         visuals,
+                        components: false,
                     };
                     cli::create_implementation(
                         names,
@@ -294,6 +296,7 @@ async fn main() -> Result<()> {
                         data: create_args.data,
                         brands: create_args.brands,
                         visuals: false,
+                        components: false,
                     };
                     cli::create_tests(
                         names,

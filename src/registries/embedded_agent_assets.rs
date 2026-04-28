@@ -23,6 +23,9 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
         "create_specifications_brand.yml" => {
             Some(include_str!("../../agents/create_specifications_brand.yml"))
         }
+        "create_specification_components.yml" => Some(include_str!(
+            "../../agents/create_specification_components.yml"
+        )),
         "create_implementation.yml" => Some(include_str!("../../agents/create_implementation.yml")),
         "create_implementation_brand.yml" => {
             Some(include_str!("../../agents/create_implementation_brand.yml"))
@@ -44,6 +47,7 @@ pub fn embedded_expected_agent_names() -> &'static [&'static str] {
         "create_specifications_main",
         "create_specifications_external_api",
         "create_specifications_brand",
+        "create_specification_components",
         "create_implementation",
         "create_implementation_brand",
         "create_test",

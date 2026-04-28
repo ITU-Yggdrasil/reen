@@ -89,6 +89,7 @@ pub struct CategoryFilter {
     pub data: bool,
     pub brands: bool,
     pub visuals: bool,
+    pub components: bool,
 }
 
 impl CategoryFilter {
@@ -98,11 +99,12 @@ impl CategoryFilter {
             data: false,
             brands: false,
             visuals: false,
+            components: false,
         }
     }
 
     fn is_active(&self) -> bool {
-        self.contexts || self.data || self.brands || self.visuals
+        self.contexts || self.data || self.brands || self.visuals || self.components
     }
 
     fn include_data(&self) -> bool {
@@ -119,6 +121,10 @@ impl CategoryFilter {
 
     fn include_visuals(&self) -> bool {
         !self.is_active() || self.visuals
+    }
+
+    fn include_components(&self) -> bool {
+        !self.is_active() || self.components
     }
 
     fn include_root(&self) -> bool {
@@ -140,6 +146,7 @@ impl CategoryFilter {
                     "contexts" | "external_apis" => self.include_contexts(),
                     "brands" => self.include_brands(),
                     "visuals" => self.include_visuals(),
+                    "components" => self.include_components(),
                     _ => self.include_root(),
                 };
             }
@@ -150,6 +157,30 @@ impl CategoryFilter {
 
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
+
+fn is_component_draft_path(path: &Path, drafts_dir: &str) -> bool {
+    path.strip_prefix(drafts_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("components")
+}
+
+fn ensure_component_spec_dirs(drafts_dir: &str, specifications_dir: &str) -> Result<()> {
+    let drafts_root = PathBuf::from(drafts_dir);
+    if drafts_root.exists() {
+        fs::create_dir_all(drafts_root.join("components"))
+            .context("Failed to create component drafts directory")?;
+    }
+
+    let specs_root = PathBuf::from(specifications_dir);
+    if specs_root.exists() {
+        fs::create_dir_all(specs_root.join("components"))
+            .context("Failed to create component specifications directory")?;
+    }
+
+    Ok(())
+}
 
 /// Outcome of processing a single draft for specification creation.
 #[derive(Debug)]
@@ -259,6 +290,7 @@ fn create_specification_inner(
     let filter = *filter;
     let config = *config;
     Box::pin(async move {
+        ensure_component_spec_dirs(DRAFTS_DIR, SPECIFICATIONS_DIR)?;
         let names_provided = !names.is_empty();
         let names_for_clear = names.clone();
         let draft_files = resolve_input_files(DRAFTS_DIR, names, "md", &filter)?;
@@ -721,6 +753,17 @@ fn finalize_specification_output(
                 unresolved.join(", ")
             );
         }
+    }
+
+    if has_blocking_ambiguities && is_component_draft_path(draft_file, DRAFTS_DIR) {
+        return Ok(ProcessSpecOutcome::BlockingAmbiguities {
+            draft_file: draft_file.to_path_buf(),
+            draft_name: draft_name.to_string(),
+            draft_content: draft_content.to_string(),
+            spec_content,
+            actionable,
+            additional_context,
+        });
     }
 
     // Ensure the output directory exists
@@ -2283,6 +2326,7 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
             "create_specifications_context",
             "create_specifications_external_api",
             "create_specifications_brand",
+            "create_specification_components",
             "create_specifications_main",
         ],
         Stage::Implementation => &["create_implementation", "create_implementation_brand"],
@@ -3261,11 +3305,12 @@ fn resolve_named_input_in_category(
 /// Resolves input files in a structured order:
 /// 1. data/ folder (simple data types)
 /// 2. contexts/ folder (use cases with role players)
-/// 3. visuals/ folder (UI component drafts)
-/// 4. Root files (like app.md)
+/// 3. brands/ and visuals/ folders (design foundations)
+/// 4. components/ folder (component templates)
+/// 5. Root files (like app.md)
 ///
 /// The `filter` controls which categories are included. When no filter is
-/// active (both flags false), all three categories are scanned.
+/// active (all flags false), all categories are scanned.
 fn resolve_input_files(
     dir: &str,
     names: Vec<String>,
@@ -3301,6 +3346,11 @@ fn resolve_input_files(
         if filter.include_visuals() {
             let visuals_dir = dir_path.join("visuals");
             files.extend(collect_md_files_recursive(&visuals_dir, extension)?);
+        }
+
+        if filter.include_components() {
+            let components_dir = dir_path.join("components");
+            files.extend(collect_md_files_recursive(&components_dir, extension)?);
         }
 
         if filter.include_root() {
@@ -3377,6 +3427,15 @@ fn resolve_input_files(
                 }
             }
 
+            if !found && filter.include_components() {
+                let component_matches =
+                    resolve_named_input_in_category(&dir_path.join("components"), &name, extension)?;
+                if !component_matches.is_empty() {
+                    files.extend(component_matches);
+                    found = true;
+                }
+            }
+
             if !found && filter.include_root() {
                 let root_path = dir_path.join(format!("{}.{}", name, extension));
                 if root_path.exists() {
@@ -3399,6 +3458,9 @@ fn resolve_input_files(
                     }
                     if filter.include_visuals() {
                         parts.push("visuals/");
+                    }
+                    if filter.include_components() {
+                        parts.push("components/");
                     }
                     if filter.include_root() {
                         parts.push("root");
@@ -3525,6 +3587,21 @@ fn determine_specification_output_path(
         return Ok(PathBuf::from(specifications_dir).join(relative_path));
     }
 
+    if relative_path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("components")
+    {
+        let file_name = relative_path
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(""));
+        return Ok(PathBuf::from(specifications_dir)
+            .join("components")
+            .join(file_name));
+    }
+
     // Build output path in specifications directory
     let output_path = PathBuf::from(specifications_dir).join(relative_path);
     Ok(output_path)
@@ -3589,6 +3666,14 @@ fn determine_draft_input_path(
             .with_extension("md"));
     }
 
+    if first == Some("components") {
+        let file_name = relative_path
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(""));
+        return Ok(PathBuf::from(drafts_dir).join("components").join(file_name));
+    }
+
     Ok(PathBuf::from(drafts_dir).join(relative_path))
 }
 
@@ -3616,6 +3701,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
             "external_apis" => "create_specifications_external_api",
             "brands" => "create_specifications_brand",
             "visuals" => "create_specifications_brand",
+            "components" => "create_specification_components",
             _ => "create_specifications_main",
         }
     } else {
@@ -4245,6 +4331,17 @@ Problem:
     }
 
     #[test]
+    fn maps_component_draft_to_components_specification_path() {
+        let path = determine_specification_output_path(
+            Path::new("drafts/components/button.md"),
+            "drafts",
+            "specifications",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("specifications/components/button.md"));
+    }
+
+    #[test]
     fn maps_contexts_external_specification_back_to_external_api_draft_path() {
         let path = determine_draft_input_path(
             Path::new("specifications/contexts/external/stripe.md"),
@@ -4267,10 +4364,29 @@ Problem:
     }
 
     #[test]
+    fn maps_component_specification_back_to_component_draft_path() {
+        let path = determine_draft_input_path(
+            Path::new("specifications/components/button.md"),
+            "specifications",
+            "drafts",
+        )
+        .expect("path mapping");
+        assert_eq!(path, Path::new("drafts/components/button.md"));
+    }
+
+    #[test]
     fn determine_specification_agent_routes_visuals_to_brand_agent() {
         assert_eq!(
             determine_specification_agent(Path::new("drafts/visuals/snake_visuals.md"), "drafts"),
             "create_specifications_brand"
+        );
+    }
+
+    #[test]
+    fn determine_specification_agent_routes_components_to_component_agent() {
+        assert_eq!(
+            determine_specification_agent(Path::new("drafts/components/button.md"), "drafts"),
+            "create_specification_components"
         );
     }
 
@@ -4347,6 +4463,7 @@ Problem:
         fs::create_dir_all(drafts.join("contexts/ui")).expect("mkdir");
         fs::create_dir_all(drafts.join("external_apis")).expect("mkdir");
         fs::create_dir_all(drafts.join("brands")).expect("mkdir");
+        fs::create_dir_all(drafts.join("components")).expect("mkdir");
         fs::create_dir_all(drafts.join("data/payments")).expect("mkdir");
         fs::write(
             drafts.join("contexts/ui/terminal_renderer.md"),
@@ -4355,6 +4472,7 @@ Problem:
         .expect("write");
         fs::write(drafts.join("external_apis/stripe.md"), "# Stripe API").expect("write");
         fs::write(drafts.join("brands/acme.md"), "# Acme Brand").expect("write");
+        fs::write(drafts.join("components/button.md"), "# Button").expect("write");
         fs::write(
             drafts.join("data/payments/ledger_entry.md"),
             "# Ledger Entry",
@@ -4373,6 +4491,7 @@ Problem:
             .any(|p| p.ends_with("contexts/ui/terminal_renderer.md")));
         assert!(all.iter().any(|p| p.ends_with("external_apis/stripe.md")));
         assert!(all.iter().any(|p| p.ends_with("brands/acme.md")));
+        assert!(all.iter().any(|p| p.ends_with("components/button.md")));
         assert!(all
             .iter()
             .any(|p| p.ends_with("data/payments/ledger_entry.md")));
@@ -4396,6 +4515,7 @@ Problem:
                 data: false,
                 brands: false,
                 visuals: false,
+                components: false,
             },
         )
         .expect("external lookup");
@@ -4411,6 +4531,7 @@ Problem:
                 data: true,
                 brands: false,
                 visuals: false,
+                components: false,
             },
         )
         .expect("nested lookup");
@@ -4426,11 +4547,22 @@ Problem:
                 data: false,
                 brands: true,
                 visuals: false,
+                components: false,
             },
         )
         .expect("brand lookup");
         assert_eq!(by_brand_name.len(), 1);
         assert!(by_brand_name[0].ends_with("brands/acme.md"));
+
+        let by_component_name = resolve_input_files(
+            drafts.to_str().expect("drafts path"),
+            vec!["button".to_string()],
+            "md",
+            &CategoryFilter::all(),
+        )
+        .expect("component lookup");
+        assert_eq!(by_component_name.len(), 1);
+        assert!(by_component_name[0].ends_with("components/button.md"));
 
         let _ = fs::remove_dir_all(root);
     }
