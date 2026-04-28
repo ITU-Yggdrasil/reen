@@ -20,7 +20,13 @@
 
 [Describe the base layout pattern (e.g., horizontal, vertical, stacked, inline).]
 
-### Content Areas or Slots
+### Subcomponents
+[List the named design library components that this component is composed of, if any. Omit this section for atomic components like Button or Badge.]
+
+- [Subcomponent name]: [its role within this component]
+- [Subcomponent name]: [its role within this component]
+
+### Content Areas or Slots 
 
 [List and describe available content regions or slots.]
 
