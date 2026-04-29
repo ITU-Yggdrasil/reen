@@ -161,6 +161,21 @@ static_prompt: |
   - Implement reusable Leptos components when component specifications are provided.
   - Component specifications from `specifications/components/**/*.md` define component-level API,
     states, layout, accessibility, and styling requirements.
+  - For every generated Leptos component prop whose Rust type is `String`, add `#[prop(into)]`
+    directly on that parameter. This includes common props such as `label`, `title`,
+    `description`, `variant`, and `size`; no plain required `String` props are allowed.
+  - For every generated Leptos component prop whose Rust type is `Option<T>`, add
+    `#[prop(optional)]` or an explicit `#[prop(default = ...)]` directly on that parameter.
+    Optional props must not become required typed-builder fields.
+  - For optional string-like props, combine the annotations, for example
+    `#[prop(optional, into)] icon_leading: Option<String>`.
+  - Call sites may use string literals such as `label="Primary"` and may omit optional props;
+    generated component signatures must compile with those call sites.
+  - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
+    types. Do not construct Leptos components with struct syntax such as `Badge { ... }`.
+  - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
+    For composed content passed through props, use renderable content types such as `Children`,
+    `ChildrenFn`, `AnyView`, or `Option<AnyView>`.
   - When visual specifications are also provided, apply the visual identity globally and use it to
     style the component implementations.
   - Do not add component variants, states, or design-system elements that are not justified by the

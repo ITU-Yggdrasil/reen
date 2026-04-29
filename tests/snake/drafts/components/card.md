@@ -29,7 +29,6 @@ Primarily vertical and stacked. The default layout follows a top-to-bottom struc
 - `Link`: used when the card exposes secondary navigation or inline destinations.
 - `Badge`: used for optional status, category, or priority markers.
 - `Image`: used for optional preview imagery, illustration, or thumbnail content.
-- `Avatar`: used for an optional leading profile cue.
 
 ### Content Areas or Slots
 
