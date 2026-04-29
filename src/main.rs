@@ -155,6 +155,9 @@ enum CreateCommands {
         #[arg(long, help = "Only process drafts from the visuals/ folder")]
         visuals: bool,
 
+        #[arg(long, help = "Only process drafts from the components/ folder")]
+        components: bool,
+
         #[arg(
             long,
             help = "When compilation fails after code generation, invoke the automatic compilation-fix loop"
@@ -271,6 +274,7 @@ async fn main() -> Result<()> {
                 }
                 CreateCommands::Implementation {
                     visuals,
+                    components,
                     fix,
                     max_compile_fix_attempts,
                     names,
@@ -280,7 +284,7 @@ async fn main() -> Result<()> {
                         data: create_args.data,
                         brands: create_args.brands,
                         visuals,
-                        components: false,
+                        components,
                     };
                     cli::create_implementation(
                         names,
@@ -385,6 +389,72 @@ mod tests {
                 assert!(!visuals);
             }
             _ => panic!("expected create specification command"),
+        }
+    }
+
+    #[test]
+    fn create_specification_parses_visuals_flag() {
+        let cli = Cli::try_parse_from(["reen", "create", "specification", "--visuals"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Commands::Create(CreateArgs {
+                command:
+                    CreateCommands::Specification {
+                        components,
+                        visuals,
+                        ..
+                    },
+                ..
+            }) => {
+                assert!(visuals);
+                assert!(!components);
+            }
+            _ => panic!("expected create specification command"),
+        }
+    }
+
+    #[test]
+    fn create_implementation_parses_components_flag() {
+        let cli = Cli::try_parse_from(["reen", "create", "implementation", "--components"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Commands::Create(CreateArgs {
+                command:
+                    CreateCommands::Implementation {
+                        components,
+                        visuals,
+                        ..
+                    },
+                ..
+            }) => {
+                assert!(components);
+                assert!(!visuals);
+            }
+            _ => panic!("expected create implementation command"),
+        }
+    }
+
+    #[test]
+    fn create_implementation_parses_visuals_flag() {
+        let cli = Cli::try_parse_from(["reen", "create", "implementation", "--visuals"])
+            .expect("cli should parse");
+
+        match cli.command {
+            Commands::Create(CreateArgs {
+                command:
+                    CreateCommands::Implementation {
+                        components,
+                        visuals,
+                        ..
+                    },
+                ..
+            }) => {
+                assert!(visuals);
+                assert!(!components);
+            }
+            _ => panic!("expected create implementation command"),
         }
     }
 }
