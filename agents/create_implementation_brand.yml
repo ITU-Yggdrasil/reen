@@ -32,24 +32,26 @@ static_prompt: |
 
   ---
 
-  Your task is to read a completed brand identity specification and component specifications
-  together, then produce a fully scaffolded, runnable Leptos SSR web application that applies both:
-  brand tokens as concrete styling and component-level implementation requirements.
+  Your task is to read completed implementation-driving specifications, then produce a fully
+  scaffolded, runnable Leptos SSR web application that applies the provided inputs.
 
   Source expectations for this agent:
-  - Brand identity specification context comes from `specifications/visuals/*.md`.
-  - Component specification context comes from `specifications/components/*.md`.
-  - When component specification context is provided, treat it as additive and authoritative alongside
-    the brand identity specification, not as a replacement.
+  - Brand identity / visual specification context comes from completed `specifications/visuals/**/*.md`.
+  - Component specification context comes from completed `specifications/components/**/*.md`.
+  - A run may provide only visual specifications, only component specifications, or both together.
+  - All provided specification content is completed and authoritative for this run.
+  - When both visual and component specification context is provided, treat them as additive and
+    co-authoritative: visual specifications control global identity and styling direction, while
+    component specifications control reusable component requirements.
 
   ## Core Rules
 
-  - Follow the specification exactly for all defined brand tokens and rules.
+  - Follow the provided specifications exactly for all defined brand tokens, visual rules, and component requirements.
   - Do not invent missing brand token values.
-  - If the specification contains blocking ambiguities or references undefined brand tokens, fail explicitly.
+  - If the provided specifications contain blocking ambiguities or reference undefined brand tokens, fail explicitly.
   - Generate a complete multi-file scaffold, not a prose explanation and not a single source file.
-  - This agent owns the generated web application scaffold for brand-only runs.
-  - If non-brand specifications are present in the same run and would require shared scaffold ownership, fail explicitly rather than sharing ownership of root scaffold files.
+  - This agent owns the generated web application scaffold for visual/component brand-site runs.
+  - If normal context/data implementation specifications are present in the same run and would require shared scaffold ownership, fail explicitly rather than sharing ownership of root scaffold files.
 
   ## Fixed Technical Target
 
@@ -151,6 +153,18 @@ static_prompt: |
   - Prefer names like `--brand-colors-primary-black`, not generic names like `--color-primary-black`.
   - If a referenced brand token is not defined, fail explicitly.
   - Do not invent fallback brand values that are not present in the specification.
+  - If only component specifications are provided, generate a coherent scaffold implementing and
+    demonstrating those components without inventing absent brand token values.
+
+  ## Component Rules
+
+  - Implement reusable Leptos components when component specifications are provided.
+  - Component specifications from `specifications/components/**/*.md` define component-level API,
+    states, layout, accessibility, and styling requirements.
+  - When visual specifications are also provided, apply the visual identity globally and use it to
+    style the component implementations.
+  - Do not add component variants, states, or design-system elements that are not justified by the
+    completed component specifications.
 
   ## Scope Rules
 
@@ -210,10 +224,14 @@ static_prompt: |
 variable_prompt: |
   ## Input
 
-  Brand identity specification content (from `specifications/visuals/*.md`):
+  Primary completed specification content. This may contain completed visual specifications,
+  completed component specifications, or both, with path-labeled section envelopes:
   {{input.context_content}}
 
-  Component specifications content (from `specifications/components/*.md`, optional; aggregated):
+  Brand identity / visual specifications content (from `specifications/visuals/**/*.md`, optional):
+  {{input.brand_identity_specifications?}}
+
+  Component specifications content (from `specifications/components/**/*.md`, optional):
   {{input.component_specifications?}}
 
   Dependency manifest (optional, authoritative):
