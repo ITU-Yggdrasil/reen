@@ -190,12 +190,6 @@ fn is_visual_spec_path(path: &Path, specifications_dir: &str) -> bool {
         == Some("visuals")
 }
 
-fn is_brand_site_spec_path(path: &Path, specifications_dir: &str) -> bool {
-    is_brand_spec_path(path, specifications_dir)
-        || is_visual_spec_path(path, specifications_dir)
-        || is_component_spec_path(path, specifications_dir)
-}
-
 fn ensure_component_spec_dirs(drafts_dir: &str, specifications_dir: &str) -> Result<()> {
     let drafts_root = PathBuf::from(drafts_dir);
     if drafts_root.exists() {
@@ -1181,7 +1175,7 @@ pub async fn create_implementation(
         .retain(|key, _| key != "brands" && !key.starts_with("brands/"));
     let has_non_brand_targets = context_files
         .iter()
-        .any(|path| !is_brand_site_spec_path(path, SPECIFICATIONS_DIR));
+        .any(|path| !is_brand_spec_path(path, SPECIFICATIONS_DIR));
 
     if has_non_brand_targets {
         let output_dir = PathBuf::from(".");
@@ -1197,7 +1191,7 @@ pub async fn create_implementation(
             println!("✓ Project structure generated");
         }
     } else if config.verbose {
-        println!("Skipping generic project structure generation for brand-site implementation run");
+        println!("Skipping generic project structure generation for brand-only implementation run");
     }
 
     let mut recent_generated_files: Vec<PathBuf> = Vec::new();
@@ -1786,7 +1780,7 @@ async fn process_implementation(
 }
 
 fn implementation_agent_name(context_file: &Path) -> &'static str {
-    if is_brand_site_spec_path(context_file, SPECIFICATIONS_DIR) {
+    if is_brand_spec_path(context_file, SPECIFICATIONS_DIR) {
         "create_implementation_brand"
     } else {
         "create_implementation"
@@ -1858,14 +1852,14 @@ fn render_component_specifications() -> Result<Option<String>> {
 fn validate_implementation_scaffold_ownership(context_files: &[PathBuf]) -> Result<()> {
     let has_brand_targets = context_files
         .iter()
-        .any(|path| is_brand_site_spec_path(path, SPECIFICATIONS_DIR));
+        .any(|path| is_brand_spec_path(path, SPECIFICATIONS_DIR));
     let has_non_brand_targets = context_files
         .iter()
-        .any(|path| !is_brand_site_spec_path(path, SPECIFICATIONS_DIR));
+        .any(|path| !is_brand_spec_path(path, SPECIFICATIONS_DIR));
 
     if has_brand_targets && has_non_brand_targets {
         anyhow::bail!(
-            "Mixed implementation run detected: brand-site specifications and non-brand specifications both need root scaffold ownership. Run brand-site and non-brand generation separately."
+            "Mixed implementation run detected: brand specifications and non-brand specifications both need root scaffold ownership. Run brand-only and non-brand generation separately."
         );
     }
 
@@ -1878,7 +1872,7 @@ fn finalize_implementation_output(
     config: &Config,
     impl_result: String,
 ) -> Result<()> {
-    if is_brand_site_spec_path(context_file, SPECIFICATIONS_DIR) {
+    if is_brand_spec_path(context_file, SPECIFICATIONS_DIR) {
         return finalize_brand_implementation_output(
             context_file,
             context_name,
@@ -4398,7 +4392,7 @@ fn determine_implementation_output_path(
 ) -> Result<PathBuf> {
     let relative_path = relative_specification_path(context_file, specifications_dir)?;
 
-    if is_brand_site_spec_path(context_file, specifications_dir) {
+    if is_brand_spec_path(context_file, specifications_dir) {
         return Ok(PathBuf::from("Cargo.toml"));
     }
 
@@ -4494,9 +4488,10 @@ mod tests {
         determine_implementation_output_path, determine_specification_agent,
         determine_specification_output_path, ensure_dev_dependency_entry,
         extract_actionable_blocking_bullets, extract_actionable_specification_blockers,
-        extract_compile_error_message, finalize_specification_output, fit_context_to_token_limit,
-        generated_project_structure_paths, has_unfinished_specification, implementation_agent_name,
-        instructions_model_hash, parse_generated_files, resolve_input_files, sync_managed_block,
+        extract_compile_error_message, finalize_specification_output,
+        fit_context_to_token_limit, generated_project_structure_paths,
+        has_unfinished_specification, implementation_agent_name, instructions_model_hash,
+        parse_generated_files, resolve_input_files, sync_managed_block,
         validate_implementation_scaffold_ownership, CacheAgentInput, CategoryFilter, Config,
         ProcessSpecOutcome, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, DRAFTS_DIR,
     };
@@ -4797,17 +4792,9 @@ Problem:
     }
 
     #[test]
-    fn implementation_agent_name_routes_brand_site_specs_to_brand_agent() {
+    fn implementation_agent_name_routes_brand_specs_to_brand_agent() {
         assert_eq!(
             implementation_agent_name(Path::new("specifications/brands/acme.md")),
-            "create_implementation_brand"
-        );
-        assert_eq!(
-            implementation_agent_name(Path::new("specifications/visuals/snake_visuals.md")),
-            "create_implementation_brand"
-        );
-        assert_eq!(
-            implementation_agent_name(Path::new("specifications/components/button.md")),
             "create_implementation_brand"
         );
         assert_eq!(
@@ -4817,9 +4804,9 @@ Problem:
     }
 
     #[test]
-    fn mixed_brand_site_and_non_brand_implementation_runs_are_rejected() {
+    fn mixed_brand_and_non_brand_implementation_runs_are_rejected() {
         let context_files = vec![
-            PathBuf::from("specifications/components/button.md"),
+            PathBuf::from("specifications/brands/acme.md"),
             PathBuf::from("specifications/contexts/account.md"),
         ];
 
@@ -4828,16 +4815,6 @@ Problem:
         assert!(err
             .to_string()
             .contains("Mixed implementation run detected"));
-    }
-
-    #[test]
-    fn determine_implementation_output_path_maps_component_specs_to_scaffold_tracking_file() {
-        let path = determine_implementation_output_path(
-            Path::new("specifications/components/button.md"),
-            "specifications",
-        )
-        .expect("implementation path");
-        assert_eq!(path, Path::new("Cargo.toml"));
     }
 
     #[test]
@@ -5667,28 +5644,16 @@ placeholder
     }
 
     #[test]
-    fn implementation_context_adds_brand_scaffold_contract_for_brand_site_specs() {
+    fn implementation_context_adds_brand_scaffold_contract_only_for_brand_specs() {
         let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
         let root = temp_root("brand_impl_context");
         fs::create_dir_all(root.join("specifications/brands")).expect("mkdir brands");
-        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
-        fs::create_dir_all(root.join("specifications/components")).expect("mkdir components");
         fs::create_dir_all(root.join("specifications/contexts")).expect("mkdir contexts");
         fs::write(
             root.join("specifications/brands/acme.md"),
             "# Brand Identity Specification\n\n## Description\nplaceholder",
         )
         .expect("write brand spec");
-        fs::write(
-            root.join("specifications/visuals/snake.md"),
-            "# Visual Specification\n\n## Description\nplaceholder",
-        )
-        .expect("write visual spec");
-        fs::write(
-            root.join("specifications/components/button.md"),
-            "# Button - Component Specification\n\n## Description\nplaceholder",
-        )
-        .expect("write component spec");
         fs::write(
             root.join("specifications/contexts/account.md"),
             "# Account\n\n## Description\nplaceholder",
@@ -5708,28 +5673,6 @@ placeholder
             Some(&json!(render_brand_scaffold_contract()))
         );
         assert!(brand_context.get("component_specifications").is_none());
-
-        let mut visual_context = HashMap::new();
-        augment_implementation_generation_context(
-            Path::new("specifications/visuals/snake.md"),
-            &mut visual_context,
-        )
-        .expect("augment visual context");
-        assert_eq!(
-            visual_context.get("brand_scaffold_contract"),
-            Some(&json!(render_brand_scaffold_contract()))
-        );
-
-        let mut component_context = HashMap::new();
-        augment_implementation_generation_context(
-            Path::new("specifications/components/button.md"),
-            &mut component_context,
-        )
-        .expect("augment component context");
-        assert_eq!(
-            component_context.get("brand_scaffold_contract"),
-            Some(&json!(render_brand_scaffold_contract()))
-        );
 
         let mut non_brand_context = HashMap::new();
         augment_implementation_generation_context(
@@ -6231,16 +6174,10 @@ Card groups related content and actions into a single unit.
 - `Heading`: used for the title.
 "#;
         fs::write(root.join("drafts/components/card.md"), card_draft).expect("write card draft");
-        fs::write(
-            root.join("drafts/components/badge.md"),
-            "# Badge - Component Specification",
-        )
-        .expect("write badge draft");
-        fs::write(
-            root.join("drafts/components/image.md"),
-            "# Image - Component Specification",
-        )
-        .expect("write image draft");
+        fs::write(root.join("drafts/components/badge.md"), "# Badge - Component Specification")
+            .expect("write badge draft");
+        fs::write(root.join("drafts/components/image.md"), "# Image - Component Specification")
+            .expect("write image draft");
         fs::write(
             root.join("component_drafts/button.md"),
             "# Button\n\n## Description\nFallback button.",
