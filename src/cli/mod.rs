@@ -4443,8 +4443,9 @@ mod tests {
         determine_specification_output_path, ensure_dev_dependency_entry,
         extract_actionable_blocking_bullets, extract_actionable_specification_blockers,
         extract_compile_error_message, finalize_specification_output,
-        generated_project_structure_paths, has_unfinished_specification, implementation_agent_name,
-        instructions_model_hash, parse_generated_files, resolve_input_files, sync_managed_block,
+        fit_context_to_token_limit, generated_project_structure_paths,
+        has_unfinished_specification, implementation_agent_name, instructions_model_hash,
+        parse_generated_files, resolve_input_files, sync_managed_block,
         validate_implementation_scaffold_ownership, CacheAgentInput, CategoryFilter, Config,
         ProcessSpecOutcome, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, DRAFTS_DIR,
     };
@@ -5746,6 +5747,196 @@ placeholder
         assert!(!executor
             .is_cache_hit(&draft_content, additional)
             .expect("cache miss after clear"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_context_includes_runtime_brand_identity_specs_from_active_workspace() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("component_brand_context");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/brands")).expect("mkdir brands");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+
+        fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+        fs::write(
+            root.join("specifications/brands/acme.md"),
+            "# Brand Identity Specification\n\n## Description\n- Brand A",
+        )
+        .expect("write brand spec");
+        fs::write(
+            root.join("specifications/visuals/snake_visuals.md"),
+            "# Brand Identity Specification\n\n## Description\n- Visual contract",
+        )
+        .expect("write visual spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/button.md");
+        let draft_content = fs::read_to_string(draft_path).expect("read draft");
+        let additional = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("build specification context");
+
+        let brand_specs = additional
+            .get("brand_identity_specifications")
+            .and_then(|value| value.as_array())
+            .expect("brand identity specs array");
+        let brand_path = brand_specs[0]["path"]
+            .as_str()
+            .expect("brand path")
+            .replace('\\', "/");
+        let visual_path = brand_specs[1]["path"]
+            .as_str()
+            .expect("visual path")
+            .replace('\\', "/");
+
+        assert_eq!(brand_specs.len(), 2);
+        assert_eq!(brand_path, "specifications/brands/acme.md");
+        assert_eq!(visual_path, "specifications/visuals/snake_visuals.md");
+        assert!(brand_specs[0]["content"]
+            .as_str()
+            .expect("brand content")
+            .contains("Brand A"));
+        assert!(brand_specs[1]["content"]
+            .as_str()
+            .expect("visual content")
+            .contains("Visual contract"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_context_brand_identity_specs_are_scoped_to_each_project_root() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root_a = temp_root("component_brand_scope_a");
+        let root_b = temp_root("component_brand_scope_b");
+
+        for (root, brand_label) in [(&root_a, "Alpha"), (&root_b, "Beta")] {
+            fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+            fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+            fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+            fs::write(
+                root.join("specifications/visuals/snake_visuals.md"),
+                format!("# Brand Identity Specification\n\n## Description\n- {brand_label}"),
+            )
+            .expect("write visual spec");
+        }
+
+        let context_a = {
+            let _dir_guard = CurrentDirGuard::enter(&root_a);
+            let draft_path = Path::new("drafts/components/button.md");
+            let draft_content = fs::read_to_string(draft_path).expect("read draft a");
+            build_specification_context(draft_path, &draft_content, HashMap::new())
+                .expect("build context a")
+        };
+        let context_b = {
+            let _dir_guard = CurrentDirGuard::enter(&root_b);
+            let draft_path = Path::new("drafts/components/button.md");
+            let draft_content = fs::read_to_string(draft_path).expect("read draft b");
+            build_specification_context(draft_path, &draft_content, HashMap::new())
+                .expect("build context b")
+        };
+
+        assert_ne!(
+            context_a.get("brand_identity_specifications"),
+            context_b.get("brand_identity_specifications")
+        );
+
+        let _ = fs::remove_dir_all(&root_a);
+        let _ = fs::remove_dir_all(&root_b);
+    }
+
+    #[test]
+    fn active_brand_spec_changes_component_cache_input() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("component_brand_cache");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+        fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/button.md");
+        let draft_content = fs::read_to_string(draft_path).expect("read draft");
+        let agent_name = "create_specification_components";
+        let instructions = FileAgentRegistry::new(None)
+            .get_specification(agent_name)
+            .expect("specification")
+            .canonical_for_cache();
+
+        fs::write(
+            Path::new("specifications/visuals/snake_visuals.md"),
+            "# Brand Identity Specification\n\n## Description\n- Version A",
+        )
+        .expect("write version a");
+        let context_a = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("context a");
+        let runner_input_a = build_agent_input(agent_name, &draft_content, context_a);
+        let cache_key_a = cache_key_for_input(&instructions, &runner_input_a);
+
+        fs::write(
+            Path::new("specifications/visuals/snake_visuals.md"),
+            "# Brand Identity Specification\n\n## Description\n- Version B",
+        )
+        .expect("write version b");
+        let context_b = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("context b");
+        let runner_input_b = build_agent_input(agent_name, &draft_content, context_b);
+        let cache_key_b = cache_key_for_input(&instructions, &runner_input_b);
+
+        assert_ne!(cache_key_a, cache_key_b);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fit_context_to_token_limit_keeps_brand_identity_specs_when_compacting() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("component_brand_compact");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+        fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+        let long_brand_content = format!(
+            "# Brand Identity Specification\n\n## Description\n- {}\n",
+            "brand".repeat(5000)
+        );
+        fs::write(
+            root.join("specifications/visuals/snake_visuals.md"),
+            long_brand_content,
+        )
+        .expect("write long brand spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/button.md");
+        let draft_content = fs::read_to_string(draft_path).expect("read draft");
+        let context = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("build context");
+        let executor = AgentExecutor::new(
+            "create_specification_components",
+            &Config {
+                verbose: false,
+                dry_run: false,
+            },
+        )
+        .expect("executor");
+        let base_estimate = executor
+            .estimate_request_tokens(&draft_content, context.clone())
+            .expect("base estimate");
+
+        let limit = (base_estimate.saturating_sub(50)) as f64;
+        let (compacted, estimated) =
+            fit_context_to_token_limit(&executor, &draft_content, context, Some(limit))
+                .expect("fit context");
+
+        assert!(estimated as f64 <= limit);
+        let brand_specs = compacted
+            .get("brand_identity_specifications")
+            .and_then(|value| value.as_array())
+            .expect("brand specs array");
+        assert!(!brand_specs.is_empty());
+        assert!(brand_specs[0]["content"]
+            .as_str()
+            .expect("brand content")
+            .contains("Brand Identity Specification"));
 
         let _ = fs::remove_dir_all(&root);
     }

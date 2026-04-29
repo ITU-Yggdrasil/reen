@@ -131,6 +131,20 @@ fn collect_component_artifacts(root: &Path) -> Result<Vec<serde_json::Value>> {
     Ok(artifacts)
 }
 
+fn collect_brand_identity_artifacts(specifications_root: &Path) -> Result<Vec<serde_json::Value>> {
+    let mut artifacts = Vec::new();
+    for folder in ["brands", "visuals"] {
+        let mut folder_artifacts = collect_markdown_artifacts(&specifications_root.join(folder))?;
+        artifacts.append(&mut folder_artifacts);
+    }
+    artifacts.sort_by(|a, b| {
+        let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        a_path.cmp(b_path)
+    });
+    Ok(artifacts)
+}
+
 fn detect_duplicate_component_names(draft_file: &Path) -> Result<Vec<String>> {
     let Some(components_dir) = draft_file.parent() else {
         return Ok(Vec::new());
@@ -190,6 +204,15 @@ fn add_component_context(
     let existing_specs = collect_markdown_artifacts(&project_root.join("specifications"))?;
     if !existing_specs.is_empty() {
         context.insert("existing_specifications".to_string(), json!(existing_specs));
+    }
+
+    let brand_identity_specs =
+        collect_brand_identity_artifacts(&project_root.join("specifications"))?;
+    if !brand_identity_specs.is_empty() {
+        context.insert(
+            "brand_identity_specifications".to_string(),
+            json!(brand_identity_specs),
+        );
     }
 
     let draft_component_refs = collect_component_artifacts(&project_root.join("drafts/components"))?;
@@ -339,6 +362,7 @@ fn build_context_variants(
         ("dependency_closure", 1200usize, 8usize),
         ("mcp_context", 1200usize, 8usize),
         ("implemented_dependencies", 800usize, 6usize),
+        ("brand_identity_specifications", 1200usize, 8usize),
         ("draft_component_references", 1200usize, 8usize),
         ("component_library_references", 1200usize, 8usize),
     ];
