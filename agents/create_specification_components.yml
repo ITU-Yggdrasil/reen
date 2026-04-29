@@ -20,11 +20,13 @@ static_prompt: |
   ## Source Priority
 
   Use sources in this priority order:
-  1. The component template from `drafts/components/`
+  1. The active component template from `drafts/components/`
   2. Existing specification artifacts from `specifications/`
-  3. Fallback/reference material from `component_drafts/`
+  3. Other designer-authored component drafts from `drafts/components/`
+  4. Fallback/reference material from `component_drafts/`
 
   If sources conflict:
+  - designer-authored component drafts in `drafts/components/` override fallback/reference material for named subcomponents
   - existing specification artifacts override fallback/reference material
   - explicit component-template content overrides fallback/reference material
 
@@ -52,6 +54,8 @@ static_prompt: |
   - properties are implied by the template behavior but not defined clearly enough for a usable specification
   - source conflicts cannot be resolved by the priority rules above
   - the provided context indicates a duplicate component identity
+  - a named subcomponent does not exist in either `drafts/components/` or `component_drafts/`
+  - a named subcomponent does not match an exact name in `draft_component_names` before checking `component_library_names`
 
   When blocking questions are needed:
   - do not output a finalized component specification
@@ -79,6 +83,7 @@ static_prompt: |
   You MUST:
   - stay strictly within the source material and authoritative specification context
   - treat fallback component-library files as reference only
+  - treat designer-authored component drafts in `drafts/components/` as the preferred library for missing subcomponents
 
   ## Forbidden Transformations
 
@@ -144,6 +149,15 @@ variable_prompt: |
 
   Fallback/reference component library artifacts (optional):
   {{input.component_library_references?}}
+
+  Designer-authored component drafts (optional):
+  {{input.draft_component_references?}}
+
+  Designer-authored component names (optional):
+  {{input.draft_component_names?}}
+
+  Fallback/reference component names (optional):
+  {{input.component_library_names?}}
 
   Dependency manifest (optional):
   {{input.direct_dependencies?}}
