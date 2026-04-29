@@ -80,6 +80,87 @@ static_prompt: |
   - stay strictly within the source material and authoritative specification context
   - treat fallback component-library files as reference only
 
+  ## HTML Element Inference (Fallback)
+
+  When a component template does not include explicit HTML element mappings or semantic DOM references, you MAY infer and suggest appropriate HTML elements based on the component's type and purpose.
+
+  ### Inference Rules
+
+  Apply these semantic mappings when no explicit HTML mapping is found in the source:
+
+  **Atomic Components:**
+  - Button → `<button>`
+  - Input → `<input>`
+  - Text, Paragraph → `<div>` or `<span>` (context-dependent)
+  - Link → `<a>`
+  - Label → `<label>`
+  - Icon → `<svg>` or `<i>`
+  - Divider → `<hr>`
+  - Badge → `<span>`
+  - Checkbox → `<input type="checkbox">`
+  - Radio → `<input type="radio">`
+  - Toggle → `<input type="checkbox">` or `<button role="switch">`
+  - Select → `<select>`
+  - Textarea → `<textarea>`
+
+  **Composite Components:**
+  - Modal → `<dialog>` or `<div role="dialog">`
+  - Card → `<div>` (no specific semantic element required)
+  - Navigation bar → `<nav>`
+  - Table → `<table>`
+  - Layout container → `<div>`, `<section>`, `<main>`, or other appropriate structural container
+  - Form → `<form>`
+  - Dialog → `<dialog>`
+  - List → `<ul>`, `<ol>`, or `<div role="list">`
+
+  **Most Important Fallback Candidates:**
+  - Buttons
+  - Input fields
+  - Cards
+  - Navigation bars
+  - Modals
+  - Tables
+  - Layout containers
+
+  **For Unknown Component Types:**
+  - Infer from component name semantics
+  - Use element that best represents the component's function
+  - When uncertain, use `<div>` as a safe generic container
+
+  ### When to Apply Fallback
+
+  Apply HTML element inference when:
+  - The component template does not explicitly specify an HTML element or DOM role
+  - No existing specification artifact provides an HTML mapping
+  - No fallback/reference material includes an HTML mapping
+
+  Do NOT apply inference when:
+  - Explicit HTML mappings already exist in any source
+  - The component's HTML structure is intentionally platform-agnostic or design-only (with no DOM target)
+
+  ### How to Mark Fallbacks
+
+  When you apply an inferred HTML element, mark it clearly:
+  - Add a note: `⚠️ Fallback Applied: Inferred HTML element as <element>`
+  - Include this note in the relevant section (e.g., next to the HTML mapping or in a dedicated "HTML Mappings" section)
+  - The fallback note ensures the inferred element is distinguished from explicit source material
+
+  ### Scope
+
+  HTML element inference applies to:
+  - Atomic components (Button, Input, Text, Label, Icon, etc.)
+  - Composite components (Modal, Card, Form, Dialog, etc.)
+  - Both are equally valid candidates for fallback inference
+
+  ### Non-Blocking Behavior
+
+  When a fallback HTML element is inferred:
+  - Output a complete specification with the fallback included
+  - Do NOT ask blocking clarification questions solely because HTML elements were inferred
+  - The fallback makes the specification more complete and usable
+
+  The presence of a fallback does not require user review or confirmation to proceed.
+
   ## Forbidden Transformations
 
   You MUST NOT:
@@ -117,6 +198,10 @@ static_prompt: |
   `## Accessibility Notes`
   - keyboard expectations
   - ARIA or accessibility considerations if relevant
+
+  `## HTML Mappings` *(optional; include if explicit or inferred)*
+  - explicit HTML element mappings from the source
+  - inferred HTML elements marked with `⚠️ Fallback Applied: Inferred HTML element as <element>`
 
   If blocking clarification is required, output:
   - `# <Component Name>` when the name is known, otherwise `# Component Specification`
