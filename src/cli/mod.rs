@@ -1799,8 +1799,54 @@ fn augment_implementation_generation_context(
             "brand_scaffold_contract".to_string(),
             json!(render_brand_scaffold_contract()),
         );
+        if let Some(component_specification) = render_component_specifications()? {
+            additional_context.insert(
+                "component_specifications".to_string(),
+                json!(component_specification),
+            );
+        }
     }
     Ok(())
+}
+
+fn render_component_specifications() -> Result<Option<String>> {
+    let components_dir = Path::new(SPECIFICATIONS_DIR).join("components");
+    if !components_dir.exists() {
+        return Ok(None);
+    }
+
+    let mut spec_paths = fs::read_dir(&components_dir)
+        .with_context(|| {
+            format!(
+                "Failed to read design component specification directory {}",
+                components_dir.display()
+            )
+        })?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect::<Vec<_>>();
+    spec_paths.sort();
+
+    if spec_paths.is_empty() {
+        return Ok(None);
+    }
+
+    let mut rendered_sections = Vec::new();
+    for path in spec_paths {
+        let content = fs::read_to_string(&path).with_context(|| {
+            format!(
+                "Failed to read design component specification {}",
+                path.display()
+            )
+        })?;
+        rendered_sections.push(format!(
+            "===COMPONENT_SPEC: {}===\n{}\n===END_COMPONENT_SPEC===",
+            path.display(),
+            content
+        ));
+    }
+
+    Ok(Some(rendered_sections.join("\n\n")))
 }
 
 fn validate_implementation_scaffold_ownership(context_files: &[PathBuf]) -> Result<()> {
@@ -5626,6 +5672,7 @@ placeholder
             brand_context.get("brand_scaffold_contract"),
             Some(&json!(render_brand_scaffold_contract()))
         );
+        assert!(brand_context.get("component_specifications").is_none());
 
         let mut non_brand_context = HashMap::new();
         augment_implementation_generation_context(
@@ -5634,6 +5681,50 @@ placeholder
         )
         .expect("augment non-brand context");
         assert!(!non_brand_context.contains_key("brand_scaffold_contract"));
+        assert!(!non_brand_context.contains_key("component_specifications"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn implementation_context_includes_design_component_specs_for_brand_implementation() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_impl_component_specs");
+        fs::create_dir_all(root.join("specifications/brands")).expect("mkdir brands");
+        fs::create_dir_all(root.join("specifications/components")).expect("mkdir components");
+        fs::write(
+            root.join("specifications/brands/acme.md"),
+            "# Brand Identity Specification\n\n## Description\nplaceholder",
+        )
+        .expect("write brand spec");
+        fs::write(
+            root.join("specifications/components/button.md"),
+            "# Button Specification\n\n## Purpose\nA primary action button.",
+        )
+        .expect("write component spec");
+        fs::write(
+            root.join("specifications/components/input.md"),
+            "# Input Specification\n\n## Purpose\nA text input field.",
+        )
+        .expect("write component spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+
+        let mut brand_context = HashMap::new();
+        augment_implementation_generation_context(
+            Path::new("specifications/brands/acme.md"),
+            &mut brand_context,
+        )
+        .expect("augment brand context");
+
+        let rendered = brand_context
+            .get("component_specifications")
+            .and_then(|value| value.as_str())
+            .expect("component specifications context");
+        assert!(rendered.contains("===COMPONENT_SPEC: specifications/components/button.md==="));
+        assert!(rendered.contains("===COMPONENT_SPEC: specifications/components/input.md==="));
+        assert!(rendered.contains("# Button Specification"));
+        assert!(rendered.contains("# Input Specification"));
 
         let _ = fs::remove_dir_all(&root);
     }

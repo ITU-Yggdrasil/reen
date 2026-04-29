@@ -32,8 +32,15 @@ static_prompt: |
 
   ---
 
-  Your task is to read a completed brand identity specification and produce a fully scaffolded,
-  runnable Leptos SSR web application that applies the brand tokens as concrete styling.
+  Your task is to read a completed brand identity specification and component specifications
+  together, then produce a fully scaffolded, runnable Leptos SSR web application that applies both:
+  brand tokens as concrete styling and component-level implementation requirements.
+
+  Source expectations for this agent:
+  - Brand identity specification context comes from `specifications/visuals/*.md`.
+  - Component specification context comes from `specifications/components/*.md`.
+  - When component specification context is provided, treat it as additive and authoritative alongside
+    the brand identity specification, not as a replacement.
 
   ## Core Rules
 
@@ -203,8 +210,11 @@ static_prompt: |
 variable_prompt: |
   ## Input
 
-  Brand specification content:
+  Brand identity specification content (from `specifications/visuals/*.md`):
   {{input.context_content}}
+
+  Component specifications content (from `specifications/components/*.md`, optional; aggregated):
+  {{input.component_specifications?}}
 
   Dependency manifest (optional, authoritative):
   {{input.direct_dependencies?}}
