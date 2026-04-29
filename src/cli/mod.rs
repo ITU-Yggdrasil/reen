@@ -892,6 +892,16 @@ fn finalize_specification_output(
         } else {
             extract_actionable_specification_blockers(&normalized_spec_content, false)
         };
+        if is_component_draft_path(draft_file, DRAFTS_DIR) {
+            let unresolved =
+                unresolved_component_references(&normalized_spec_content, &additional_context);
+            actionable.extend(unresolved.into_iter().map(|name| {
+                format!(
+                    "Which existing component should satisfy `{}`? It is not defined in `drafts/components` or `component_drafts`.",
+                    name
+                )
+            }));
+        }
         has_blocking_ambiguities = !actionable.is_empty();
         if has_blocking_ambiguities {
             if is_component_draft_path(draft_file, DRAFTS_DIR) {
@@ -2043,6 +2053,75 @@ fn extract_blocking_ambiguities_section(content: &str) -> Option<String> {
 
 fn extract_component_clarification_questions_section(content: &str) -> Option<String> {
     extract_section(content, "Clarification Questions (Blocking)")
+}
+
+fn normalize_component_reference_name(name: &str) -> String {
+    name.trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_matches('`')
+        .trim_matches('*')
+        .trim_matches('_')
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn extract_subcomponent_reference_names(content: &str) -> Vec<String> {
+    let Some(section) = extract_section(content, "Subcomponents") else {
+        return Vec::new();
+    };
+
+    let mut names = Vec::new();
+    for (_, bullet) in extract_bullets_with_indent(&section) {
+        let bullet = bullet
+            .trim_start_matches("- ")
+            .trim_start_matches("* ")
+            .trim();
+        let candidate = bullet
+            .split_once(':')
+            .map(|(name, _)| name)
+            .or_else(|| bullet.split_once(" - ").map(|(name, _)| name))
+            .unwrap_or(bullet);
+        let candidate = candidate.trim();
+        if candidate.is_empty() || candidate.eq_ignore_ascii_case("none.") {
+            continue;
+        }
+        names.push(candidate.trim_matches('`').trim().to_string());
+    }
+
+    names
+}
+
+fn collect_known_component_names(context: &HashMap<String, serde_json::Value>) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for key in ["draft_component_names", "component_library_names"] {
+        if let Some(values) = context.get(key).and_then(|value| value.as_array()) {
+            for value in values {
+                if let Some(name) = value.as_str() {
+                    names.insert(normalize_component_reference_name(name));
+                }
+            }
+        }
+    }
+    names
+}
+
+fn unresolved_component_references(
+    content: &str,
+    context: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let known_names = collect_known_component_names(context);
+    let mut unresolved = Vec::new();
+    for name in extract_subcomponent_reference_names(content) {
+        let normalized = normalize_component_reference_name(&name);
+        if !normalized.is_empty() && !known_names.contains(&normalized) {
+            unresolved.push(name);
+        }
+    }
+    unresolved.sort_by_key(|name| name.to_ascii_lowercase());
+    unresolved.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    unresolved
 }
 
 fn extract_actionable_blocking_bullets_from_section(section: Option<String>) -> Vec<String> {
@@ -4364,8 +4443,9 @@ mod tests {
         determine_specification_output_path, ensure_dev_dependency_entry,
         extract_actionable_blocking_bullets, extract_actionable_specification_blockers,
         extract_compile_error_message, finalize_specification_output,
-        generated_project_structure_paths, has_unfinished_specification, implementation_agent_name,
-        instructions_model_hash, parse_generated_files, resolve_input_files, sync_managed_block,
+        fit_context_to_token_limit, generated_project_structure_paths,
+        has_unfinished_specification, implementation_agent_name, instructions_model_hash,
+        parse_generated_files, resolve_input_files, sync_managed_block,
         validate_implementation_scaffold_ownership, CacheAgentInput, CategoryFilter, Config,
         ProcessSpecOutcome, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START, DRAFTS_DIR,
     };
@@ -5672,6 +5752,196 @@ placeholder
     }
 
     #[test]
+    fn component_context_includes_runtime_brand_identity_specs_from_active_workspace() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("component_brand_context");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/brands")).expect("mkdir brands");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+
+        fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+        fs::write(
+            root.join("specifications/brands/acme.md"),
+            "# Brand Identity Specification\n\n## Description\n- Brand A",
+        )
+        .expect("write brand spec");
+        fs::write(
+            root.join("specifications/visuals/snake_visuals.md"),
+            "# Brand Identity Specification\n\n## Description\n- Visual contract",
+        )
+        .expect("write visual spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/button.md");
+        let draft_content = fs::read_to_string(draft_path).expect("read draft");
+        let additional = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("build specification context");
+
+        let brand_specs = additional
+            .get("brand_identity_specifications")
+            .and_then(|value| value.as_array())
+            .expect("brand identity specs array");
+        let brand_path = brand_specs[0]["path"]
+            .as_str()
+            .expect("brand path")
+            .replace('\\', "/");
+        let visual_path = brand_specs[1]["path"]
+            .as_str()
+            .expect("visual path")
+            .replace('\\', "/");
+
+        assert_eq!(brand_specs.len(), 2);
+        assert_eq!(brand_path, "specifications/brands/acme.md");
+        assert_eq!(visual_path, "specifications/visuals/snake_visuals.md");
+        assert!(brand_specs[0]["content"]
+            .as_str()
+            .expect("brand content")
+            .contains("Brand A"));
+        assert!(brand_specs[1]["content"]
+            .as_str()
+            .expect("visual content")
+            .contains("Visual contract"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn component_context_brand_identity_specs_are_scoped_to_each_project_root() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root_a = temp_root("component_brand_scope_a");
+        let root_b = temp_root("component_brand_scope_b");
+
+        for (root, brand_label) in [(&root_a, "Alpha"), (&root_b, "Beta")] {
+            fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+            fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+            fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+            fs::write(
+                root.join("specifications/visuals/snake_visuals.md"),
+                format!("# Brand Identity Specification\n\n## Description\n- {brand_label}"),
+            )
+            .expect("write visual spec");
+        }
+
+        let context_a = {
+            let _dir_guard = CurrentDirGuard::enter(&root_a);
+            let draft_path = Path::new("drafts/components/button.md");
+            let draft_content = fs::read_to_string(draft_path).expect("read draft a");
+            build_specification_context(draft_path, &draft_content, HashMap::new())
+                .expect("build context a")
+        };
+        let context_b = {
+            let _dir_guard = CurrentDirGuard::enter(&root_b);
+            let draft_path = Path::new("drafts/components/button.md");
+            let draft_content = fs::read_to_string(draft_path).expect("read draft b");
+            build_specification_context(draft_path, &draft_content, HashMap::new())
+                .expect("build context b")
+        };
+
+        assert_ne!(
+            context_a.get("brand_identity_specifications"),
+            context_b.get("brand_identity_specifications")
+        );
+
+        let _ = fs::remove_dir_all(&root_a);
+        let _ = fs::remove_dir_all(&root_b);
+    }
+
+    #[test]
+    fn active_brand_spec_changes_component_cache_input() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("component_brand_cache");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+        fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/button.md");
+        let draft_content = fs::read_to_string(draft_path).expect("read draft");
+        let agent_name = "create_specification_components";
+        let instructions = FileAgentRegistry::new(None)
+            .get_specification(agent_name)
+            .expect("specification")
+            .canonical_for_cache();
+
+        fs::write(
+            Path::new("specifications/visuals/snake_visuals.md"),
+            "# Brand Identity Specification\n\n## Description\n- Version A",
+        )
+        .expect("write version a");
+        let context_a = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("context a");
+        let runner_input_a = build_agent_input(agent_name, &draft_content, context_a);
+        let cache_key_a = cache_key_for_input(&instructions, &runner_input_a);
+
+        fs::write(
+            Path::new("specifications/visuals/snake_visuals.md"),
+            "# Brand Identity Specification\n\n## Description\n- Version B",
+        )
+        .expect("write version b");
+        let context_b = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("context b");
+        let runner_input_b = build_agent_input(agent_name, &draft_content, context_b);
+        let cache_key_b = cache_key_for_input(&instructions, &runner_input_b);
+
+        assert_ne!(cache_key_a, cache_key_b);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fit_context_to_token_limit_keeps_brand_identity_specs_when_compacting() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("component_brand_compact");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+        fs::write(root.join("drafts/components/button.md"), "# Button").expect("write draft");
+        let long_brand_content = format!(
+            "# Brand Identity Specification\n\n## Description\n- {}\n",
+            "brand".repeat(5000)
+        );
+        fs::write(
+            root.join("specifications/visuals/snake_visuals.md"),
+            long_brand_content,
+        )
+        .expect("write long brand spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/button.md");
+        let draft_content = fs::read_to_string(draft_path).expect("read draft");
+        let context = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("build context");
+        let executor = AgentExecutor::new(
+            "create_specification_components",
+            &Config {
+                verbose: false,
+                dry_run: false,
+            },
+        )
+        .expect("executor");
+        let base_estimate = executor
+            .estimate_request_tokens(&draft_content, context.clone())
+            .expect("base estimate");
+
+        let limit = (base_estimate.saturating_sub(50)) as f64;
+        let (compacted, estimated) =
+            fit_context_to_token_limit(&executor, &draft_content, context, Some(limit))
+                .expect("fit context");
+
+        assert!(estimated as f64 <= limit);
+        let brand_specs = compacted
+            .get("brand_identity_specifications")
+            .and_then(|value| value.as_array())
+            .expect("brand specs array");
+        assert!(!brand_specs.is_empty());
+        assert!(brand_specs[0]["content"]
+            .as_str()
+            .expect("brand content")
+            .contains("Brand Identity Specification"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn dependency_manifest_uses_metadata_only_and_marks_directness() {
         let direct = DependencyArtifact {
             name: "amount".to_string(),
@@ -5777,6 +6047,124 @@ placeholder
             actionable,
             vec!["- What variants does Button support?".to_string()]
         );
+    }
+
+    #[test]
+    fn component_draft_priority_allows_designer_owned_components_and_blocks_unknowns() {
+        let _guard = current_dir_lock().lock().expect("lock current dir");
+        let root = temp_root("component_priority");
+        fs::create_dir_all(root.join("drafts/components")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("component_drafts")).expect("mkdir library");
+        fs::create_dir_all(root.join("specifications/components")).expect("mkdir specs");
+
+        let card_draft = r#"# Card - Component Specification
+
+## Component Metadata
+
+### Name
+
+Card
+
+### Description
+
+Card groups related content and actions into a single unit.
+
+---
+
+## Visual Structure
+
+### Subcomponents
+
+- `Badge`: used for optional status or category markers.
+- `Image`: used for optional preview imagery.
+- `Avatar`: used for an optional leading profile cue.
+- `Button`: used for a primary action.
+- `Link`: used for a secondary action.
+- `Heading`: used for the title.
+"#;
+        fs::write(root.join("drafts/components/card.md"), card_draft).expect("write card draft");
+        fs::write(root.join("drafts/components/badge.md"), "# Badge - Component Specification")
+            .expect("write badge draft");
+        fs::write(root.join("drafts/components/image.md"), "# Image - Component Specification")
+            .expect("write image draft");
+        fs::write(
+            root.join("component_drafts/button.md"),
+            "# Button\n\n## Description\nFallback button.",
+        )
+        .expect("write button library");
+        fs::write(
+            root.join("component_drafts/link.md"),
+            "# Link\n\n## Description\nFallback link.",
+        )
+        .expect("write link library");
+        fs::write(
+            root.join("component_drafts/heading.md"),
+            "# Heading\n\n## Description\nFallback heading.",
+        )
+        .expect("write heading library");
+
+        let _dir = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/components/card.md");
+        let draft_content = fs::read_to_string(draft_path).expect("read draft");
+        let additional = build_specification_context(draft_path, &draft_content, HashMap::new())
+            .expect("build component context");
+
+        let spec_content = r#"# Card
+
+## Component Metadata
+- Name
+- Description
+
+## Visual Structure
+- layout structure
+- content areas or slots
+- alignment and spacing rules
+
+### Subcomponents
+- `Badge`: used for optional status or category markers.
+- `Image`: used for optional preview imagery.
+- `Avatar`: used for an optional leading profile cue.
+- `Button`: used for a primary action.
+- `Link`: used for a secondary action.
+- `Heading`: used for the title.
+
+## Variants
+- documented visual variants only
+
+## States
+- documented states only
+
+## Properties
+- configurable inputs only
+
+## Accessibility Notes
+- keyboard expectations
+- ARIA or accessibility considerations if relevant
+"#;
+
+        let outcome = finalize_specification_output(
+            &draft_content,
+            draft_path,
+            "card",
+            spec_content.to_string(),
+            additional,
+        )
+        .expect("finalize component spec");
+
+        match outcome {
+            ProcessSpecOutcome::CreatedWithBlockingAmbiguities { actionable, .. } => {
+                assert!(actionable.iter().any(|item| item.contains("Avatar")));
+                assert!(!actionable.iter().any(|item| item.contains("Badge")));
+                assert!(!actionable.iter().any(|item| item.contains("Image")));
+                assert!(!actionable.iter().any(|item| item.contains("Button")));
+                assert!(!actionable.iter().any(|item| item.contains("Link")));
+                assert!(!actionable.iter().any(|item| item.contains("Heading")));
+            }
+            other => panic!("expected blocking component outcome, got {:?}", other),
+        }
+
+        drop(_dir);
+        let _ = fs::remove_dir_all(&root);
     }
 
     fn valid_brand_spec_with_blocker() -> String {

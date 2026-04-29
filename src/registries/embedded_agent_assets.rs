@@ -92,4 +92,13 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn component_spec_agent_uses_runtime_brand_identity_input() {
+        let content = embedded_agent_spec("create_specification_components.yml")
+            .expect("embedded component spec agent");
+        assert!(content.contains("brand_identity_specifications"));
+        assert!(content.contains("provided for this run"));
+        assert!(content.contains("never assume a built-in default brand"));
+    }
 }

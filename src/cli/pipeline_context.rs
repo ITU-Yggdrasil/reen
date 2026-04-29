@@ -73,6 +73,78 @@ fn collect_markdown_artifacts(root: &Path) -> Result<Vec<serde_json::Value>> {
     Ok(artifacts)
 }
 
+fn declared_component_name(content: &str, fallback: &str) -> String {
+    let heading = content
+        .lines()
+        .find(|line| line.trim_start().starts_with('#'))
+        .map(|line| line.trim_start().trim_start_matches('#').trim())
+        .unwrap_or(fallback);
+
+    heading
+        .strip_suffix(" - Component Specification")
+        .unwrap_or(heading)
+        .trim()
+        .to_string()
+}
+
+fn collect_component_artifacts(root: &Path) -> Result<Vec<serde_json::Value>> {
+    fn visit(dir: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, out)?;
+                continue;
+            }
+
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+
+            let content = fs::read_to_string(&path)?;
+            let fallback_name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let name = declared_component_name(&content, fallback_name);
+            out.push(json!({
+                "name": name,
+                "path": path.to_string_lossy().to_string(),
+                "content": content,
+            }));
+        }
+
+        Ok(())
+    }
+
+    let mut artifacts = Vec::new();
+    visit(root, &mut artifacts)?;
+    artifacts.sort_by(|a, b| {
+        let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        a_path.cmp(b_path)
+    });
+    Ok(artifacts)
+}
+
+fn collect_brand_identity_artifacts(specifications_root: &Path) -> Result<Vec<serde_json::Value>> {
+    let mut artifacts = Vec::new();
+    for folder in ["brands", "visuals"] {
+        let mut folder_artifacts = collect_markdown_artifacts(&specifications_root.join(folder))?;
+        artifacts.append(&mut folder_artifacts);
+    }
+    artifacts.sort_by(|a, b| {
+        let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        a_path.cmp(b_path)
+    });
+    Ok(artifacts)
+}
+
 fn detect_duplicate_component_names(draft_file: &Path) -> Result<Vec<String>> {
     let Some(components_dir) = draft_file.parent() else {
         return Ok(Vec::new());
@@ -134,11 +206,68 @@ fn add_component_context(
         context.insert("existing_specifications".to_string(), json!(existing_specs));
     }
 
-    let library_refs = collect_markdown_artifacts(&project_root.join("component_drafts"))?;
-    if !library_refs.is_empty() {
+    let brand_identity_specs =
+        collect_brand_identity_artifacts(&project_root.join("specifications"))?;
+    if !brand_identity_specs.is_empty() {
+        context.insert(
+            "brand_identity_specifications".to_string(),
+            json!(brand_identity_specs),
+        );
+    }
+
+    let draft_component_refs = collect_component_artifacts(&project_root.join("drafts/components"))?;
+    if !draft_component_refs.is_empty() {
+        let draft_component_names = draft_component_refs
+            .iter()
+            .filter_map(|artifact| artifact.get("name").and_then(|v| v.as_str()))
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        context.insert(
+            "draft_component_references".to_string(),
+            json!(draft_component_refs),
+        );
+        context.insert(
+            "draft_component_names".to_string(),
+            json!(draft_component_names),
+        );
+    }
+
+    let draft_component_name_set = context
+        .get("draft_component_names")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(|name| name.to_string())
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+
+    let library_refs = collect_component_artifacts(&project_root.join("component_drafts"))?;
+    let filtered_library_refs: Vec<serde_json::Value> = library_refs
+        .into_iter()
+        .filter(|artifact| {
+            artifact
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|name| !draft_component_name_set.contains(name))
+                .unwrap_or(true)
+        })
+        .collect();
+    if !filtered_library_refs.is_empty() {
+        let component_library_names = filtered_library_refs
+            .iter()
+            .filter_map(|artifact| artifact.get("name").and_then(|v| v.as_str()))
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
         context.insert(
             "component_library_references".to_string(),
-            json!(library_refs),
+            json!(filtered_library_refs),
+        );
+        context.insert(
+            "component_library_names".to_string(),
+            json!(component_library_names),
         );
     }
 
@@ -233,6 +362,9 @@ fn build_context_variants(
         ("dependency_closure", 1200usize, 8usize),
         ("mcp_context", 1200usize, 8usize),
         ("implemented_dependencies", 800usize, 6usize),
+        ("brand_identity_specifications", 1200usize, 8usize),
+        ("draft_component_references", 1200usize, 8usize),
+        ("component_library_references", 1200usize, 8usize),
     ];
     let mut compact = base_context.clone();
     let mut changed = false;
