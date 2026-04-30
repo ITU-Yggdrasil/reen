@@ -91,6 +91,10 @@ static_prompt: |
   - `### Surface`
   - `### Text and Foreground/Background`
 
+  Color token categories are subsections only. Never emit `## Primary`, `## Secondary`,
+  `## Semantic`, `## Surface`, or `## Text and Foreground/Background` as top-level sections.
+  They must appear exactly under `## Color Tokens` using `###` headings.
+
   Under `## Typography`:
   - `### Families`
   - `### Scales`
