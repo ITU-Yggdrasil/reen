@@ -176,6 +176,17 @@ static_prompt: |
   - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
     For composed content passed through props, use renderable content types such as `Children`,
     `ChildrenFn`, `AnyView`, or `Option<AnyView>`.
+  - When emitting any generated component implementation file under `src/components/*.rs`, also
+    emit `src/components/mod.rs`.
+  - `src/components/mod.rs` must declare every generated component module using the file stem,
+    for example `mod button;`, and re-export the public component function, for example
+    `pub use button::Button;`.
+  - When generated component files exist, `src/lib.rs` must declare `pub mod components;` so the
+    application can import reusable components.
+  - `src/app.rs` must import any generated components it renders, for example
+    `use crate::components::{Badge, Button};`.
+  - Generated composed components must import sibling generated components they render, for example
+    a `Card` component that renders `Badge` or `Image` must import them from `crate::components`.
   - When visual specifications are also provided, apply the visual identity globally and use it to
     style the component implementations.
   - Do not add component variants, states, or design-system elements that are not justified by the
@@ -231,6 +242,9 @@ static_prompt: |
   - [ ] `src/lib.rs` contains bootstrap/hydration-facing app wiring
   - [ ] `src/app.rs` defines the root `App` component and routing
   - [ ] `src/app.rs` imports router APIs from `leptos_router`
+  - [ ] If `src/components/*.rs` files are emitted, `src/components/mod.rs` declares and re-exports them
+  - [ ] If generated components exist, `src/lib.rs` declares `pub mod components;`
+  - [ ] Any generated component rendered by `src/app.rs` or another component is imported into that file
   - [ ] `"/"` is present as the root route
   - [ ] `style/app.css` exists and applies defined brand tokens as CSS custom properties where applicable
   - [ ] All emitted brand token references are defined in the specification
