@@ -155,6 +155,17 @@ impl CategoryFilter {
     }
 }
 
+fn implementation_category_filter(filter: &CategoryFilter) -> CategoryFilter {
+    if filter.visuals {
+        CategoryFilter {
+            components: true,
+            ..*filter
+        }
+    } else {
+        *filter
+    }
+}
+
 const DRAFTS_DIR: &str = "drafts";
 const SPECIFICATIONS_DIR: &str = "specifications";
 
@@ -1125,7 +1136,9 @@ pub async fn create_implementation(
 ) -> Result<()> {
     let names_provided = !names.is_empty();
     let names_for_clear = names.clone();
-    let context_files = resolve_input_files(SPECIFICATIONS_DIR, names, "md", filter)?;
+    let implementation_filter = implementation_category_filter(filter);
+    let context_files =
+        resolve_input_files(SPECIFICATIONS_DIR, names, "md", &implementation_filter)?;
 
     if context_files.is_empty() {
         println!("No context files found to process");
@@ -1171,7 +1184,7 @@ pub async fn create_implementation(
         SPECIFICATIONS_DIR,
         DRAFTS_DIR,
         names_provided,
-        filter,
+        &implementation_filter,
     )?;
     let total_count: usize = execution_levels.iter().map(|level| level.len()).sum();
     println!(
@@ -4764,10 +4777,11 @@ mod tests {
         extract_actionable_blocking_bullets, extract_actionable_specification_blockers,
         extract_compile_error_message, finalize_specification_output, fit_context_to_token_limit,
         generated_project_structure_paths, has_unfinished_specification, implementation_agent_name,
-        instructions_model_hash, is_brand_site_implementation_spec_path, parse_generated_files,
-        resolve_input_files, sync_managed_block, validate_implementation_scaffold_ownership,
-        CacheAgentInput, CategoryFilter, Config, ProcessSpecOutcome, BDD_TEST_TARGETS_END,
-        BDD_TEST_TARGETS_START, DRAFTS_DIR,
+        implementation_category_filter, instructions_model_hash,
+        is_brand_site_implementation_spec_path, parse_generated_files, resolve_input_files,
+        sync_managed_block, validate_implementation_scaffold_ownership, CacheAgentInput,
+        CategoryFilter, Config, ProcessSpecOutcome, BDD_TEST_TARGETS_END, BDD_TEST_TARGETS_START,
+        DRAFTS_DIR,
     };
     use crate::cli::agent_executor::AgentExecutor;
     use crate::cli::brand_scaffold::{
@@ -5308,6 +5322,87 @@ Problem:
 
         assert_eq!(component_only.len(), 1);
         assert!(component_only[0].ends_with("components/button.md"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn implementation_visuals_filter_includes_components() {
+        let root = temp_root("implementation_visuals_filter");
+        let specifications = root.join("specifications");
+        fs::create_dir_all(specifications.join("visuals")).expect("mkdir visuals");
+        fs::create_dir_all(specifications.join("components")).expect("mkdir components");
+        fs::create_dir_all(specifications.join("contexts")).expect("mkdir contexts");
+        fs::write(
+            specifications.join("visuals/snake_visuals.md"),
+            "# Snake Visuals",
+        )
+        .expect("write visuals");
+        fs::write(specifications.join("components/button.md"), "# Button")
+            .expect("write component");
+        fs::write(specifications.join("contexts/game_loop.md"), "# Game Loop")
+            .expect("write context");
+
+        let filter = implementation_category_filter(&CategoryFilter {
+            contexts: false,
+            data: false,
+            brands: false,
+            visuals: true,
+            components: false,
+        });
+        let files = resolve_input_files(
+            specifications.to_str().expect("specifications path"),
+            Vec::new(),
+            "md",
+            &filter,
+        )
+        .expect("implementation visuals lookup");
+
+        assert_eq!(files.len(), 2);
+        assert!(files
+            .iter()
+            .any(|path| path.ends_with("visuals/snake_visuals.md")));
+        assert!(files
+            .iter()
+            .any(|path| path.ends_with("components/button.md")));
+        assert!(!files
+            .iter()
+            .any(|path| path.ends_with("contexts/game_loop.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn implementation_components_filter_stays_component_only() {
+        let root = temp_root("implementation_components_filter");
+        let specifications = root.join("specifications");
+        fs::create_dir_all(specifications.join("visuals")).expect("mkdir visuals");
+        fs::create_dir_all(specifications.join("components")).expect("mkdir components");
+        fs::write(
+            specifications.join("visuals/snake_visuals.md"),
+            "# Snake Visuals",
+        )
+        .expect("write visuals");
+        fs::write(specifications.join("components/button.md"), "# Button")
+            .expect("write component");
+
+        let filter = implementation_category_filter(&CategoryFilter {
+            contexts: false,
+            data: false,
+            brands: false,
+            visuals: false,
+            components: true,
+        });
+        let files = resolve_input_files(
+            specifications.to_str().expect("specifications path"),
+            Vec::new(),
+            "md",
+            &filter,
+        )
+        .expect("implementation component lookup");
+
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with("components/button.md"));
 
         let _ = fs::remove_dir_all(root);
     }

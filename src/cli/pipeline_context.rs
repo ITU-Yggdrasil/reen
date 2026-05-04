@@ -215,7 +215,8 @@ fn add_component_context(
         );
     }
 
-    let draft_component_refs = collect_component_artifacts(&project_root.join("drafts/components"))?;
+    let draft_component_refs =
+        collect_component_artifacts(&project_root.join("drafts/components"))?;
     if !draft_component_refs.is_empty() {
         let draft_component_names = draft_component_refs
             .iter()
