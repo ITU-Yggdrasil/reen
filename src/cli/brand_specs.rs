@@ -217,6 +217,36 @@ pub fn unresolved_brand_token_references(
         .collect())
 }
 
+pub fn repair_brand_spec_heading_levels(spec_content: &str) -> String {
+    let mut repaired = Vec::new();
+    let mut in_color_tokens = false;
+
+    for line in spec_content.lines() {
+        if let Some((level, heading)) = parse_heading(line) {
+            if level == 2 && heading == "Color Tokens" {
+                in_color_tokens = true;
+                repaired.push(line.to_string());
+                continue;
+            }
+
+            if in_color_tokens && level == 2 {
+                if COLOR_SUBSECTIONS
+                    .iter()
+                    .any(|candidate| *candidate == heading)
+                {
+                    repaired.push(format!("### {}", heading));
+                    continue;
+                }
+                in_color_tokens = false;
+            }
+        }
+
+        repaired.push(line.to_string());
+    }
+
+    repaired.join("\n")
+}
+
 fn parse_brand_spec(spec_content: &str) -> Result<ParsedBrandSpec> {
     let mut first_heading_seen = false;
     let mut section_order = Vec::new();
@@ -681,8 +711,8 @@ struct ParsedBrandSpec {
 mod tests {
     use super::{
         collect_brand_token_references, is_brand_draft_path, is_brand_spec_path,
-        missing_required_brand_spec_parts, unresolved_brand_token_references,
-        validate_brand_spec_content,
+        missing_required_brand_spec_parts, repair_brand_spec_heading_levels,
+        unresolved_brand_token_references, validate_brand_spec_content,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -851,6 +881,16 @@ Structured visual identity for Acme.
     }
 
     #[test]
+    fn repairs_misleveled_color_subsection_heading() {
+        let spec = valid_brand_spec().replace("### Semantic", "## Semantic");
+        let repaired = repair_brand_spec_heading_levels(&spec);
+
+        assert!(repaired.contains("### Semantic"));
+        assert!(!repaired.contains("\n## Semantic"));
+        validate_brand_spec_content(&repaired).expect("repaired brand spec should validate");
+    }
+
+    #[test]
     fn rejects_missing_required_section() {
         let spec = valid_brand_spec().replace("## Token Reference Rules", "## Token Rules");
         let err = validate_brand_spec_content(&spec).expect_err("expected failure");
@@ -951,9 +991,8 @@ Ok.
 
     #[test]
     fn ignores_namespace_only_brand_references() {
-        let refs = collect_brand_token_references(
-            "All color tokens use the `brand.colors` namespace.",
-        );
+        let refs =
+            collect_brand_token_references("All color tokens use the `brand.colors` namespace.");
         assert!(refs.is_empty());
 
         let root = temp_root("namespace_refs");

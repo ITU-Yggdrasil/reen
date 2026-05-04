@@ -28,7 +28,8 @@ use agent_executor::{AgentExecutor, AgentResponse};
 use brand_scaffold::render_brand_scaffold_contract;
 use brand_specs::{
     is_brand_draft_path, is_brand_spec_path, missing_required_brand_spec_parts,
-    unresolved_brand_token_references, validate_brand_spec_content,
+    repair_brand_spec_heading_levels, unresolved_brand_token_references,
+    validate_brand_spec_content,
 };
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
@@ -850,6 +851,7 @@ fn finalize_specification_output(
     let has_blocking_ambiguities;
 
     if is_visual_draft_path(draft_file, DRAFTS_DIR) {
+        normalized_spec_content = repair_brand_spec_heading_levels(&normalized_spec_content);
         actionable = extract_actionable_blocking_bullets_from_section(
             extract_blocking_ambiguities_section(&normalized_spec_content),
         );
@@ -879,6 +881,7 @@ fn finalize_specification_output(
             );
         }
     } else if is_brand_draft_path(draft_file, DRAFTS_DIR) {
+        normalized_spec_content = repair_brand_spec_heading_levels(&normalized_spec_content);
         let validation = validate_brand_spec_content(&normalized_spec_content).map_err(|err| {
             anyhow::anyhow!(
                 "generated brand specification for '{}' is invalid: {}",
@@ -7168,6 +7171,43 @@ Card groups related content and actions into a single unit.
             written,
             "## Blocking Ambiguities\n\n- The draft does not define any semantic color tokens for warning/error states."
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visual_brand_specs_repair_misleveled_color_subsections_before_validation() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("visual_heading_repair");
+        fs::create_dir_all(root.join("drafts/visuals")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir specs");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/visuals/snake.md");
+        let draft_content = "# Snake";
+        fs::write(draft_path, draft_content).expect("write draft");
+
+        let spec_content = valid_brand_spec_with_blocker()
+            .replace(
+                "\n## Blocking Ambiguities\n- The draft does not define any semantic color tokens for warning/error states.\n",
+                "\n",
+            )
+            .replace("### Semantic", "## Semantic");
+
+        let outcome = finalize_specification_output(
+            draft_content,
+            draft_path,
+            "snake",
+            spec_content,
+            HashMap::new(),
+        )
+        .expect("finalize repaired visual spec");
+
+        assert!(matches!(outcome, ProcessSpecOutcome::Success));
+
+        let written = fs::read_to_string("specifications/visuals/snake.md").expect("read spec");
+        assert!(written.contains("### Semantic"));
+        assert!(!written.contains("\n## Semantic"));
+
         let _ = fs::remove_dir_all(root);
     }
 

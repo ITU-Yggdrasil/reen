@@ -174,8 +174,15 @@ static_prompt: |
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
     types. Do not construct Leptos components with struct syntax such as `Badge { ... }`.
   - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
-    For composed content passed through props, use renderable content types such as `Children`,
-    `ChildrenFn`, `AnyView`, or `Option<AnyView>`.
+  - Do not pass component tags or `view!` fragments directly as prop attribute values. Invalid:
+    `media=<Image src="/placeholder.jpg" alt="Placeholder" variant="thumbnail"/>`.
+  - Prefer plain data props for composed generated components instead of view-valued props. For
+    example, a generated `Card` should accept props like `media_src`, `media_alt`, `badge_label`,
+    `badge_variant`, `action_label`, and `action_variant`, then render `<Image/>`, `<Badge/>`,
+    and `<Button/>` internally.
+  - Only use Leptos child/slot types such as `Children` or `ChildrenFn` when the component is
+    intentionally invoked with nested children between an opening and closing tag. Do not use
+    `AnyView` or `Option<AnyView>` in generated component props.
   - When emitting any generated component implementation file under `src/components/*.rs`, also
     emit `src/components/mod.rs`.
   - `src/components/mod.rs` must declare every generated component module using the file stem,
