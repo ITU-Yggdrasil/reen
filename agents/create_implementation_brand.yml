@@ -176,6 +176,16 @@ static_prompt: |
   - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
     For composed content passed through props, use renderable content types such as `Children`,
     `ChildrenFn`, `AnyView`, or `Option<AnyView>`.
+  - Generated `view!` macro attributes must use conservative, broadly compatible Leptos syntax.
+  - Do not emit `class:...={...}` conditional class bindings when the class name contains hyphens,
+    BEM modifiers, or any other non-trivial token pattern such as `button--primary`,
+    `top-nav--default`, or `theme-toggle--text-segmented`.
+  - When conditional styling is needed, compute the final class string in Rust and pass it through
+    plain `class=...` in `view!` rather than relying on `class:` toggles.
+  - Prefer plain `class="..."` or `class=...` attributes over Leptos class-toggle shorthand unless
+    the emitted syntax is guaranteed to compile.
+  - BEM-style CSS class names are allowed in stylesheet strings and `class=...` values, but must
+    not be emitted through `class:` bindings.
   - When visual specifications are also provided, apply the visual identity globally and use it to
     style the component implementations.
   - Do not add component variants, states, or design-system elements that are not justified by the
@@ -232,6 +242,8 @@ static_prompt: |
   - [ ] `src/app.rs` defines the root `App` component and routing
   - [ ] `src/app.rs` imports router APIs from `leptos_router`
   - [ ] `"/"` is present as the root route
+  - [ ] All emitted `view!` macro attributes use valid Leptos syntax
+  - [ ] No emitted `class:` binding uses dashed or BEM-style class names; conditional classes use computed `class=...` strings instead
   - [ ] `style/app.css` exists and applies defined brand tokens as CSS custom properties where applicable
   - [ ] All emitted brand token references are defined in the specification
   - [ ] The scaffold is intended to run with `cargo leptos watch`
