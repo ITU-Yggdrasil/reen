@@ -4,7 +4,7 @@
 
 Lupa Accounts is defined by clarity, trust, and restraint. Its visual and verbal expression should make private banking feel calm, understandable, and confidently modern without relying on aggressive marketing cues or dense financial-product styling.
 
-The experience should feel premium but quiet, with a strong focus on readability, spacious composition, and one clear primary action. The brand avoids clutter, excessive decoration, and anything that makes signing in feel complicated or uncertain.
+The experience should feel premium but quiet, with a strong focus on readability, spacious composition, and one clear primary content hierarchy. The brand avoids clutter, excessive decoration, and anything that makes reviewing accounts feel complicated or uncertain.
 
 
 ---
@@ -20,14 +20,14 @@ Communication should be:
 * Trustworthy without sounding cold
 * Concise without feeling abrupt
 
-Avoid playful language, exaggerated fintech claims, or overly technical wording. The tone should help users feel secure and oriented immediately, especially on the sign-in screen.
+Avoid playful language, exaggerated fintech claims, or overly technical wording. The tone should help users feel secure and oriented immediately, especially on the accounts dashboard.
 
 ---
 
 ### Logo and Color System
 
 **Logo**
-The Lupa wordmark should be treated as a refined textual brand cue rather than as a loud emblem. It should appear clean, stable, and consistent wherever it is used, including in the top navigation and the login hero.
+The Lupa wordmark should be treated as a refined textual brand cue rather than as a loud emblem. It should appear clean, stable, and consistent wherever it is used, including in the top navigation and the main dashboard summary area.
 
 * Maintain clear space around the wordmark to preserve its calm presence
 * Do not distort, rotate, decorate, or outline the wordmark
@@ -37,7 +37,7 @@ The Lupa wordmark should be treated as a refined textual brand cue rather than a
 **Color**
 The visual identity is built on a restrained, high-clarity palette.
 
-Soft light surfaces and dark readable text form the foundation, creating a trustworthy and low-friction experience. A muted accent color may be used to introduce focus and emphasis, especially for the primary sign-in button and small interaction highlights.
+Soft light surfaces and dark readable text form the foundation, creating a trustworthy and low-friction experience. A muted accent color may be used to introduce focus and emphasis, especially for primary action buttons, active utility controls, and small interaction highlights.
 
 Additional supporting tones such as muted grays, softened dark neutrals, and subtle cool gradients may be used sparingly to support hierarchy, depth, and atmosphere, but they should never overpower the interface.
 
@@ -67,7 +67,7 @@ Visuals should feel:
 * Modern and polished
 * Supportive rather than attention-seeking
 
-Abstract background gradients, blur, glow, or tonal layering may be used to add depth to the login experience, but the design should avoid literal photography, noisy textures, or high-energy promotional illustration.
+Abstract background gradients, blur, glow, or tonal layering may be used to add depth to the dashboard experience, but the design should avoid literal photography, noisy textures, or high-energy promotional illustration.
 
 ---
 
@@ -85,14 +85,14 @@ The Lupa Accounts identity should always be applied with consistency and restrai
 
 * Maintain clear hierarchy and spacious composition in all layouts
 * Ensure strong contrast and immediate readability in all states
-* Use one dominant call to action in focused flows such as sign-in
+* Use one dominant content hierarchy in focused flows such as account overview and assistant support
 * Use decorative gradients or glow only when they support atmosphere without reducing clarity
 
 All applications of the brand should reflect its core principles: calm trust, composure, and plainspoken usability.
 
-Examples of correct usage should demonstrate generous spacing, a restrained page shell, a strong but simple headline, and a clearly emphasized sign-in action.
+Examples of correct usage should demonstrate generous spacing, a restrained page shell, a strong but simple balance-led summary, clearly repeated account cards, and a supportive assistant panel.
 
-Incorrect usage includes multiple competing calls to action, heavy dashboard chrome on authentication pages, overly saturated gradients, or copy that sounds promotional instead of reassuring.
+Incorrect usage includes multiple competing dashboard focal points, heavy or noisy module chrome, overly saturated gradients, or copy that sounds promotional instead of reassuring.
 
 ---
 

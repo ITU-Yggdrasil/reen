@@ -8,7 +8,7 @@ Footer
 
 ### Description
 
-Footer is the low-emphasis site footer used to present lightweight legal navigation, ownership labeling, and trust-supporting microcopy at the end of the page. It should be used to close the page quietly without competing with the primary authentication flow.
+Footer is the low-emphasis site footer used to present lightweight legal navigation, ownership labeling, and trust-supporting microcopy at the end of the page. It should be used to close the page quietly without competing with the primary dashboard content.
 
 ---
 
@@ -62,7 +62,7 @@ Groups reflow into multiple lines or stacks while preserving readable grouping.
 
 ### Link Hover
 
-Legal links gain recognizable interactive feedback without becoming louder than the page’s primary CTA.
+Legal links gain recognizable interactive feedback without becoming louder than the page's primary actions.
 
 ---
 
@@ -103,4 +103,4 @@ Legal links gain recognizable interactive feedback without becoming louder than 
 
 - Don't turn the footer into a second navigation bar.
 - Don't add dense product messaging or promotional content.
-- Don't give trust-badge styling so much weight that it competes with the page headline or sign-in action.
+- Don't give trust-badge styling so much weight that it competes with the page headline or primary account actions.
