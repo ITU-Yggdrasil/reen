@@ -189,9 +189,16 @@ pub fn collect_brand_token_references(content: &str) -> Vec<String> {
     let pattern = Regex::new(r"\bbrand(?:\.[A-Za-z0-9_-]+)+\b").expect("brand ref regex");
     let mut refs = BTreeSet::new();
     for m in pattern.find_iter(content) {
-        refs.insert(m.as_str().to_string());
+        let reference = m.as_str();
+        if !is_brand_namespace_reference(reference) {
+            refs.insert(reference.to_string());
+        }
     }
     refs.into_iter().collect()
+}
+
+fn is_brand_namespace_reference(reference: &str) -> bool {
+    reference.split('.').count() == 2
 }
 
 pub fn unresolved_brand_token_references(
@@ -940,6 +947,50 @@ Ok.
         let refs =
             collect_brand_token_references("Use `brand.colors.primary.default` in the layout.");
         assert_eq!(refs, vec!["brand.colors.primary.default".to_string()]);
+    }
+
+    #[test]
+    fn ignores_namespace_only_brand_references() {
+        let refs = collect_brand_token_references(
+            "All color tokens use the `brand.colors` namespace.",
+        );
+        assert!(refs.is_empty());
+
+        let root = temp_root("namespace_refs");
+        let specs = root.join("specifications").join("brands");
+        fs::create_dir_all(&specs).expect("mkdir");
+        fs::write(specs.join("acme.md"), valid_brand_spec()).expect("write");
+
+        let unresolved = unresolved_brand_token_references(
+            "All color tokens use the `brand.colors` namespace.",
+            root.join("specifications").to_str().expect("spec path"),
+        )
+        .expect("resolved refs");
+
+        assert!(unresolved.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reports_incomplete_three_segment_brand_references() {
+        let refs = collect_brand_token_references("Use `brand.colors.primary` for emphasis.");
+        assert_eq!(refs, vec!["brand.colors.primary".to_string()]);
+
+        let root = temp_root("incomplete_refs");
+        let specs = root.join("specifications").join("brands");
+        fs::create_dir_all(&specs).expect("mkdir");
+        fs::write(specs.join("acme.md"), valid_brand_spec()).expect("write");
+
+        let unresolved = unresolved_brand_token_references(
+            "Use `brand.colors.primary` for emphasis.",
+            root.join("specifications").to_str().expect("spec path"),
+        )
+        .expect("resolved refs");
+
+        assert_eq!(unresolved, vec!["brand.colors.primary".to_string()]);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
