@@ -835,6 +835,15 @@ Structured visual identity for Acme.
     }
 
     #[test]
+    fn rejects_top_level_semantic_color_heading() {
+        let spec = valid_brand_spec().replace("### Semantic", "## Semantic");
+        let err = validate_brand_spec_content(&spec).expect_err("expected failure");
+        assert!(err
+            .to_string()
+            .contains("brand specification has unexpected section 'Semantic'"));
+    }
+
+    #[test]
     fn rejects_missing_required_section() {
         let spec = valid_brand_spec().replace("## Token Reference Rules", "## Token Rules");
         let err = validate_brand_spec_content(&spec).expect_err("expected failure");
