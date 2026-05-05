@@ -2011,42 +2011,13 @@ fn augment_implementation_generation_context(
 
 fn render_component_specifications() -> Result<Option<String>> {
     let components_dir = Path::new(SPECIFICATIONS_DIR).join("components");
-    if !components_dir.exists() {
-        return Ok(None);
-    }
-
-    let mut spec_paths = fs::read_dir(&components_dir)
-        .with_context(|| {
-            format!(
-                "Failed to read design component specification directory {}",
-                components_dir.display()
-            )
-        })?
-        .filter_map(|entry| entry.ok().map(|item| item.path()))
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
-        .collect::<Vec<_>>();
-    spec_paths.sort();
-
-    if spec_paths.is_empty() {
-        return Ok(None);
-    }
-
-    let mut rendered_sections = Vec::new();
-    for path in spec_paths {
-        let content = fs::read_to_string(&path).with_context(|| {
-            format!(
-                "Failed to read design component specification {}",
-                path.display()
-            )
-        })?;
-        rendered_sections.push(format!(
-            "===COMPONENT_SPEC: {}===\n{}\n===END_COMPONENT_SPEC===",
-            path.display(),
-            content
-        ));
-    }
-
-    Ok(Some(rendered_sections.join("\n\n")))
+    let spec_paths = collect_md_files_recursive(&components_dir, "md").with_context(|| {
+        format!(
+            "Failed to read design component specification directory {}",
+            components_dir.display()
+        )
+    })?;
+    render_selected_specifications("COMPONENT_SPEC", &spec_paths)
 }
 
 fn render_specification_bundle(label: &str, spec_paths: &[PathBuf]) -> Result<String> {
@@ -2090,11 +2061,18 @@ fn augment_brand_site_implementation_context(
         additional_context.insert("brand_identity_specifications".to_string(), json!(rendered));
     }
 
-    let component_specs = context_files
+    let selected_component_specs = context_files
         .iter()
         .filter(|path| is_component_spec_path(path, SPECIFICATIONS_DIR))
         .cloned()
         .collect::<Vec<_>>();
+    let component_specs = if !selected_component_specs.is_empty() {
+        selected_component_specs
+    } else if !visual_specs.is_empty() {
+        collect_md_files_recursive(&Path::new(SPECIFICATIONS_DIR).join("components"), "md")?
+    } else {
+        Vec::new()
+    };
     if let Some(rendered) = render_selected_specifications("COMPONENT_SPEC", &component_specs)? {
         additional_context.insert("component_specifications".to_string(), json!(rendered));
     }
@@ -6183,6 +6161,95 @@ placeholder
         assert!(components.contains("===COMPONENT_SPEC: specifications/components/button.md==="));
         assert!(components.contains("# Button"));
         assert!(!components.contains("# Input"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn brand_site_visual_only_context_falls_back_to_all_component_specs() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_site_visual_context_components_fallback");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+        fs::create_dir_all(root.join("specifications/components")).expect("mkdir components");
+        fs::write(
+            root.join("specifications/visuals/snake.md"),
+            "# Snake Visuals\n\n## Description\nVisual identity.",
+        )
+        .expect("write visual spec");
+        fs::write(
+            root.join("specifications/components/button.md"),
+            "# Button\n\n## Purpose\nPrimary action.",
+        )
+        .expect("write component spec");
+        fs::write(
+            root.join("specifications/components/input.md"),
+            "# Input\n\n## Purpose\nText input.",
+        )
+        .expect("write component spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let selected = vec![PathBuf::from("specifications/visuals/snake.md")];
+        let mut context = HashMap::new();
+        augment_brand_site_implementation_context(&selected, &mut context)
+            .expect("augment visual-only brand-site context");
+
+        let components = context
+            .get("component_specifications")
+            .and_then(|value| value.as_str())
+            .expect("component specs context");
+        assert!(components.contains("button.md==="));
+        assert!(components.contains("input.md==="));
+        assert!(components.contains("# Button"));
+        assert!(components.contains("# Input"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fit_context_to_token_limit_compacts_component_specifications_strings() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_impl_component_compact");
+        fs::create_dir_all(&root).expect("mkdir root");
+        let _dir_guard = CurrentDirGuard::enter(&root);
+
+        let executor = AgentExecutor::new(
+            "create_implementation_brand",
+            &Config {
+                verbose: false,
+                dry_run: false,
+            },
+        )
+        .expect("executor");
+        let long_components = format!(
+            "===COMPONENT_SPEC: specifications/components/button.md===\n{}\n===END_COMPONENT_SPEC===",
+            "component".repeat(5000)
+        );
+        let context_content = "# Snake Visuals\n\n## Description\nVisual identity.";
+        let mut context = HashMap::new();
+        context.insert(
+            "brand_scaffold_contract".to_string(),
+            json!(render_brand_scaffold_contract()),
+        );
+        context.insert(
+            "component_specifications".to_string(),
+            json!(long_components.clone()),
+        );
+
+        let base_estimate = executor
+            .estimate_request_tokens(context_content, context.clone())
+            .expect("base estimate");
+        let limit = (base_estimate.saturating_sub(50)) as f64;
+        let (compacted, estimated) =
+            fit_context_to_token_limit(&executor, context_content, context, Some(limit))
+                .expect("fit context");
+
+        assert!(estimated as f64 <= limit);
+        let rendered = compacted
+            .get("component_specifications")
+            .and_then(|value| value.as_str())
+            .expect("component specifications");
+        assert!(rendered.contains("===COMPONENT_SPEC: specifications/components/button.md==="));
+        assert!(rendered.len() < long_components.len());
 
         let _ = fs::remove_dir_all(&root);
     }

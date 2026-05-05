@@ -288,6 +288,18 @@ fn compact_dependency_entries(
     content_limit: usize,
     max_entries: usize,
 ) -> serde_json::Value {
+    if let Some(content) = value.as_str() {
+        let truncated = if content.chars().count() > content_limit {
+            format!(
+                "{}\n...[truncated by reen]",
+                content.chars().take(content_limit).collect::<String>()
+            )
+        } else {
+            content.to_string()
+        };
+        return serde_json::Value::String(truncated);
+    }
+
     let Some(entries) = value.as_array() else {
         return value.clone();
     };
@@ -364,6 +376,7 @@ fn build_context_variants(
         ("mcp_context", 1200usize, 8usize),
         ("implemented_dependencies", 800usize, 6usize),
         ("brand_identity_specifications", 1200usize, 8usize),
+        ("component_specifications", 1200usize, 8usize),
         ("draft_component_references", 1200usize, 8usize),
         ("component_library_references", 1200usize, 8usize),
     ];

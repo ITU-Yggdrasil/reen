@@ -108,6 +108,22 @@ pub async fn ensure_compiles_with_auto_fix(
         max_attempts, session_dir_display
     );
 
+    if apply_generated_ui_compile_fixes(project_root, &output.stderr)? {
+        fs::write(
+            session_dir.join("preflight_fix.txt"),
+            "Applied deterministic generated-UI compilation fixes before agent-based retries.\n",
+        )
+        .ok();
+        output = run_cargo_build(project_root)?;
+        if output.status_success {
+            println!(
+                "✓ Build restored by deterministic generated-UI fixes. Logs: {}",
+                session_dir_display
+            );
+            return Ok(());
+        }
+    }
+
     let cfg = compile_fix_config();
 
     for attempt in 1..=max_attempts {
@@ -237,9 +253,18 @@ pub async fn ensure_compiles_with_auto_fix(
             );
         }
 
+        let before_patch = snapshot_patch_targets(project_root, &extracted)?;
         let applied_patch = apply_unified_diff(project_root, &extracted)
             .context("Failed to apply proposed patch")?;
         fs::write(attempt_dir.join("applied.patch"), &applied_patch).ok();
+        if !patch_changed_any_target(project_root, &before_patch)? {
+            fs::write(
+                attempt_dir.join("no_op_patch.txt"),
+                "Resolver patch applied without changing any target file contents.\n",
+            )
+            .ok();
+            continue;
+        }
 
         output = run_cargo_build(project_root)?;
         if output.status_success {
@@ -285,12 +310,112 @@ fn create_session_dir(project_root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+fn apply_generated_ui_compile_fixes(project_root: &Path, stderr: &str) -> Result<bool> {
+    let app_path = project_root.join("src").join("app.rs");
+    if !app_path.exists() {
+        return Ok(false);
+    }
+    if !stderr.contains("src\\app.rs") && !stderr.contains("src/app.rs") {
+        return Ok(false);
+    }
+
+    let original = fs::read_to_string(&app_path)
+        .with_context(|| format!("Failed to read {}", app_path.display()))?;
+    let mut updated = original.clone();
+
+    updated = generated_signal_read_re()
+        .replace_all(&updated, "class:active=move || $signal.get() == \"$value\"")
+        .to_string();
+    updated = generated_signal_write_re()
+        .replace_all(&updated, "on:click=move |_| $signal.set(\"$value\")")
+        .to_string();
+    updated = optional_string_prop_re()
+        .replace_all(&updated, "#[prop(optional, into)] $name: Option<String>,")
+        .to_string();
+    updated = string_default_prop_re()
+        .replace_all(
+            &updated,
+            "#[prop(default = String::from(\"$value\"), into)] $name: String,",
+        )
+        .to_string();
+    updated = borrowed_badge_label_re()
+        .replace_all(
+            &updated,
+            "<Badge label=$value.to_string() variant=\"$variant\"/>",
+        )
+        .to_string();
+    updated = for_view_prop_re()
+        .replace_all(&updated, "children=move |$param| {")
+        .to_string();
+    updated = utility_action_mouse_event_re()
+        .replace_all(&updated, "on_click: fn(MouseEvent),")
+        .to_string();
+    updated = forwarded_option_string_prop_re()
+        .replace_all(&updated, "icon: Option<String>,")
+        .to_string();
+    updated = forwarded_option_badge_prop_re()
+        .replace_all(&updated, "badge: Option<BadgeConfig>,")
+        .to_string();
+
+    if updated.contains("fn(MouseEvent)") && !updated.contains("use leptos::ev::MouseEvent;") {
+        updated = format!("use leptos::ev::MouseEvent;\n{}", updated);
+    }
+
+    if updated == original {
+        return Ok(false);
+    }
+
+    fs::write(&app_path, updated).with_context(|| format!("Failed to write {}", app_path.display()))?;
+    Ok(true)
+}
+
 fn write_attempt_compile_output(attempt_dir: &Path, output: &CompilationOutput) -> Result<()> {
     fs::write(attempt_dir.join("cargo_stdout.txt"), &output.stdout)
         .context("Failed to write cargo stdout")?;
     fs::write(attempt_dir.join("cargo_stderr.txt"), &output.stderr)
         .context("Failed to write cargo stderr")?;
     Ok(())
+}
+
+fn snapshot_patch_targets(project_root: &Path, diff: &str) -> Result<BTreeMap<String, String>> {
+    let file_patches = parse_unified_diff(diff).context("Invalid unified diff")?;
+    let mut snapshot = BTreeMap::new();
+    for fp in file_patches {
+        if fp.is_deletion {
+            continue;
+        }
+        let target = fp
+            .new_path
+            .clone()
+            .or(fp.old_path.clone())
+            .ok_or_else(|| anyhow::anyhow!("Patch missing file path"))?;
+        let full = project_root.join(&target);
+        let content = if full.exists() {
+            fs::read_to_string(&full).with_context(|| format!("Failed to read {}", full.display()))?
+        } else {
+            String::new()
+        };
+        snapshot.insert(target, content);
+    }
+    Ok(snapshot)
+}
+
+fn patch_changed_any_target(
+    project_root: &Path,
+    before_patch: &BTreeMap<String, String>,
+) -> Result<bool> {
+    for (target, before) in before_patch {
+        let full = project_root.join(target);
+        let after = if full.exists() {
+            fs::read_to_string(&full).with_context(|| format!("Failed to read {}", full.display()))?
+        } else {
+            String::new()
+        };
+        if &after != before {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn parse_rustc_diagnostics(stderr: &str) -> Vec<DiagnosticSpan> {
@@ -1346,6 +1471,87 @@ fn stub_macro_re() -> &'static Regex {
     })
 }
 
+fn generated_signal_read_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"class:active=move \|\| (?P<signal>[A-Za-z_][A-Za-z0-9_]*)\(\) == "(?P<value>[^"]+)""#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn generated_signal_write_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"on:click=move \|_\| (?P<signal>[A-Za-z_][A-Za-z0-9_]*)\("(?P<value>[^"]+)"\)"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn optional_string_prop_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"#\[prop\(optional\)\]\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*): Option<String>,"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn string_default_prop_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"#\[prop\(default = "(?P<value>[^"]+)"\)\]\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*): String,"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn borrowed_badge_label_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"<Badge label=(?P<value>[A-Za-z_][A-Za-z0-9_]*) variant="(?P<variant>[^"]+)"\s*/>"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn for_view_prop_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"view=move \|(?P<param>[A-Za-z_][A-Za-z0-9_]*(?::[^|]+)?)\| \{"#)
+            .expect("valid regex")
+    })
+}
+
+fn utility_action_mouse_event_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"on_click:\s*leptos::ev::MouseEvent,"#).expect("valid regex")
+    })
+}
+
+fn forwarded_option_string_prop_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"#\[prop\(optional,\s*into\)\]\s+icon:\s+Option<String>,"#)
+            .expect("valid regex")
+    })
+}
+
+fn forwarded_option_badge_prop_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"#\[prop\(optional\)\]\s+badge:\s+Option<BadgeConfig>,"#)
+            .expect("valid regex")
+    })
+}
+
 fn spec_method_code_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -1362,7 +1568,10 @@ fn spec_method_bold_re() -> &'static Regex {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_guardrails, map_src_to_spec};
+    use super::{
+        apply_generated_ui_compile_fixes, check_guardrails, map_src_to_spec, patch_changed_any_target,
+        snapshot_patch_targets,
+    };
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -1605,6 +1814,80 @@ mod tests {
 
         let report = check_guardrails(&root, diff).expect("guardrail report");
         assert!(report.ok, "issues: {:?}", report.issues);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn generated_ui_compile_fixes_rewrite_known_leptos_patterns() {
+        let root = make_temp_test_dir("compile_fix_generated_ui");
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src dir");
+        let app = src.join("app.rs");
+        fs::write(
+            &app,
+            r#"#[component]
+fn ThemeToggle() -> impl IntoView {
+    let (theme, set_theme) = create_signal("light");
+    view! {
+        <button class:active=move || theme() == "light" on:click=move |_| set_theme("light")>
+            Light
+        </button>
+    }
+}
+
+#[component]
+fn AccountCard(
+    #[prop(optional)] badge: Option<String>,
+    #[prop(default = "neutral")] variant: String,
+) -> impl IntoView {
+    view! {
+        {badge.as_ref().map(|b| view! { <Badge label=b variant="neutral"/> })}
+    }
+}
+"#,
+        )
+        .expect("write app");
+
+        let changed = apply_generated_ui_compile_fixes(
+            &root,
+            "error[E0618]:\n  --> src/app.rs:1:1\nerror[E0308]:\n  --> src/app.rs:2:2\n",
+        )
+        .expect("apply generated ui fixes");
+        assert!(changed);
+
+        let updated = fs::read_to_string(&app).expect("read app");
+        assert!(updated.contains("theme.get() == \"light\""));
+        assert!(updated.contains("set_theme.set(\"light\")"));
+        assert!(updated.contains("#[prop(optional, into)] badge: Option<String>,"));
+        assert!(updated.contains(
+            "#[prop(default = String::from(\"neutral\"), into)] variant: String,"
+        ));
+        assert!(updated.contains("<Badge label=b.to_string() variant=\"neutral\"/>"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn patch_changed_any_target_detects_noop_patch() {
+        let root = make_temp_test_dir("compile_fix_noop_patch");
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src dir");
+        let app = src.join("app.rs");
+        fs::write(&app, "fn main() {}\n").expect("write app");
+
+        let diff = r#"diff --git a/src/app.rs b/src/app.rs
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1 +1 @@
+ fn main() {}
+"#;
+
+        let before = snapshot_patch_targets(&root, diff).expect("snapshot patch targets");
+        assert!(
+            !patch_changed_any_target(&root, &before).expect("check changed targets"),
+            "no-op patch should not report file changes"
+        );
 
         fs::remove_dir_all(&root).ok();
     }

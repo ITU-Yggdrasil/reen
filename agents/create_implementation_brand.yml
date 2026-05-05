@@ -202,8 +202,13 @@ static_prompt: |
     For composed content passed through props, use renderable content types such as `Children`,
     `ChildrenFn`, `AnyView`, or `Option<AnyView>`.
   - Target the Leptos `0.6.x` API family used by the scaffold dependencies.
+  - For Leptos signals created with `create_signal(...)`, read values with `.get()` and update
+    them with `.set(...)`. Do not emit `theme()` / `set_theme(...)` call-style signal usage.
+  - For signal-driven class toggles and comparisons, prefer patterns such as
+    `class:active=move || theme.get() == "light"` and `on:click=move |_| set_theme.set("light")`.
   - For Leptos `0.6` list rendering with `<For />`, use `children=move |item| view! { ... }`,
     not `view=move |item| { ... }`.
+  - Never emit a `<For ... view=... />` prop. The prop name must be `children=...`.
   - A valid pattern is:
     `<For each=move || items.clone() key=|item| item.id.clone() children=move |item| view! { <div>{item.id}</div> } />`
   - Do not use JSX-style spread props such as `<Badge ..badge />`, `<AccountCard ..account />`,
@@ -224,10 +229,26 @@ static_prompt: |
     and commonly breaks repeated-item rendering. For demo or placeholder utility actions, prefer
     static buttons without stored closures, enum-based actions, or cloneable callback types only if
     truly required.
+  - Do not emit event payload types where callback/function types are required. For example, do not
+    generate `on_click: MouseEvent` or `on_click: leptos::ev::MouseEvent` as a stored field type.
+    If a stored click handler is truly needed, use a callable type such as `fn(MouseEvent)` and
+    ensure `MouseEvent` is imported.
   - Do not emit `on:click=some_boxed_callback.clone()` patterns.
   - When rendering from borrowed items or shared references, do not move owned `String` fields out
     of borrowed data into `view!`. Clone the string field for attributes/text, or render from owned
     cloned items so the code compiles cleanly.
+  - When a child component expects an owned `String` prop and the current value is borrowed
+    (for example `&String` from `option.as_ref()`), clone or otherwise convert it to an owned
+    `String` before passing it into the child component.
+  - For generated `String` props with defaults, the default expression must itself be a `String`,
+    for example `#[prop(default = String::from("neutral"), into)] variant: String`.
+    Do not use bare string-literal defaults such as `#[prop(default = "neutral")] variant: String`.
+  - For optional string props, prefer `#[prop(optional, into)]` so omitted props remain optional
+    and provided string literals still compile at call sites.
+  - Exception: when a component prop is typed as `Option<T>` and parent call sites explicitly
+    forward an `Option<T>` value such as `icon=account.icon.clone()` or `badge=account.badge.clone()`,
+    do not use optional-builder annotations that coerce the setter to `T`. In that forwarding case,
+    keep the prop as a plain `Option<T>` parameter so an `Option<T>` expression compiles directly.
   - Avoid `view! {}.into_any()` as an empty branch. Prefer an explicit empty fragment strategy that
     is known to compile for Leptos `0.6`, or restructure the conditional rendering to avoid an
     empty `AnyView` branch entirely.

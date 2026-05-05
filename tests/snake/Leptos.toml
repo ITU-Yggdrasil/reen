@@ -1,10 +1,10 @@
 [package]
-name = "lupa-accounts"
+name = "lupa_accounts"
 lib = { path = "src/lib.rs" }
 bin = { path = "src/main.rs" }
 
 [leptos]
-output-name = "lupa-accounts"
+output-name = "lupa_accounts"
 site-root = "target/site"
 site-pkg-dir = "pkg"
 style-file = "style/app.css"

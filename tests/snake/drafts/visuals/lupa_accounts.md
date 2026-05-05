@@ -85,12 +85,12 @@ The Lupa Accounts identity should always be applied with consistency and restrai
 
 * Maintain clear hierarchy and spacious composition in all layouts
 * Ensure strong contrast and immediate readability in all states
-* Use one dominant content hierarchy in focused flows such as account overview and assistant support
+* Use one dominant content hierarchy in focused flows such as account overview
 * Use decorative gradients or glow only when they support atmosphere without reducing clarity
 
 All applications of the brand should reflect its core principles: calm trust, composure, and plainspoken usability.
 
-Examples of correct usage should demonstrate generous spacing, a restrained page shell, a strong but simple balance-led summary, clearly repeated account cards, and a supportive assistant panel.
+Examples of correct usage should demonstrate generous spacing, a restrained page shell, a strong but simple balance-led summary, and clearly repeated account cards.
 
 Incorrect usage includes multiple competing dashboard focal points, heavy or noisy module chrome, overly saturated gradients, or copy that sounds promotional instead of reassuring.
 
