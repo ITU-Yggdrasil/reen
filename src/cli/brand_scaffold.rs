@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -315,6 +316,7 @@ impl BrandScaffoldValidator {
 
         let app_rs = find_file(generated_files, "src/app.rs")?;
         validate_app_rs(context_name, &app_rs.content)?;
+        validate_requested_component_implementations(context_name, &app_rs.content)?;
 
         let app_css = find_file(generated_files, "style/app.css")?;
         validate_app_css(context_name, &app_css.content)?;
@@ -596,7 +598,235 @@ fn validate_app_rs(context_name: &str, content: &str) -> Result<()> {
             context_name
         );
     }
+
+    let forbidden_markers = [
+        ("<use ", "raw SVG <use> tag; use <use_ ... /> in Leptos view!"),
+        ("..Default::default()", "Rust struct update syntax in generated UI data; prefer explicit field mapping"),
+    ];
+    for (marker, description) in forbidden_markers {
+        if content.contains(marker) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' uses invalid Leptos syntax in src/app.rs: {}",
+                context_name,
+                description
+            );
+        }
+    }
+
+    validate_for_component_syntax(context_name, content)?;
+    validate_component_spread_syntax(context_name, content)?;
+    validate_component_name_collisions(context_name, content)?;
+    validate_component_struct_literal_usage(context_name, content)?;
+    validate_non_cloneable_callback_patterns(context_name, content)?;
+
     Ok(())
+}
+
+fn validate_for_component_syntax(context_name: &str, content: &str) -> Result<()> {
+    if content.contains("<For") && content.contains("view=move |") {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' uses Leptos-incompatible <For /> syntax in src/app.rs: for the scaffold's Leptos 0.6 target, use children=move |item| view! {{ ... }} instead of view=move |item| {{ ... }}",
+            context_name
+        );
+    }
+    Ok(())
+}
+
+fn validate_component_name_collisions(context_name: &str, content: &str) -> Result<()> {
+    let component_names = extract_component_names(content);
+    for name in component_names {
+        let struct_marker = format!("pub struct {}", name);
+        let derive_struct_marker = format!("struct {}", name);
+        if content.contains(&struct_marker) || content.contains(&derive_struct_marker) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' reuses '{}' as both a Leptos component and a Rust struct in src/app.rs; use a distinct helper type name such as '{}Data'",
+                context_name,
+                name,
+                name
+            );
+        }
+
+        let props_marker = format!("struct {}Props", name);
+        let public_props_marker = format!("pub struct {}Props", name);
+        if content.contains(&props_marker) || content.contains(&public_props_marker) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' manually defines '{}Props' in src/app.rs, but the #[component] macro already generates that props type; use a helper name like '{}Data' instead",
+                context_name,
+                name,
+                name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_component_spread_syntax(context_name: &str, content: &str) -> Result<()> {
+    let spread_re = Regex::new(r"<[A-Z][A-Za-z0-9_]*\s+\.\.[A-Za-z_][A-Za-z0-9_]*").unwrap();
+    if spread_re.is_match(content) {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' uses JSX-style component spread props in src/app.rs; Leptos view! requires explicit prop mapping instead of <Component ..props />",
+            context_name
+        );
+    }
+    Ok(())
+}
+
+fn validate_component_struct_literal_usage(context_name: &str, content: &str) -> Result<()> {
+    let component_names = extract_component_names(content);
+    for name in component_names {
+        let literal_marker = format!("{} {{", name);
+        if content.contains(&literal_marker) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' treats Leptos component '{}' like a Rust struct literal in src/app.rs; instantiate a distinct helper data type such as '{}Data' and map fields into <{} ... /> explicitly",
+                context_name,
+                name,
+                name,
+                name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_non_cloneable_callback_patterns(context_name: &str, content: &str) -> Result<()> {
+    let forbidden_patterns = [
+        (
+            "Box<dyn Fn()>",
+            "boxed dyn Fn() callback fields are not Clone and tend to break repeated-item rendering; use static actions, enums, or a cloneable callback strategy",
+        ),
+        (
+            "on:click=action.action.clone()",
+            "cloning a boxed callback into on:click is not valid here; avoid storing non-cloneable callbacks in helper data",
+        ),
+    ];
+
+    for (marker, description) in forbidden_patterns {
+        if content.contains(marker) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' uses invalid callback pattern in src/app.rs: {}",
+                context_name,
+                description
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_requested_component_implementations(
+    context_name: &str,
+    content: &str,
+) -> Result<()> {
+    let requested_components = requested_component_names()?;
+    for component_name in requested_components {
+        let fn_marker = format!("fn {}(", component_name);
+        if !content.contains(&fn_marker) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' does not define requested component '{}' in src/app.rs",
+                context_name,
+                component_name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn requested_component_names() -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    let components_dir = Path::new(SPECIFICATIONS_DIR).join("components");
+    if !components_dir.exists() {
+        return Ok(names);
+    }
+
+    let mut paths = fs::read_dir(&components_dir)
+        .with_context(|| format!("Failed to read component specifications {}", components_dir.display()))?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    for path in paths {
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read component specification {}", path.display()))?;
+        let name = extract_component_name_from_spec(&content)
+            .or_else(|| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(to_pascal_case)
+            })
+            .filter(|name| !name.is_empty());
+
+        if let Some(name) = name {
+            if seen.insert(name.clone()) {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn extract_component_name_from_spec(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix("- **Name**:") {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(to_pascal_case(name));
+            }
+        }
+        if let Some(name) = trimmed.strip_prefix("# ") {
+            let name = name.split(" - ").next().unwrap_or(name).trim();
+            if !name.is_empty() {
+                return Some(to_pascal_case(name));
+            }
+        }
+    }
+    None
+}
+
+fn to_pascal_case(raw: &str) -> String {
+    let mut out = String::new();
+    for token in raw.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if token.is_empty() {
+            continue;
+        }
+        let mut chars = token.chars();
+        if let Some(first) = chars.next() {
+            out.push_str(&first.to_uppercase().collect::<String>());
+            out.push_str(&chars.as_str().to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+fn extract_component_names(content: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut previous_was_component_attr = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#[component]" {
+            previous_was_component_attr = true;
+            continue;
+        }
+
+        if previous_was_component_attr {
+            previous_was_component_attr = false;
+            if let Some(rest) = trimmed.strip_prefix("pub fn ") {
+                if let Some((name, _)) = rest.split_once('(') {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    names
 }
 
 fn validate_app_css(context_name: &str, content: &str) -> Result<()> {
@@ -810,7 +1040,7 @@ fn extract_dependency_spec(content: &str, dependency: &str) -> Option<String> {
 mod tests {
     use super::{
         extract_dep_feature_refs, extract_dependency_spec, extract_toml_value,
-        render_brand_scaffold_contract, validate_dependency_render_feature_mode,
+        render_brand_scaffold_contract, validate_app_rs, validate_dependency_render_feature_mode,
         validate_lib_target_name, validate_matching_leptos_config,
         validate_optional_dep_feature_wiring,
     };
@@ -949,5 +1179,242 @@ path = "src/lib.rs"
         assert!(err
             .to_string()
             .contains("library target names must not contain hyphens"));
+    }
+
+    #[test]
+    fn app_rs_rejects_jsx_style_spread_props_and_raw_svg_use() {
+        let app = r##"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    view! { <AccountCard ..account /> }
+}
+
+#[component]
+pub fn AccountCard() -> impl IntoView {
+    view! { <svg><use href="#icon" /></svg> }
+}
+"##;
+
+        let err = validate_app_rs("demo", app).expect_err("expected invalid Leptos syntax");
+        assert!(err.to_string().contains("invalid Leptos syntax"));
+    }
+
+    #[test]
+    fn app_rs_rejects_component_and_struct_name_collisions() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    view! { <Badge label="ok" /> }
+}
+
+pub struct Badge {
+    pub label: String,
+}
+
+#[component]
+pub fn Badge(#[prop(into)] label: String) -> impl IntoView {
+    view! { <span>{label}</span> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected name collision failure");
+        assert!(err.to_string().contains("both a Leptos component and a Rust struct"));
+    }
+
+    #[test]
+    fn app_rs_rejects_leptos_0_6_incompatible_for_view_syntax() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    view! {
+        <For
+            each=move || vec!["a".to_string()]
+            key=|item| item.clone()
+            view=move |item| {
+                view! { <div>{item}</div> }
+            }
+        />
+    }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected invalid For syntax");
+        assert!(err.to_string().contains("Leptos-incompatible <For /> syntax"));
+        assert!(err.to_string().contains("children=move |item| view!"));
+    }
+
+    #[test]
+    fn app_rs_rejects_manual_component_props_structs() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    view! { <ThemeToggle variant="default" /> }
+}
+
+pub struct ThemeToggleProps {
+    pub variant: String,
+}
+
+#[component]
+pub fn ThemeToggle(#[prop(into)] variant: String) -> impl IntoView {
+    view! { <div>{variant}</div> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected props struct failure");
+        assert!(err.to_string().contains("already generates that props type"));
+    }
+
+    #[test]
+    fn app_rs_rejects_generic_component_spread_props() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    view! { <ThemeToggle ..props /> }
+}
+
+#[component]
+pub fn ThemeToggle() -> impl IntoView {
+    view! { <div/> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected spread props failure");
+        assert!(err.to_string().contains("component spread props"));
+    }
+
+    #[test]
+    fn app_rs_rejects_component_struct_literal_usage() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    let _items = vec![AccountCard { title: "x".to_string() }];
+    view! { <div/> }
+}
+
+#[component]
+pub fn AccountCard(#[prop(into)] title: String) -> impl IntoView {
+    view! { <div>{title}</div> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected struct literal failure");
+        assert!(err.to_string().contains("like a Rust struct literal"));
+    }
+
+    #[test]
+    fn app_rs_rejects_non_cloneable_boxed_callback_patterns() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+pub struct UtilityAction {
+    pub action: Box<dyn Fn()>,
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    let action = UtilityAction { action: Box::new(|| {}) };
+    view! { <button on:click=action.action.clone()></button> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected callback pattern failure");
+        assert!(err.to_string().contains("invalid callback pattern"));
     }
 }
