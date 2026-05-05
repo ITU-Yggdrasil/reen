@@ -153,6 +153,12 @@ static_prompt: |
   - Prefer names like `--brand-colors-primary-black`, not generic names like `--color-primary-black`.
   - If a referenced brand token is not defined, fail explicitly.
   - Do not invent fallback brand values that are not present in the specification.
+  - **Exception for foundational web colors:** If a visual specification is provided but does not
+    explicitly include `brand.colors.primary.black` and/or `brand.colors.primary.white`, you MUST
+    add them as primary color tokens before generating the implementation. These are foundational
+    contrast colors required for web accessibility, readability, and coherent text rendering. Use
+    `#000000` for black and `#ffffff` for white. Always generate their corresponding CSS custom
+    properties (`--brand-colors-primary-black` and `--brand-colors-primary-white`) in the `:root` block.
   - If only component specifications are provided, generate a coherent scaffold implementing and
     demonstrating those components without inventing absent brand token values.
 
@@ -174,6 +180,17 @@ static_prompt: |
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
     types. Do not construct Leptos components with struct syntax such as `Badge { ... }`.
   - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
+  - When generating Leptos `view!` code, avoid repeated `move ||` closures that each capture the same
+    owned `String` local. Instead, convert the string to `&str` once or precompute boolean flags such as
+    `let is_neutral = variant == "neutral";` and use `class:neutral=is_neutral`. This prevents Rust
+    move errors when the same `String` is used in multiple class bindings or conditional view expressions.
+  - Avoid inline `move ||` render closures that match or branch on owned `String`/`Option<String>` data
+    inside `view!`. Precompute optional child fragments outside of the template, for example:
+      let leading_icon = icon_leading.map(|icon| view! { <span class="icon">{icon}</span> }.into_view());
+      let label_view = if !icon_only { view! { <span class="label">{label}</span> }.into_view() } else { ().into_view() };
+    Then use `{leading_icon}` and `{label_view}` inside `view!`.
+  - Prefer generating plain boolean class bindings instead of inline closure expressions when the
+    condition only depends on a local string prop.
   - Do not pass component tags or `view!` fragments directly as prop attribute values. Invalid:
     `media=<Image src="/placeholder.jpg" alt="Placeholder" variant="thumbnail"/>`.
   - Prefer plain data props for composed generated components instead of view-valued props. For
