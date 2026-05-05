@@ -180,6 +180,24 @@ static_prompt: |
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
     types. Do not construct Leptos components with struct syntax such as `Badge { ... }`.
   - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
+  - Only emit component imports in a generated Rust source file if the imported component is actually
+    referenced in that file. Do not generate unused `use crate::components::{...}` statements.
+  - Only generate component props and local bindings that are actually consumed by the implementation.
+    If a prop is declared but never used in markup, class logic, or conditional rendering, omit it.
+    Do not create unused placeholder props such as `interactive` unless the component clearly requires them
+    and the implementation makes use of them.
+  - Leptos `class` attribute syntax: Use `class=[ "string1", "string2", variable ]` for multiple class
+    names or dynamic strings. Leptos `class=(...)` tuples are only valid for binary conditional classes
+    such as `class=("button--full-width", full_width)` where the second element is a boolean condition.
+    Do not mix plain `&str` strings and `(&str, bool)` tuples in a single `class=[...]` array—they
+    have incompatible types. Use one of these safe patterns instead:
+    - Pattern 1 (recommended): Use `class="base-name"` for static base classes, then use separate
+      `class:variant=boolean` directives for conditional classes.
+    - Pattern 2: Use the `classes!(...)` macro which accepts both plain strings and `(name, bool)` tuples.
+  - The `class:name` directive in Leptos is for boolean conditional classes only. Use `class:neutral=is_neutral`
+    where `is_neutral` is a boolean, NOT `class:neutral="true"` (which is invalid). For static/base class
+    names, use plain `class` attribute: `class="badge"` or build a class string in Rust. Never use
+    `class:name="string"` or `class:name=string_variable`; `class:` is strictly for boolean conditions.
   - When generating Leptos `view!` code, avoid repeated `move ||` closures that each capture the same
     owned `String` local. Instead, convert the string to `&str` once or precompute boolean flags such as
     `let is_neutral = variant == "neutral";` and use `class:neutral=is_neutral`. This prevents Rust
@@ -215,6 +233,19 @@ static_prompt: |
     style the component implementations.
   - Do not add component variants, states, or design-system elements that are not justified by the
     completed component specifications.
+
+  ## Code Generation Validation
+
+  Before finalizing generated component code:
+  - Audit every `use crate::components::...` import and remove any that are not used in the file.
+    An import is "used" only if the component name appears in markup like `<ComponentName ... />`.
+  - Audit every `#[prop(...)] prop_name:` parameter and remove any that are never read or rendered
+    in the component body. Every parameter must appear in markup, class logic, or conditional rendering.
+  - When generating composed components (e.g., `Card` that renders `Badge`), prefer plain data props
+    over `Option<View>` props. For example, emit `badge_label: String` and `badge_variant: String`
+    instead of `badge: Option<View>`. This keeps components composable without forcing view-valued dependencies.
+  - Ensure all generated Rust code compiles without warnings about unused imports or unused variables.
+    The generated scaffold must have zero unused-import and zero unused-variable warnings.
 
   ## Scope Rules
 
