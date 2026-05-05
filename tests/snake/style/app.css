@@ -1,20 +1,15 @@
 :root {
     --brand-colors-primary-black: #000000;
     --brand-colors-primary-white: #ffffff;
-    --brand-colors-accent-default: #4a6bff;
-    --brand-colors-surface-default: #f5f5f5;
-    --brand-colors-text-default: #333333;
-    --brand-colors-text-secondary: #666666;
-    --brand-colors-text-tertiary: #999999;
-    --brand-typography-family-primary: 'Inter', Arial, Helvetica, sans-serif;
-    --brand-typography-family-fallback: Arial, Helvetica, sans-serif;
-    --brand-typography-style-heading: 1.5rem;
-    --brand-typography-style-body: 1rem;
-    --brand-typography-style-navigation: 0.875rem;
+    --brand-colors-accent-default: #4a6fa5;
+    --brand-colors-surface-default: #f8f9fa;
+    --brand-colors-text-default: #212529;
+    --brand-colors-text-secondary: #6c757d;
+    --brand-colors-text-tertiary: #adb5bd;
 }
 
 body {
-    font-family: var(--brand-typography-family-primary), var(--brand-typography-family-fallback);
+    font-family: 'Inter', Arial, Helvetica, sans-serif;
     color: var(--brand-colors-text-default);
     background-color: var(--brand-colors-primary-white);
     margin: 0;
@@ -22,49 +17,45 @@ body {
     line-height: 1.5;
 }
 
-main {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 0 20px;
+.page-shell {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+}
+
+.main-content {
+    flex: 1;
+    padding: 2rem;
 }
 
 .top-nav {
-    background-color: var(--brand-colors-primary-white);
-    border-bottom: 1px solid var(--brand-colors-surface-default);
-    padding: 1rem 0;
-    position: sticky;
-    top: 0;
-    z-index: 100;
-}
-
-.top-nav nav {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 0 20px;
+    padding: 1rem 2rem;
+    background-color: var(--brand-colors-primary-white);
+    border-bottom: 1px solid var(--brand-colors-text-tertiary);
 }
 
 .brand-link {
-    font-size: var(--brand-typography-style-heading);
+    font-size: 1.5rem;
     font-weight: bold;
-    color: var(--brand-colors-primary-black);
+    color: var(--brand-colors-text-default);
     text-decoration: none;
 }
 
-.nav-links {
+.primary-nav {
     display: flex;
     gap: 1.5rem;
 }
 
-.nav-links a {
+.nav-link {
     color: var(--brand-colors-text-default);
     text-decoration: none;
-    font-size: var(--brand-typography-style-navigation);
+    font-weight: 500;
 }
 
-.nav-links a:hover {
+.nav-link:hover {
     color: var(--brand-colors-accent-default);
 }
 
@@ -75,18 +66,18 @@ main {
 }
 
 .theme-toggle {
-    display: flex;
-    border: 1px solid var(--brand-colors-surface-default);
-    border-radius: 4px;
+    display: inline-flex;
+    border-radius: 0.25rem;
     overflow: hidden;
+    border: 1px solid var(--brand-colors-text-tertiary);
 }
 
 .theme-toggle button {
-    padding: 0.5rem 1rem;
-    background: none;
+    padding: 0.25rem 0.5rem;
+    background: transparent;
     border: none;
     cursor: pointer;
-    font-size: var(--brand-typography-style-navigation);
+    color: var(--brand-colors-text-default);
 }
 
 .theme-toggle button.active {
@@ -95,59 +86,61 @@ main {
 }
 
 .sign-out {
-    padding: 0.5rem 1rem;
-    background-color: var(--brand-colors-surface-default);
-    border: none;
-    border-radius: 4px;
+    padding: 0.25rem 0.5rem;
+    background-color: transparent;
+    border: 1px solid var(--brand-colors-text-tertiary);
+    border-radius: 0.25rem;
+    color: var(--brand-colors-text-default);
     cursor: pointer;
-    font-size: var(--brand-typography-style-navigation);
 }
 
 .sign-out:hover {
-    background-color: var(--brand-colors-accent-default);
-    color: var(--brand-colors-primary-white);
+    background-color: var(--brand-colors-surface-default);
 }
 
 .accounts-dashboard {
-    padding: 2rem 0;
+    max-width: 1200px;
+    margin: 0 auto;
 }
 
 .balance-summary {
     margin-bottom: 2rem;
-    padding: 2rem;
+    padding: 1.5rem;
     background-color: var(--brand-colors-surface-default);
-    border-radius: 8px;
+    border-radius: 0.5rem;
 }
 
-.balance-summary h2 {
-    font-size: var(--brand-typography-style-heading);
-    margin-bottom: 0.5rem;
+.greeting {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.5rem;
+    color: var(--brand-colors-text-default);
 }
 
 .summary-label {
-    font-size: var(--brand-typography-style-navigation);
-    color: var(--brand-colors-text-secondary);
+    margin-bottom: 0.5rem;
+    font-size: 0.875rem;
     text-transform: uppercase;
-    margin-bottom: 1rem;
+    color: var(--brand-colors-text-secondary);
 }
 
-.balance-value {
+.balance-row {
     display: flex;
     align-items: baseline;
     gap: 0.5rem;
 }
 
-.balance-value .value {
-    font-size: 2.5rem;
+.balance-value {
+    font-size: 2rem;
     font-weight: bold;
+    color: var(--brand-colors-text-default);
 }
 
-.balance-value .currency {
-    font-size: var(--brand-typography-style-body);
+.currency-code {
+    font-size: 1rem;
     color: var(--brand-colors-text-secondary);
 }
 
-.account-cards {
+.accounts-list {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 1.5rem;
@@ -155,115 +148,50 @@ main {
 
 .account-card {
     background-color: var(--brand-colors-primary-white);
-    border: 1px solid var(--brand-colors-surface-default);
-    border-radius: 8px;
+    border: 1px solid var(--brand-colors-text-tertiary);
+    border-radius: 0.5rem;
     padding: 1.5rem;
     transition: transform 0.2s, box-shadow 0.2s;
 }
 
-.account-card.interactive {
-    cursor: pointer;
-}
-
-.account-card.interactive:hover {
+.account-card:hover {
     transform: translateY(-2px);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
 
-.card-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 1rem;
-}
-
-.card-header .icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    color: var(--brand-colors-accent-default);
-}
-
-.card-header h3 {
-    font-size: var(--brand-typography-style-body);
-    margin: 0;
-}
-
-.card-body {
+.card-content {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
 }
 
-.identifier {
-    font-size: var(--brand-typography-style-navigation);
-    color: var(--brand-colors-text-secondary);
-}
-
-.balance {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-}
-
-.balance .value {
-    font-size: 1.25rem;
-    font-weight: bold;
-}
-
-.balance .currency {
-    font-size: var(--brand-typography-style-navigation);
-    color: var(--brand-colors-text-secondary);
-}
-
-.badge {
-    display: inline-block;
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: var(--brand-typography-style-navigation);
-    font-weight: bold;
-}
-
-.badge-neutral {
-    background-color: var(--brand-colors-surface-default);
+.account-title {
+    margin: 0 0 0.5rem 0;
+    font-size: 1.125rem;
     color: var(--brand-colors-text-default);
 }
 
-.badge-success {
-    background-color: #d4edda;
-    color: #155724;
-}
-
-.badge-warning {
-    background-color: #fff3cd;
-    color: #856404;
-}
-
-.badge-destructive {
-    background-color: #f8d7da;
-    color: #721c24;
+.account-identifier {
+    margin-bottom: 1rem;
+    font-size: 0.875rem;
+    color: var(--brand-colors-text-secondary);
 }
 
 .footer {
     background-color: var(--brand-colors-primary-white);
-    border-top: 1px solid var(--brand-colors-surface-default);
-    padding: 2rem 0;
-    margin-top: 2rem;
+    border-top: 1px solid var(--brand-colors-text-tertiary);
+    padding: 1.5rem 2rem;
 }
 
 .footer-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     max-width: 1200px;
     margin: 0 auto;
-    padding: 0 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
 }
 
 .copyright {
-    font-size: var(--brand-typography-style-navigation);
+    font-size: 0.875rem;
     color: var(--brand-colors-text-secondary);
 }
 
@@ -272,29 +200,13 @@ main {
     gap: 1.5rem;
 }
 
-.legal-links a {
-    color: var(--brand-colors-text-default);
-    text-decoration: none;
-    font-size: var(--brand-typography-style-navigation);
-}
-
-.legal-links a:hover {
-    color: var(--brand-colors-accent-default);
-}
-
-.trust-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: var(--brand-typography-style-navigation);
+.legal-link {
+    font-size: 0.875rem;
     color: var(--brand-colors-text-secondary);
+    text-decoration: none;
 }
 
-.trust-badge .icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
+.legal-link:hover {
     color: var(--brand-colors-accent-default);
+    text-decoration: underline;
 }

@@ -618,6 +618,7 @@ fn validate_app_rs(context_name: &str, content: &str) -> Result<()> {
     validate_component_name_collisions(context_name, content)?;
     validate_component_struct_literal_usage(context_name, content)?;
     validate_non_cloneable_callback_patterns(context_name, content)?;
+    validate_component_prop_annotations(context_name, content)?;
 
     Ok(())
 }
@@ -815,7 +816,10 @@ fn extract_component_names(content: &str) -> Vec<String> {
 
         if previous_was_component_attr {
             previous_was_component_attr = false;
-            if let Some(rest) = trimmed.strip_prefix("pub fn ") {
+            let rest = trimmed
+                .strip_prefix("pub fn ")
+                .or_else(|| trimmed.strip_prefix("fn "));
+            if let Some(rest) = rest {
                 if let Some((name, _)) = rest.split_once('(') {
                     let name = name.trim();
                     if !name.is_empty() {
@@ -827,6 +831,35 @@ fn extract_component_names(content: &str) -> Vec<String> {
     }
 
     names
+}
+
+fn validate_component_prop_annotations(context_name: &str, content: &str) -> Result<()> {
+    let missing_into_string =
+        Regex::new(r"(?m)^\s*(?!#\[prop\()([A-Za-z_][A-Za-z0-9_]*)\s*:\s*String\s*,?\s*$").unwrap();
+    if missing_into_string.is_match(content) {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' defines a String component prop in src/app.rs without #[prop(into)]; string literal call sites would not compile",
+            context_name
+        );
+    }
+
+    let missing_optional_option =
+        Regex::new(r"(?m)^\s*(?!#\[prop\()([A-Za-z_][A-Za-z0-9_]*)\s*:\s*Option<[^>]+>\s*,?\s*$").unwrap();
+    if missing_optional_option.is_match(content) {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' defines an Option<T> component prop in src/app.rs without #[prop(optional)] or #[prop(default = ...)]",
+            context_name
+        );
+    }
+
+    if content.contains("view! {}.into_any()") {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' uses invalid empty into_any branch syntax in src/app.rs; avoid `view! {{}}.into_any()`",
+            context_name
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_app_css(context_name: &str, content: &str) -> Result<()> {
@@ -1416,5 +1449,42 @@ pub fn HomePage() -> impl IntoView {
 
         let err = validate_app_rs("demo", app).expect_err("expected callback pattern failure");
         assert!(err.to_string().contains("invalid callback pattern"));
+    }
+
+    #[test]
+    fn app_rs_rejects_non_pub_component_props_struct_collisions() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! { <div/> }
+}
+
+struct AccountCardProps {
+    title: String,
+}
+
+#[component]
+fn AccountCard(title: String) -> impl IntoView {
+    view! { <div>{title}</div> }
+}
+"#;
+
+        let err =
+            validate_app_rs("demo", app).expect_err("expected non-pub props collision failure");
+        assert!(err.to_string().contains("already generates that props type"));
     }
 }

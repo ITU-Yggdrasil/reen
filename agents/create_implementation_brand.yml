@@ -180,6 +180,9 @@ static_prompt: |
   - For every generated Leptos component prop whose Rust type is `String`, add `#[prop(into)]`
     directly on that parameter. This includes common props such as `label`, `title`,
     `description`, `variant`, and `size`; no plain required `String` props are allowed.
+  - This rule also applies to page-shell and composed components such as `AccountsDashboard`,
+    `BalanceSummary`, `TopNav`, `Footer`, `ThemeToggle`, and similar generated components. Do not
+    leave any required `String` prop unannotated.
   - For every generated Leptos component prop whose Rust type is `Option<T>`, add
     `#[prop(optional)]` or an explicit `#[prop(default = ...)]` directly on that parameter.
     Optional props must not become required typed-builder fields.
@@ -189,6 +192,8 @@ static_prompt: |
     prop type must remain `Option<T>`, and call sites may pass `None`, `Some(value)`, or omit the
     prop when appropriate. Never silently collapse an optional prop into a required `String` or
     required helper struct.
+  - Do not represent optional booleans as unannotated `Option<bool>` props. Use `#[prop(optional)]`
+    or `#[prop(default = false)]` explicitly so typed-builder does not treat them as required.
   - Call sites may use string literals such as `label="Primary"` and may omit optional props;
     generated component signatures must compile with those call sites.
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
@@ -223,6 +228,9 @@ static_prompt: |
   - When rendering from borrowed items or shared references, do not move owned `String` fields out
     of borrowed data into `view!`. Clone the string field for attributes/text, or render from owned
     cloned items so the code compiles cleanly.
+  - Avoid `view! {}.into_any()` as an empty branch. Prefer an explicit empty fragment strategy that
+    is known to compile for Leptos `0.6`, or restructure the conditional rendering to avoid an
+    empty `AnyView` branch entirely.
   - Generated `view!` macro attributes must use conservative, broadly compatible Leptos syntax.
   - Do not emit `class:...={...}` conditional class bindings when the class name contains hyphens,
     BEM modifiers, or any other non-trivial token pattern such as `button--primary`,
