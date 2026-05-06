@@ -38,6 +38,15 @@ Inline and compact, with content centered inside a small rounded surface.
 - **Warning:** Used for cautionary states.
 - **Destructive:** Used for error or high-risk states.
 
+### Brand Token Constraints
+
+Use brand color tokens from the visual specification when available. If a needed semantic role is not defined, map the badge variant to the closest existing token and describe the intended role without inventing a new token path.
+
+- **Neutral:** `brand.colors.primary.white` or `brand.colors.semantic.informative`.
+- **Success:** `brand.colors.secondary.green`.
+- **Warning:** `brand.colors.secondary.blue` with restrained emphasis.
+- **Destructive:** `brand.colors.primary.red`, since no negative/error semantic token is defined.
+
 ---
 
 ## States
