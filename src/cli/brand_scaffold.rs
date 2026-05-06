@@ -433,8 +433,10 @@ pub(crate) fn finalize_brand_implementation_output(
     impl_result: String,
 ) -> Result<()> {
     let component_specs = load_component_spec_contracts()?;
-    let generated_files =
-        normalize_generated_brand_files(BrandEnvelopeParser::parse(&impl_result)?, &component_specs);
+    let generated_files = normalize_generated_brand_files(
+        BrandEnvelopeParser::parse(&impl_result)?,
+        &component_specs,
+    );
     let report = BrandScaffoldValidator::validate(context_file, context_name, &generated_files)?;
     BrandScaffoldWriter::write(context_file, context_name, config, &report.generated_files)
 }
@@ -453,7 +455,10 @@ fn normalize_generated_brand_files(
         })
         .collect::<Vec<_>>();
 
-    if !normalized.iter().any(|file| file.path == Path::new(".gitignore")) {
+    if !normalized
+        .iter()
+        .any(|file| file.path == Path::new(".gitignore"))
+    {
         normalized.push(GeneratedOutputFile {
             path: PathBuf::from(".gitignore"),
             content: BRAND_GITIGNORE_MINIMUM_SHAPE.to_string(),
@@ -464,10 +469,11 @@ fn normalize_generated_brand_files(
 }
 
 fn normalize_generated_app_rs(content: &str, component_specs: &[ComponentSpecContract]) -> String {
-    let mut updated = Regex::new(r#"view=move \|(?P<param>[A-Za-z_][A-Za-z0-9_]*(?::[^|]+)?)\| \{"#)
-        .expect("valid regex")
-        .replace_all(content, "children=move |$param| {")
-        .to_string();
+    let mut updated =
+        Regex::new(r#"view=move \|(?P<param>[A-Za-z_][A-Za-z0-9_]*(?::[^|]+)?)\| \{"#)
+            .expect("valid regex")
+            .replace_all(content, "children=move |$param| {")
+            .to_string();
 
     updated = dedupe_consecutive_derive_clone(&updated);
 
@@ -488,6 +494,11 @@ fn normalize_generated_app_rs(content: &str, component_specs: &[ComponentSpecCon
         updated = format!("use leptos::ev::MouseEvent;\n{}", updated);
     }
 
+    updated = normalize_leptos_view_erasure(&updated);
+    updated = normalize_string_prop_defaults(&updated);
+    updated = normalize_string_signal_option_updates(&updated);
+    updated = normalize_moved_for_item_string_closures(&updated);
+    updated = normalize_if_else_view_branches(&updated);
     updated = normalize_spec_defined_variants(&updated, component_specs);
     updated = normalize_component_props_helper_names(&updated);
     updated = normalize_component_data_literals(&updated);
@@ -511,6 +522,201 @@ fn dedupe_consecutive_derive_clone(content: &str) -> String {
     }
 
     output.join("\n")
+}
+
+fn normalize_leptos_view_erasure(content: &str) -> String {
+    content
+        .replace("AnyView", "View")
+        .replace(".into_any()", ".into_view()")
+}
+
+fn normalize_string_prop_defaults(content: &str) -> String {
+    let default_string_re = Regex::new(
+        r#"#\[prop\((?P<args>[^\]]*?\bdefault\s*=\s*"(?P<value>[^"]+)"[^\]]*)\)\](?P<tail>\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*String)"#,
+    )
+    .expect("valid regex");
+    let default_literal_re =
+        Regex::new(r#"\bdefault\s*=\s*"(?P<value>[^"]+)""#).expect("valid regex");
+
+    default_string_re
+        .replace_all(content, |caps: &regex::Captures| {
+            let args = caps.name("args").map(|m| m.as_str()).unwrap_or_default();
+            let tail = caps.name("tail").map(|m| m.as_str()).unwrap_or_default();
+            let rewritten_args = default_literal_re
+                .replace(args, r#"default = String::from("$value")"#)
+                .to_string();
+            let rewritten_args = if prop_args_contain_token(&rewritten_args, "into") {
+                rewritten_args
+            } else {
+                format!("{}, into", rewritten_args.trim())
+            };
+
+            format!("#[prop({rewritten_args})]{tail}")
+        })
+        .to_string()
+}
+
+fn prop_args_contain_token(args: &str, token: &str) -> bool {
+    args.split(',')
+        .map(str::trim)
+        .any(|part| part == token || part.starts_with(&format!("{token} ")))
+}
+
+fn normalize_string_signal_option_updates(content: &str) -> String {
+    if !Regex::new(r#"let\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*vec!\[\s*""#)
+        .expect("valid regex")
+        .is_match(content)
+    {
+        return content.to_string();
+    }
+
+    Regex::new(
+        r#"(?P<prefix>\bset_[A-Za-z_][A-Za-z0-9_]*\.set\()\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)\.clone\(\)\s*\)"#,
+    )
+    .expect("valid regex")
+    .replace_all(content, "$prefix$value.to_string())")
+    .to_string()
+}
+
+fn normalize_moved_for_item_string_closures(content: &str) -> String {
+    let is_selected_re = Regex::new(
+        r#"(?m)^(?P<indent>\s*)let\s+is_selected\s*=\s*move\s*\|\|\s*(?P<left>[^;\n]+?)\s*==\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*;"#,
+    )
+    .expect("valid regex");
+
+    let mut updated = is_selected_re
+        .replace_all(content, |caps: &regex::Captures| {
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or_default();
+            let left = caps.name("left").map(|m| m.as_str()).unwrap_or_default();
+            let value = caps.name("value").map(|m| m.as_str()).unwrap_or_default();
+            format!(
+                "{indent}let selected_value = {value}.clone();\n{indent}let click_value = {value}.clone();\n{indent}let is_selected = move || {left} == selected_value;"
+            )
+        })
+        .to_string();
+
+    if updated.contains("let click_value =") {
+        let set_option_re = Regex::new(
+            r#"(?P<prefix>\bset_[A-Za-z_][A-Za-z0-9_]*\.set\()\s*option\.(?:clone\(\)|to_string\(\))\s*\)"#,
+        )
+        .expect("valid regex");
+        updated = set_option_re
+            .replace_all(&updated, "${prefix}click_value.clone())")
+            .to_string();
+    }
+
+    updated
+}
+
+fn normalize_if_else_view_branches(content: &str) -> String {
+    let mut output = String::with_capacity(content.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = content[cursor..].find("{if ") {
+        let start = cursor + relative_start;
+        let Some(normalized) = normalize_if_else_view_expression(content, start) else {
+            output.push_str(&content[cursor..=start]);
+            cursor = start + 1;
+            continue;
+        };
+
+        output.push_str(&content[cursor..start]);
+        output.push_str(&normalized.replacement);
+        cursor = normalized.end;
+    }
+
+    output.push_str(&content[cursor..]);
+    output
+}
+
+struct NormalizedIfElseView {
+    end: usize,
+    replacement: String,
+}
+
+fn normalize_if_else_view_expression(content: &str, start: usize) -> Option<NormalizedIfElseView> {
+    let then_open = content[start + 1..].find('{')? + start + 1;
+    let then_close = find_matching_brace(content, then_open)?;
+    let after_then = &content[then_close + 1..];
+    let else_offset = after_then.find("else")?;
+    if !after_then[..else_offset].trim().is_empty() {
+        return None;
+    }
+    let else_start = then_close + 1 + else_offset;
+    let else_open = content[else_start..].find('{')? + else_start;
+    if !content[else_start + "else".len()..else_open]
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    let else_close = find_matching_brace(content, else_open)?;
+    let after_else = &content[else_close + 1..];
+    let outer_close_offset = after_else.find('}')?;
+    if !after_else[..outer_close_offset].trim().is_empty() {
+        return None;
+    }
+    let outer_close = else_close + 1 + outer_close_offset;
+
+    let then_body = &content[then_open + 1..then_close];
+    let else_body = &content[else_open + 1..else_close];
+    let normalized_then = normalize_view_branch_to_into_view(then_body)?;
+    let normalized_else = normalize_view_branch_to_into_view(else_body)?;
+
+    let mut replacement = String::new();
+    replacement.push_str(&content[start..then_open + 1]);
+    replacement.push_str(&normalized_then);
+    replacement.push('}');
+    replacement.push_str(&content[then_close + 1..else_open + 1]);
+    replacement.push_str(&normalized_else);
+    replacement.push('}');
+    replacement.push_str(&content[else_close + 1..outer_close + 1]);
+
+    Some(NormalizedIfElseView {
+        end: outer_close + 1,
+        replacement,
+    })
+}
+
+fn normalize_view_branch_to_into_view(branch: &str) -> Option<String> {
+    let leading_len = branch.len() - branch.trim_start().len();
+    let trailing_len = branch.len() - branch.trim_end().len();
+    let leading = &branch[..leading_len];
+    let trailing_start = branch.len() - trailing_len;
+    let trailing = &branch[trailing_start..];
+    let trimmed = branch.trim();
+
+    if !trimmed.starts_with("view!") {
+        return None;
+    }
+    if trimmed.ends_with(".into_view()") {
+        return Some(branch.to_string());
+    }
+
+    Some(format!("{leading}{trimmed}.into_view(){trailing}"))
+}
+
+fn find_matching_brace(content: &str, open: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn normalize_spec_defined_variants(
@@ -607,7 +813,10 @@ fn rewrite_variant_props_block(props: &str, spec: &ComponentSpecContract) -> Str
         }
 
         if trimmed.contains("variant") && trimmed.contains("String") {
-            let indent = line.chars().take_while(|c| c.is_whitespace()).collect::<String>();
+            let indent = line
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .collect::<String>();
             let inline_attr = if line.contains("#[prop(") {
                 Some(line.to_string())
             } else {
@@ -652,7 +861,10 @@ fn extract_string_default_variant(attr_line: &str, spec: &ComponentSpecContract)
         let direct = format!("\"{}\"", raw);
         let string_from = format!("String::from(\"{}\")", raw);
         let to_string = format!("\"{}\".to_string()", raw);
-        if attr_line.contains(&direct) || attr_line.contains(&string_from) || attr_line.contains(&to_string) {
+        if attr_line.contains(&direct)
+            || attr_line.contains(&string_from)
+            || attr_line.contains(&to_string)
+        {
             return Some(rust.clone());
         }
     }
@@ -725,9 +937,18 @@ fn rewrite_helper_variant_literals(content: &str, spec: &ComponentSpecContract) 
 
     for helper_name in helper_struct_names_for_component(content, &spec.name) {
         for pattern in [
-            format!(r"(?s)(=\s*{}\s*\{{)(?P<body>.*?)(\n\s*\}})", regex::escape(&helper_name)),
-            format!(r"(?s)(Some\(\s*{}\s*\{{)(?P<body>.*?)(\n\s*\}}\s*\))", regex::escape(&helper_name)),
-            format!(r"(?s)(vec!\[\s*{}\s*\{{)(?P<body>.*?)(\n\s*\}})", regex::escape(&helper_name)),
+            format!(
+                r"(?s)(=\s*{}\s*\{{)(?P<body>.*?)(\n\s*\}})",
+                regex::escape(&helper_name)
+            ),
+            format!(
+                r"(?s)(Some\(\s*{}\s*\{{)(?P<body>.*?)(\n\s*\}}\s*\))",
+                regex::escape(&helper_name)
+            ),
+            format!(
+                r"(?s)(vec!\[\s*{}\s*\{{)(?P<body>.*?)(\n\s*\}})",
+                regex::escape(&helper_name)
+            ),
         ] {
             let literal_re = Regex::new(&pattern).expect("valid regex");
             updated = literal_re
@@ -787,7 +1008,10 @@ fn rewrite_component_variant_logic(content: &str, spec: &ComponentSpecContract) 
                     .to_string();
                 rewritten = Regex::new(&format!(r#"variant\s*==\s*"{}""#, regex::escape(raw)))
                     .expect("valid regex")
-                    .replace_all(&rewritten, format!("variant == {}::{}", spec.enum_name, rust))
+                    .replace_all(
+                        &rewritten,
+                        format!("variant == {}::{}", spec.enum_name, rust),
+                    )
                     .to_string();
             }
             format!("{prefix}{rewritten}{suffix}")
@@ -797,19 +1021,31 @@ fn rewrite_component_variant_logic(content: &str, spec: &ComponentSpecContract) 
 
 fn expand_component_spread_props(content: &str) -> String {
     let component_props = parse_component_prop_specs(content);
-    let spread_re =
-        Regex::new(r#"<(?P<component>[A-Z][A-Za-z0-9_]*)\s+\.\.(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*/>"#)
-            .expect("valid regex");
+    let spread_re = Regex::new(
+        r#"<(?P<component>[A-Z][A-Za-z0-9_]*)\s+\.\.(?P<value>[A-Za-z_][A-Za-z0-9_]*)\s*/>"#,
+    )
+    .expect("valid regex");
 
     spread_re
         .replace_all(content, |caps: &regex::Captures| {
-            let component = caps.name("component").map(|m| m.as_str()).unwrap_or_default();
+            let component = caps
+                .name("component")
+                .map(|m| m.as_str())
+                .unwrap_or_default();
             let value = caps.name("value").map(|m| m.as_str()).unwrap_or_default();
             let Some(props) = component_props.get(component) else {
-                return caps.get(0).map(|m| m.as_str()).unwrap_or_default().to_string();
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
             };
             if props.is_empty() {
-                return caps.get(0).map(|m| m.as_str()).unwrap_or_default().to_string();
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
             }
 
             let mapped = props
@@ -843,7 +1079,8 @@ fn normalize_component_props_helper_names(content: &str) -> String {
             continue;
         }
 
-        let replacement_name = choose_component_helper_name(&normalized, &component_name, &props_name);
+        let replacement_name =
+            choose_component_helper_name(&normalized, &component_name, &props_name);
         normalized = Regex::new(&format!(r"\b{}\b", regex::escape(&props_name)))
             .expect("valid regex")
             .replace_all(&normalized, replacement_name.as_str())
@@ -859,8 +1096,8 @@ fn choose_component_helper_name(content: &str, component_name: &str, current_nam
         if candidate == current_name {
             return candidate;
         }
-        let candidate_re = Regex::new(&format!(r"\b{}\b", regex::escape(&candidate)))
-            .expect("valid regex");
+        let candidate_re =
+            Regex::new(&format!(r"\b{}\b", regex::escape(&candidate))).expect("valid regex");
         if !candidate_re.is_match(content) {
             return candidate;
         }
@@ -964,7 +1201,9 @@ fn render_component_data_helper(
     )
 }
 
-pub(crate) fn render_brand_variant_contract(component_specs: &[ComponentSpecContract]) -> Option<String> {
+pub(crate) fn render_brand_variant_contract(
+    component_specs: &[ComponentSpecContract],
+) -> Option<String> {
     let relevant = component_specs
         .iter()
         .filter(|spec| !spec.variant_values.is_empty())
@@ -979,7 +1218,10 @@ pub(crate) fn render_brand_variant_contract(component_specs: &[ComponentSpecCont
             .default_variant
             .as_ref()
             .map(|value| format!("- default enum variant: `{}::{}`", spec.enum_name, value))
-            .unwrap_or_else(|| "- default enum variant: none; require explicit variant selection at call sites".to_string());
+            .unwrap_or_else(|| {
+                "- default enum variant: none; require explicit variant selection at call sites"
+                    .to_string()
+            });
         let members = spec
             .variant_values
             .iter()
@@ -1032,11 +1274,7 @@ fn normalize_forwarded_option_props(content: &str) -> String {
 
         if should_strip {
             if optional_attr_inline_re.is_match(line) {
-                output.push(
-                    inline_prop_attr_re
-                        .replace_all(line, "")
-                        .to_string(),
-                );
+                output.push(inline_prop_attr_re.replace_all(line, "").to_string());
                 pending_optional_attr_line = None;
                 continue;
             }
@@ -1075,11 +1313,9 @@ fn prop_receives_explicit_option_value(content: &str, prop_name: &str) -> bool {
         ),
     ];
 
-    patterns.into_iter().any(|pattern| {
-        Regex::new(&pattern)
-            .expect("valid regex")
-            .is_match(content)
-    })
+    patterns
+        .into_iter()
+        .any(|pattern| Regex::new(&pattern).expect("valid regex").is_match(content))
 }
 
 fn extract_prop_name(candidate: &str) -> &str {
@@ -1141,7 +1377,10 @@ fn parse_component_prop_specs(content: &str) -> HashMap<String, Vec<ComponentPro
                 current_component = trimmed
                     .strip_prefix("pub fn ")
                     .or_else(|| trimmed.strip_prefix("fn "))
-                    .and_then(|rest| rest.split_once('(').map(|(name, _)| name.trim().to_string()))
+                    .and_then(|rest| {
+                        rest.split_once('(')
+                            .map(|(name, _)| name.trim().to_string())
+                    })
                     .unwrap_or_default();
             } else if !trimmed.is_empty() {
                 previous_was_component_attr = false;
@@ -1395,8 +1634,14 @@ fn validate_app_rs_with_component_specs(
     }
 
     let forbidden_markers = [
-        ("<use ", "raw SVG <use> tag; use <use_ ... /> in Leptos view!"),
-        ("..Default::default()", "Rust struct update syntax in generated UI data; prefer explicit field mapping"),
+        (
+            "<use ",
+            "raw SVG <use> tag; use <use_ ... /> in Leptos view!",
+        ),
+        (
+            "..Default::default()",
+            "Rust struct update syntax in generated UI data; prefer explicit field mapping",
+        ),
     ];
     for (marker, description) in forbidden_markers {
         if content.contains(marker) {
@@ -1413,7 +1658,10 @@ fn validate_app_rs_with_component_specs(
     validate_component_name_collisions(context_name, content)?;
     validate_component_struct_literal_usage(context_name, content)?;
     validate_non_cloneable_callback_patterns(context_name, content)?;
+    validate_leptos_view_erasure_patterns(context_name, content)?;
     validate_component_prop_annotations(context_name, content)?;
+    validate_string_prop_default_literals(context_name, content)?;
+    validate_string_signal_option_updates(context_name, content)?;
     validate_optional_option_forwarding_patterns(context_name, content)?;
     validate_spec_defined_variant_contracts(context_name, content, component_specs)?;
     validate_generated_text_encoding(context_name, content)?;
@@ -1429,6 +1677,24 @@ fn validate_for_component_syntax(context_name: &str, content: &str) -> Result<()
             context_name
         );
     }
+    Ok(())
+}
+
+fn validate_leptos_view_erasure_patterns(context_name: &str, content: &str) -> Result<()> {
+    if content.contains("AnyView") {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' uses unsupported `AnyView` in src/app.rs; for the scaffold's Leptos 0.6 target, use `View` and `.into_view()`",
+            context_name
+        );
+    }
+
+    if content.contains(".into_any()") {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' uses unsupported `.into_any()` in src/app.rs; for the scaffold's Leptos 0.6 target, use `.into_view()`",
+            context_name
+        );
+    }
+
     Ok(())
 }
 
@@ -1520,7 +1786,10 @@ fn validate_non_cloneable_callback_patterns(context_name: &str, content: &str) -
         Regex::new(r"(?m)^\s*(?:pub\s+)?(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*fn\(\)\s*,\s*$")
             .unwrap();
     for captures in zero_arg_field_re.captures_iter(content) {
-        let field = captures.name("field").map(|m| m.as_str()).unwrap_or_default();
+        let field = captures
+            .name("field")
+            .map(|m| m.as_str())
+            .unwrap_or_default();
         if field.is_empty() {
             continue;
         }
@@ -1542,10 +1811,7 @@ fn validate_non_cloneable_callback_patterns(context_name: &str, content: &str) -
     Ok(())
 }
 
-fn validate_requested_component_implementations(
-    context_name: &str,
-    content: &str,
-) -> Result<()> {
+fn validate_requested_component_implementations(context_name: &str, content: &str) -> Result<()> {
     let requested_components = requested_component_names()?;
     for component_name in requested_components {
         let fn_marker = format!("fn {}(", component_name);
@@ -1574,7 +1840,12 @@ fn load_component_spec_contracts() -> Result<Vec<ComponentSpecContract>> {
     }
 
     let mut paths = fs::read_dir(&components_dir)
-        .with_context(|| format!("Failed to read component specifications {}", components_dir.display()))?
+        .with_context(|| {
+            format!(
+                "Failed to read component specifications {}",
+                components_dir.display()
+            )
+        })?
         .filter_map(|entry| entry.ok().map(|item| item.path()))
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
         .collect::<Vec<_>>();
@@ -1590,8 +1861,9 @@ pub(crate) fn load_component_spec_contracts_from_paths(
     let mut seen = HashSet::new();
 
     for path in paths {
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read component specification {}", path.display()))?;
+        let content = fs::read_to_string(&path).with_context(|| {
+            format!("Failed to read component specification {}", path.display())
+        })?;
         let Some(name) = extract_component_name_from_spec(&content)
             .or_else(|| {
                 path.file_stem()
@@ -1613,7 +1885,10 @@ pub(crate) fn load_component_spec_contracts_from_paths(
     Ok(contracts)
 }
 
-fn build_component_spec_contract(name: String, variant_values: Vec<String>) -> ComponentSpecContract {
+fn build_component_spec_contract(
+    name: String,
+    variant_values: Vec<String>,
+) -> ComponentSpecContract {
     let enum_name = format!("{}Variant", name);
     let rust_variants = variant_values
         .iter()
@@ -1639,17 +1914,35 @@ fn extract_component_name_from_spec(content: &str) -> Option<String> {
         if let Some(name) = trimmed.strip_prefix("- **Name**:") {
             let name = name.trim();
             if !name.is_empty() {
-                return Some(to_pascal_case(name));
+                return Some(normalize_component_name(name));
             }
         }
         if let Some(name) = trimmed.strip_prefix("# ") {
             let name = name.split(" - ").next().unwrap_or(name).trim();
             if !name.is_empty() {
-                return Some(to_pascal_case(name));
+                return Some(normalize_component_name(name));
             }
         }
     }
     None
+}
+
+fn normalize_component_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if is_preserved_component_identifier(trimmed) {
+        return trimmed.to_string();
+    }
+    to_pascal_case(trimmed)
+}
+
+fn is_preserved_component_identifier(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_uppercase()
+        && chars.clone().all(|c| c.is_ascii_alphanumeric())
+        && chars.any(|c| c.is_ascii_uppercase())
 }
 
 fn to_pascal_case(raw: &str) -> String {
@@ -1816,9 +2109,35 @@ fn validate_component_prop_annotations(context_name: &str, content: &str) -> Res
         }
     }
 
-    if content.contains("view! {}.into_any()") {
+    Ok(())
+}
+
+fn validate_string_prop_default_literals(context_name: &str, content: &str) -> Result<()> {
+    let bare_string_default_re = Regex::new(
+        r#"#\[prop\([^\]]*\bdefault\s*=\s*"[^"]+"[^\]]*\)\]\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*String"#,
+    )
+    .unwrap();
+    if bare_string_default_re.is_match(content) {
         anyhow::bail!(
-            "Generated brand implementation for '{}' uses invalid empty into_any branch syntax in src/app.rs; avoid `view! {{}}.into_any()`",
+            "Generated brand implementation for '{}' defines a String component prop with a bare string-literal default in src/app.rs; use `String::from(...)` and `#[prop(into)]`",
+            context_name
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_string_signal_option_updates(context_name: &str, content: &str) -> Result<()> {
+    let string_option_vec_re =
+        Regex::new(r#"let\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*vec!\[\s*""#).unwrap();
+    let set_cloned_option_re = Regex::new(
+        r#"\bset_[A-Za-z_][A-Za-z0-9_]*\.set\(\s*[A-Za-z_][A-Za-z0-9_]*\.clone\(\)\s*\)"#,
+    )
+    .unwrap();
+
+    if string_option_vec_re.is_match(content) && set_cloned_option_re.is_match(content) {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' updates a String signal from a cloned string-literal option in src/app.rs; use `.to_string()` or store owned String options",
             context_name
         );
     }
@@ -2195,19 +2514,22 @@ fn extract_dependency_spec(content: &str, dependency: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_component_spec_contract, extract_dep_feature_refs, extract_dependency_spec,
-        extract_toml_value, normalize_generated_app_rs, normalize_generated_brand_files,
-        GeneratedOutputFile, render_brand_scaffold_contract, render_brand_variant_contract,
-        validate_app_rs,
-        validate_app_rs_with_component_specs, validate_dependency_render_feature_mode,
-        validate_lib_target_name, validate_matching_leptos_config, validate_optional_dep_feature_wiring,
+        build_component_spec_contract, extract_component_name_from_spec, extract_dep_feature_refs,
+        extract_dependency_spec, extract_toml_value, normalize_generated_app_rs,
+        normalize_generated_brand_files, render_brand_scaffold_contract,
+        render_brand_variant_contract, validate_app_rs, validate_app_rs_with_component_specs,
+        validate_dependency_render_feature_mode, validate_lib_target_name,
+        validate_matching_leptos_config, validate_optional_dep_feature_wiring, GeneratedOutputFile,
     };
     use std::path::PathBuf;
 
     fn test_component_spec(name: &str, variant_values: &[&str]) -> super::ComponentSpecContract {
         build_component_spec_contract(
             name.to_string(),
-            variant_values.iter().map(|value| value.to_string()).collect(),
+            variant_values
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
         )
     }
 
@@ -2247,6 +2569,27 @@ mod tests {
         assert!(rendered.contains("`BadgeVariant`"));
         assert!(rendered.contains("`neutral` -> `BadgeVariant::Neutral`"));
         assert!(rendered.contains("`positive-balance` -> `AccountCardVariant::PositiveBalance`"));
+    }
+
+    #[test]
+    fn component_name_extraction_preserves_authored_pascal_case() {
+        let account_card = "# AccountCard\n\n## Component Metadata\n- **Name**: AccountCard\n";
+        let balance_summary =
+            "# BalanceSummary - Component Specification\n\n## Component Metadata\n";
+        let lowercase_badge = "# badge\n\n## Component Metadata\n- **Name**: badge\n";
+
+        assert_eq!(
+            extract_component_name_from_spec(account_card),
+            Some("AccountCard".to_string())
+        );
+        assert_eq!(
+            extract_component_name_from_spec(balance_summary),
+            Some("BalanceSummary".to_string())
+        );
+        assert_eq!(
+            extract_component_name_from_spec(lowercase_badge),
+            Some("Badge".to_string())
+        );
     }
 
     #[test]
@@ -2430,7 +2773,9 @@ pub fn Badge(#[prop(into)] label: String) -> impl IntoView {
 
         let err = validate_app_rs_with_component_specs("demo", app, &[])
             .expect_err("expected name collision failure");
-        assert!(err.to_string().contains("both a Leptos component and a Rust struct"));
+        assert!(err
+            .to_string()
+            .contains("both a Leptos component and a Rust struct"));
     }
 
     #[test]
@@ -2466,7 +2811,9 @@ pub fn HomePage() -> impl IntoView {
 
         let err = validate_app_rs_with_component_specs("demo", app, &[])
             .expect_err("expected invalid For syntax");
-        assert!(err.to_string().contains("Leptos-incompatible <For /> syntax"));
+        assert!(err
+            .to_string()
+            .contains("Leptos-incompatible <For /> syntax"));
         assert!(err.to_string().contains("children=move |item| view!"));
     }
 
@@ -2504,7 +2851,9 @@ pub fn ThemeToggle(#[prop(into)] variant: String) -> impl IntoView {
 
         let err = validate_app_rs_with_component_specs("demo", app, &[])
             .expect_err("expected props struct failure");
-        assert!(err.to_string().contains("already generates that props type"));
+        assert!(err
+            .to_string()
+            .contains("already generates that props type"));
     }
 
     #[test]
@@ -2641,7 +2990,9 @@ fn AccountCard(title: String) -> impl IntoView {
 
         let err = validate_app_rs_with_component_specs("demo", app, &[])
             .expect_err("expected non-pub props collision failure");
-        assert!(err.to_string().contains("already generates that props type"));
+        assert!(err
+            .to_string()
+            .contains("already generates that props type"));
     }
 
     #[test]
@@ -2721,7 +3072,10 @@ pub fn AccountCard(#[prop(into)] variant: String) -> impl IntoView {
 }
 "#;
 
-        let specs = vec![test_component_spec("AccountCard", &["default", "positive-balance"])];
+        let specs = vec![test_component_spec(
+            "AccountCard",
+            &["default", "positive-balance"],
+        )];
 
         let err = validate_app_rs_with_component_specs("demo", app, &specs)
             .expect_err("expected string variant prop failure");
@@ -2771,7 +3125,10 @@ pub fn AccountCard(variant: AccountCardVariant) -> impl IntoView {
 }
 "#;
 
-        let specs = vec![test_component_spec("AccountCard", &["default", "positive-balance"])];
+        let specs = vec![test_component_spec(
+            "AccountCard",
+            &["default", "positive-balance"],
+        )];
 
         validate_app_rs_with_component_specs("demo", app, &specs)
             .expect("enum-backed dashed variants should validate");
@@ -2807,8 +3164,7 @@ pub fn HomePage() -> impl IntoView {
 fn noop() {}
 "#;
 
-        let err =
-            validate_app_rs("demo", app).expect_err("expected zero-arg callback failure");
+        let err = validate_app_rs("demo", app).expect_err("expected zero-arg callback failure");
         assert!(err
             .to_string()
             .contains("zero-argument stored callbacks such as 'action'"));
@@ -2875,8 +3231,7 @@ pub fn AccountCard(#[prop(optional)] icon: Option<String>) -> impl IntoView {
 }
 "#;
 
-        let err = validate_app_rs("demo", app)
-            .expect_err("expected optional forwarding failure");
+        let err = validate_app_rs("demo", app).expect_err("expected optional forwarding failure");
         assert!(err
             .to_string()
             .contains("forwards `Option<T>` values directly into optional-builder prop 'icon'"));
@@ -3057,6 +3412,171 @@ fn AccountCard(
     }
 
     #[test]
+    fn normalize_generated_app_rs_rewrites_leptos_06_compile_traps() {
+        let app = r#"use leptos::*;
+
+#[component]
+fn ThemeToggle(
+    #[prop(default = "light")] selected: String,
+) -> impl IntoView {
+    let (theme, set_theme) = create_signal(selected);
+    let options = vec!["light", "dark", "system"];
+    view! {
+        <div>
+            <For
+                each=move || options.clone()
+                key=|option| option.clone()
+                children=move |option| {
+                    let is_selected = move || theme.get() == option;
+                    view! {
+                        <button on:click=move |_| set_theme.set(option.clone())>
+                            {option}
+                        </button>
+                    }
+                }
+            />
+        </div>
+    }
+}
+
+#[component]
+fn AccountCard(badge: Option<AnyView>) -> impl IntoView {
+    view! { <div>{badge}</div> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! { <AccountCard badge=Some(view! { <span>"Badge"</span> }.into_any()) /> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized
+            .contains(r#"#[prop(default = String::from("light"), into)] selected: String"#));
+        assert!(normalized.contains("set_theme.set(click_value.clone())"));
+        assert!(normalized.contains("badge: Option<View>"));
+        assert!(normalized.contains(".into_view()"));
+        assert!(!normalized.contains("AnyView"));
+        assert!(!normalized.contains(".into_any()"));
+    }
+
+    #[test]
+    fn app_rs_rejects_leptos_06_compile_traps_after_normalization_boundary() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! { <Card badge=Some(view! { <span>"Badge"</span> }.into_any()) /> }
+}
+
+#[component]
+fn Card(badge: Option<AnyView>) -> impl IntoView {
+    view! { <div>{badge}</div> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected AnyView failure");
+        assert!(err.to_string().contains("unsupported `AnyView`"));
+
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! { <ThemeToggle/> }
+}
+
+#[component]
+fn ThemeToggle(#[prop(default = "light")] selected: String) -> impl IntoView {
+    let (_theme, set_theme) = create_signal(selected);
+    let options = vec!["light"];
+    view! { <button on:click=move |_| set_theme.set(option.clone())></button> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected string default failure");
+        assert!(err.to_string().contains("bare string-literal default"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_rewrites_moved_for_item_and_if_else_views() {
+        let app = r#"use leptos::*;
+
+#[component]
+fn ThemeToggle() -> impl IntoView {
+    let (current_theme, set_current_theme) = create_signal("light".to_string());
+    let options = vec!["light".to_string(), "dark".to_string()];
+    let disabled = false;
+    view! {
+        <For each=move || options.clone() key=|option| option.clone() children=move |option| {
+            let is_selected = move || current_theme.get() == option;
+            let option_class = move || if is_selected() { "selected" } else { "" };
+            view! {
+                <button class=option_class disabled=disabled on:click=move |_| set_current_theme.set(option.clone())>
+                    {option}
+                </button>
+            }
+        } />
+    }
+}
+
+#[component]
+fn AccountsDashboard(accounts: Vec<String>, loading: bool) -> impl IntoView {
+    view! {
+        <section>
+            {if accounts.is_empty() && !loading {
+                view! { <div class="accounts-dashboard__empty">No accounts available</div> }
+            } else {
+                view! {
+                    <For each=move || accounts.clone() key=|account| account.clone() children=move |account| {
+                        view! { <div>{account}</div> }
+                    } />
+                }
+            }}
+        </section>
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("let selected_value = option.clone();"));
+        assert!(normalized.contains("let click_value = option.clone();"));
+        assert!(
+            normalized.contains("let is_selected = move || current_theme.get() == selected_value;")
+        );
+        assert!(normalized.contains("set_current_theme.set(click_value.clone())"));
+        assert!(normalized.contains(
+            r#"view! { <div class="accounts-dashboard__empty">No accounts available</div> }.into_view()"#
+        ));
+        assert!(normalized.contains("} />\n                }.into_view()"));
+    }
+
+    #[test]
     fn normalize_generated_brand_files_adds_missing_gitignore() {
         let files = vec![GeneratedOutputFile {
             path: PathBuf::from("src/app.rs"),
@@ -3124,7 +3644,8 @@ fn HomePage() -> impl IntoView {
     view! { <AccountCard title=account.title.clone() /> }
 }"#;
 
-        let normalized = normalize_generated_app_rs(app, &[test_component_spec("Badge", &["neutral"])]);
+        let normalized =
+            normalize_generated_app_rs(app, &[test_component_spec("Badge", &["neutral"])]);
         assert!(normalized.contains("struct AccountCardData"));
         assert!(normalized.contains("struct AccountCardModel"));
         assert!(normalized.contains("let account = AccountCardModel"));
@@ -3160,7 +3681,9 @@ fn HomePage() -> impl IntoView {
 
         let normalized = normalize_generated_app_rs(app, &[]);
         assert!(
-            normalized.contains("<AccountCard title=account.title.clone() interactive=account.interactive />"),
+            normalized.contains(
+                "<AccountCard title=account.title.clone() interactive=account.interactive />"
+            ),
             "{}",
             normalized
         );
@@ -3275,7 +3798,9 @@ fn Footer(
         let normalized = normalize_generated_app_rs(app, &[]);
         assert!(normalized.contains("legal_links: Option<Vec<(String, String)>>,"));
         assert!(normalized.contains("#[prop(optional)] omitted: Option<bool>,"));
-        assert!(!normalized.contains("#[prop(optional)] legal_links: Option<Vec<(String, String)>>,"));
+        assert!(
+            !normalized.contains("#[prop(optional)] legal_links: Option<Vec<(String, String)>>,")
+        );
     }
 
     #[test]

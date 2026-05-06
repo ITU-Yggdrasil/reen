@@ -81,6 +81,13 @@ pub struct GuardrailReport {
     pub total_deleted_lines: usize,
 }
 
+pub(crate) fn try_apply_generated_ui_compile_fixes(
+    project_root: &Path,
+    cargo_stderr: &str,
+) -> Result<bool> {
+    apply_generated_ui_compile_fixes(project_root, cargo_stderr)
+}
+
 pub async fn ensure_compiles_with_auto_fix(
     config: &Config,
     max_attempts: usize,
@@ -328,6 +335,39 @@ fn apply_generated_ui_compile_fixes(project_root: &Path, stderr: &str) -> Result
         .to_string();
     updated = generated_signal_write_re()
         .replace_all(&updated, "on:click=move |_| $signal.set(\"$value\")")
+        .to_string();
+    updated = generated_signal_write_ident_re()
+        .replace_all(&updated, "on:click=move |_| $signal.set($value.clone())")
+        .to_string();
+    updated = underscored_interactive_prop_re()
+        .replace_all(&updated, "#[prop(default = false)] interactive: bool,")
+        .to_string();
+    updated = underscored_loading_prop_re()
+        .replace_all(&updated, "#[prop(default = false)] loading: bool,")
+        .to_string();
+    updated = optional_bool_props_re()
+        .replace_all(&updated, "$indent#[prop(optional)] $name: Option<bool>,")
+        .to_string();
+    updated = option_class_then_re()
+        .replace_all(
+            &updated,
+            "$indentlet $var = if $flag.unwrap_or(false) { \"$class\" } else { \"\" };",
+        )
+        .to_string();
+    updated = optional_option_string_props_re()
+        .replace_all(&updated, "$indent#[prop(optional)] $name: Option<String>,")
+        .to_string();
+    updated = for_key_view_pointer_re()
+        .replace_all(&updated, "key=|$var| $var as *const _ as usize")
+        .to_string();
+    updated = legal_links_into_view_re()
+        .replace_all(&updated, "let legal_links = view! {$body}.into_view();")
+        .to_string();
+    updated = empty_accounts_message_into_view_re()
+        .replace_all(
+            &updated,
+            "Some(view! { <p class=\"accounts-dashboard__empty-message\">No accounts available</p> }.into_view())",
+        )
         .to_string();
     updated = optional_string_prop_re()
         .replace_all(&updated, "#[prop(optional, into)] $name: Option<String>,")
@@ -1498,6 +1538,87 @@ fn generated_signal_write_re() -> &'static Regex {
     RE.get_or_init(|| {
         Regex::new(
             r#"on:click=move \|_\| (?P<signal>[A-Za-z_][A-Za-z0-9_]*)\("(?P<value>[^"]+)"\)"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn generated_signal_write_ident_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"on:click=move \|_\| (?P<signal>[A-Za-z_][A-Za-z0-9_]*)\.set\((?P<value>[A-Za-z_][A-Za-z0-9_]*)\)"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn underscored_interactive_prop_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"#\[prop\(default = false\)\]\s+_interactive:\s*bool,"#)
+            .expect("valid regex")
+    })
+}
+
+fn underscored_loading_prop_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"#\[prop\(default = false\)\]\s+_loading:\s*bool,"#).expect("valid regex")
+    })
+}
+
+fn optional_bool_props_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)^(?P<indent>\s*)(?P<name>disabled|loading|interactive|icon_only|full_width)\s*:\s*Option<bool>,\s*$"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn option_class_then_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)^(?P<indent>\s*)let\s+(?P<var>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<flag>[A-Za-z_][A-Za-z0-9_]*)\.unwrap_or\(false\)\.then\(\|\|\s*"(?P<class>[^"]+)"\s*\);\s*$"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn optional_option_string_props_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)^(?P<indent>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*Option<String>,\s*$"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn for_key_view_pointer_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"key=\|(?P<var>[A-Za-z_][A-Za-z0-9_]*)\|\s+\k<var>\.clone\(\)"#)
+            .expect("valid regex")
+    })
+}
+
+fn legal_links_into_view_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?s)let\s+legal_links\s*=\s*view!\s*\{(?P<body>.*?)\}\s*;"#)
+            .expect("valid regex")
+    })
+}
+
+fn empty_accounts_message_into_view_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"Some\(view!\s*\{\s*<p class="accounts-dashboard__empty-message">No accounts available</p>\s*\}\s*\)"#,
         )
         .expect("valid regex")
     })

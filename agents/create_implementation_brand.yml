@@ -216,13 +216,21 @@ static_prompt: |
   - Render Leptos components with view syntax. For unconstrained string props, string literals such
     as `<Badge label="Status"/>` are valid. For enum-backed variant props, use enum values such as
     `<BalanceSummary variant=BalanceSummaryVariant::Default/>`. For composed content passed through
-    props, use renderable content types such as `Children`, `ChildrenFn`, `AnyView`, or
-    `Option<AnyView>`.
+    props in this Leptos `0.6.x` scaffold, use `View` or `Option<View>` and convert generated
+    views with `.into_view()`. Do not use `AnyView` or `.into_any()`.
   - Target the Leptos `0.6.x` API family used by the scaffold dependencies.
   - For Leptos signals created with `create_signal(...)`, read values with `.get()` and update
     them with `.set(...)`. Do not emit `theme()` / `set_theme(...)` call-style signal usage.
   - For signal-driven class toggles and comparisons, prefer patterns such as
     `class:active=move || theme.get() == "light"` and `on:click=move |_| set_theme.set("light")`.
+  - If a signal stores `String`, update it with an owned `String`; for example use
+    `set_theme.set(option.to_string())` when `option` comes from `vec!["light", "dark"]`, or store
+    owned options such as `vec!["light".to_string(), "dark".to_string()]`.
+  - In `<For />` child closures, do not move the same owned `String` item into multiple `move`
+    closures and then also render it. Clone the item into separate local values before closures,
+    for example `let selected_value = option.clone(); let click_value = option.clone();`, use
+    `selected_value` in derived closures and `click_value` in click handlers, leaving `option`
+    available for rendered text.
   - For Leptos `0.6` list rendering with `<For />`, use `children=move |item| view! { ... }`,
     not `view=move |item| { ... }`.
   - Never emit a `<For ... view=... />` prop. The prop name must be `children=...`.
@@ -281,9 +289,11 @@ static_prompt: |
   - Only use `#[prop(optional)]` or `#[prop(optional, into)]` on `Option<T>` props when parent
     call sites truly omit that prop rather than passing `None`, `Some(...)`, or a forwarded
     `Option<T>` value.
-  - Avoid `view! {}.into_any()` as an empty branch. Prefer an explicit empty fragment strategy that
-    is known to compile for Leptos `0.6`, or restructure the conditional rendering to avoid an
-    empty `AnyView` branch entirely.
+  - Do not use `view! {}.into_any()` or any `.into_any()` branch. Prefer `.into_view()` with `View`,
+    or restructure the conditional rendering to avoid an empty rendered-content branch entirely.
+  - When an inline `{if ... { view! { ... } } else { view! { ... } }}` expression has view-producing
+    branches, erase both branches consistently with `.into_view()` so the `if` and `else` branches
+    have the same Rust type.
   - Generated `view!` macro attributes must use conservative, broadly compatible Leptos syntax.
   - Do not emit `class:...={...}` conditional class bindings when the class name contains hyphens,
     BEM modifiers, or any other non-trivial token pattern such as `button--primary`,

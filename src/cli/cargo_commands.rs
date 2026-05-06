@@ -16,20 +16,37 @@ pub async fn compile(config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    let output = Command::new("cargo")
+    let project_root = Path::new(".");
+
+    let mut output = Command::new("cargo")
         .arg("build")
         .output()
         .context("Failed to execute cargo build")?;
 
-    if config.verbose || !output.status.success() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let changed = compilation_fix::try_apply_generated_ui_compile_fixes(project_root, &stderr)
+            .unwrap_or(false);
+        if changed {
+            output = Command::new("cargo")
+                .arg("build")
+                .output()
+                .context("Failed to execute cargo build")?;
+        }
     }
 
     if output.status.success() {
+        if config.verbose {
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
         println!("✓ Build successful");
         Ok(())
     } else {
+        if config.verbose || !output.status.success() {
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
         anyhow::bail!("Build failed");
     }
 }
