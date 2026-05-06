@@ -109,7 +109,10 @@ reload-port = 3001"#;
 const BRAND_GITIGNORE_MINIMUM_SHAPE: &str = r#"target/
 .cargo-leptos/
 .leptos/
-.reen/"#;
+.reen/
+/style
+Leptos.toml
+/public"#;
 const BRAND_LIB_RS_MINIMUM_SHAPE: &str = r#"pub mod app;
 pub use app::App;"#;
 const BRAND_APP_RS_MINIMUM_SHAPE: &str = r#"use leptos::*;
@@ -799,7 +802,7 @@ fn validate_brand_css_variables(context_name: &str, content: &str) -> Result<()>
 }
 
 fn validate_gitignore(context_name: &str, content: &str) -> Result<()> {
-    let required_entries = ["target/", ".cargo-leptos/"];
+    let required_entries = ["target/", ".cargo-leptos/", ".leptos/", ".reen/", "/style", "Leptos.toml", "/public"];
     for entry in required_entries {
         if !content.lines().any(|line| line.trim() == entry) {
             anyhow::bail!(

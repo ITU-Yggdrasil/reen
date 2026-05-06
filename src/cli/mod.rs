@@ -5818,7 +5818,7 @@ site-addr = "127.0.0.1:3000"
 reload-port = 3001
 "#,
             ),
-            generated_brand_file(".gitignore", "target/\n.cargo-leptos/\n.leptos/\n.reen/\n"),
+            generated_brand_file(".gitignore", "target/\n.cargo-leptos/\n.leptos/\n.reen/\n/style\nLeptos.toml\n/public\n"),
             generated_brand_file(
                 "src/main.rs",
                 r#"#[tokio::main]
@@ -5943,6 +5943,9 @@ target/
 .cargo-leptos/
 .leptos/
 .reen/
+/style
+Leptos.toml
+/public
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -6130,6 +6133,9 @@ target/
 .cargo-leptos/
 .leptos/
 .reen/
+/style
+Leptos.toml
+/public
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -6206,6 +6212,9 @@ target/
 .cargo-leptos/
 .leptos/
 .reen/
+/style
+Leptos.toml
+/public
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
