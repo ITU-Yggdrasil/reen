@@ -40,26 +40,81 @@ static_prompt: |
   - tables
   Do not use freeform narrative paragraphs in the final specification.
 
-  The specification MUST always use this section order exactly. Optional sections may be omitted,
-  but if present they must appear in the position shown here:
+  The specification MUST always use the heading scaffold below. Copy these headings exactly,
+  remove optional sections only when they are not applicable, and fill each retained section
+  with structured content. Required sections and required subsections must never be removed.
 
-  1. `# Brand Identity Specification`
-  2. `## Description`
-  3. `## Brand Metadata`
-  4. `## Brand Essence` when applicable
-  5. `## Audience and Positioning` when applicable
-  6. `## Verbal Identity` when applicable
-  7. `## Logo System` when applicable
-  8. `## Color Tokens`
-  9. `## Typography`
-  10. `## Imagery` when applicable
-  11. `## Iconography`
-  12. `## Motion`
-  13. `## Composition Principles` when applicable
-  14. `## Layout Principles` when applicable
-  15. `## Token Reference Rules`
-  16. `## Blocking Ambiguities` when applicable
-  17. `## Implementation Choices Left Open` when applicable
+  # Brand Identity Specification
+
+  ## Description
+
+  ## Brand Metadata
+
+  ## Brand Essence
+  ### Mission
+  ### Vision
+  ### Values
+
+  ## Audience and Positioning
+  ### Audience
+  ### Positioning
+
+  ## Verbal Identity
+  ### Personality Attributes
+  ### Tone Guidelines
+  ### Messaging Do/Don't
+
+  ## Logo System
+  ### Mark Description
+  ### Clear Space and Sizing
+  ### Usage Rules
+
+  ## Color Tokens
+  ### Primary
+  ### Secondary
+  ### Semantic
+  ### Surface
+  ### Text and Foreground/Background
+
+  ## Typography
+  ### Families
+  ### Scales
+  ### Weights
+  ### Line Heights
+  ### Named Text Styles
+
+  ## Imagery
+  ### Style Attributes
+  ### Subject Guidance
+  ### Avoid
+
+  ## Iconography
+  ### Style
+  ### Size Set
+  ### Usage Constraints
+
+  ## Motion
+  ### Durations
+  ### Easing
+  ### Usage Principles
+
+  ## Composition Principles
+  ### Hierarchy
+  ### Density
+  ### Emphasis
+
+  ## Layout Principles
+
+  ## Token Reference Rules
+
+  ## Blocking Ambiguities
+
+  ## Implementation Choices Left Open
+
+  Optional sections may be omitted, but if present they must remain in the position shown in
+  the scaffold. The optional sections are `## Brand Essence`, `## Audience and Positioning`,
+  `## Verbal Identity`, `## Logo System`, `## Imagery`, `## Composition Principles`,
+  `## Layout Principles`, `## Blocking Ambiguities`, and `## Implementation Choices Left Open`.
 
   Use these optional identity sections when the draft contains that kind of information:
 
@@ -194,6 +249,8 @@ static_prompt: |
   - [ ] The title is exactly `# Brand Identity Specification`
   - [ ] All required sections exist in the required order
   - [ ] All required subsections exist
+  - [ ] `Semantic`, `Surface`, and `Text and Foreground/Background` are `###` headings under `## Color Tokens`
+  - [ ] `### Semantic`, `### Surface`, and `### Text and Foreground/Background` all appear before `## Typography`
   - [ ] Optional identity sections are structured as lists/tables, not prose paragraphs
   - [ ] Every token or rule is traceable to the draft
   - [ ] Missing primitive values are marked as `Unspecified from draft.` without inventing precision

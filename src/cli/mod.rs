@@ -28,7 +28,8 @@ use agent_executor::{AgentExecutor, AgentResponse};
 use brand_scaffold::render_brand_scaffold_contract;
 use brand_specs::{
     is_brand_draft_path, is_brand_spec_path, missing_required_brand_spec_parts,
-    unresolved_brand_token_references, validate_brand_spec_content,
+    repair_brand_spec_heading_levels, unresolved_brand_token_references,
+    validate_brand_spec_content,
 };
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
@@ -850,6 +851,7 @@ fn finalize_specification_output(
     let has_blocking_ambiguities;
 
     if is_visual_draft_path(draft_file, DRAFTS_DIR) {
+        normalized_spec_content = repair_brand_spec_heading_levels(&normalized_spec_content);
         actionable = extract_actionable_blocking_bullets_from_section(
             extract_blocking_ambiguities_section(&normalized_spec_content),
         );
@@ -879,6 +881,7 @@ fn finalize_specification_output(
             );
         }
     } else if is_brand_draft_path(draft_file, DRAFTS_DIR) {
+        normalized_spec_content = repair_brand_spec_heading_levels(&normalized_spec_content);
         let validation = validate_brand_spec_content(&normalized_spec_content).map_err(|err| {
             anyhow::anyhow!(
                 "generated brand specification for '{}' is invalid: {}",
@@ -4786,6 +4789,7 @@ mod tests {
     use crate::cli::agent_executor::AgentExecutor;
     use crate::cli::brand_scaffold::{
         render_brand_scaffold_contract, BrandEnvelopeParser, BrandScaffoldValidator,
+        GeneratedOutputFile,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -5757,6 +5761,139 @@ oops
         assert!(err.to_string().contains("disallowed path traversal"));
     }
 
+    fn generated_brand_file(path: &str, content: &str) -> GeneratedOutputFile {
+        GeneratedOutputFile {
+            path: PathBuf::from(path),
+            content: content.to_string(),
+        }
+    }
+
+    fn brand_generated_files_with_components(
+        lib_rs: &str,
+        components_mod: Option<&str>,
+    ) -> Vec<GeneratedOutputFile> {
+        let mut files = vec![
+            generated_brand_file(
+                "Cargo.toml",
+                r#"[package]
+name = "acme"
+[package.metadata.leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+bin-features = ["ssr"]
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+[lib]
+crate-type = ["cdylib", "rlib"]
+[features]
+hydrate = []
+ssr = []
+[dependencies]
+leptos = "0.6"
+leptos_router = "0.6"
+leptos_axum = "0.6"
+axum = "0.7"
+"#,
+            ),
+            generated_brand_file(
+                "Leptos.toml",
+                r#"[package]
+name = "acme"
+lib = { path = "src/lib.rs" }
+bin = { path = "src/main.rs" }
+
+[leptos]
+output-name = "acme"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/app.css"
+assets-dir = "public"
+site-addr = "127.0.0.1:3000"
+reload-port = 3001
+"#,
+            ),
+            generated_brand_file(".gitignore", "target/\n.cargo-leptos/\n.leptos/\n.reen/\n/style\nLeptos.toml\n/public\n"),
+            generated_brand_file(
+                "src/main.rs",
+                r#"#[tokio::main]
+async fn main() {
+    let leptos_options = leptos::get_configuration(None).await.unwrap().leptos_options;
+    let routes = leptos_axum::generate_route_list(|| view! { <App/> });
+    let app = axum::Router::new()
+        .leptos_routes(&leptos_options, routes, || view! { <App/> })
+        .with_state(leptos_options);
+    let listener = tokio::net::TcpListener::bind(leptos_options.site_addr).await.unwrap();
+    axum::serve(listener, app.into_make_service()).await.unwrap();
+}
+"#,
+            ),
+            generated_brand_file("src/lib.rs", lib_rs),
+            generated_brand_file(
+                "src/app.rs",
+                r#"use leptos::*;
+use leptos_router::components::{Route, Router, Routes};
+use crate::components::{Badge, Button};
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>
+            {include_str!("../style/app.css")}
+        </style>
+        <Router>
+            <Routes fallback=|| view! { <main></main> }>
+                <Route path="/" view=|| view! {
+                    <main class="shell">
+                        <Button label="Primary" variant="primary"/>
+                        <Badge label="New" variant="neutral"/>
+                    </main>
+                }/>
+            </Routes>
+        </Router>
+    }
+}
+"#,
+            ),
+            generated_brand_file(
+                "style/app.css",
+                ":root { --brand-colors-primary-default: #112233; }\n",
+            ),
+            generated_brand_file("public/favicon.ico", "placeholder\n"),
+            generated_brand_file(
+                "src/components/button.rs",
+                r#"use leptos::*;
+
+#[component]
+pub fn Button(#[prop(into)] label: String, #[prop(into)] variant: String) -> impl IntoView {
+    view! { <button class=variant>{label}</button> }
+}
+"#,
+            ),
+            generated_brand_file(
+                "src/components/badge.rs",
+                r#"use leptos::*;
+
+#[component]
+pub fn Badge(#[prop(into)] label: String, #[prop(into)] variant: String) -> impl IntoView {
+    view! { <span class=variant>{label}</span> }
+}
+"#,
+            ),
+        ];
+
+        if let Some(content) = components_mod {
+            files.push(generated_brand_file("src/components/mod.rs", content));
+        }
+
+        files
+    }
+
     #[test]
     fn validate_brand_generated_output_requires_leptos_scaffold_files_and_root_route() {
         let files = BrandEnvelopeParser::parse(
@@ -5806,6 +5943,9 @@ target/
 .cargo-leptos/
 .leptos/
 .reen/
+/style
+Leptos.toml
+/public
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -5859,6 +5999,92 @@ placeholder
     }
 
     #[test]
+    fn validate_brand_generated_output_rejects_components_without_mod_file() {
+        let files = brand_generated_files_with_components(
+            "pub mod app;\npub mod components;\npub use app::App;\n",
+            None,
+        );
+
+        let err = BrandScaffoldValidator::validate(
+            Path::new("specifications/visuals/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect_err("expected missing src/components/mod.rs failure");
+
+        assert!(err.to_string().contains("missing src/components/mod.rs"));
+    }
+
+    #[test]
+    fn validate_brand_generated_output_rejects_components_without_lib_module() {
+        let files = brand_generated_files_with_components(
+            "pub mod app;\npub use app::App;\n",
+            Some("mod button;\nmod badge;\npub use button::Button;\npub use badge::Badge;\n"),
+        );
+
+        let err = BrandScaffoldValidator::validate(
+            Path::new("specifications/visuals/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect_err("expected missing lib components module failure");
+
+        assert!(err.to_string().contains("src/lib.rs"));
+        assert!(err.to_string().contains("pub mod components"));
+    }
+
+    #[test]
+    fn validate_brand_generated_output_rejects_missing_component_module_declaration() {
+        let files = brand_generated_files_with_components(
+            "pub mod app;\npub mod components;\npub use app::App;\n",
+            Some("mod button;\npub use button::Button;\npub use badge::Badge;\n"),
+        );
+
+        let err = BrandScaffoldValidator::validate(
+            Path::new("specifications/visuals/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect_err("expected missing badge module declaration failure");
+
+        assert!(err.to_string().contains("mod badge;"));
+        assert!(err.to_string().contains("src/components/mod.rs"));
+    }
+
+    #[test]
+    fn validate_brand_generated_output_rejects_missing_component_reexport() {
+        let files = brand_generated_files_with_components(
+            "pub mod app;\npub mod components;\npub use app::App;\n",
+            Some("mod button;\nmod badge;\npub use button::Button;\n"),
+        );
+
+        let err = BrandScaffoldValidator::validate(
+            Path::new("specifications/visuals/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect_err("expected missing badge re-export failure");
+
+        assert!(err.to_string().contains("pub use badge::Badge;"));
+        assert!(err.to_string().contains("src/components/mod.rs"));
+    }
+
+    #[test]
+    fn validate_brand_generated_output_accepts_complete_component_module_wiring() {
+        let files = brand_generated_files_with_components(
+            "pub mod app;\npub mod components;\npub use app::App;\n",
+            Some("mod button;\nmod badge;\npub use button::Button;\npub use badge::Badge;\n"),
+        );
+
+        BrandScaffoldValidator::validate(
+            Path::new("specifications/visuals/acme.md"),
+            "acme",
+            &files,
+        )
+        .expect("complete component module wiring should pass validation");
+    }
+
+    #[test]
     fn validate_brand_generated_output_rejects_missing_root_route() {
         let files = BrandEnvelopeParser::parse(
             r#"===FILE: Cargo.toml===
@@ -5907,6 +6133,9 @@ target/
 .cargo-leptos/
 .leptos/
 .reen/
+/style
+Leptos.toml
+/public
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -5983,6 +6212,9 @@ target/
 .cargo-leptos/
 .leptos/
 .reen/
+/style
+Leptos.toml
+/public
 ===END_FILE===
 ===FILE: src/main.rs===
 #[tokio::main]
@@ -6632,10 +6864,16 @@ Card groups related content and actions into a single unit.
 - `Heading`: used for the title.
 "#;
         fs::write(root.join("drafts/components/card.md"), card_draft).expect("write card draft");
-        fs::write(root.join("drafts/components/badge.md"), "# Badge - Component Specification")
-            .expect("write badge draft");
-        fs::write(root.join("drafts/components/image.md"), "# Image - Component Specification")
-            .expect("write image draft");
+        fs::write(
+            root.join("drafts/components/badge.md"),
+            "# Badge - Component Specification",
+        )
+        .expect("write badge draft");
+        fs::write(
+            root.join("drafts/components/image.md"),
+            "# Image - Component Specification",
+        )
+        .expect("write image draft");
         fs::write(
             root.join("component_drafts/button.md"),
             "# Button\n\n## Description\nFallback button.",
@@ -6942,6 +7180,43 @@ Card groups related content and actions into a single unit.
             written,
             "## Blocking Ambiguities\n\n- The draft does not define any semantic color tokens for warning/error states."
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visual_brand_specs_repair_misleveled_color_subsections_before_validation() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("visual_heading_repair");
+        fs::create_dir_all(root.join("drafts/visuals")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir specs");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/visuals/snake.md");
+        let draft_content = "# Snake";
+        fs::write(draft_path, draft_content).expect("write draft");
+
+        let spec_content = valid_brand_spec_with_blocker()
+            .replace(
+                "\n## Blocking Ambiguities\n- The draft does not define any semantic color tokens for warning/error states.\n",
+                "\n",
+            )
+            .replace("### Semantic", "## Semantic");
+
+        let outcome = finalize_specification_output(
+            draft_content,
+            draft_path,
+            "snake",
+            spec_content,
+            HashMap::new(),
+        )
+        .expect("finalize repaired visual spec");
+
+        assert!(matches!(outcome, ProcessSpecOutcome::Success));
+
+        let written = fs::read_to_string("specifications/visuals/snake.md").expect("read spec");
+        assert!(written.contains("### Semantic"));
+        assert!(!written.contains("\n## Semantic"));
+
         let _ = fs::remove_dir_all(root);
     }
 

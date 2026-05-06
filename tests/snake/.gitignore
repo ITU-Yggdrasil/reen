@@ -2,3 +2,6 @@ target/
 .cargo-leptos/
 .leptos/
 .reen/
+/style
+Leptos.toml
+/public

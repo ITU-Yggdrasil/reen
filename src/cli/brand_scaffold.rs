@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,7 +109,10 @@ reload-port = 3001"#;
 const BRAND_GITIGNORE_MINIMUM_SHAPE: &str = r#"target/
 .cargo-leptos/
 .leptos/
-.reen/"#;
+.reen/
+/style
+Leptos.toml
+/public"#;
 const BRAND_LIB_RS_MINIMUM_SHAPE: &str = r#"pub mod app;
 pub use app::App;"#;
 const BRAND_APP_RS_MINIMUM_SHAPE: &str = r#"use leptos::*;
@@ -318,6 +322,10 @@ impl BrandScaffoldValidator {
 
         let app_css = find_file(generated_files, "style/app.css")?;
         validate_app_css(context_name, &app_css.content)?;
+        validate_brand_css_variables(context_name, &app_css.content)?;
+
+        validate_generated_brand_rust_patterns(context_name, generated_files)?;
+        validate_component_module_wiring(context_name, generated_files, &lib_rs.content)?;
 
         let combined = generated_files
             .iter()
@@ -407,6 +415,13 @@ impl BrandScaffoldWriter {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComponentModuleSpec {
+    path: PathBuf,
+    module_name: String,
+    component_name: String,
+}
+
 pub(crate) fn finalize_brand_implementation_output(
     context_file: &Path,
     context_name: &str,
@@ -453,6 +468,122 @@ fn find_file<'a>(
         .iter()
         .find(|file| file.path == Path::new(path))
         .ok_or_else(|| anyhow::anyhow!("Generated brand implementation is missing {}", path))
+}
+
+fn component_module_specs(generated_files: &[GeneratedOutputFile]) -> Vec<ComponentModuleSpec> {
+    let mut specs = generated_files
+        .iter()
+        .filter_map(|file| component_module_spec(&file.path))
+        .collect::<Vec<_>>();
+    specs.sort_by(|left, right| left.path.cmp(&right.path));
+    specs
+}
+
+fn component_module_spec(path: &Path) -> Option<ComponentModuleSpec> {
+    let parent = path.parent()?;
+    if parent != Path::new("src/components") {
+        return None;
+    }
+    if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+        return None;
+    }
+
+    let module_name = path.file_stem()?.to_str()?;
+    if module_name == "mod" {
+        return None;
+    }
+
+    Some(ComponentModuleSpec {
+        path: path.to_path_buf(),
+        module_name: module_name.to_string(),
+        component_name: pascal_case_identifier(module_name),
+    })
+}
+
+fn pascal_case_identifier(value: &str) -> String {
+    let mut output = String::new();
+    for segment in value.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        if segment.is_empty() {
+            continue;
+        }
+
+        let mut chars = segment.chars();
+        if let Some(first) = chars.next() {
+            output.extend(first.to_uppercase());
+            output.push_str(chars.as_str());
+        }
+    }
+    output
+}
+
+fn validate_component_module_wiring(
+    context_name: &str,
+    generated_files: &[GeneratedOutputFile],
+    lib_rs: &str,
+) -> Result<()> {
+    let components = component_module_specs(generated_files);
+    if components.is_empty() {
+        return Ok(());
+    }
+
+    if !lib_rs.contains("mod components;") {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' emits src/components/*.rs files but src/lib.rs does not declare 'pub mod components;'",
+            context_name
+        );
+    }
+
+    let components_mod = find_file(generated_files, "src/components/mod.rs").map_err(|_| {
+        anyhow::anyhow!(
+            "Generated brand implementation for '{}' emits src/components/*.rs files but is missing src/components/mod.rs",
+            context_name
+        )
+    })?;
+
+    for component in components {
+        if !has_module_declaration(&components_mod.content, &component.module_name) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' is missing module declaration 'mod {};' in src/components/mod.rs for {}",
+                context_name,
+                component.module_name,
+                component.path.display()
+            );
+        }
+
+        if !has_component_reexport(
+            &components_mod.content,
+            &component.module_name,
+            &component.component_name,
+        ) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' is missing re-export 'pub use {}::{};' in src/components/mod.rs for {}",
+                context_name,
+                component.module_name,
+                component.component_name,
+                component.path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn has_module_declaration(content: &str, module_name: &str) -> bool {
+    let private_decl = format!("mod {};", module_name);
+    let public_decl = format!("pub mod {};", module_name);
+    content
+        .lines()
+        .map(str::trim)
+        .any(|line| line == private_decl || line == public_decl)
+}
+
+fn has_component_reexport(content: &str, module_name: &str, component_name: &str) -> bool {
+    let direct_reexport = format!("pub use {}::{};", module_name, component_name);
+    let self_reexport = format!("pub use self::{}::{};", module_name, component_name);
+    content
+        .lines()
+        .map(str::trim)
+        .any(|line| line == direct_reexport || line == self_reexport)
 }
 
 fn validate_cargo_toml(context_name: &str, content: &str) -> Result<()> {
@@ -609,8 +740,69 @@ fn validate_app_css(context_name: &str, content: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_generated_brand_rust_patterns(
+    context_name: &str,
+    generated_files: &[GeneratedOutputFile],
+) -> Result<()> {
+    let component_tag_prop =
+        Regex::new(r"=\s*<[A-Z]").expect("component tag prop regex should compile");
+
+    for file in generated_files
+        .iter()
+        .filter(|file| file.path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+    {
+        if component_tag_prop.is_match(&file.content) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' contains a component tag or view fragment as a prop value in {}; use plain data props or nested children instead",
+                context_name,
+                file.path.display()
+            );
+        }
+
+        if file.content.contains("AnyView") {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' uses unsupported AnyView props in {}; use plain data props or an explicitly supported Children/ChildrenFn slot pattern instead",
+                context_name,
+                file.path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_brand_css_variables(context_name: &str, content: &str) -> Result<()> {
+    let definition_pattern =
+        Regex::new(r"(?m)(--brand-[A-Za-z0-9_-]+)\s*:").expect("brand css definition regex");
+    let reference_pattern =
+        Regex::new(r"var\(\s*(--brand-[A-Za-z0-9_-]+)").expect("brand css reference regex");
+
+    let definitions = definition_pattern
+        .captures_iter(content)
+        .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        .collect::<HashSet<_>>();
+
+    let unresolved = reference_pattern
+        .captures_iter(content)
+        .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        .filter(|reference| !definitions.contains(reference))
+        .collect::<HashSet<_>>();
+
+    if !unresolved.is_empty() {
+        let mut unresolved = unresolved.into_iter().collect::<Vec<_>>();
+        unresolved.sort();
+        anyhow::bail!(
+            "Generated brand implementation for '{}' references undefined CSS brand variable(s) in style/app.css: {}",
+            context_name,
+            unresolved.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
 fn validate_gitignore(context_name: &str, content: &str) -> Result<()> {
-    let required_entries = ["target/", ".cargo-leptos/"];
+    let required_entries = ["target/", ".cargo-leptos/", ".leptos/", ".reen/", "/style", "Leptos.toml", "/public"];
     for entry in required_entries {
         if !content.lines().any(|line| line.trim() == entry) {
             anyhow::bail!(
@@ -809,11 +1001,13 @@ fn extract_dependency_spec(content: &str, dependency: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_dep_feature_refs, extract_dependency_spec, extract_toml_value,
-        render_brand_scaffold_contract, validate_dependency_render_feature_mode,
-        validate_lib_target_name, validate_matching_leptos_config,
-        validate_optional_dep_feature_wiring,
+        component_module_specs, extract_dep_feature_refs, extract_dependency_spec,
+        extract_toml_value, pascal_case_identifier, render_brand_scaffold_contract,
+        validate_brand_css_variables, validate_dependency_render_feature_mode,
+        validate_generated_brand_rust_patterns, validate_lib_target_name,
+        validate_matching_leptos_config, validate_optional_dep_feature_wiring, GeneratedOutputFile,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn rendered_contract_includes_expected_scaffold_shapes() {
@@ -856,6 +1050,136 @@ reload-port = 3001
             extract_toml_value(content, "package.metadata.leptos", "missing-key"),
             None
         );
+    }
+
+    #[test]
+    fn component_module_detection_excludes_components_mod_rs() {
+        let files = vec![
+            GeneratedOutputFile {
+                path: PathBuf::from("src/components/button.rs"),
+                content: String::new(),
+            },
+            GeneratedOutputFile {
+                path: PathBuf::from("src/components/mod.rs"),
+                content: String::new(),
+            },
+            GeneratedOutputFile {
+                path: PathBuf::from("src/app.rs"),
+                content: String::new(),
+            },
+        ];
+
+        let specs = component_module_specs(&files);
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].module_name, "button");
+        assert_eq!(specs[0].component_name, "Button");
+    }
+
+    #[test]
+    fn generated_rust_validation_rejects_component_tag_prop_values() {
+        let files = vec![GeneratedOutputFile {
+            path: PathBuf::from("src/app.rs"),
+            content: r#"
+view! {
+    <Card media=<Image src="/placeholder.jpg" alt="Placeholder" variant="thumbnail"/> />
+}
+"#
+            .to_string(),
+        }];
+
+        let err = validate_generated_brand_rust_patterns("demo", &files)
+            .expect_err("expected component tag prop rejection");
+
+        assert!(err
+            .to_string()
+            .contains("component tag or view fragment as a prop value"));
+    }
+
+    #[test]
+    fn generated_rust_validation_rejects_any_view_props() {
+        let files = vec![GeneratedOutputFile {
+            path: PathBuf::from("src/components/card.rs"),
+            content: "pub fn Card(#[prop(optional)] media: Option<AnyView>) -> impl IntoView { view! { <article/> } }"
+                .to_string(),
+        }];
+
+        let err = validate_generated_brand_rust_patterns("demo", &files)
+            .expect_err("expected AnyView rejection");
+
+        assert!(err.to_string().contains("unsupported AnyView props"));
+    }
+
+    #[test]
+    fn generated_rust_validation_accepts_plain_data_composition_props() {
+        let files = vec![GeneratedOutputFile {
+            path: PathBuf::from("src/components/card.rs"),
+            content: r#"
+use leptos::*;
+use crate::components::{Badge, Button, Image};
+
+#[component]
+pub fn Card(
+    #[prop(into, optional)] media_src: Option<String>,
+    #[prop(into, optional)] badge_label: Option<String>,
+    #[prop(into, optional)] action_label: Option<String>,
+) -> impl IntoView {
+    view! {
+        <article>
+            {media_src.map(|src| view! { <Image src=src alt="Preview" variant="thumbnail"/> })}
+            {badge_label.map(|label| view! { <Badge label=label variant="neutral"/> })}
+            {action_label.map(|label| view! { <Button label=label variant="primary"/> })}
+        </article>
+    }
+}
+"#
+            .to_string(),
+        }];
+
+        validate_generated_brand_rust_patterns("demo", &files)
+            .expect("plain data composition should be accepted");
+    }
+
+    #[test]
+    fn brand_css_variable_validation_accepts_defined_references() {
+        let css = r#"
+:root {
+    --brand-colors-primary-red: #ff0000;
+    --brand-colors-primary-white: #ffffff;
+}
+
+body {
+    color: var(--brand-colors-primary-red);
+    background: var(--brand-colors-primary-white);
+}
+"#;
+
+        validate_brand_css_variables("demo", css).expect("defined vars should pass");
+    }
+
+    #[test]
+    fn brand_css_variable_validation_rejects_undefined_references() {
+        let css = r#"
+:root {
+    --brand-colors-primary-red: #ff0000;
+}
+
+body {
+    color: var(--brand-colors-primary-black);
+}
+"#;
+
+        let err = validate_brand_css_variables("demo", css)
+            .expect_err("expected undefined variable rejection");
+
+        assert!(err.to_string().contains("--brand-colors-primary-black"));
+    }
+
+    #[test]
+    fn pascal_case_identifier_handles_component_file_stems() {
+        assert_eq!(pascal_case_identifier("button"), "Button");
+        assert_eq!(pascal_case_identifier("button_minimal"), "ButtonMinimal");
+        assert_eq!(pascal_case_identifier("badge"), "Badge");
     }
 
     #[test]
