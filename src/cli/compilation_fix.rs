@@ -1601,7 +1601,11 @@ fn optional_option_string_props_re() -> &'static Regex {
 fn for_key_view_pointer_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"key=\|(?P<var>[A-Za-z_][A-Za-z0-9_]*)\|\s+\k<var>\.clone\(\)"#)
+        // Note: Rust's `regex` crate does not support backreferences, so we match
+        // `key=|x| <identifier>.clone()` and reuse the `x` capture in the replacement.
+        Regex::new(
+            r#"key=\|(?P<var>[A-Za-z_][A-Za-z0-9_]*)\|\s+(?P<_rhs>[A-Za-z_][A-Za-z0-9_]*)\.clone\(\)"#,
+        )
             .expect("valid regex")
     })
 }
