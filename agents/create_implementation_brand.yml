@@ -145,6 +145,10 @@ static_prompt: |
   When present, `input.brand_variant_contract` is also authoritative. Do not invent alternate
   enum names, keep spec-enumerated variants as `String`, or emit raw string variant call sites
   when that contract provides exact enum/type/call-site requirements.
+  When present, `input.component_implementation_contracts` is also authoritative. Use it for
+  exact prop shapes, nested object fields, repeated-item schemas, interaction kinds, composition
+  usage, and concrete brand-informed implementation constraints extracted from component specs.
+  Do not invent alternate data payload shapes when this contract is present.
 
   ## Brand Token Rules
 
@@ -392,5 +396,8 @@ variable_prompt: |
 
   CLI-owned deterministic variant contract (authoritative when present):
   {{input.brand_variant_contract?}}
+
+  CLI-owned extracted component implementation contracts (authoritative when present):
+  {{input.component_implementation_contracts?}}
 
   Please complete the task described above. Return only the ===FILE: ...=== blocks.

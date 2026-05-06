@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use regex::Regex;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -176,12 +177,60 @@ pub(crate) struct ComponentSpecContract {
     enum_name: String,
     rust_variants: Vec<String>,
     default_variant: Option<String>,
+    props: Vec<ComponentContractField>,
+    object_contracts: Vec<ComponentObjectContract>,
+    collection_contracts: Vec<ComponentCollectionContract>,
+    interaction_contracts: Vec<ComponentInteractionContract>,
+    composition_contracts: Vec<ComponentCompositionContract>,
+    brand_constraints: Vec<ComponentBrandConstraint>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ComponentPropSpec {
     name: String,
     ty: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ComponentContractField {
+    name: String,
+    required: bool,
+    shape: String,
+    ty: String,
+    item_contract: Option<String>,
+    object_contract: Option<String>,
+    allowed: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ComponentObjectContract {
+    name: String,
+    fields: Vec<ComponentContractField>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ComponentCollectionContract {
+    name: String,
+    item_contract: String,
+    behavior: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ComponentInteractionContract {
+    target: String,
+    kind: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ComponentCompositionContract {
+    name: String,
+    usage: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ComponentBrandConstraint {
+    topic: String,
+    guidance: String,
 }
 
 pub(crate) struct BrandEnvelopeParser;
@@ -1247,6 +1296,86 @@ pub(crate) fn render_brand_variant_contract(
     ))
 }
 
+pub(crate) fn render_component_implementation_contract(
+    component_specs: &[ComponentSpecContract],
+) -> Option<String> {
+    if component_specs.is_empty() {
+        return None;
+    }
+
+    let rendered = component_specs
+        .iter()
+        .map(|spec| {
+            let payload = json!({
+                "component": spec.name,
+                "props": spec.props.iter().map(|prop| {
+                    json!({
+                        "name": prop.name,
+                        "required": prop.required,
+                        "shape": prop.shape,
+                        "type": prop.ty,
+                        "item_contract": prop.item_contract,
+                        "object_contract": prop.object_contract,
+                        "allowed": prop.allowed,
+                    })
+                }).collect::<Vec<_>>(),
+                "object_contracts": spec.object_contracts.iter().map(|contract| {
+                    json!({
+                        "name": contract.name,
+                        "fields": contract.fields.iter().map(|field| {
+                            json!({
+                                "name": field.name,
+                                "required": field.required,
+                                "shape": field.shape,
+                                "type": field.ty,
+                                "item_contract": field.item_contract,
+                                "object_contract": field.object_contract,
+                                "allowed": field.allowed,
+                            })
+                        }).collect::<Vec<_>>(),
+                    })
+                }).collect::<Vec<_>>(),
+                "collection_contracts": spec.collection_contracts.iter().map(|contract| {
+                    json!({
+                        "name": contract.name,
+                        "item_contract": contract.item_contract,
+                        "behavior": contract.behavior,
+                    })
+                }).collect::<Vec<_>>(),
+                "interaction_contracts": spec.interaction_contracts.iter().map(|contract| {
+                    json!({
+                        "target": contract.target,
+                        "kind": contract.kind,
+                    })
+                }).collect::<Vec<_>>(),
+                "composition_contracts": spec.composition_contracts.iter().map(|contract| {
+                    json!({
+                        "name": contract.name,
+                        "usage": contract.usage,
+                    })
+                }).collect::<Vec<_>>(),
+                "brand_constraints": spec.brand_constraints.iter().map(|constraint| {
+                    json!({
+                        "topic": constraint.topic,
+                        "guidance": constraint.guidance,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            format!(
+                "Component `{}` implementation contract:\n```json\n{}\n```",
+                spec.name,
+                serde_json::to_string_pretty(&payload).expect("component contract json")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    Some(format!(
+        "Treat the following CLI-extracted component implementation contracts as authoritative for this run.\nUse them for exact prop shapes, nested object fields, repeated-item schemas, interaction kinds, composition usage, and concrete brand-informed implementation constraints.\n\n{}",
+        rendered
+    ))
+}
+
 fn normalize_forwarded_option_props(content: &str) -> String {
     let inline_prop_attr_re = Regex::new(r"#\[prop\([^\]]+\)\]\s*").expect("valid regex");
     let optional_attr_line_re =
@@ -1876,8 +2005,14 @@ pub(crate) fn load_component_spec_contracts_from_paths(
         };
 
         let variant_values = extract_variant_values_from_spec(&content);
+        let implementation_contract =
+            parse_component_implementation_contract(&name, &content, &variant_values)?;
         if seen.insert(name.clone()) {
-            contracts.push(build_component_spec_contract(name, variant_values));
+            contracts.push(build_component_spec_contract(
+                name,
+                variant_values,
+                implementation_contract,
+            ));
         }
     }
 
@@ -1888,6 +2023,7 @@ pub(crate) fn load_component_spec_contracts_from_paths(
 fn build_component_spec_contract(
     name: String,
     variant_values: Vec<String>,
+    implementation_contract: ParsedImplementationContract,
 ) -> ComponentSpecContract {
     let enum_name = format!("{}Variant", name);
     let rust_variants = variant_values
@@ -1905,6 +2041,12 @@ fn build_component_spec_contract(
         enum_name,
         rust_variants,
         default_variant,
+        props: implementation_contract.props,
+        object_contracts: implementation_contract.object_contracts,
+        collection_contracts: implementation_contract.collection_contracts,
+        interaction_contracts: implementation_contract.interaction_contracts,
+        composition_contracts: implementation_contract.composition_contracts,
+        brand_constraints: implementation_contract.brand_constraints,
     }
 }
 
@@ -1975,6 +2117,661 @@ fn extract_variant_values_from_spec(content: &str) -> Vec<String> {
         }
     }
     Vec::new()
+}
+
+#[derive(Debug, Default)]
+struct ParsedImplementationContract {
+    props: Vec<ComponentContractField>,
+    object_contracts: Vec<ComponentObjectContract>,
+    collection_contracts: Vec<ComponentCollectionContract>,
+    interaction_contracts: Vec<ComponentInteractionContract>,
+    composition_contracts: Vec<ComponentCompositionContract>,
+    brand_constraints: Vec<ComponentBrandConstraint>,
+}
+
+fn parse_component_implementation_contract(
+    component_name: &str,
+    content: &str,
+    variant_values: &[String],
+) -> Result<ParsedImplementationContract> {
+    let section =
+        extract_markdown_section(content, "Implementation Contract").ok_or_else(|| {
+            anyhow::anyhow!(
+            "Component specification '{}' is missing required '## Implementation Contract' section",
+            component_name
+        )
+        })?;
+
+    let subsections = split_contract_subsections(&section);
+    let props_lines = subsections.get("Props").ok_or_else(|| {
+        anyhow::anyhow!(
+            "Component specification '{}' is missing required '### Props' section under '## Implementation Contract'",
+            component_name
+        )
+    })?;
+
+    let props = props_lines
+        .iter()
+        .filter(|line| line.starts_with("- "))
+        .map(|line| parse_contract_field_line(line, component_name, "Props"))
+        .collect::<Result<Vec<_>>>()?;
+    if props.is_empty() {
+        anyhow::bail!(
+            "Component specification '{}' must declare at least one prop in '## Implementation Contract > ### Props'",
+            component_name
+        );
+    }
+
+    let object_contracts = parse_object_contracts(
+        component_name,
+        subsections
+            .get("Object Contracts")
+            .cloned()
+            .unwrap_or_default(),
+    )?;
+    let collection_contracts = parse_collection_contracts(
+        component_name,
+        subsections
+            .get("Collection Contracts")
+            .cloned()
+            .unwrap_or_default(),
+    )?;
+    let interaction_contracts = parse_interaction_contracts(
+        component_name,
+        subsections
+            .get("Interaction Contracts")
+            .cloned()
+            .unwrap_or_default(),
+    )?;
+    let composition_contracts = parse_composition_contracts(
+        component_name,
+        subsections
+            .get("Composition Contracts")
+            .cloned()
+            .unwrap_or_default(),
+    )?;
+    let brand_constraints = parse_brand_constraints(
+        component_name,
+        subsections
+            .get("Brand Constraints")
+            .cloned()
+            .unwrap_or_default(),
+    )?;
+
+    validate_component_implementation_contract(
+        component_name,
+        variant_values,
+        &props,
+        &object_contracts,
+        &collection_contracts,
+        &interaction_contracts,
+        &brand_constraints,
+    )?;
+
+    Ok(ParsedImplementationContract {
+        props,
+        object_contracts,
+        collection_contracts,
+        interaction_contracts,
+        composition_contracts,
+        brand_constraints,
+    })
+}
+
+fn extract_markdown_section(content: &str, section_name: &str) -> Option<String> {
+    let target = format!("## {}", section_name);
+    let mut in_section = false;
+    let mut lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            if in_section {
+                break;
+            }
+            if trimmed == target {
+                in_section = true;
+                continue;
+            }
+        }
+        if in_section {
+            lines.push(line.to_string());
+        }
+    }
+
+    if in_section {
+        Some(lines.join("\n"))
+    } else {
+        None
+    }
+}
+
+fn split_contract_subsections(section: &str) -> HashMap<String, Vec<String>> {
+    let mut sections = HashMap::new();
+    let mut current: Option<String> = None;
+
+    for line in section.lines() {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix("### ") {
+            let key = name.trim().to_string();
+            sections.entry(key.clone()).or_insert_with(Vec::new);
+            current = Some(key);
+            continue;
+        }
+
+        if let Some(name) = current.as_ref() {
+            if !trimmed.is_empty() {
+                sections
+                    .entry(name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(trimmed.to_string());
+            }
+        }
+    }
+
+    sections
+}
+
+fn parse_contract_field_line(
+    line: &str,
+    component_name: &str,
+    section_name: &str,
+) -> Result<ComponentContractField> {
+    let (name, attrs) = parse_named_contract_line(line, component_name, section_name)?;
+    let required = parse_bool_contract_attr(
+        attrs.get("required"),
+        component_name,
+        section_name,
+        &name,
+        "required",
+    )?;
+    let shape = require_contract_attr(
+        attrs.get("shape"),
+        component_name,
+        section_name,
+        &name,
+        "shape",
+    )?;
+    let ty = require_contract_attr(
+        attrs.get("type"),
+        component_name,
+        section_name,
+        &name,
+        "type",
+    )?;
+    let allowed = attrs
+        .get("allowed")
+        .map(|raw| {
+            raw.split('|')
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(ComponentContractField {
+        name,
+        required,
+        shape,
+        ty,
+        item_contract: attrs.get("item_contract").cloned(),
+        object_contract: attrs.get("object_contract").cloned(),
+        allowed,
+    })
+}
+
+fn parse_object_contracts(
+    component_name: &str,
+    lines: Vec<String>,
+) -> Result<Vec<ComponentObjectContract>> {
+    let mut contracts = Vec::new();
+    let mut current_name: Option<String> = None;
+    let mut current_fields = Vec::new();
+
+    for line in lines {
+        if let Some(name) = parse_h4_backtick_name(&line) {
+            if let Some(previous) = current_name.replace(name) {
+                if current_fields.is_empty() {
+                    anyhow::bail!(
+                        "Component specification '{}' declares object contract '{}' without any fields",
+                        component_name,
+                        previous
+                    );
+                }
+                contracts.push(ComponentObjectContract {
+                    name: previous,
+                    fields: std::mem::take(&mut current_fields),
+                });
+            }
+            continue;
+        }
+
+        if line.starts_with("- ") {
+            current_fields.push(parse_contract_field_line(
+                &line,
+                component_name,
+                "Object Contracts",
+            )?);
+        }
+    }
+
+    if let Some(previous) = current_name {
+        if current_fields.is_empty() {
+            anyhow::bail!(
+                "Component specification '{}' declares object contract '{}' without any fields",
+                component_name,
+                previous
+            );
+        }
+        contracts.push(ComponentObjectContract {
+            name: previous,
+            fields: current_fields,
+        });
+    }
+
+    Ok(contracts)
+}
+
+fn parse_collection_contracts(
+    component_name: &str,
+    lines: Vec<String>,
+) -> Result<Vec<ComponentCollectionContract>> {
+    lines
+        .iter()
+        .filter(|line| line.starts_with("- "))
+        .map(|line| {
+            let (name, attrs) =
+                parse_named_contract_line(line, component_name, "Collection Contracts")?;
+            Ok(ComponentCollectionContract {
+                name: name.clone(),
+                item_contract: require_contract_attr(
+                    attrs.get("item_contract"),
+                    component_name,
+                    "Collection Contracts",
+                    &name,
+                    "item_contract",
+                )?,
+                behavior: require_contract_attr(
+                    attrs.get("behavior"),
+                    component_name,
+                    "Collection Contracts",
+                    &name,
+                    "behavior",
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn parse_interaction_contracts(
+    component_name: &str,
+    lines: Vec<String>,
+) -> Result<Vec<ComponentInteractionContract>> {
+    lines
+        .iter()
+        .filter(|line| line.starts_with("- "))
+        .map(|line| {
+            let (target, attrs) =
+                parse_named_contract_line(line, component_name, "Interaction Contracts")?;
+            Ok(ComponentInteractionContract {
+                target: target.clone(),
+                kind: require_contract_attr(
+                    attrs.get("kind"),
+                    component_name,
+                    "Interaction Contracts",
+                    &target,
+                    "kind",
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn parse_composition_contracts(
+    component_name: &str,
+    lines: Vec<String>,
+) -> Result<Vec<ComponentCompositionContract>> {
+    lines
+        .iter()
+        .filter(|line| line.starts_with("- "))
+        .map(|line| {
+            let (name, attrs) =
+                parse_named_contract_line(line, component_name, "Composition Contracts")?;
+            Ok(ComponentCompositionContract {
+                name: name.clone(),
+                usage: require_contract_attr(
+                    attrs.get("usage"),
+                    component_name,
+                    "Composition Contracts",
+                    &name,
+                    "usage",
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn parse_brand_constraints(
+    component_name: &str,
+    lines: Vec<String>,
+) -> Result<Vec<ComponentBrandConstraint>> {
+    lines
+        .iter()
+        .filter(|line| line.starts_with("- "))
+        .map(|line| {
+            let (topic, guidance) =
+                parse_named_text_line(line, component_name, "Brand Constraints")?;
+            Ok(ComponentBrandConstraint { topic, guidance })
+        })
+        .collect()
+}
+
+fn parse_named_contract_line(
+    line: &str,
+    component_name: &str,
+    section_name: &str,
+) -> Result<(String, HashMap<String, String>)> {
+    let re = Regex::new(r#"^- `(?P<name>[^`]+)`: (?P<attrs>.+)$"#).expect("valid regex");
+    let caps = re.captures(line).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Component specification '{}' contains malformed '{}' line: '{}'",
+            component_name,
+            section_name,
+            line
+        )
+    })?;
+    Ok((
+        caps["name"].trim().to_string(),
+        parse_backtick_attributes(caps.name("attrs").map(|m| m.as_str()).unwrap_or_default()),
+    ))
+}
+
+fn parse_named_text_line(
+    line: &str,
+    component_name: &str,
+    section_name: &str,
+) -> Result<(String, String)> {
+    let re = Regex::new(r#"^- `(?P<name>[^`]+)`: (?P<text>.+)$"#).expect("valid regex");
+    let caps = re.captures(line).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Component specification '{}' contains malformed '{}' line: '{}'",
+            component_name,
+            section_name,
+            line
+        )
+    })?;
+    let guidance = caps["text"].trim().to_string();
+    if guidance.is_empty() {
+        anyhow::bail!(
+            "Component specification '{}' contains empty '{}' entry for '{}'",
+            component_name,
+            section_name,
+            caps["name"].trim()
+        );
+    }
+    Ok((caps["name"].trim().to_string(), guidance))
+}
+
+fn parse_backtick_attributes(raw: &str) -> HashMap<String, String> {
+    let attr_re = Regex::new(r#"([a-z_]+)=`([^`]*)`"#).expect("valid regex");
+    let mut attrs = HashMap::new();
+    for caps in attr_re.captures_iter(raw) {
+        attrs.insert(caps[1].to_string(), caps[2].trim().to_string());
+    }
+    attrs
+}
+
+fn require_contract_attr(
+    value: Option<&String>,
+    component_name: &str,
+    section_name: &str,
+    field_name: &str,
+    attr_name: &str,
+) -> Result<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Component specification '{}' is missing '{}' for '{}' in '{}'",
+                component_name,
+                attr_name,
+                field_name,
+                section_name
+            )
+        })
+}
+
+fn parse_bool_contract_attr(
+    value: Option<&String>,
+    component_name: &str,
+    section_name: &str,
+    field_name: &str,
+    attr_name: &str,
+) -> Result<bool> {
+    match require_contract_attr(value, component_name, section_name, field_name, attr_name)?
+        .as_str()
+    {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => anyhow::bail!(
+            "Component specification '{}' has invalid boolean '{}' for '{}' in '{}': expected `true` or `false`, got '{}'",
+            component_name,
+            attr_name,
+            field_name,
+            section_name,
+            other
+        ),
+    }
+}
+
+fn parse_h4_backtick_name(line: &str) -> Option<String> {
+    let re = Regex::new(r#"^#### `([^`]+)`$"#).expect("valid regex");
+    re.captures(line)
+        .map(|caps| caps[1].trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_component_implementation_contract(
+    component_name: &str,
+    variant_values: &[String],
+    props: &[ComponentContractField],
+    object_contracts: &[ComponentObjectContract],
+    collection_contracts: &[ComponentCollectionContract],
+    interaction_contracts: &[ComponentInteractionContract],
+    brand_constraints: &[ComponentBrandConstraint],
+) -> Result<()> {
+    let object_contract_names = object_contracts
+        .iter()
+        .map(|contract| contract.name.as_str())
+        .collect::<HashSet<_>>();
+    let collection_contract_names = collection_contracts
+        .iter()
+        .map(|contract| contract.name.as_str())
+        .collect::<HashSet<_>>();
+
+    for prop in props {
+        match prop.shape.as_str() {
+            "scalar" | "enum" | "object" | "list" => {}
+            other => anyhow::bail!(
+                "Component specification '{}' uses unsupported prop shape '{}' for '{}'",
+                component_name,
+                other,
+                prop.name
+            ),
+        }
+
+        if prop.shape == "enum" && prop.allowed.is_empty() {
+            anyhow::bail!(
+                "Component specification '{}' defines enum-shaped prop '{}' without any allowed values",
+                component_name,
+                prop.name
+            );
+        }
+        if prop.shape == "object" {
+            let object_contract = prop.object_contract.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Component specification '{}' defines object-shaped prop '{}' without object_contract",
+                    component_name,
+                    prop.name
+                )
+            })?;
+            if !object_contract_names.contains(object_contract.as_str()) {
+                anyhow::bail!(
+                    "Component specification '{}' references unknown object contract '{}' for prop '{}'",
+                    component_name,
+                    object_contract,
+                    prop.name
+                );
+            }
+        }
+        if prop.shape == "list" {
+            if !collection_contract_names.contains(prop.name.as_str()) {
+                anyhow::bail!(
+                    "Component specification '{}' defines list-shaped prop '{}' without a matching collection contract",
+                    component_name,
+                    prop.name
+                );
+            }
+            if requires_structured_item_contract(&prop.ty)
+                && prop
+                    .item_contract
+                    .as_ref()
+                    .is_none_or(|value| value.trim().is_empty())
+            {
+                anyhow::bail!(
+                    "Component specification '{}' defines structured list prop '{}' without item_contract",
+                    component_name,
+                    prop.name
+                );
+            }
+        }
+    }
+
+    for collection in collection_contracts {
+        let prop = props
+            .iter()
+            .find(|prop| prop.name == collection.name)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Component specification '{}' defines collection contract '{}' without a matching prop",
+                    component_name,
+                    collection.name
+                )
+            })?;
+        if prop.shape != "list" {
+            anyhow::bail!(
+                "Component specification '{}' defines collection contract '{}' for non-list prop '{}'",
+                component_name,
+                collection.name,
+                prop.name
+            );
+        }
+    }
+
+    if !variant_values.is_empty() {
+        let variant_prop = props.iter().find(|prop| prop.name == "variant").ok_or_else(|| {
+            anyhow::anyhow!(
+                "Component specification '{}' enumerates variants but does not define a `variant` prop in '## Implementation Contract'",
+                component_name
+            )
+        })?;
+        if variant_prop.shape != "enum" {
+            anyhow::bail!(
+                "Component specification '{}' enumerates variants but its `variant` prop is not marked as shape=`enum`",
+                component_name
+            );
+        }
+        if variant_prop.allowed != variant_values {
+            anyhow::bail!(
+                "Component specification '{}' has mismatched variant values between `## Variants` and `## Implementation Contract`: expected {:?}, found {:?}",
+                component_name,
+                variant_values,
+                variant_prop.allowed
+            );
+        }
+    }
+
+    if contract_requires_interactions(props, object_contracts) && interaction_contracts.is_empty() {
+        anyhow::bail!(
+            "Component specification '{}' exposes implementation-relevant interactions but does not define any '### Interaction Contracts'",
+            component_name
+        );
+    }
+
+    for constraint in brand_constraints {
+        if is_vague_brand_guidance(&constraint.guidance) {
+            anyhow::bail!(
+                "Component specification '{}' contains vague brand guidance for topic '{}'; brand constraints in '## Implementation Contract' must be concrete enough to influence implementation shape",
+                component_name,
+                constraint.topic
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn requires_structured_item_contract(ty: &str) -> bool {
+    !matches!(
+        ty,
+        "String" | "Boolean" | "Integer" | "Number" | "Float" | "View"
+    )
+}
+
+fn contract_requires_interactions(
+    props: &[ComponentContractField],
+    object_contracts: &[ComponentObjectContract],
+) -> bool {
+    props.iter().any(prop_name_implies_interaction)
+        || object_contracts
+            .iter()
+            .flat_map(|contract| contract.fields.iter())
+            .any(prop_name_implies_interaction)
+}
+
+fn prop_name_implies_interaction(prop: &ComponentContractField) -> bool {
+    let normalized = prop.name.to_ascii_lowercase();
+    normalized.contains("href")
+        || normalized.contains("action")
+        || normalized.starts_with("on_")
+        || normalized.starts_with("on")
+        || normalized.contains("toggle")
+        || normalized.contains("link")
+}
+
+fn is_vague_brand_guidance(guidance: &str) -> bool {
+    let normalized = guidance.to_ascii_lowercase();
+    let implementation_keywords = [
+        "spacing",
+        "typography",
+        "motion",
+        "icon",
+        "token",
+        "color",
+        "contrast",
+        "surface",
+        "shadow",
+        "border",
+        "radius",
+        "hierarchy",
+        "scale",
+    ];
+    let vague_only_terms = [
+        "beautiful",
+        "premium",
+        "nice",
+        "polished",
+        "delightful",
+        "modern",
+    ];
+
+    !implementation_keywords
+        .iter()
+        .any(|keyword| normalized.contains(keyword))
+        || vague_only_terms
+            .iter()
+            .any(|term| normalized == *term || normalized.starts_with(&format!("{} ", term)))
 }
 
 fn extract_backtick_values(raw: &str) -> Vec<String> {
@@ -2517,9 +3314,10 @@ mod tests {
         build_component_spec_contract, extract_component_name_from_spec, extract_dep_feature_refs,
         extract_dependency_spec, extract_toml_value, normalize_generated_app_rs,
         normalize_generated_brand_files, render_brand_scaffold_contract,
-        render_brand_variant_contract, validate_app_rs, validate_app_rs_with_component_specs,
-        validate_dependency_render_feature_mode, validate_lib_target_name,
-        validate_matching_leptos_config, validate_optional_dep_feature_wiring, GeneratedOutputFile,
+        render_brand_variant_contract, render_component_implementation_contract, validate_app_rs,
+        validate_app_rs_with_component_specs, validate_dependency_render_feature_mode,
+        validate_lib_target_name, validate_matching_leptos_config,
+        validate_optional_dep_feature_wiring, GeneratedOutputFile, ParsedImplementationContract,
     };
     use std::path::PathBuf;
 
@@ -2530,6 +3328,27 @@ mod tests {
                 .iter()
                 .map(|value| value.to_string())
                 .collect(),
+            ParsedImplementationContract {
+                props: vec![super::ComponentContractField {
+                    name: "variant".to_string(),
+                    required: false,
+                    shape: "enum".to_string(),
+                    ty: format!("{}Variant", name),
+                    item_contract: None,
+                    object_contract: None,
+                    allowed: variant_values
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
+                }],
+                ..Default::default()
+            },
+        )
+    }
+
+    fn implementation_contract_spec(name: &str) -> String {
+        format!(
+            "# {name}\n\n## Component Metadata\n- **Name**: {name}\n\n## Variants\n- `default`\n- `minimal`\n\n## Properties\n- `variant`: `default` | `minimal`\n- `items`: list\n\n## Implementation Contract\n### Props\n- `variant`: required=`false`; shape=`enum`; type=`{name}Variant`; allowed=`default|minimal`\n- `title`: required=`true`; shape=`scalar`; type=`String`\n- `items`: required=`true`; shape=`list`; type=`NavItem`; item_contract=`NavItem`\n- `theme_toggle`: required=`false`; shape=`object`; type=`ThemeToggle`; object_contract=`ThemeToggle`\n\n### Object Contracts\n#### `NavItem`\n- `label`: required=`true`; shape=`scalar`; type=`String`\n- `href`: required=`true`; shape=`scalar`; type=`String`\n\n#### `ThemeToggle`\n- `selected`: required=`true`; shape=`scalar`; type=`String`\n- `options`: required=`true`; shape=`list`; type=`String`\n\n### Collection Contracts\n- `items`: item_contract=`NavItem`; behavior=`repeated-item`\n\n### Interaction Contracts\n- `items[*]`: kind=`navigational`\n- `theme_toggle`: kind=`stateful`\n\n### Composition Contracts\n- `Link`: usage=`reused-subcomponent`\n- `ThemeToggle`: usage=`optional`\n\n### Brand Constraints\n- `spacing`: use active brand spacing rhythm and hierarchy tokens when available\n",
         )
     }
 
@@ -2569,6 +3388,80 @@ mod tests {
         assert!(rendered.contains("`BadgeVariant`"));
         assert!(rendered.contains("`neutral` -> `BadgeVariant::Neutral`"));
         assert!(rendered.contains("`positive-balance` -> `AccountCardVariant::PositiveBalance`"));
+    }
+
+    #[test]
+    fn rendered_component_implementation_contract_includes_structured_shapes() {
+        let contract = super::parse_component_implementation_contract(
+            "TopNav",
+            &implementation_contract_spec("TopNav"),
+            &["default".to_string(), "minimal".to_string()],
+        )
+        .expect("parse implementation contract");
+        let rendered = render_component_implementation_contract(&[build_component_spec_contract(
+            "TopNav".to_string(),
+            vec!["default".to_string(), "minimal".to_string()],
+            contract,
+        )])
+        .expect("rendered component implementation contract");
+
+        assert!(rendered.contains("Component `TopNav` implementation contract"));
+        assert!(rendered.contains("\"shape\": \"list\""));
+        assert!(rendered.contains("\"item_contract\": \"NavItem\""));
+        assert!(rendered.contains("\"kind\": \"navigational\""));
+        assert!(rendered.contains("\"topic\": \"spacing\""));
+    }
+
+    #[test]
+    fn component_contract_parser_rejects_missing_collection_item_shape() {
+        let spec = "# NavBar\n\n## Component Metadata\n- **Name**: NavBar\n\n## Properties\n- `items`: list\n\n## Implementation Contract\n### Props\n- `items`: required=`true`; shape=`list`; type=`NavItem`\n";
+        let err = super::parse_component_implementation_contract("NavBar", spec, &[])
+            .expect_err("expected missing collection contract failure");
+        assert!(err
+            .to_string()
+            .contains("without a matching collection contract"));
+    }
+
+    #[test]
+    fn component_contract_parser_rejects_object_prop_without_fields() {
+        let spec = "# Dashboard\n\n## Component Metadata\n- **Name**: Dashboard\n\n## Properties\n- `summary`: object\n\n## Implementation Contract\n### Props\n- `summary`: required=`false`; shape=`object`; type=`SummaryBlock`; object_contract=`SummaryBlock`\n\n### Object Contracts\n#### `SummaryBlock`\n";
+        let err = super::parse_component_implementation_contract("Dashboard", spec, &[])
+            .expect_err("expected missing object field failure");
+        assert!(err.to_string().contains("without any fields"));
+    }
+
+    #[test]
+    fn component_contract_parser_rejects_variant_mismatch() {
+        let spec = "# Badge\n\n## Component Metadata\n- **Name**: Badge\n\n## Variants\n- `default`\n- `success`\n\n## Properties\n- `variant`: `default` | `success`\n\n## Implementation Contract\n### Props\n- `variant`: required=`false`; shape=`enum`; type=`BadgeVariant`; allowed=`default|neutral`\n";
+        let err = super::parse_component_implementation_contract(
+            "Badge",
+            spec,
+            &["default".to_string(), "success".to_string()],
+        )
+        .expect_err("expected variant mismatch");
+        assert!(err.to_string().contains(
+            "mismatched variant values between `## Variants` and `## Implementation Contract`"
+        ));
+    }
+
+    #[test]
+    fn component_contract_parser_rejects_missing_interaction_contracts_for_navigation_shapes() {
+        let spec = "# Footer\n\n## Component Metadata\n- **Name**: Footer\n\n## Properties\n- `legal_links`: list\n\n## Implementation Contract\n### Props\n- `legal_links`: required=`false`; shape=`list`; type=`LegalLink`; item_contract=`LegalLink`\n\n### Object Contracts\n#### `LegalLink`\n- `label`: required=`true`; shape=`scalar`; type=`String`\n- `href`: required=`true`; shape=`scalar`; type=`String`\n\n### Collection Contracts\n- `legal_links`: item_contract=`LegalLink`; behavior=`repeated-item`\n";
+        let err = super::parse_component_implementation_contract("Footer", spec, &[])
+            .expect_err("expected interaction contract failure");
+        assert!(err
+            .to_string()
+            .contains("does not define any '### Interaction Contracts'"));
+    }
+
+    #[test]
+    fn component_contract_parser_rejects_vague_brand_constraints() {
+        let spec = "# Button\n\n## Component Metadata\n- **Name**: Button\n\n## Properties\n- `label`: text\n\n## Implementation Contract\n### Props\n- `label`: required=`true`; shape=`scalar`; type=`String`\n\n### Brand Constraints\n- `tone`: premium\n";
+        let err = super::parse_component_implementation_contract("Button", spec, &[])
+            .expect_err("expected vague brand failure");
+        assert!(err
+            .to_string()
+            .contains("brand constraints in '## Implementation Contract' must be concrete enough"));
     }
 
     #[test]

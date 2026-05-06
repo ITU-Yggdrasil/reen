@@ -417,7 +417,8 @@ fn apply_generated_ui_compile_fixes(project_root: &Path, stderr: &str) -> Result
         return Ok(false);
     }
 
-    fs::write(&app_path, updated).with_context(|| format!("Failed to write {}", app_path.display()))?;
+    fs::write(&app_path, updated)
+        .with_context(|| format!("Failed to write {}", app_path.display()))?;
     Ok(true)
 }
 
@@ -443,7 +444,8 @@ fn snapshot_patch_targets(project_root: &Path, diff: &str) -> Result<BTreeMap<St
             .ok_or_else(|| anyhow::anyhow!("Patch missing file path"))?;
         let full = project_root.join(&target);
         let content = if full.exists() {
-            fs::read_to_string(&full).with_context(|| format!("Failed to read {}", full.display()))?
+            fs::read_to_string(&full)
+                .with_context(|| format!("Failed to read {}", full.display()))?
         } else {
             String::new()
         };
@@ -459,7 +461,8 @@ fn patch_changed_any_target(
     for (target, before) in before_patch {
         let full = project_root.join(target);
         let after = if full.exists() {
-            fs::read_to_string(&full).with_context(|| format!("Failed to read {}", full.display()))?
+            fs::read_to_string(&full)
+                .with_context(|| format!("Failed to read {}", full.display()))?
         } else {
             String::new()
         };
@@ -1556,8 +1559,7 @@ fn generated_signal_write_ident_re() -> &'static Regex {
 fn underscored_interactive_prop_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"#\[prop\(default = false\)\]\s+_interactive:\s*bool,"#)
-            .expect("valid regex")
+        Regex::new(r#"#\[prop\(default = false\)\]\s+_interactive:\s*bool,"#).expect("valid regex")
     })
 }
 
@@ -1631,10 +1633,8 @@ fn empty_accounts_message_into_view_re() -> &'static Regex {
 fn optional_string_prop_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r#"#\[prop\(optional\)\]\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*): Option<String>,"#,
-        )
-        .expect("valid regex")
+        Regex::new(r#"#\[prop\(optional\)\]\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*): Option<String>,"#)
+            .expect("valid regex")
     })
 }
 
@@ -1668,9 +1668,7 @@ fn for_view_prop_re() -> &'static Regex {
 
 fn utility_action_mouse_event_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r#"on_click:\s*leptos::ev::MouseEvent,"#).expect("valid regex")
-    })
+    RE.get_or_init(|| Regex::new(r#"on_click:\s*leptos::ev::MouseEvent,"#).expect("valid regex"))
 }
 
 fn boxed_zero_arg_callback_field_re() -> &'static Regex {
@@ -1743,8 +1741,8 @@ fn spec_method_bold_re() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_generated_ui_compile_fixes, check_guardrails, map_src_to_spec, patch_changed_any_target,
-        snapshot_patch_targets,
+        apply_generated_ui_compile_fixes, check_guardrails, map_src_to_spec,
+        patch_changed_any_target, snapshot_patch_targets,
     };
     use std::collections::HashSet;
     use std::fs;
@@ -2068,9 +2066,9 @@ struct AccountCardData {
         assert!(updated.contains("badge: Option<String>,"));
         assert!(updated.contains("icon: Option<String>,"));
         assert!(updated.contains("trust_badge_icon: Option<String>,"));
-        assert!(updated.contains(
-            "#[prop(default = String::from(\"neutral\"), into)] variant: String,"
-        ));
+        assert!(
+            updated.contains("#[prop(default = String::from(\"neutral\"), into)] variant: String,")
+        );
         assert!(updated.contains("<Badge label=b.to_string() variant=\"neutral\"/>"));
         assert!(updated.contains("action: fn(MouseEvent),"));
         assert!(updated.contains("action: |_| {},"));

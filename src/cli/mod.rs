@@ -27,7 +27,7 @@ mod stage_runner;
 use agent_executor::{AgentExecutor, AgentResponse};
 use brand_scaffold::{
     load_component_spec_contracts_from_paths, render_brand_scaffold_contract,
-    render_brand_variant_contract,
+    render_brand_variant_contract, render_component_implementation_contract,
 };
 use brand_specs::{
     is_brand_draft_path, is_brand_spec_path, missing_required_brand_spec_parts,
@@ -2002,14 +2002,18 @@ fn augment_implementation_generation_context(
             "brand_scaffold_contract".to_string(),
             json!(render_brand_scaffold_contract()),
         );
-        let component_contract_paths = collect_md_files_recursive(
-            &Path::new(SPECIFICATIONS_DIR).join("components"),
-            "md",
-        )?;
+        let component_contract_paths =
+            collect_md_files_recursive(&Path::new(SPECIFICATIONS_DIR).join("components"), "md")?;
         let component_contracts =
             load_component_spec_contracts_from_paths(&component_contract_paths)?;
         if let Some(rendered) = render_brand_variant_contract(&component_contracts) {
             additional_context.insert("brand_variant_contract".to_string(), json!(rendered));
+        }
+        if let Some(rendered) = render_component_implementation_contract(&component_contracts) {
+            additional_context.insert(
+                "component_implementation_contracts".to_string(),
+                json!(rendered),
+            );
         }
         if let Some(component_specification) = render_component_specifications()? {
             additional_context.insert(
@@ -2091,6 +2095,12 @@ fn augment_brand_site_implementation_context(
     let component_contracts = load_component_spec_contracts_from_paths(&component_specs)?;
     if let Some(rendered) = render_brand_variant_contract(&component_contracts) {
         additional_context.insert("brand_variant_contract".to_string(), json!(rendered));
+    }
+    if let Some(rendered) = render_component_implementation_contract(&component_contracts) {
+        additional_context.insert(
+            "component_implementation_contracts".to_string(),
+            json!(rendered),
+        );
     }
 
     Ok(())
@@ -4780,7 +4790,8 @@ mod tests {
     use crate::cli::agent_executor::AgentExecutor;
     use crate::cli::brand_scaffold::{
         load_component_spec_contracts_from_paths, render_brand_scaffold_contract,
-        render_brand_variant_contract, BrandEnvelopeParser, BrandScaffoldValidator,
+        render_brand_variant_contract, render_component_implementation_contract,
+        BrandEnvelopeParser, BrandScaffoldValidator,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -4825,6 +4836,38 @@ mod tests {
         fn drop(&mut self) {
             std::env::set_current_dir(&self.original).expect("restore current dir");
         }
+    }
+
+    fn sample_component_spec(name: &str, variant_values: &[&str]) -> String {
+        let variant_markdown = if variant_values.is_empty() {
+            "## Variants\n- None documented\n\n## Properties\n- `label`: text\n".to_string()
+        } else {
+            format!(
+                "## Variants\n{}\n\n## Properties\n- `variant`: {}\n- `label`: text\n",
+                variant_values
+                    .iter()
+                    .map(|value| format!("- `{}`", value))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                variant_values
+                    .iter()
+                    .map(|value| format!("`{}`", value))
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            )
+        };
+        let variant_contract = if variant_values.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "- `variant`: required=`false`; shape=`enum`; type=`{name}Variant`; allowed=`{}`\n",
+                variant_values.join("|")
+            )
+        };
+
+        format!(
+            "# {name}\n\n## Component Metadata\n- **Name**: {name}\n\n{variant_markdown}\n## Implementation Contract\n### Props\n{variant_contract}- `label`: required=`true`; shape=`scalar`; type=`String`\n- `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem`\n\n### Object Contracts\n#### `NavItem`\n- `label`: required=`true`; shape=`scalar`; type=`String`\n- `href`: required=`true`; shape=`scalar`; type=`String`\n\n### Collection Contracts\n- `items`: item_contract=`NavItem`; behavior=`repeated-item`\n\n### Interaction Contracts\n- `items[*]`: kind=`navigational`\n",
+        )
     }
 
     #[test]
@@ -6045,7 +6088,7 @@ placeholder
         .expect("write visual spec");
         fs::write(
             root.join("specifications/components/button.md"),
-            "# Button Specification\n\n- **Name**: Button\n- `variant`: `primary`, `secondary`\n\n## Purpose\nA primary action button.",
+            sample_component_spec("Button", &["primary", "secondary"]),
         )
         .expect("write component spec");
         fs::write(
@@ -6066,14 +6109,22 @@ placeholder
             brand_context.get("brand_scaffold_contract"),
             Some(&json!(render_brand_scaffold_contract()))
         );
-        let component_contracts = load_component_spec_contracts_from_paths(&[root
-            .join("specifications/components/button.md")])
+        let component_contracts = load_component_spec_contracts_from_paths(&[
+            root.join("specifications/components/button.md")
+        ])
         .expect("load component contracts");
-        let expected_variant_contract = render_brand_variant_contract(&component_contracts)
-            .map(|rendered| json!(rendered));
+        let expected_variant_contract =
+            render_brand_variant_contract(&component_contracts).map(|rendered| json!(rendered));
+        let expected_component_contract =
+            render_component_implementation_contract(&component_contracts)
+                .map(|rendered| json!(rendered));
         assert_eq!(
             brand_context.get("brand_variant_contract"),
             expected_variant_contract.as_ref()
+        );
+        assert_eq!(
+            brand_context.get("component_implementation_contracts"),
+            expected_component_contract.as_ref()
         );
 
         let mut component_context = HashMap::new();
@@ -6090,6 +6141,10 @@ placeholder
             component_context.get("brand_variant_contract"),
             expected_variant_contract.as_ref()
         );
+        assert_eq!(
+            component_context.get("component_implementation_contracts"),
+            expected_component_contract.as_ref()
+        );
 
         let mut non_brand_context = HashMap::new();
         augment_implementation_generation_context(
@@ -6099,6 +6154,7 @@ placeholder
         .expect("augment non-brand context");
         assert!(!non_brand_context.contains_key("brand_scaffold_contract"));
         assert!(!non_brand_context.contains_key("brand_variant_contract"));
+        assert!(!non_brand_context.contains_key("component_implementation_contracts"));
         assert!(!non_brand_context.contains_key("component_specifications"));
 
         let _ = fs::remove_dir_all(&root);
@@ -6117,12 +6173,12 @@ placeholder
         .expect("write visual spec");
         fs::write(
             root.join("specifications/components/button.md"),
-            "# Button Specification\n\n## Purpose\nA primary action button.",
+            sample_component_spec("Button", &[]),
         )
         .expect("write component spec");
         fs::write(
             root.join("specifications/components/input.md"),
-            "# Input Specification\n\n## Purpose\nA text input field.",
+            sample_component_spec("Input", &[]),
         )
         .expect("write component spec");
 
@@ -6139,10 +6195,16 @@ placeholder
             .get("component_specifications")
             .and_then(|value| value.as_str())
             .expect("component specifications context");
-        assert!(rendered.contains("===COMPONENT_SPEC: specifications/components/button.md==="));
-        assert!(rendered.contains("===COMPONENT_SPEC: specifications/components/input.md==="));
-        assert!(rendered.contains("# Button Specification"));
-        assert!(rendered.contains("# Input Specification"));
+        assert!(rendered.contains("button.md==="));
+        assert!(rendered.contains("input.md==="));
+        assert!(rendered.contains("# Button"));
+        assert!(rendered.contains("# Input"));
+        let contract_rendered = brand_context
+            .get("component_implementation_contracts")
+            .and_then(|value| value.as_str())
+            .expect("component implementation contracts context");
+        assert!(contract_rendered.contains("Component `Button` implementation contract"));
+        assert!(contract_rendered.contains("Component `Input` implementation contract"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -6160,12 +6222,12 @@ placeholder
         .expect("write visual spec");
         fs::write(
             root.join("specifications/components/button.md"),
-            "# Button\n\n## Purpose\nPrimary action.",
+            sample_component_spec("Button", &[]),
         )
         .expect("write component spec");
         fs::write(
             root.join("specifications/components/input.md"),
-            "# Input\n\n## Purpose\nText input.",
+            sample_component_spec("Input", &[]),
         )
         .expect("write unselected component spec");
 
@@ -6192,6 +6254,12 @@ placeholder
         assert!(components.contains("===COMPONENT_SPEC: specifications/components/button.md==="));
         assert!(components.contains("# Button"));
         assert!(!components.contains("# Input"));
+        let implementation_contracts = context
+            .get("component_implementation_contracts")
+            .and_then(|value| value.as_str())
+            .expect("component implementation contract context");
+        assert!(implementation_contracts.contains("Component `Button` implementation contract"));
+        assert!(!implementation_contracts.contains("Component `Input` implementation contract"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -6209,12 +6277,12 @@ placeholder
         .expect("write visual spec");
         fs::write(
             root.join("specifications/components/button.md"),
-            "# Button\n\n## Purpose\nPrimary action.",
+            sample_component_spec("Button", &[]),
         )
         .expect("write component spec");
         fs::write(
             root.join("specifications/components/input.md"),
-            "# Input\n\n## Purpose\nText input.",
+            sample_component_spec("Input", &[]),
         )
         .expect("write component spec");
 
@@ -6232,6 +6300,12 @@ placeholder
         assert!(components.contains("input.md==="));
         assert!(components.contains("# Button"));
         assert!(components.contains("# Input"));
+        let implementation_contracts = context
+            .get("component_implementation_contracts")
+            .and_then(|value| value.as_str())
+            .expect("component implementation contract context");
+        assert!(implementation_contracts.contains("Component `Button` implementation contract"));
+        assert!(implementation_contracts.contains("Component `Input` implementation contract"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -6730,10 +6804,16 @@ Card groups related content and actions into a single unit.
 - `Heading`: used for the title.
 "#;
         fs::write(root.join("drafts/components/card.md"), card_draft).expect("write card draft");
-        fs::write(root.join("drafts/components/badge.md"), "# Badge - Component Specification")
-            .expect("write badge draft");
-        fs::write(root.join("drafts/components/image.md"), "# Image - Component Specification")
-            .expect("write image draft");
+        fs::write(
+            root.join("drafts/components/badge.md"),
+            "# Badge - Component Specification",
+        )
+        .expect("write badge draft");
+        fs::write(
+            root.join("drafts/components/image.md"),
+            "# Image - Component Specification",
+        )
+        .expect("write image draft");
         fs::write(
             root.join("component_drafts/button.md"),
             "# Button\n\n## Description\nFallback button.",
