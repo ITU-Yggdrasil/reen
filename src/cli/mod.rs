@@ -25,7 +25,10 @@ mod rate_limiter;
 mod stage_runner;
 
 use agent_executor::{AgentExecutor, AgentResponse};
-use brand_scaffold::render_brand_scaffold_contract;
+use brand_scaffold::{
+    load_component_spec_contracts_from_paths, render_brand_scaffold_contract,
+    render_brand_variant_contract,
+};
 use brand_specs::{
     is_brand_draft_path, is_brand_spec_path, missing_required_brand_spec_parts,
     unresolved_brand_token_references, validate_brand_spec_content,
@@ -1999,6 +2002,15 @@ fn augment_implementation_generation_context(
             "brand_scaffold_contract".to_string(),
             json!(render_brand_scaffold_contract()),
         );
+        let component_contract_paths = collect_md_files_recursive(
+            &Path::new(SPECIFICATIONS_DIR).join("components"),
+            "md",
+        )?;
+        let component_contracts =
+            load_component_spec_contracts_from_paths(&component_contract_paths)?;
+        if let Some(rendered) = render_brand_variant_contract(&component_contracts) {
+            additional_context.insert("brand_variant_contract".to_string(), json!(rendered));
+        }
         if let Some(component_specification) = render_component_specifications()? {
             additional_context.insert(
                 "component_specifications".to_string(),
@@ -2075,6 +2087,10 @@ fn augment_brand_site_implementation_context(
     };
     if let Some(rendered) = render_selected_specifications("COMPONENT_SPEC", &component_specs)? {
         additional_context.insert("component_specifications".to_string(), json!(rendered));
+    }
+    let component_contracts = load_component_spec_contracts_from_paths(&component_specs)?;
+    if let Some(rendered) = render_brand_variant_contract(&component_contracts) {
+        additional_context.insert("brand_variant_contract".to_string(), json!(rendered));
     }
 
     Ok(())
@@ -4763,7 +4779,8 @@ mod tests {
     };
     use crate::cli::agent_executor::AgentExecutor;
     use crate::cli::brand_scaffold::{
-        render_brand_scaffold_contract, BrandEnvelopeParser, BrandScaffoldValidator,
+        load_component_spec_contracts_from_paths, render_brand_scaffold_contract,
+        render_brand_variant_contract, BrandEnvelopeParser, BrandScaffoldValidator,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -6028,7 +6045,7 @@ placeholder
         .expect("write visual spec");
         fs::write(
             root.join("specifications/components/button.md"),
-            "# Button Specification\n\n## Purpose\nA primary action button.",
+            "# Button Specification\n\n- **Name**: Button\n- `variant`: `primary`, `secondary`\n\n## Purpose\nA primary action button.",
         )
         .expect("write component spec");
         fs::write(
@@ -6049,6 +6066,15 @@ placeholder
             brand_context.get("brand_scaffold_contract"),
             Some(&json!(render_brand_scaffold_contract()))
         );
+        let component_contracts = load_component_spec_contracts_from_paths(&[root
+            .join("specifications/components/button.md")])
+        .expect("load component contracts");
+        let expected_variant_contract = render_brand_variant_contract(&component_contracts)
+            .map(|rendered| json!(rendered));
+        assert_eq!(
+            brand_context.get("brand_variant_contract"),
+            expected_variant_contract.as_ref()
+        );
 
         let mut component_context = HashMap::new();
         augment_implementation_generation_context(
@@ -6060,6 +6086,10 @@ placeholder
             component_context.get("brand_scaffold_contract"),
             Some(&json!(render_brand_scaffold_contract()))
         );
+        assert_eq!(
+            component_context.get("brand_variant_contract"),
+            expected_variant_contract.as_ref()
+        );
 
         let mut non_brand_context = HashMap::new();
         augment_implementation_generation_context(
@@ -6068,6 +6098,7 @@ placeholder
         )
         .expect("augment non-brand context");
         assert!(!non_brand_context.contains_key("brand_scaffold_contract"));
+        assert!(!non_brand_context.contains_key("brand_variant_contract"));
         assert!(!non_brand_context.contains_key("component_specifications"));
 
         let _ = fs::remove_dir_all(&root);

@@ -142,6 +142,9 @@ static_prompt: |
 
   The CLI provides the default scaffold baseline through `input.brand_scaffold_contract`.
   Treat that contract as authoritative unless the specification forces a compatible variation.
+  When present, `input.brand_variant_contract` is also authoritative. Do not invent alternate
+  enum names, keep spec-enumerated variants as `String`, or emit raw string variant call sites
+  when that contract provides exact enum/type/call-site requirements.
 
   ## Brand Token Rules
 
@@ -179,10 +182,22 @@ static_prompt: |
     `AccountCardProps`, or similar type will conflict at compile time.
   - For every generated Leptos component prop whose Rust type is `String`, add `#[prop(into)]`
     directly on that parameter. This includes common props such as `label`, `title`,
-    `description`, `variant`, and `size`; no plain required `String` props are allowed.
+    `description` and `size`; no plain required `String` props are allowed.
   - This rule also applies to page-shell and composed components such as `AccountsDashboard`,
     `BalanceSummary`, `TopNav`, `Footer`, `ThemeToggle`, and similar generated components. Do not
     leave any required `String` prop unannotated.
+  - When a component specification explicitly enumerates allowed values for a `variant` prop, do
+    not generate `variant: String`. Generate a typed enum named `{ComponentName}Variant` in
+    `src/app.rs`, derive at least `Clone` and `Copy`, and use that enum as the prop type.
+  - If `input.brand_variant_contract` supplies the exact enum name or enum members for a component,
+    use that contract verbatim rather than inferring your own variant representation.
+  - For enum-backed variants, convert specification values into Rust enum variants using PascalCase.
+    For example, `default` becomes `Default` and `positive-balance` becomes `PositiveBalance`.
+  - For enum-backed variants, generated call sites must pass enum values such as
+    `variant=BalanceSummaryVariant::Default`, never raw string literals such as `variant="default"`.
+  - Only use `variant: String` when the specification does not enumerate allowed variant values.
+  - If helper data forwards a spec-enumerated variant into a component, that helper field must use
+    the enum type from `input.brand_variant_contract`, not `String`.
   - For every generated Leptos component prop whose Rust type is `Option<T>`, add
     `#[prop(optional)]` or an explicit `#[prop(default = ...)]` directly on that parameter.
     Optional props must not become required typed-builder fields.
@@ -198,9 +213,11 @@ static_prompt: |
     generated component signatures must compile with those call sites.
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
     types. Do not construct Leptos components with struct syntax such as `Badge { ... }`.
-  - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
-    For composed content passed through props, use renderable content types such as `Children`,
-    `ChildrenFn`, `AnyView`, or `Option<AnyView>`.
+  - Render Leptos components with view syntax. For unconstrained string props, string literals such
+    as `<Badge label="Status"/>` are valid. For enum-backed variant props, use enum values such as
+    `<BalanceSummary variant=BalanceSummaryVariant::Default/>`. For composed content passed through
+    props, use renderable content types such as `Children`, `ChildrenFn`, `AnyView`, or
+    `Option<AnyView>`.
   - Target the Leptos `0.6.x` API family used by the scaffold dependencies.
   - For Leptos signals created with `create_signal(...)`, read values with `.get()` and update
     them with `.set(...)`. Do not emit `theme()` / `set_theme(...)` call-style signal usage.
@@ -229,10 +246,15 @@ static_prompt: |
     and commonly breaks repeated-item rendering. For demo or placeholder utility actions, prefer
     static buttons without stored closures, enum-based actions, or cloneable callback types only if
     truly required.
+  - Do not generate repeated action helper fields like `action: Box<dyn Fn()>` together with
+    `on:click=action.action.clone()`. That pattern is invalid for Leptos and will not compile.
+  - Inline click handlers should use Leptos event closures such as `on:click=move |_| { ... }`.
   - Do not emit event payload types where callback/function types are required. For example, do not
     generate `on_click: MouseEvent` or `on_click: leptos::ev::MouseEvent` as a stored field type.
     If a stored click handler is truly needed, use a callable type such as `fn(MouseEvent)` and
     ensure `MouseEvent` is imported.
+  - Never wire a zero-argument stored callback such as `fn()` directly into `on:click`; Leptos
+    event handlers must accept the event argument even when it is ignored.
   - Do not emit `on:click=some_boxed_callback.clone()` patterns.
   - When rendering from borrowed items or shared references, do not move owned `String` fields out
     of borrowed data into `view!`. Clone the string field for attributes/text, or render from owned
@@ -249,6 +271,16 @@ static_prompt: |
     forward an `Option<T>` value such as `icon=account.icon.clone()` or `badge=account.badge.clone()`,
     do not use optional-builder annotations that coerce the setter to `T`. In that forwarding case,
     keep the prop as a plain `Option<T>` parameter so an `Option<T>` expression compiles directly.
+  - The same exception applies when a parent call site passes `None` explicitly, for example
+    `trust_badge_icon=None`. In that case, keep the prop as a plain `Option<T>` parameter rather
+    than adding `#[prop(optional)]` or `#[prop(optional, into)]`.
+  - The same rule applies to explicit `Some(...)` call sites and to any forwarded optional helper
+    data such as `badge=item.badge.clone()`, `theme_toggle=nav.theme_toggle.clone()`, or similar.
+    If the parent passes an `Option<T>` expression explicitly, the child prop must remain a plain
+    `Option<T>` parameter with no `#[prop(optional)]` or `#[prop(optional, into)]` annotation.
+  - Only use `#[prop(optional)]` or `#[prop(optional, into)]` on `Option<T>` props when parent
+    call sites truly omit that prop rather than passing `None`, `Some(...)`, or a forwarded
+    `Option<T>` value.
   - Avoid `view! {}.into_any()` as an empty branch. Prefer an explicit empty fragment strategy that
     is known to compile for Leptos `0.6`, or restructure the conditional rendering to avoid an
     empty `AnyView` branch entirely.
@@ -318,6 +350,8 @@ static_prompt: |
   - [ ] `src/app.rs` defines the root `App` component and routing
   - [ ] `src/app.rs` imports router APIs from `leptos_router`
   - [ ] `"/"` is present as the root route
+  - [ ] Any component spec that enumerates `variant` values is implemented with a typed `{ComponentName}Variant` enum and enum-valued call sites in `src/app.rs`
+  - [ ] No zero-argument stored callback is wired directly into `on:click`
   - [ ] All emitted `view!` macro attributes use valid Leptos syntax
   - [ ] No emitted `class:` binding uses dashed or BEM-style class names; conditional classes use computed `class=...` strings instead
   - [ ] `style/app.css` exists and applies defined brand tokens as CSS custom properties where applicable
@@ -345,5 +379,8 @@ variable_prompt: |
 
   CLI-owned scaffold contract (authoritative baseline):
   {{input.brand_scaffold_contract}}
+
+  CLI-owned deterministic variant contract (authoritative when present):
+  {{input.brand_variant_contract?}}
 
   Please complete the task described above. Return only the ===FILE: ...=== blocks.

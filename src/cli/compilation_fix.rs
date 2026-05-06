@@ -350,11 +350,23 @@ fn apply_generated_ui_compile_fixes(project_root: &Path, stderr: &str) -> Result
     updated = utility_action_mouse_event_re()
         .replace_all(&updated, "on_click: fn(MouseEvent),")
         .to_string();
+    updated = boxed_zero_arg_callback_field_re()
+        .replace_all(&updated, "$indent$name: fn(MouseEvent),")
+        .to_string();
+    updated = boxed_noop_callback_value_re()
+        .replace_all(&updated, "$indent$name: |_| {},")
+        .to_string();
+    updated = cloned_click_handler_re()
+        .replace_all(&updated, "on:click=$handler")
+        .to_string();
     updated = forwarded_option_string_prop_re()
-        .replace_all(&updated, "icon: Option<String>,")
+        .replace_all(&updated, "$name: Option<String>,")
         .to_string();
     updated = forwarded_option_badge_prop_re()
-        .replace_all(&updated, "badge: Option<BadgeConfig>,")
+        .replace_all(&updated, "$name: Option<String>,")
+        .to_string();
+    updated = mojibake_copyright_re()
+        .replace_all(&updated, "©")
         .to_string();
 
     if updated.contains("fn(MouseEvent)") && !updated.contains("use leptos::ev::MouseEvent;") {
@@ -1536,10 +1548,40 @@ fn utility_action_mouse_event_re() -> &'static Regex {
     })
 }
 
+fn boxed_zero_arg_callback_field_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)^(?P<indent>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*Box<dyn Fn\(\)>,\s*$"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn boxed_noop_callback_value_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?m)^(?P<indent>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*Box::new\(\|\| \{\}\),\s*$"#,
+        )
+        .expect("valid regex")
+    })
+}
+
+fn cloned_click_handler_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"on:click=(?P<handler>[A-Za-z_][A-Za-z0-9_\.]*)\.clone\(\)"#)
+            .expect("valid regex")
+    })
+}
+
 fn forwarded_option_string_prop_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"#\[prop\(optional,\s*into\)\]\s+icon:\s+Option<String>,"#)
+        Regex::new(
+            r#"#\[prop\((?:optional,\s*into|into,\s*optional|optional)\)\]\s+(?P<name>icon|trust_badge_icon):\s+Option<String>,"#,
+        )
             .expect("valid regex")
     })
 }
@@ -1547,9 +1589,16 @@ fn forwarded_option_string_prop_re() -> &'static Regex {
 fn forwarded_option_badge_prop_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"#\[prop\(optional\)\]\s+badge:\s+Option<BadgeConfig>,"#)
+        Regex::new(
+            r#"#\[prop\((?:optional,\s*into|into,\s*optional|optional)\)\]\s+(?P<name>badge):\s+Option<String>,"#,
+        )
             .expect("valid regex")
     })
+}
+
+fn mojibake_copyright_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new("Â©").expect("valid regex"))
 }
 
 fn spec_method_code_re() -> &'static Regex {
@@ -1838,12 +1887,44 @@ fn ThemeToggle() -> impl IntoView {
 
 #[component]
 fn AccountCard(
+    #[prop(optional)] icon: Option<String>,
     #[prop(optional)] badge: Option<String>,
     #[prop(default = "neutral")] variant: String,
 ) -> impl IntoView {
     view! {
         {badge.as_ref().map(|b| view! { <Badge label=b variant="neutral"/> })}
     }
+}
+
+#[derive(Clone)]
+struct UtilityAction {
+    label: String,
+    action: Box<dyn Fn()>,
+}
+
+#[component]
+fn Footer(
+    #[prop(optional)] trust_badge_icon: Option<String>,
+) -> impl IntoView {
+    let action = UtilityAction {
+        label: "Sign Out".to_string(),
+        action: Box::new(|| {}),
+    };
+    let account = AccountCardData { icon: None, badge: None };
+    view! {
+        <div>
+            <button on:click=action.action.clone()>{action.label}</button>
+            <AccountCard icon=account.icon.clone() badge=account.badge.clone() variant="neutral"/>
+            <span>{"Â©"}</span>
+            <div trust_badge_icon=None></div>
+        </div>
+    }
+}
+
+#[derive(Clone)]
+struct AccountCardData {
+    icon: Option<String>,
+    badge: Option<String>,
 }
 "#,
         )
@@ -1859,11 +1940,17 @@ fn AccountCard(
         let updated = fs::read_to_string(&app).expect("read app");
         assert!(updated.contains("theme.get() == \"light\""));
         assert!(updated.contains("set_theme.set(\"light\")"));
-        assert!(updated.contains("#[prop(optional, into)] badge: Option<String>,"));
+        assert!(updated.contains("badge: Option<String>,"));
+        assert!(updated.contains("icon: Option<String>,"));
+        assert!(updated.contains("trust_badge_icon: Option<String>,"));
         assert!(updated.contains(
             "#[prop(default = String::from(\"neutral\"), into)] variant: String,"
         ));
         assert!(updated.contains("<Badge label=b.to_string() variant=\"neutral\"/>"));
+        assert!(updated.contains("action: fn(MouseEvent),"));
+        assert!(updated.contains("action: |_| {},"));
+        assert!(updated.contains("on:click=action.action"));
+        assert!(updated.contains("\"©\""));
 
         fs::remove_dir_all(&root).ok();
     }
