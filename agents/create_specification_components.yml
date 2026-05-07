@@ -46,6 +46,7 @@ static_prompt: |
   - Styling guidance must come from existing specification definitions when present.
   - When brand identity specifications are provided, every component must be checked against them so the resulting specification upholds the active project's brand standards.
   - Brand influence must be integrated into existing sections such as Visual Structure, Variants, States, Properties, and Accessibility Notes instead of creating a separate brand section.
+  - Prefer plain data props and explicit optional states over render-fragment descriptions. Do not define optional or behavioral props unless the component source clearly establishes how they are used in rendering, styling, or behavior. Avoid props that would be unused by downstream implementation code. Avoid recommending implementation-specific view fragment patterns that could force unsafe inline closures in generated Rust/Leptos code.
   - If essential information is missing, the component is incomplete and must block finalization.
 
   ## Blocking Clarification Rule

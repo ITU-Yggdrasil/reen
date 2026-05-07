@@ -160,6 +160,12 @@ static_prompt: |
   - Prefer names like `--brand-colors-primary-black`, not generic names like `--color-primary-black`.
   - If a referenced brand token is not defined, fail explicitly.
   - Do not invent fallback brand values that are not present in the specification.
+  - **Exception for foundational web colors:** If a visual specification is provided but does not
+    explicitly include `brand.colors.primary.black` and/or `brand.colors.primary.white`, you MUST
+    add them as primary color tokens before generating the implementation. These are foundational
+    contrast colors required for web accessibility, readability, and coherent text rendering. Use
+    `#000000` for black and `#ffffff` for white. Always generate their corresponding CSS custom
+    properties (`--brand-colors-primary-black` and `--brand-colors-primary-white`) in the `:root` block.
   - If only component specifications are provided, generate a coherent scaffold implementing and
     demonstrating those components without inventing absent brand token values.
   - Visual execution quality matters. When the specification leaves room for composition choices,
@@ -217,101 +223,73 @@ static_prompt: |
     generated component signatures must compile with those call sites.
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
     types. Do not construct Leptos components with struct syntax such as `Badge { ... }`.
-  - Render Leptos components with view syntax. For unconstrained string props, string literals such
-    as `<Badge label="Status"/>` are valid. For enum-backed variant props, use enum values such as
-    `<BalanceSummary variant=BalanceSummaryVariant::Default/>`. For composed content passed through
-    props in this Leptos `0.6.x` scaffold, use `View` or `Option<View>` and convert generated
-    views with `.into_view()`. Do not use `AnyView` or `.into_any()`.
-  - Target the Leptos `0.6.x` API family used by the scaffold dependencies.
-  - For Leptos signals created with `create_signal(...)`, read values with `.get()` and update
-    them with `.set(...)`. Do not emit `theme()` / `set_theme(...)` call-style signal usage.
-  - For signal-driven class toggles and comparisons, prefer patterns such as
-    `class:active=move || theme.get() == "light"` and `on:click=move |_| set_theme.set("light")`.
-  - If a signal stores `String`, update it with an owned `String`; for example use
-    `set_theme.set(option.to_string())` when `option` comes from `vec!["light", "dark"]`, or store
-    owned options such as `vec!["light".to_string(), "dark".to_string()]`.
-  - In `<For />` child closures, do not move the same owned `String` item into multiple `move`
-    closures and then also render it. Clone the item into separate local values before closures,
-    for example `let selected_value = option.clone(); let click_value = option.clone();`, use
-    `selected_value` in derived closures and `click_value` in click handlers, leaving `option`
-    available for rendered text.
-  - For Leptos `0.6` list rendering with `<For />`, use `children=move |item| view! { ... }`,
-    not `view=move |item| { ... }`.
-  - Never emit a `<For ... view=... />` prop. The prop name must be `children=...`.
-  - A valid pattern is:
-    `<For each=move || items.clone() key=|item| item.id.clone() children=move |item| view! { <div>{item.id}</div> } />`
-  - Do not use JSX-style spread props such as `<Badge ..badge />`, `<AccountCard ..account />`,
-    or any `<Component ..props />` form. Leptos `view!` does not support that syntax.
-  - When rendering a list of complex repeated items, either:
-    - pass primitive props directly at the call site, for example
-      `<AccountCard title=item.title masked_identifier=item.masked_identifier ... />`, or
-    - define a separate data struct with a non-component, non-`Props` name such as `AccountCardData` and then
-      manually map each field into the component call.
-  - If a helper data shape is needed for repeated items, its Rust type name must not match the
-    component function name and must not end in `Props`. Prefer suffixes like `Data`, `Model`, or `Item`.
-  - Never instantiate a Leptos component name with Rust struct literal syntax such as
-    `AccountCard { ... }`, `Badge { ... }`, or `ThemeToggle { ... }`. If helper data is needed,
-    instantiate a distinct helper type like `AccountCardData { ... }`.
-  - For SVG `<use>` elements inside `view!`, use the Leptos-compatible escaped tag form
-    `<use_ ... />`, not raw `<use ... />`.
-  - Avoid storing event handlers in helper data structs as `Box<dyn Fn()>`; that is not `Clone`
-    and commonly breaks repeated-item rendering. For demo or placeholder utility actions, prefer
-    static buttons without stored closures, enum-based actions, or cloneable callback types only if
-    truly required.
-  - Do not generate repeated action helper fields like `action: Box<dyn Fn()>` together with
-    `on:click=action.action.clone()`. That pattern is invalid for Leptos and will not compile.
-  - Inline click handlers should use Leptos event closures such as `on:click=move |_| { ... }`.
-  - Do not emit event payload types where callback/function types are required. For example, do not
-    generate `on_click: MouseEvent` or `on_click: leptos::ev::MouseEvent` as a stored field type.
-    If a stored click handler is truly needed, use a callable type such as `fn(MouseEvent)` and
-    ensure `MouseEvent` is imported.
-  - Never wire a zero-argument stored callback such as `fn()` directly into `on:click`; Leptos
-    event handlers must accept the event argument even when it is ignored.
-  - Do not emit `on:click=some_boxed_callback.clone()` patterns.
-  - When rendering from borrowed items or shared references, do not move owned `String` fields out
-    of borrowed data into `view!`. Clone the string field for attributes/text, or render from owned
-    cloned items so the code compiles cleanly.
-  - When a child component expects an owned `String` prop and the current value is borrowed
-    (for example `&String` from `option.as_ref()`), clone or otherwise convert it to an owned
-    `String` before passing it into the child component.
-  - For generated `String` props with defaults, the default expression must itself be a `String`,
-    for example `#[prop(default = String::from("neutral"), into)] variant: String`.
-    Do not use bare string-literal defaults such as `#[prop(default = "neutral")] variant: String`.
-  - For optional string props, prefer `#[prop(optional, into)]` so omitted props remain optional
-    and provided string literals still compile at call sites.
-  - Exception: when a component prop is typed as `Option<T>` and parent call sites explicitly
-    forward an `Option<T>` value such as `icon=account.icon.clone()` or `badge=account.badge.clone()`,
-    do not use optional-builder annotations that coerce the setter to `T`. In that forwarding case,
-    keep the prop as a plain `Option<T>` parameter so an `Option<T>` expression compiles directly.
-  - The same exception applies when a parent call site passes `None` explicitly, for example
-    `trust_badge_icon=None`. In that case, keep the prop as a plain `Option<T>` parameter rather
-    than adding `#[prop(optional)]` or `#[prop(optional, into)]`.
-  - The same rule applies to explicit `Some(...)` call sites and to any forwarded optional helper
-    data such as `badge=item.badge.clone()`, `theme_toggle=nav.theme_toggle.clone()`, or similar.
-    If the parent passes an `Option<T>` expression explicitly, the child prop must remain a plain
-    `Option<T>` parameter with no `#[prop(optional)]` or `#[prop(optional, into)]` annotation.
-  - Only use `#[prop(optional)]` or `#[prop(optional, into)]` on `Option<T>` props when parent
-    call sites truly omit that prop rather than passing `None`, `Some(...)`, or a forwarded
-    `Option<T>` value.
-  - Do not use `view! {}.into_any()` or any `.into_any()` branch. Prefer `.into_view()` with `View`,
-    or restructure the conditional rendering to avoid an empty rendered-content branch entirely.
-  - When an inline `{if ... { view! { ... } } else { view! { ... } }}` expression has view-producing
-    branches, erase both branches consistently with `.into_view()` so the `if` and `else` branches
-    have the same Rust type.
-  - Generated `view!` macro attributes must use conservative, broadly compatible Leptos syntax.
-  - Do not emit `class:...={...}` conditional class bindings when the class name contains hyphens,
-    BEM modifiers, or any other non-trivial token pattern such as `button--primary`,
-    `top-nav--default`, or `theme-toggle--text-segmented`.
-  - When conditional styling is needed, compute the final class string in Rust and pass it through
-    plain `class=...` in `view!` rather than relying on `class:` toggles.
-  - Prefer plain `class="..."` or `class=...` attributes over Leptos class-toggle shorthand unless
-    the emitted syntax is guaranteed to compile.
-  - BEM-style CSS class names are allowed in stylesheet strings and `class=...` values, but must
-    not be emitted through `class:` bindings.
+  - Render Leptos components with view syntax such as `<Badge label="Status" variant="neutral"/>`.
+  - Only emit component imports in a generated Rust source file if the imported component is actually
+    referenced in that file. Do not generate unused `use crate::components::{...}` statements.
+  - Only generate component props and local bindings that are actually consumed by the implementation.
+    If a prop is declared but never used in markup, class logic, or conditional rendering, omit it.
+    Do not create unused placeholder props such as `interactive` unless the component clearly requires them
+    and the implementation makes use of them.
+  - Leptos `class` attribute syntax: Use `class=[ "string1", "string2", variable ]` for multiple class
+    names or dynamic strings. Leptos `class=(...)` tuples are only valid for binary conditional classes
+    such as `class=("button--full-width", full_width)` where the second element is a boolean condition.
+    Do not mix plain `&str` strings and `(&str, bool)` tuples in a single `class=[...]` array—they
+    have incompatible types. Use one of these safe patterns instead:
+    - Pattern 1 (recommended): Use `class="base-name"` for static base classes, then use separate
+      `class:variant=boolean` directives for conditional classes.
+    - Pattern 2: Use the `classes!(...)` macro which accepts both plain strings and `(name, bool)` tuples.
+  - The `class:name` directive in Leptos is for boolean conditional classes only. Use `class:neutral=is_neutral`
+    where `is_neutral` is a boolean, NOT `class:neutral="true"` (which is invalid). For static/base class
+    names, use plain `class` attribute: `class="badge"` or build a class string in Rust. Never use
+    `class:name="string"` or `class:name=string_variable`; `class:` is strictly for boolean conditions.
+  - When generating Leptos `view!` code, avoid repeated `move ||` closures that each capture the same
+    owned `String` local. Instead, convert the string to `&str` once or precompute boolean flags such as
+    `let is_neutral = variant == "neutral";` and use `class:neutral=is_neutral`. This prevents Rust
+    move errors when the same `String` is used in multiple class bindings or conditional view expressions.
+  - Avoid inline `move ||` render closures that match or branch on owned `String`/`Option<String>` data
+    inside `view!`. Precompute optional child fragments outside of the template, for example:
+      let leading_icon = icon_leading.map(|icon| view! { <span class="icon">{icon}</span> }.into_view());
+      let label_view = if !icon_only { view! { <span class="label">{label}</span> }.into_view() } else { ().into_view() };
+    Then use `{leading_icon}` and `{label_view}` inside `view!`.
+  - Prefer generating plain boolean class bindings instead of inline closure expressions when the
+    condition only depends on a local string prop.
+  - Do not pass component tags or `view!` fragments directly as prop attribute values. Invalid:
+    `media=<Image src="/placeholder.jpg" alt="Placeholder" variant="thumbnail"/>`.
+  - Prefer plain data props for composed generated components instead of view-valued props. For
+    example, a generated `Card` should accept props like `media_src`, `media_alt`, `badge_label`,
+    `badge_variant`, `action_label`, and `action_variant`, then render `<Image/>`, `<Badge/>`,
+    and `<Button/>` internally.
+  - Only use Leptos child/slot types such as `Children` or `ChildrenFn` when the component is
+    intentionally invoked with nested children between an opening and closing tag. Do not use
+    `AnyView` or `Option<AnyView>` in generated component props.
+  - When emitting any generated component implementation file under `src/components/*.rs`, also
+    emit `src/components/mod.rs`.
+  - `src/components/mod.rs` must declare every generated component module using the file stem,
+    for example `mod button;`, and re-export the public component function, for example
+    `pub use button::Button;`.
+  - When generated component files exist, `src/lib.rs` must declare `pub mod components;` so the
+    application can import reusable components.
+  - `src/app.rs` must import any generated components it renders, for example
+    `use crate::components::{Badge, Button};`.
+  - Generated composed components must import sibling generated components they render, for example
+    a `Card` component that renders `Badge` or `Image` must import them from `crate::components`.
   - When visual specifications are also provided, apply the visual identity globally and use it to
     style the component implementations.
   - Do not add component variants, states, or design-system elements that are not justified by the
     completed component specifications.
+
+  ## Code Generation Validation
+
+  Before finalizing generated component code:
+  - Audit every `use crate::components::...` import and remove any that are not used in the file.
+    An import is "used" only if the component name appears in markup like `<ComponentName ... />`.
+  - Audit every `#[prop(...)] prop_name:` parameter and remove any that are never read or rendered
+    in the component body. Every parameter must appear in markup, class logic, or conditional rendering.
+  - When generating composed components (e.g., `Card` that renders `Badge`), prefer plain data props
+    over `Option<View>` props. For example, emit `badge_label: String` and `badge_variant: String`
+    instead of `badge: Option<View>`. This keeps components composable without forcing view-valued dependencies.
+  - Ensure all generated Rust code compiles without warnings about unused imports or unused variables.
+    The generated scaffold must have zero unused-import and zero unused-variable warnings.
 
   ## Scope Rules
 
@@ -363,6 +341,9 @@ static_prompt: |
   - [ ] `src/lib.rs` contains bootstrap/hydration-facing app wiring
   - [ ] `src/app.rs` defines the root `App` component and routing
   - [ ] `src/app.rs` imports router APIs from `leptos_router`
+  - [ ] If `src/components/*.rs` files are emitted, `src/components/mod.rs` declares and re-exports them
+  - [ ] If generated components exist, `src/lib.rs` declares `pub mod components;`
+  - [ ] Any generated component rendered by `src/app.rs` or another component is imported into that file
   - [ ] `"/"` is present as the root route
   - [ ] Any component spec that enumerates `variant` values is implemented with a typed `{ComponentName}Variant` enum and enum-valued call sites in `src/app.rs`
   - [ ] No zero-argument stored callback is wired directly into `on:click`
