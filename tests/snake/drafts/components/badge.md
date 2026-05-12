@@ -38,14 +38,14 @@ Inline and compact, with content centered inside a small rounded surface.
 - **Warning:** Used for cautionary states.
 - **Destructive:** Used for error or high-risk states.
 
-### Brand Token Constraints
+### Brand Constraints
 
-Use brand color tokens from the visual specification when available. If a needed semantic role is not defined, map the badge variant to the closest existing token and describe the intended role without inventing a new token path.
+Use the project’s active visual/brand specification to decide the badge’s colors and typography. Do not introduce new token paths in the specification.
 
-- **Neutral:** `brand.colors.primary.white`.
-- **Success:** `brand.colors.secondary.green`.
-- **Warning:** `brand.colors.secondary.blue` with restrained emphasis.
-- **Destructive:** `brand.colors.primary.red`, since no negative/error semantic token is defined.
+- **Neutral:** Use a subdued, low-emphasis treatment consistent with the brand’s base palette and hierarchy.
+- **Success:** Use the closest brand-approved “positive” / “complete” color treatment if one is explicitly defined; otherwise keep it neutral and rely on label text.
+- **Warning:** Use the closest brand-approved “caution” treatment if one is explicitly defined; otherwise keep it neutral and rely on label text.
+- **Destructive:** Use the closest brand-approved “error/high-risk” treatment if one is explicitly defined; otherwise keep it neutral and rely on label text.
 
 ---
 

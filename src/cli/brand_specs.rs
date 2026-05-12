@@ -244,7 +244,11 @@ pub fn repair_brand_spec_heading_levels(spec_content: &str) -> String {
         repaired.push(line.to_string());
     }
 
-    repaired.join("\n")
+    let mut output = repaired.join("\n");
+    if spec_content.ends_with('\n') && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
 
 fn parse_brand_spec(spec_content: &str) -> Result<ParsedBrandSpec> {

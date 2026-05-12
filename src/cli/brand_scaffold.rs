@@ -346,9 +346,10 @@ impl BrandScaffoldValidator {
         context_name: &str,
         generated_files: &[GeneratedOutputFile],
     ) -> Result<BrandValidationReport> {
+        let mut normalized_files = generated_files.to_vec();
         for required in REQUIRED_BRAND_SCAFFOLD_PATHS {
             let required = Path::new(required);
-            if !generated_files.iter().any(|file| file.path == required) {
+            if !normalized_files.iter().any(|file| file.path == required) {
                 anyhow::bail!(
                     "Generated brand implementation for '{}' is missing required scaffold file '{}'",
                     context_name,
@@ -357,7 +358,7 @@ impl BrandScaffoldValidator {
             }
         }
 
-        if !generated_files
+        if !normalized_files
             .iter()
             .any(|file| file.path.starts_with("public") && file.path.file_name().is_some())
         {
@@ -367,34 +368,47 @@ impl BrandScaffoldValidator {
             );
         }
 
-        let cargo_toml = find_file(generated_files, "Cargo.toml")?;
+        let cargo_toml = find_file(&normalized_files, "Cargo.toml")?;
         validate_cargo_toml(context_name, &cargo_toml.content)?;
 
-        let leptos_toml = find_file(generated_files, "Leptos.toml")?;
+        let leptos_toml = find_file(&normalized_files, "Leptos.toml")?;
         validate_leptos_toml(context_name, &leptos_toml.content)?;
         validate_matching_leptos_config(context_name, &cargo_toml.content, &leptos_toml.content)?;
 
-        let gitignore = find_file(generated_files, ".gitignore")?;
+        let gitignore = find_file(&normalized_files, ".gitignore")?;
         validate_gitignore(context_name, &gitignore.content)?;
 
-        let main_rs = find_file(generated_files, "src/main.rs")?;
+        let main_rs = find_file(&normalized_files, "src/main.rs")?;
         validate_main_rs(context_name, &main_rs.content)?;
 
-        let lib_rs = find_file(generated_files, "src/lib.rs")?;
-        validate_lib_rs(context_name, &lib_rs.content)?;
+        let lib_rs = find_file(&normalized_files, "src/lib.rs")?;
+        // Clone to avoid holding an immutable borrow across later in-place CSS repair.
+        let lib_rs_content = lib_rs.content.clone();
+        validate_lib_rs(context_name, &lib_rs_content)?;
 
-        let app_rs = find_file(generated_files, "src/app.rs")?;
+        let app_rs = find_file(&normalized_files, "src/app.rs")?;
         validate_app_rs(context_name, &app_rs.content)?;
         validate_requested_component_implementations(context_name, &app_rs.content)?;
 
-        let app_css = find_file(generated_files, "style/app.css")?;
+        // Repair brand CSS to keep scaffolds runnable even when drafts/specs are imprecise
+        // (e.g. named-only colors, or missing CSS variable definitions).
+        let app_css_idx = normalized_files
+            .iter()
+            .position(|file| file.path == Path::new("style/app.css"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Generated brand implementation is missing style/app.css")
+            })?;
+        let repaired_css = repair_brand_app_css(context_name, &normalized_files[app_css_idx].content)?;
+        normalized_files[app_css_idx].content = repaired_css;
+
+        let app_css = find_file(&normalized_files, "style/app.css")?;
         validate_app_css(context_name, &app_css.content)?;
         validate_brand_css_variables(context_name, &app_css.content)?;
 
-        validate_generated_brand_rust_patterns(context_name, generated_files)?;
-        validate_component_module_wiring(context_name, generated_files, &lib_rs.content)?;
+        validate_generated_brand_rust_patterns(context_name, &normalized_files)?;
+        validate_component_module_wiring(context_name, &normalized_files, &lib_rs_content)?;
 
-        let combined = generated_files
+        let combined = normalized_files
             .iter()
             .map(|file| file.content.as_str())
             .collect::<Vec<_>>()
@@ -418,7 +432,7 @@ impl BrandScaffoldValidator {
         }
 
         Ok(BrandValidationReport {
-            generated_files: generated_files.to_vec(),
+            generated_files: normalized_files,
         })
     }
 }
@@ -3302,6 +3316,216 @@ fn validate_brand_css_variables(context_name: &str, content: &str) -> Result<()>
     Ok(())
 }
 
+fn repair_brand_app_css(context_name: &str, content: &str) -> Result<String> {
+    // 1) Normalize named-color definitions to deterministic concrete values.
+    // 2) Ensure referenced `--brand-*` variables are defined when we can infer a fallback.
+    let definition_line_pattern = Regex::new(
+        r#"(?m)^(?P<indent>\s*)(?P<var>--brand-[A-Za-z0-9_-]+)\s*:\s*(?P<value>[^;]+)\s*;\s*$"#,
+    )
+    .expect("brand css definition line regex");
+
+    let normalized = definition_line_pattern
+        .replace_all(content, |caps: &regex::Captures| {
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let var = caps.name("var").map(|m| m.as_str()).unwrap_or("");
+            let value = caps.name("value").map(|m| m.as_str()).unwrap_or("").trim();
+
+            let normalized_value = normalize_color_value(value)
+                .unwrap_or_else(|| value.to_string());
+
+            format!("{indent}{var}: {normalized_value};")
+        })
+        .to_string();
+
+    let definition_pattern =
+        Regex::new(r"(?m)(--brand-[A-Za-z0-9_-]+)\s*:").expect("brand css definition regex");
+    let reference_pattern =
+        Regex::new(r"var\(\s*(--brand-[A-Za-z0-9_-]+)").expect("brand css reference regex");
+
+    let definitions = definition_pattern
+        .captures_iter(&normalized)
+        .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        .collect::<HashSet<_>>();
+
+    let referenced = reference_pattern
+        .captures_iter(&normalized)
+        .filter_map(|captures| captures.get(1).map(|m| m.as_str().to_string()))
+        .collect::<HashSet<_>>();
+
+    let mut unresolved = referenced
+        .into_iter()
+        .filter(|reference| !definitions.contains(reference))
+        .collect::<Vec<_>>();
+    unresolved.sort();
+
+    let mut injectable = Vec::new();
+    for var in &unresolved {
+        if let Some(value) = brand_var_fallback(var) {
+            injectable.push((var.clone(), value.to_string()));
+        }
+    }
+
+    let repaired = if injectable.is_empty() {
+        normalized
+    } else {
+        inject_root_definitions(&normalized, &injectable)
+    };
+
+    // If unknown unresolved vars remain, keep the strict behavior (the subsequent validator will bail).
+    // But attach a hint so failures are easier to diagnose.
+    if unresolved.iter().any(|var| brand_var_fallback(var).is_none()) {
+        // Don't bail here; keep behavior centralized in `validate_brand_css_variables`.
+        // Just ensure the output remains deterministic.
+        return Ok(repaired);
+    }
+
+    // Additional safety: make sure we didn't introduce mojibake or invalid output.
+    if repaired.trim().is_empty() {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' produced empty style/app.css after repair",
+            context_name
+        );
+    }
+
+    Ok(repaired)
+}
+
+fn normalize_color_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if is_explicit_color_value(trimmed) {
+        return None;
+    }
+    // Accept simple named colors (single token, possibly quoted).
+    let unquoted = trimmed
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_ascii_lowercase();
+    if !unquoted
+        .chars()
+        .all(|ch| ch.is_ascii_alphabetic() || ch == '-')
+    {
+        return None;
+    }
+    named_color_fallback(&unquoted).map(|fallback| fallback.to_string())
+}
+
+fn is_explicit_color_value(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    v.starts_with('#')
+        || v.starts_with("rgb(")
+        || v.starts_with("rgba(")
+        || v.starts_with("hsl(")
+        || v.starts_with("hsla(")
+        || v.starts_with("color(")
+        || v.starts_with("oklch(")
+        || v.starts_with("oklab(")
+}
+
+fn named_color_fallback(name: &str) -> Option<&'static str> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "black" => Some("#000000"),
+        "white" => Some("#ffffff"),
+        "red" => Some("#ff0000"),
+        "blue" => Some("#0000ff"),
+        "green" => Some("#008000"),
+        "yellow" => Some("#ffff00"),
+        "orange" => Some("#ffa500"),
+        "purple" => Some("#800080"),
+        "gray" | "grey" => Some("#808080"),
+        // A few common “designer” names that appear in drafts.
+        "lavender" => Some("#e6e6fa"),
+        "beige" => Some("#f5f5dc"),
+        _ => None,
+    }
+}
+
+fn brand_var_fallback(var_name: &str) -> Option<&'static str> {
+    let normalized = var_name.trim();
+    match normalized {
+        "--brand-colors-primary-black" => Some("#000000"), // black
+        "--brand-colors-primary-white" => Some("#ffffff"), // white
+        "--brand-colors-text-primary" => Some("#111111"), // near-black text
+        "--brand-colors-text-secondary" => Some("#444444"), // secondary text gray
+        "--brand-colors-surface-default" => Some("#ffffff"), // surface white
+        "--brand-colors-surface-raised" => Some("#f7f7f7"), // raised surface (light gray)
+        "--brand-colors-surface-muted" => Some("#f2f2f2"), // muted surface (light gray)
+        "--brand-colors-border-default" => Some("rgba(0, 0, 0, 0.12)"), // subtle black border
+        "--brand-colors-semantic-success" => Some("#00aa55"), // success green
+        "--brand-colors-semantic-warning" => Some("#f59e0b"), // warning amber
+        "--brand-colors-semantic-destructive" => Some("#dc2626"), // destructive red
+        "--brand-colors-semantic-error" => Some("#dc2626"), // error red
+        _ => {
+            // Heuristics: if the variable name ends with a known named color, use that.
+            // Example: `--brand-colors-primary-red` -> fallback for `red`.
+            let suffix = normalized
+                .rsplit('-')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if let Some(color) = named_color_fallback(&suffix) {
+                return Some(color);
+            }
+
+            // Semantic heuristics.
+            if normalized.contains("semantic") {
+                if normalized.contains("success") {
+                    return Some("#00aa55");
+                }
+                if normalized.contains("warning") {
+                    return Some("#f59e0b");
+                }
+                if normalized.contains("destructive") || normalized.contains("error") {
+                    return Some("#dc2626");
+                }
+            }
+
+            None
+        }
+    }
+}
+
+fn inject_root_definitions(content: &str, definitions: &[(String, String)]) -> String {
+    if definitions.is_empty() {
+        return content.to_string();
+    }
+    let mut lines = Vec::new();
+    for (var, value) in definitions {
+        lines.push(format!("    {var}: {value};"));
+    }
+    let injection = lines.join("\n");
+
+    if let Some(root_pos) = content.find(":root") {
+        // Find the first '{' following :root
+        if let Some(open_brace_rel) = content[root_pos..].find('{') {
+            let open_brace = root_pos + open_brace_rel;
+            if let Some(close_brace_rel) = content[open_brace..].find('}') {
+                let close_brace = open_brace + close_brace_rel;
+                let mut out = String::new();
+                out.push_str(&content[..close_brace]);
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&injection);
+                out.push('\n');
+                out.push_str(&content[close_brace..]);
+                return out;
+            }
+        }
+    }
+
+    // No `:root {}` block found; prepend one.
+    let mut out = String::new();
+    out.push_str(":root {\n");
+    out.push_str(&injection);
+    out.push_str("\n}\n\n");
+    out.push_str(content);
+    out
+}
+
 fn validate_gitignore(context_name: &str, content: &str) -> Result<()> {
     let required_entries = ["target/", ".cargo-leptos/", ".leptos/", ".reen/", "/style", "Leptos.toml", "/public"];
     for entry in required_entries {
@@ -3503,10 +3727,12 @@ fn extract_dependency_spec(content: &str, dependency: &str) -> Option<String> {
 mod tests {
     use super::{
         build_component_spec_contract, extract_component_name_from_spec, extract_dep_feature_refs,
-        extract_dependency_spec, extract_toml_value, normalize_generated_app_rs,
-        normalize_generated_brand_files, render_brand_scaffold_contract,
-        render_brand_variant_contract, render_component_implementation_contract, validate_app_rs,
-        validate_app_rs_with_component_specs, validate_dependency_render_feature_mode,
+        component_module_specs, extract_dependency_spec, extract_toml_value,
+        normalize_generated_app_rs, normalize_generated_brand_files, pascal_case_identifier,
+        render_brand_scaffold_contract, render_brand_variant_contract,
+        render_component_implementation_contract, repair_brand_app_css, validate_app_rs,
+        validate_app_rs_with_component_specs, validate_brand_css_variables,
+        validate_dependency_render_feature_mode, validate_generated_brand_rust_patterns,
         validate_lib_target_name, validate_matching_leptos_config,
         validate_optional_dep_feature_wiring, GeneratedOutputFile, ParsedImplementationContract,
     };
@@ -3818,6 +4044,60 @@ body {
             .expect_err("expected undefined variable rejection");
 
         assert!(err.to_string().contains("--brand-colors-primary-black"));
+    }
+
+    #[test]
+    fn brand_app_css_repair_normalizes_named_color_values() {
+        let css = r#"
+:root {
+    --brand-colors-primary-red: red;
+    --brand-colors-primary-white: #ffffff;
+}
+
+body {
+    color: var(--brand-colors-primary-red);
+    background: var(--brand-colors-primary-white);
+}
+"#;
+
+        let repaired = repair_brand_app_css("demo", css).expect("repair should succeed");
+        assert!(repaired.contains("--brand-colors-primary-red: #ff0000;"));
+        validate_brand_css_variables("demo", &repaired).expect("repaired vars should validate");
+    }
+
+    #[test]
+    fn brand_app_css_repair_injects_missing_definitions_when_fallback_known() {
+        let css = r#"
+:root {
+    --brand-colors-primary-red: #ff0000;
+}
+
+body {
+    color: var(--brand-colors-primary-black);
+}
+"#;
+
+        let repaired = repair_brand_app_css("demo", css).expect("repair should succeed");
+        assert!(repaired.contains("--brand-colors-primary-black: #000000;"));
+        validate_brand_css_variables("demo", &repaired).expect("injected vars should validate");
+    }
+
+    #[test]
+    fn brand_app_css_repair_does_not_mask_unknown_variables() {
+        let css = r#"
+:root {
+    --brand-colors-primary-red: #ff0000;
+}
+
+body {
+    color: var(--brand-colors-primary-unknowncustom);
+}
+"#;
+
+        let repaired = repair_brand_app_css("demo", css).expect("repair should not fail");
+        let err = validate_brand_css_variables("demo", &repaired)
+            .expect_err("unknown variable should still fail strict validation");
+        assert!(err.to_string().contains("--brand-colors-primary-unknowncustom"));
     }
 
     #[test]
