@@ -62,7 +62,7 @@ static_prompt: |
   - properties are implied by the template behavior but not defined clearly enough for a usable specification
   - a configurable property does not clearly state whether it is required or optional
   - a configurable property does not clearly state whether it is a scalar, list, enum, or object-like value
-  - a collection property does not define its repeated item shape well enough for implementation
+  - a collection property does not define its repeated item shape well enough for implementation; prose examples of what a collection might contain (e.g. "date, author, tags") are NOT a sufficient item schema and must trigger a blocking question — only an explicit field list qualifies
   - an object-like property does not define the fields needed to use it
   - a component exposes interactions but their implementation-driving kind is unclear (for example navigational, callback-driven, or stateful)
   - the component presents variants in prose but does not enumerate the allowed variant values
@@ -324,6 +324,14 @@ static_prompt: |
 
   ## Brand Token Precision Rules
 
+  ### Color Token Variant Scope
+
+  - When applying a brand color token to a component that has named variants, the brand constraint MUST explicitly state which variant(s) the token applies to.
+  - Do NOT write a color constraint that is ambiguous across variants (e.g. "for emphasis" or "for strong accents") when the component has multiple variants that could each claim that description.
+  - If the brand identity specification does not provide a variant-specific color mapping, and the component has more than one variant where the token could plausibly apply, you MUST ask a blocking clarification question rather than choosing a scope yourself.
+  - Example of a forbidden inference: the brand spec says `brand.colors.primary.red` is "for emphasis and energy" and the component has both a Feature variant and a Status variant — do NOT silently assign red to one or both. Ask which variant(s) it applies to.
+  - Example of a safe inference: the brand spec explicitly states `brand.colors.primary.red` is used for error or danger states — applying it to a Status variant's error condition is traceable and allowed.
+
   - When citing brand tokens in any section, use only exact token names that appear in the active brand identity specifications.
   - When the active visual spec defines project-specific tokens such as `testcompany.colors.*`, you MUST use those exact project-specific token names and MUST NOT fall back to generic namespaces such as `brand.colors.*`.
   - Do NOT derive alternate token names from color meaning, component purpose, or variant labels.
@@ -372,6 +380,8 @@ static_prompt: |
   - [ ] `### Brand Constraints` contains only flat bullets and no nested bullets
   - [ ] Every brand-constraint guidance sentence explicitly names its implementation dimension, such as `typography`, `spacing`, `color`, or `hierarchy`
   - [ ] `typography`, `spacing`, `color`, and `hierarchy` guidance sentences start with `Typography`, `Spacing`, `Color`, or `Hierarchy` respectively
+  - [ ] No collection item schema was inferred from prose examples — every object contract field list is traceable to an explicit definition in the source, not to examples like "date, author, tags"
+  - [ ] Every brand color constraint names the exact variant(s) it applies to; no color token was assigned to a variant scope that is not traceable to the brand identity specification
   - [ ] Every referenced brand token exists exactly in the active brand identity specification set
   - [ ] No brand token name was renamed or inferred into a different family such as `semantic.*` when only `primary.*` was defined
   - [ ] No project-specific brand token was rewritten into a generic `brand.*` namespace
