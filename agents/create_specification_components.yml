@@ -226,6 +226,9 @@ static_prompt: |
   - configurable inputs only
 
   `## Implementation Contract`
+    - all contract subsection headings under this section MUST remain level 3 (`###`), not level 2 (`##`)
+    - invalid heading example: `## Collection Contracts`
+    - valid heading example: `### Collection Contracts`
   `### Props`
   - one bullet per configurable prop using exact authored prop names
   - every bullet MUST use this machine-readable pattern as a raw markdown line:
