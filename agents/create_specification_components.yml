@@ -62,7 +62,7 @@ static_prompt: |
   - properties are implied by the template behavior but not defined clearly enough for a usable specification
   - a configurable property does not clearly state whether it is required or optional
   - a configurable property does not clearly state whether it is a scalar, list, enum, or object-like value
-  - a collection property does not define its repeated item shape well enough for implementation
+  - a collection property does not define its repeated item shape well enough for implementation; prose examples of what a collection might contain (e.g. "date, author, tags") are NOT a sufficient item schema and must trigger a blocking question — only an explicit field list qualifies
   - an object-like property does not define the fields needed to use it
   - a component exposes interactions but their implementation-driving kind is unclear (for example navigational, callback-driven, or stateful)
   - the component presents variants in prose but does not enumerate the allowed variant values
@@ -322,65 +322,15 @@ static_prompt: |
     - `brand_href`: kind=`navigational`
     - `sign_out_action.action`: kind=`callback-driven`
 
-  ## Type Reference and Contract Precision Rules
-
-  ### Type Naming for Object Contracts
-
-  - When a scalar prop references a defined object contract, the `type` field MUST use the exact object contract name without additional suffix.
-    Example: `type=`MetadataItem`` (NOT `MetadataItemReference` or `MetadataItemData`)
-  - When a prop references a well-known component or external reference type, use a clear, suffixed name consistently.
-    Allowed suffixes: `Reference`, `Config`, `State`. Examples: `ActionReference`, `IconReference`, `ImageReference`.
-  - If the source does NOT explicitly name the type and you must infer one, use the object contract name without suffix unless the source clearly indicates a reference.
-  - Do NOT arbitrarily vary naming between `Image`, `ImageReference` across similar props in the same component. Choose one pattern per component consistently.
-
-  ### List Prop Redundancy: Both `type=` AND `item_contract=` Are Required
-
-  - For every prop with `shape=list` and structured items, the Props section MUST include BOTH:
-    - `type=`ItemTypeName`` (the item type)
-    - `item_contract=`ItemTypeName`` (reference to the object contract)
-  - These are NOT redundant. `type=` declares the item's type in the prop; `item_contract=` provides the reference target in Collection Contracts.
-  - Example (correct):
-    - `items`: required=`false`; shape=`list`; type=`MetadataItem`; item_contract=`MetadataItem`
-  - Example (incorrect):
-    - `items`: required=`false`; shape=`list`; item_contract=`MetadataItem`
-      (missing `type=` field)
-
-  ### Union Types Are Forbidden
-
-  - Do NOT infer or introduce union types such as `string | function` or `Action | Callback` in type fields.
-  - If a prop could legitimately accept multiple types, ask a blocking clarification question instead of guessing.
-  - If the source explicitly uses a union (rare), rephrase it as a single canonical type or enum:
-    - If `action` can be a string or a function, ask: "What is the semantic meaning? Is it a callback name (string), an action reference (object), or something else?"
-    - Do NOT assume the source means a literal union type in the contract.
-
-  ### Subcomponent Usage Normalization
-
-  - Use these exact usage values for `### Composition Contracts`:
-    - `required`: The subcomponent is always present and essential to the component's structure.
-    - `optional`: The subcomponent may be omitted; the parent component can render without it.
-    - `slot-provided`: The subcomponent is rendered by a dedicated content slot that the consumer provides.
-    - `reused-subcomponent`: The subcomponent is a library component that may be composed into this component, but is not tightly coupled to this component's specific structure.
-  - Apply this decision tree:
-    1. Is the subcomponent ALWAYS present in the visual structure or required by the component template? → `required`
-    2. Is it conditionally present based on a prop (e.g., `media` presence)? → `optional`
-    3. Is it provided by the consumer via a slot or `children` property? → `slot-provided`
-    4. Is it a general library component used for styling/layout but not core to identity? → `reused-subcomponent`
-  - Normalize across the component: Do NOT use `optional` for Button, `required` for Text, and `reused-subcomponent` for Link if they are all similarly optional subcomponents.
-  - If the source is ambiguous, ask a blocking clarification question.
-
-  ### Semantic Token Inference Is Forbidden
-
-  - Do NOT infer missing semantic tokens such as `brand.colors.semantic.red`, `brand.colors.semantic.green`, `brand.colors.semantic.warning`, etc.
-  - Use ONLY tokens that are explicitly defined in the active brand identity specifications provided for this run.
-  - If a semantic token family would be useful but is not defined, ask a blocking clarification question instead.
-  - Example (forbidden):
-    - Brand spec defines: `brand.colors.primary.red`
-    - You infer and use: `brand.colors.semantic.error` → NOT ALLOWED
-  - Example (correct):
-    - Brand spec defines: `brand.colors.primary.red`
-    - You use: `brand.colors.primary.red` for error emphasis → ALLOWED
-
   ## Brand Token Precision Rules
+
+  ### Color Token Variant Scope
+
+  - When applying a brand color token to a component that has named variants, the brand constraint MUST explicitly state which variant(s) the token applies to.
+  - Do NOT write a color constraint that is ambiguous across variants (e.g. "for emphasis" or "for strong accents") when the component has multiple variants that could each claim that description.
+  - If the brand identity specification does not provide a variant-specific color mapping, and the component has more than one variant where the token could plausibly apply, you MUST ask a blocking clarification question rather than choosing a scope yourself.
+  - Example of a forbidden inference: the brand spec says `brand.colors.primary.red` is "for emphasis and energy" and the component has both a Feature variant and a Status variant — do NOT silently assign red to one or both. Ask which variant(s) it applies to.
+  - Example of a safe inference: the brand spec explicitly states `brand.colors.primary.red` is used for error or danger states — applying it to a Status variant's error condition is traceable and allowed.
 
   - When citing brand tokens in any section, use only exact token names that appear in the active brand identity specifications.
   - When the active visual spec defines project-specific tokens such as `testcompany.colors.*`, you MUST use those exact project-specific token names and MUST NOT fall back to generic namespaces such as `brand.colors.*`.
@@ -419,12 +369,6 @@ static_prompt: |
   - [ ] Every prop in `## Implementation Contract` states `required`, `shape`, and `type`
   - [ ] Every collection prop in `## Implementation Contract` has a repeated-item contract when needed
   - [ ] Every object-like prop in `## Implementation Contract` has a matching object contract
-  - [ ] Every prop with `shape=list` includes BOTH `type=` and `item_contract=` fields (not redundant; both required)
-  - [ ] Every `type=` reference to an object contract uses the exact contract name without added suffix (e.g., `MetadataItem` not `MetadataItemReference`)
-  - [ ] Type reference naming is consistent within the component (e.g., all reference types are either suffixed or unsuffixed, not mixed)
-  - [ ] No type field contains union types such as `string | function` or `Action | Callback`
-  - [ ] `### Composition Contracts` uses only these exact values: `required`, `optional`, `slot-provided`, or `reused-subcomponent`
-  - [ ] Subcomponent usage is normalized across similar subcomponents (Button, Text, Link usage patterns are consistent)
   - [ ] Empty implementation-contract subsections use `_None._` exactly
   - [ ] `### Interaction Contracts` contains only actual interaction surfaces or state transitions
   - [ ] Every interaction target uses an exact prop or repeated-item path rather than a whole component name unless the source truly defines only component-level behavior
@@ -436,8 +380,9 @@ static_prompt: |
   - [ ] `### Brand Constraints` contains only flat bullets and no nested bullets
   - [ ] Every brand-constraint guidance sentence explicitly names its implementation dimension, such as `typography`, `spacing`, `color`, or `hierarchy`
   - [ ] `typography`, `spacing`, `color`, and `hierarchy` guidance sentences start with `Typography`, `Spacing`, `Color`, or `Hierarchy` respectively
+  - [ ] No collection item schema was inferred from prose examples — every object contract field list is traceable to an explicit definition in the source, not to examples like "date, author, tags"
+  - [ ] Every brand color constraint names the exact variant(s) it applies to; no color token was assigned to a variant scope that is not traceable to the brand identity specification
   - [ ] Every referenced brand token exists exactly in the active brand identity specification set
-  - [ ] No semantic tokens were inferred (e.g., `brand.colors.semantic.red` invented when only `brand.colors.primary.red` is defined)
   - [ ] No brand token name was renamed or inferred into a different family such as `semantic.*` when only `primary.*` was defined
   - [ ] No project-specific brand token was rewritten into a generic `brand.*` namespace
   - [ ] Every final statement is traceable to the component template or supporting specification context
