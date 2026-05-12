@@ -855,7 +855,7 @@ fn finalize_specification_output(
 
     if is_visual_draft_path(draft_file, DRAFTS_DIR) {
         normalized_spec_content = repair_brand_spec_heading_levels(&normalized_spec_content);
-        actionable = extract_actionable_blocking_bullets_from_section(
+        actionable = extract_actionable_brand_blocking_bullets_from_section(
             extract_blocking_ambiguities_section(&normalized_spec_content),
         );
         if actionable.is_empty() {
@@ -2471,6 +2471,13 @@ fn extract_actionable_blocking_bullets_from_section(section: Option<String>) -> 
         .unwrap_or_default()
 }
 
+fn extract_actionable_brand_blocking_bullets_from_section(section: Option<String>) -> Vec<String> {
+    section
+        .as_deref()
+        .map(extract_actionable_brand_blocking_bullets)
+        .unwrap_or_default()
+}
+
 fn is_numbered_section_heading(line: &str) -> bool {
     let mut parts = line.splitn(2, '.');
     matches!(
@@ -2599,6 +2606,91 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
         || (normalized.contains("spacing")
             && normalized.contains("normal")
             && normalized.contains("relative baseline"))
+        || (normalized.contains("logo")
+            && (normalized.contains("exact geometric")
+                || normalized.contains("circle diameter")
+                || normalized.contains("icon proportions")
+                || normalized.contains("minimum sizing")
+                || normalized.contains("clear space")
+                || normalized.contains("numeric values")))
+        || (normalized.contains("secondary colors")
+            && (normalized.contains("exact usage rules")
+                || normalized.contains("specific states")
+                || normalized.contains("specific contexts")))
+        || ((normalized.contains("green") || normalized.contains("blue"))
+            && (normalized.contains("semantic contexts")
+                || normalized.contains("semantic context"))
+            && (normalized.contains("exact usage constraints")
+                || normalized.contains("usage constraints"))
+            && (normalized.contains("unspecified")
+                || normalized.contains("not specified")))
+        || (normalized.contains("typography scale")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not defined")))
+        || (normalized.contains("typography")
+            && normalized.contains("font sizes")
+            && normalized.contains("line heights")
+            && (normalized.contains("no numeric values")
+                || normalized.contains("no scales are provided")
+                || normalized.contains("no numeric values or scales are provided")))
+        || (normalized.contains("motion")
+            && normalized.contains("durations")
+            && normalized.contains("easing")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not specified")))
+        || (normalized.contains("iconography")
+            && normalized.contains("size set")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not specified")))
+        || (normalized.contains("iconography style")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not specified")))
+}
+
+fn is_actionable_brand_blocker(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    if normalized.is_empty()
+        || is_no_issue_placeholder_bullet(text)
+        || is_layout_specific_physical_blocker(text)
+        || is_precision_only_brand_blocker(text)
+    {
+        return false;
+    }
+
+    let contradiction_or_ambiguity = normalized.contains("contradict")
+        || normalized.contains("conflict")
+        || normalized.contains("inconsistent")
+        || normalized.contains("ambiguous")
+        || normalized.contains("unclear")
+        || normalized.contains("cannot determine")
+        || normalized.contains("can't determine")
+        || normalized.contains("cannot establish")
+        || normalized.contains("can't establish")
+        || normalized.contains("uncertain whether")
+        || normalized.contains("too incomplete");
+
+    let structure_signal = normalized.contains("intended primitive family")
+        || normalized.contains("rule direction")
+        || normalized.contains("brand identity")
+        || normalized.contains("primary color")
+        || normalized.contains("primary typeface")
+        || normalized.contains("logo system")
+        || normalized.contains("color token family")
+        || normalized.contains("typography family")
+        || normalized.contains("motion system");
+
+    contradiction_or_ambiguity || structure_signal && normalized.contains("cannot")
 }
 
 fn extract_actionable_blocking_bullets(section: &str) -> Vec<String> {
@@ -4781,6 +4873,7 @@ mod tests {
         clear_cache, create_implementation, determine_bdd_test_paths, determine_draft_input_path,
         determine_implementation_output_path, determine_specification_agent,
         determine_specification_output_path, ensure_dev_dependency_entry,
+        check_brand_references_in_spec_content,
         extract_actionable_blocking_bullets, extract_actionable_specification_blockers,
         extract_compile_error_message, finalize_specification_output, fit_context_to_token_limit,
         generated_project_structure_paths, has_unfinished_specification, implementation_agent_name,
@@ -4930,7 +5023,7 @@ Problem:
 
 ## Typography
 ### Families
-- `brand.typography.families.primary`: `Inter`
+- `brand.typography.family.primary`: `Inter`
 
 ## Iconography
 ### Style
@@ -6759,6 +6852,111 @@ placeholder
     }
 
     #[test]
+    fn snake_style_visual_spec_typography_token_satisfies_component_brand_validation() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("snake_typography_token_validation");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+
+        fs::write(
+            root.join("specifications/visuals/snake_visuals.md"),
+            r#"# Brand Identity Specification
+
+## Description
+- Snake visual contract.
+
+## Brand Metadata
+- Brand name: TestCompany
+
+## Color Tokens
+### Primary
+- `brand.colors.primary.red`: `#FF0000`
+- `brand.colors.primary.white`: `#FFFFFF`
+
+### Secondary
+- `brand.colors.secondary.green`: `#008000`
+- `brand.colors.secondary.blue`: `#0000FF`
+
+### Semantic
+- Unspecified from draft.
+
+### Surface
+- Unspecified from draft.
+
+### Text and Foreground/Background
+- **Background:** `brand.colors.primary.white`
+
+## Typography
+### Families
+- **Primary Typeface:** Inter
+  - Token: `brand.typography.family.primary`
+  - Fallback fonts: Arial, Helvetica, sans-serif system fonts
+
+### Scales
+- Unspecified from draft.
+
+### Weights
+- **Headings:** Bold
+  - Token: `brand.typography.weight.heading`
+  - Value: Unspecified from draft.
+- **Body Text:** Regular
+  - Token: `brand.typography.weight.body`
+  - Value: Unspecified from draft.
+
+### Line Heights
+- Unspecified from draft.
+
+### Named Text Styles
+- Unspecified from draft.
+
+## Iconography
+### Style
+- Unspecified from draft.
+
+### Size Set
+- Unspecified from draft.
+
+### Usage Constraints
+- Unspecified from draft.
+
+## Motion
+### Durations
+- Unspecified from draft.
+
+### Easing
+- Unspecified from draft.
+
+### Usage Principles
+- Use motion sparingly.
+
+## Token Reference Rules
+- Typography tokens must align with the principles of clarity and readability."#,
+        )
+        .expect("write visual spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let unresolved = check_brand_references_in_spec_content(
+            Path::new("specifications/components/badge.md"),
+            "- `typography`: Typography must use `brand.typography.family.primary` for all visible text.",
+        )
+        .expect("validate typography token reference");
+
+        assert!(unresolved.is_empty());
+
+        let unresolved_plural = check_brand_references_in_spec_content(
+            Path::new("specifications/components/badge.md"),
+            "- `typography`: Typography must use `brand.typography.families.primary` for all visible text.",
+        )
+        .expect("validate plural typography token reference");
+
+        assert_eq!(
+            unresolved_plural,
+            vec!["brand.typography.families.primary".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn component_context_brand_identity_specs_are_scoped_to_each_project_root() {
         let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
         let root_a = temp_root("component_brand_scope_a");
@@ -7205,13 +7403,13 @@ Card groups related content and actions into a single unit.
 
 ## Typography
 ### Families
-- `brand.typography.families.primary`: `Fraunces`
+- `brand.typography.family.primary`: `Fraunces`
 
 ### Scales
 - `brand.typography.scales.body.medium.size`: `16px`
 
 ### Weights
-- `brand.typography.weights.regular`: `400`
+- `brand.typography.weight.body`: `400`
 
 ### Line Heights
 - `brand.typography.line_heights.body.medium`: `24px`
@@ -7267,7 +7465,7 @@ Card groups related content and actions into a single unit.
 - Downstream specifications must reference tokens by stable dotted token names such as `brand.colors.primary.default`.
 
 ## Blocking Ambiguities
-- The draft does not define any semantic color tokens for warning/error states.
+- The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established.
 
 ## Implementation Choices Left Open
 - Non-blocking: The final design-system package format is left to implementation.
@@ -7349,7 +7547,7 @@ Card groups related content and actions into a single unit.
                 assert_eq!(
                     actionable,
                     vec![
-                        "- The draft does not define any semantic color tokens for warning/error states."
+                        "- The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established."
                             .to_string()
                     ]
                 );
@@ -7360,8 +7558,43 @@ Card groups related content and actions into a single unit.
         let written = fs::read_to_string("specifications/visuals/snake.md").expect("read spec");
         assert_eq!(
             written,
-            "## Blocking Ambiguities\n\n- The draft does not define any semantic color tokens for warning/error states."
+            "## Blocking Ambiguities\n\n- The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established."
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visual_non_structural_brand_gap_keeps_full_spec_and_succeeds() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("visual_non_structural_gap");
+        fs::create_dir_all(root.join("drafts/visuals")).expect("mkdir drafts");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir specs");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let draft_path = Path::new("drafts/visuals/snake.md");
+        let draft_content = "# Snake";
+        fs::write(draft_path, draft_content).expect("write draft");
+
+        let spec_content = valid_brand_spec_with_blocker().replace(
+            "The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established.",
+            "The draft does not define any semantic color tokens for warning/error states.",
+        );
+
+        let outcome = finalize_specification_output(
+            draft_content,
+            draft_path,
+            "snake",
+            spec_content,
+            HashMap::new(),
+        )
+        .expect("finalize visual spec with non-structural gap");
+
+        assert!(matches!(outcome, ProcessSpecOutcome::Success));
+
+        let written = fs::read_to_string("specifications/visuals/snake.md").expect("read spec");
+        assert!(written.contains("# Brand Identity Specification"));
+        assert!(written.contains("## Blocking Ambiguities"));
+
         let _ = fs::remove_dir_all(root);
     }
 
@@ -7379,7 +7612,7 @@ Card groups related content and actions into a single unit.
 
         let spec_content = valid_brand_spec_with_blocker()
             .replace(
-                "\n## Blocking Ambiguities\n- The draft does not define any semantic color tokens for warning/error states.\n",
+                "\n## Blocking Ambiguities\n- The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established.\n",
                 "\n",
             )
             .replace("### Semantic", "## Semantic");
@@ -7430,7 +7663,7 @@ Card groups related content and actions into a single unit.
                 assert_eq!(
                     actionable,
                     vec![
-                        "The draft does not define any semantic color tokens for warning/error states."
+                        "The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established."
                             .to_string()
                     ]
                 );
@@ -7505,4 +7738,33 @@ Card groups related content and actions into a single unit.
         let actionable = extract_actionable_blocking_bullets(section);
         assert!(actionable.is_empty());
     }
+
+    #[test]
+    fn ignores_precision_only_logo_typography_and_iconography_blockers() {
+        let section = r#"
+- The exact geometric specifications of the logo (e.g., circle diameter, icon proportions) are unspecified.
+- No numeric values are provided for clear space or minimum sizing of the logo.
+- The exact usage rules for `green` and `blue` as secondary colors (e.g., specific states or contexts) are unspecified.
+- The exact usage constraints for `green` and `blue` in semantic contexts are unspecified.
+- No typography scale (e.g., font sizes, line heights) is defined.
+- No numeric values or scales are provided for typography (e.g., font sizes, line heights).
+- No motion durations or easing curves are specified.
+- No iconography style or size set is specified.
+"#;
+        let actionable = extract_actionable_blocking_bullets(section);
+        assert!(actionable.is_empty());
+    }
+}
+
+fn extract_actionable_brand_blocking_bullets(section: &str) -> Vec<String> {
+    extract_bullets_with_indent(section)
+        .into_iter()
+        .filter_map(|(_, text)| {
+            if is_actionable_brand_blocker(&text) {
+                Some(text)
+            } else {
+                None
+            }
+        })
+        .collect()
 }

@@ -61,7 +61,7 @@ A further darkened or pressed appearance is applied while the pointer is held do
 
 ### Disabled
 
-The button becomes non-interactive. Opacity is reduced (typically to 40–50%) and the cursor changes to `not-allowed`. All click and keyboard events are blocked. The button should not receive focus when disabled.
+The button becomes non-interactive. Opacity is reduced (typically to 40â€“50%) and the cursor changes to `not-allowed`. All click and keyboard events are blocked. The button should not receive focus when disabled.
 
 ### Loading (if applicable)
 
@@ -99,7 +99,7 @@ The label is replaced by or accompanied with a spinner indicator. The button rem
 - If rendered as a non-native element (e.g., `<div>`), `role="button"` and `tabindex="0"` must be explicitly applied.
 - **Accessible name:** Every button must have a discernible text label. For icon-only buttons, an `aria-label` or visually hidden text must be provided.
 - **Disabled state:** Use the native `disabled` attribute on `<button>` elements. If using `aria-disabled`, ensure click and keyboard events are manually suppressed.
-- **Loading state:** Use `aria-busy="true"` while loading. Consider adding a visually hidden status message (e.g., "Loading…") for screen reader users.
+- **Loading state:** Use `aria-busy="true"` while loading. Consider adding a visually hidden status message (e.g., "Loadingâ€¦") for screen reader users.
 
 ---
 
@@ -115,11 +115,11 @@ The label is replaced by or accompanied with a spinner indicator. The button rem
 
 ### Don't
 
-- Don't use more than one Primary button in the same visual section — this undermines hierarchy and user decision-making.
+- Don't use more than one Primary button in the same visual section â€” this undermines hierarchy and user decision-making.
 - Don't use vague labels like "Click here", "OK", or "Yes" without sufficient surrounding context.
 - Don't use a Ghost or Outlined button for a critical primary action where it might be overlooked.
 - Don't disable a button without providing an explanation of why the action is unavailable, either via tooltip or contextual messaging.
-- Don't resize buttons mid-flow during loading states — stabilize dimensions to prevent layout shift.
+- Don't resize buttons mid-flow during loading states â€” stabilize dimensions to prevent layout shift.
 
 ---
 

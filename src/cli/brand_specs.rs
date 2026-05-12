@@ -528,8 +528,7 @@ fn extract_blocking_ambiguities(lines: Option<&Vec<String>>) -> Vec<String> {
 
     extract_bullets(&lines.join("\n"))
         .into_iter()
-        .filter(|item| !is_placeholder_blocker(item))
-        .filter(|item| !is_precision_only_brand_blocker(item))
+        .filter(|item| is_actionable_brand_blocker(item))
         .collect()
 }
 
@@ -581,6 +580,47 @@ fn is_placeholder_blocker(text: &str) -> bool {
     )
 }
 
+fn is_actionable_brand_blocker(text: &str) -> bool {
+    let normalized = text
+        .trim()
+        .trim_start_matches('-')
+        .trim_start_matches('*')
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    if normalized.is_empty()
+        || is_placeholder_blocker(text)
+        || is_precision_only_brand_blocker(text)
+    {
+        return false;
+    }
+
+    let contradiction_or_ambiguity = normalized.contains("contradict")
+        || normalized.contains("conflict")
+        || normalized.contains("inconsistent")
+        || normalized.contains("ambiguous")
+        || normalized.contains("unclear")
+        || normalized.contains("cannot determine")
+        || normalized.contains("can't determine")
+        || normalized.contains("cannot establish")
+        || normalized.contains("can't establish")
+        || normalized.contains("uncertain whether")
+        || normalized.contains("too incomplete");
+
+    let structure_signal = normalized.contains("intended primitive family")
+        || normalized.contains("rule direction")
+        || normalized.contains("brand identity")
+        || normalized.contains("primary color")
+        || normalized.contains("primary typeface")
+        || normalized.contains("logo system")
+        || normalized.contains("color token family")
+        || normalized.contains("typography family")
+        || normalized.contains("motion system");
+
+    contradiction_or_ambiguity || structure_signal && normalized.contains("cannot")
+}
+
 fn is_precision_only_brand_blocker(text: &str) -> bool {
     let normalized = text
         .trim()
@@ -607,6 +647,49 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
         || (normalized.contains("spacing")
             && normalized.contains("normal")
             && normalized.contains("relative baseline"))
+        || (normalized.contains("logo")
+            && (normalized.contains("exact geometric")
+                || normalized.contains("circle diameter")
+                || normalized.contains("icon proportions")
+                || normalized.contains("minimum sizing")
+                || normalized.contains("clear space")
+                || normalized.contains("numeric values")))
+        || (normalized.contains("secondary colors")
+            && (normalized.contains("exact usage rules")
+                || normalized.contains("specific states")
+                || normalized.contains("specific contexts")))
+        || ((normalized.contains("green") || normalized.contains("blue"))
+            && (normalized.contains("semantic contexts")
+                || normalized.contains("semantic context"))
+            && (normalized.contains("exact usage constraints")
+                || normalized.contains("usage constraints"))
+            && (normalized.contains("unspecified")
+                || normalized.contains("not specified")))
+        || (normalized.contains("typography scale")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not defined")))
+        || (normalized.contains("typography")
+            && normalized.contains("font sizes")
+            && normalized.contains("line heights")
+            && (normalized.contains("no numeric values")
+                || normalized.contains("no scales are provided")
+                || normalized.contains("no numeric values or scales are provided")))
+        || (normalized.contains("motion")
+            && normalized.contains("durations")
+            && normalized.contains("easing")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not specified")))
+        || (normalized.contains("iconography")
+            && normalized.contains("size set")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not specified")))
+        || (normalized.contains("iconography style")
+            && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not specified")))
 }
 
 fn collect_defined_tokens(sections: &BTreeMap<String, Section>) -> BTreeSet<String> {
@@ -625,6 +708,7 @@ fn collect_defined_tokens(sections: &BTreeMap<String, Section>) -> BTreeSet<Stri
         "Motion",
         "Composition Principles",
         "Layout Principles",
+        "Token Reference Rules",
     ] {
         if let Some(section) = sections.get(section_name) {
             collect_tokens_from_lines(&section.body, &token_pattern, &mut defined_tokens);
@@ -798,13 +882,13 @@ Structured visual identity for Acme.
 
 ## Typography
 ### Families
-- `brand.typography.families.primary`: `Fraunces`
+- `brand.typography.family.primary`: `Fraunces`
 
 ### Scales
 - `brand.typography.scales.body.medium.size`: `16px`
 
 ### Weights
-- `brand.typography.weights.regular`: `400`
+- `brand.typography.weight.body`: `400`
 
 ### Line Heights
 - `brand.typography.line_heights.body.medium`: `24px`
@@ -871,7 +955,7 @@ Structured visual identity for Acme.
             .contains("brand.colors.primary.default"));
         assert!(validation
             .defined_tokens
-            .contains("brand.typography.families.primary"));
+            .contains("brand.typography.family.primary"));
         assert!(validation.blocking_ambiguities.is_empty());
     }
 
@@ -920,7 +1004,7 @@ Ok.
 
 ## Typography
 ### Families
-- `brand.typography.families.primary`: `Inter`
+- `brand.typography.family.primary`: `Inter`
 
 ## Iconography
 ### Style
@@ -958,13 +1042,26 @@ Ok.
     fn extracts_blocking_ambiguities_from_markdown_section() {
         let spec = valid_brand_spec().replace(
             "## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
-            "## Blocking Ambiguities\n- The draft does not define any semantic color tokens.\n\n## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+            "## Blocking Ambiguities\n- The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established.\n\n## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
         );
         let validation = validate_brand_spec_content(&spec).expect("valid brand spec");
         assert_eq!(
             validation.blocking_ambiguities,
-            vec!["The draft does not define any semantic color tokens.".to_string()]
+            vec![
+                "The draft contradicts itself about whether the primary color is red or blue, so the intended primary color family cannot be established.".to_string()
+            ]
         );
+    }
+
+    #[test]
+    fn ignores_missing_semantic_tokens_as_non_blocking_brand_gap() {
+        let spec = valid_brand_spec().replace(
+            "## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+            "## Blocking Ambiguities\n- The draft does not define any semantic color tokens.\n\n## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+        );
+        let validation =
+            validate_brand_spec_content(&spec).expect("valid brand spec with non-blocking gap");
+        assert!(validation.blocking_ambiguities.is_empty());
     }
 
     #[test]
@@ -975,6 +1072,17 @@ Ok.
         );
         let validation =
             validate_brand_spec_content(&spec).expect("valid brand spec with ignored blockers");
+        assert!(validation.blocking_ambiguities.is_empty());
+    }
+
+    #[test]
+    fn ignores_precision_only_logo_typography_and_iconography_blockers() {
+        let spec = valid_brand_spec().replace(
+            "## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+            "## Blocking Ambiguities\n- The exact geometric specifications of the logo (e.g., circle diameter, icon proportions) are unspecified.\n- No numeric values are provided for clear space or minimum sizing of the logo.\n- The exact usage rules for `green` and `blue` as secondary colors (e.g., specific states or contexts) are unspecified.\n- The exact usage constraints for `green` and `blue` in semantic contexts are unspecified.\n- No typography scale (e.g., font sizes, line heights) is defined.\n- No numeric values or scales are provided for typography (e.g., font sizes, line heights).\n- No motion durations or easing curves are specified.\n- No iconography style or size set is specified.\n\n## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+        );
+        let validation = validate_brand_spec_content(&spec)
+            .expect("valid brand spec with ignored precision-only blockers");
         assert!(validation.blocking_ambiguities.is_empty());
     }
 
@@ -1111,5 +1219,174 @@ Ok.
         assert_eq!(unresolved, vec!["brand.layout.breakpoints.xl".to_string()]);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn token_reference_rules_can_define_runtime_brand_tokens() {
+        let spec = r#"# Brand Identity Specification
+
+## Description
+- Runtime visual identity.
+
+## Brand Metadata
+- Brand name: TestCompany
+
+## Color Tokens
+### Primary
+- Red is used for emphasis.
+
+### Secondary
+- Unspecified from draft.
+
+### Semantic
+- Green and blue are used sparingly for status and information.
+
+### Surface
+- White is the foundational surface color.
+
+### Text and Foreground/Background
+- Ensure strong contrast on white backgrounds.
+
+## Typography
+### Families
+- Inter is the primary family.
+
+### Scales
+- Unspecified from draft.
+
+### Weights
+- Bold headings and regular body copy.
+
+### Line Heights
+- Unspecified from draft.
+
+### Named Text Styles
+- Unspecified from draft.
+
+## Iconography
+### Style
+- Unspecified from draft.
+
+### Size Set
+- Unspecified from draft.
+
+### Usage Constraints
+- Unspecified from draft.
+
+## Motion
+### Durations
+- Unspecified from draft.
+
+### Easing
+- Unspecified from draft.
+
+### Usage Principles
+- Use motion sparingly.
+
+## Token Reference Rules
+- `brand.colors.primary.red`: `#FF0000`
+- `brand.colors.primary.white`: `#FFFFFF`
+- `brand.colors.semantic.green`: `#008000`
+- `brand.colors.semantic.blue`: `#0000FF`
+- `brand.typography.family.primary`: `Inter`"#;
+
+        let validation =
+            validate_brand_spec_content(spec).expect("token reference rules should be parsed");
+        assert!(validation.defined_tokens.contains("brand.colors.primary.red"));
+        assert!(validation.defined_tokens.contains("brand.colors.primary.white"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.colors.semantic.green"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.colors.semantic.blue"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.typography.family.primary"));
+    }
+
+    #[test]
+    fn generated_style_typography_tokens_are_collected_from_typography_sections() {
+        let spec = r#"# Brand Identity Specification
+
+## Description
+- Runtime visual identity.
+
+## Brand Metadata
+- Brand name: TestCompany
+
+## Color Tokens
+### Primary
+- `brand.colors.primary.red`: `#FF0000`
+
+### Secondary
+- Unspecified from draft.
+
+### Semantic
+- Unspecified from draft.
+
+### Surface
+- Unspecified from draft.
+
+### Text and Foreground/Background
+- `brand.colors.primary.white`: `#FFFFFF`
+
+## Typography
+### Families
+- **Primary Typeface:** Inter
+  - Token: `brand.typography.family.primary`
+  - Fallback fonts: Arial, Helvetica, sans-serif system fonts
+
+### Scales
+- Unspecified from draft.
+
+### Weights
+- **Headings:** Bold
+  - Token: `brand.typography.weight.heading`
+  - Value: Unspecified from draft.
+- **Body Text:** Regular
+  - Token: `brand.typography.weight.body`
+  - Value: Unspecified from draft.
+
+### Line Heights
+- Unspecified from draft.
+
+### Named Text Styles
+- Unspecified from draft.
+
+## Iconography
+### Style
+- Unspecified from draft.
+
+### Size Set
+- Unspecified from draft.
+
+### Usage Constraints
+- Unspecified from draft.
+
+## Motion
+### Durations
+- Unspecified from draft.
+
+### Easing
+- Unspecified from draft.
+
+### Usage Principles
+- Use motion sparingly.
+
+## Token Reference Rules
+- Typography tokens must align with the principles of clarity and readability."#;
+
+        let validation =
+            validate_brand_spec_content(spec).expect("generated-style typography spec");
+        assert!(validation
+            .defined_tokens
+            .contains("brand.typography.family.primary"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.typography.weight.heading"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.typography.weight.body"));
     }
 }
