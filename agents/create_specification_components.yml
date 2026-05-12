@@ -322,6 +322,64 @@ static_prompt: |
     - `brand_href`: kind=`navigational`
     - `sign_out_action.action`: kind=`callback-driven`
 
+  ## Type Reference and Contract Precision Rules
+
+  ### Type Naming for Object Contracts
+
+  - When a scalar prop references a defined object contract, the `type` field MUST use the exact object contract name without additional suffix.
+    Example: `type=`MetadataItem`` (NOT `MetadataItemReference` or `MetadataItemData`)
+  - When a prop references a well-known component or external reference type, use a clear, suffixed name consistently.
+    Allowed suffixes: `Reference`, `Config`, `State`. Examples: `ActionReference`, `IconReference`, `ImageReference`.
+  - If the source does NOT explicitly name the type and you must infer one, use the object contract name without suffix unless the source clearly indicates a reference.
+  - Do NOT arbitrarily vary naming between `Image`, `ImageReference` across similar props in the same component. Choose one pattern per component consistently.
+
+  ### List Prop Redundancy: Both `type=` AND `item_contract=` Are Required
+
+  - For every prop with `shape=list` and structured items, the Props section MUST include BOTH:
+    - `type=`ItemTypeName`` (the item type)
+    - `item_contract=`ItemTypeName`` (reference to the object contract)
+  - These are NOT redundant. `type=` declares the item's type in the prop; `item_contract=` provides the reference target in Collection Contracts.
+  - Example (correct):
+    - `items`: required=`false`; shape=`list`; type=`MetadataItem`; item_contract=`MetadataItem`
+  - Example (incorrect):
+    - `items`: required=`false`; shape=`list`; item_contract=`MetadataItem`
+      (missing `type=` field)
+
+  ### Union Types Are Forbidden
+
+  - Do NOT infer or introduce union types such as `string | function` or `Action | Callback` in type fields.
+  - If a prop could legitimately accept multiple types, ask a blocking clarification question instead of guessing.
+  - If the source explicitly uses a union (rare), rephrase it as a single canonical type or enum:
+    - If `action` can be a string or a function, ask: "What is the semantic meaning? Is it a callback name (string), an action reference (object), or something else?"
+    - Do NOT assume the source means a literal union type in the contract.
+
+  ### Subcomponent Usage Normalization
+
+  - Use these exact usage values for `### Composition Contracts`:
+    - `required`: The subcomponent is always present and essential to the component's structure.
+    - `optional`: The subcomponent may be omitted; the parent component can render without it.
+    - `slot-provided`: The subcomponent is rendered by a dedicated content slot that the consumer provides.
+    - `reused-subcomponent`: The subcomponent is a library component that may be composed into this component, but is not tightly coupled to this component's specific structure.
+  - Apply this decision tree:
+    1. Is the subcomponent ALWAYS present in the visual structure or required by the component template? → `required`
+    2. Is it conditionally present based on a prop (e.g., `media` presence)? → `optional`
+    3. Is it provided by the consumer via a slot or `children` property? → `slot-provided`
+    4. Is it a general library component used for styling/layout but not core to identity? → `reused-subcomponent`
+  - Normalize across the component: Do NOT use `optional` for Button, `required` for Text, and `reused-subcomponent` for Link if they are all similarly optional subcomponents.
+  - If the source is ambiguous, ask a blocking clarification question.
+
+  ### Semantic Token Inference Is Forbidden
+
+  - Do NOT infer missing semantic tokens such as `brand.colors.semantic.red`, `brand.colors.semantic.green`, `brand.colors.semantic.warning`, etc.
+  - Use ONLY tokens that are explicitly defined in the active brand identity specifications provided for this run.
+  - If a semantic token family would be useful but is not defined, ask a blocking clarification question instead.
+  - Example (forbidden):
+    - Brand spec defines: `brand.colors.primary.red`
+    - You infer and use: `brand.colors.semantic.error` → NOT ALLOWED
+  - Example (correct):
+    - Brand spec defines: `brand.colors.primary.red`
+    - You use: `brand.colors.primary.red` for error emphasis → ALLOWED
+
   ## Brand Token Precision Rules
 
   - When citing brand tokens in any section, use only exact token names that appear in the active brand identity specifications.
@@ -361,6 +419,12 @@ static_prompt: |
   - [ ] Every prop in `## Implementation Contract` states `required`, `shape`, and `type`
   - [ ] Every collection prop in `## Implementation Contract` has a repeated-item contract when needed
   - [ ] Every object-like prop in `## Implementation Contract` has a matching object contract
+  - [ ] Every prop with `shape=list` includes BOTH `type=` and `item_contract=` fields (not redundant; both required)
+  - [ ] Every `type=` reference to an object contract uses the exact contract name without added suffix (e.g., `MetadataItem` not `MetadataItemReference`)
+  - [ ] Type reference naming is consistent within the component (e.g., all reference types are either suffixed or unsuffixed, not mixed)
+  - [ ] No type field contains union types such as `string | function` or `Action | Callback`
+  - [ ] `### Composition Contracts` uses only these exact values: `required`, `optional`, `slot-provided`, or `reused-subcomponent`
+  - [ ] Subcomponent usage is normalized across similar subcomponents (Button, Text, Link usage patterns are consistent)
   - [ ] Empty implementation-contract subsections use `_None._` exactly
   - [ ] `### Interaction Contracts` contains only actual interaction surfaces or state transitions
   - [ ] Every interaction target uses an exact prop or repeated-item path rather than a whole component name unless the source truly defines only component-level behavior
@@ -373,6 +437,7 @@ static_prompt: |
   - [ ] Every brand-constraint guidance sentence explicitly names its implementation dimension, such as `typography`, `spacing`, `color`, or `hierarchy`
   - [ ] `typography`, `spacing`, `color`, and `hierarchy` guidance sentences start with `Typography`, `Spacing`, `Color`, or `Hierarchy` respectively
   - [ ] Every referenced brand token exists exactly in the active brand identity specification set
+  - [ ] No semantic tokens were inferred (e.g., `brand.colors.semantic.red` invented when only `brand.colors.primary.red` is defined)
   - [ ] No brand token name was renamed or inferred into a different family such as `semantic.*` when only `primary.*` was defined
   - [ ] No project-specific brand token was rewritten into a generic `brand.*` namespace
   - [ ] Every final statement is traceable to the component template or supporting specification context
