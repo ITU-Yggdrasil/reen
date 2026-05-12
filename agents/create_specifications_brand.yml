@@ -185,6 +185,8 @@ static_prompt: |
   - `### Weights`
   - `### Line Heights`
   - `### Named Text Styles`
+  - When the draft defines a primary typeface, emit the canonical token `brand.typography.family.primary` alongside the human-readable label.
+  - When the draft defines heading/body weight guidance, emit canonical tokens using the singular family `brand.typography.weight.*`, starting with `brand.typography.weight.heading` and `brand.typography.weight.body`.
 
   Under `## Imagery` when applicable:
   - `### Style Attributes`
@@ -211,6 +213,7 @@ static_prompt: |
 
   - Use stable token references where the draft defines reusable primitives
   - Token references MUST use dotted names such as `brand.colors.primary.default`
+  - Typography token references MUST use the singular canonical family names `brand.typography.family.primary` and `brand.typography.weight.*`; do NOT emit plural forms such as `brand.typography.families.*` or `brand.typography.weights.*`
   - Define tokens in markdown lists or tables using inline code for the token name
   - If a section has no defined token because the draft is missing the information, write `Unspecified from draft.` in that subsection
   - Tokens must remain implementation-neutral; do not emit CSS variables, Tailwind classes, framework config, or component bindings
@@ -234,6 +237,7 @@ static_prompt: |
   You MUST:
   - Stay strictly within the draft's scope
   - Keep the result component-independent and implementation-independent
+  - Emit canonical typography token bullets alongside human-readable typography labels whenever the draft explicitly defines the corresponding typeface or weight guidance
 
   ## Forbidden Transformations
 
