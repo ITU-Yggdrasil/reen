@@ -193,6 +193,8 @@ static_prompt: |
   - For every generated Leptos component prop whose Rust type is `String`, add `#[prop(into)]`
     directly on that parameter. This includes common props such as `label`, `title`,
     `description` and `size`; no plain required `String` props are allowed.
+  - Treat bare `String` props as invalid generator output. Valid: `#[prop(into)] label: String`.
+    Invalid: `label: String`.
   - This rule also applies to page-shell and composed components such as `AccountsDashboard`,
     `BalanceSummary`, `TopNav`, `Footer`, `ThemeToggle`, and similar generated components. Do not
     leave any required `String` prop unannotated.
@@ -213,6 +215,8 @@ static_prompt: |
     Optional props must not become required typed-builder fields.
   - For optional string-like props, combine the annotations, for example
     `#[prop(optional, into)] icon_leading: Option<String>`.
+  - Treat bare `Option<String>` props as invalid generator output. Valid:
+    `#[prop(optional, into)] subtitle: Option<String>`. Invalid: `subtitle: Option<String>`.
   - Preserve optionality end-to-end. If a specification property is optional, the generated Rust
     prop type must remain `Option<T>`, and call sites may pass `None`, `Some(value)`, or omit the
     prop when appropriate. Never silently collapse an optional prop into a required `String` or
@@ -230,22 +234,20 @@ static_prompt: |
     If a prop is declared but never used in markup, class logic, or conditional rendering, omit it.
     Do not create unused placeholder props such as `interactive` unless the component clearly requires them
     and the implementation makes use of them.
-  - Leptos `class` attribute syntax: Use `class=[ "string1", "string2", variable ]` for multiple class
-    names or dynamic strings. Leptos `class=(...)` tuples are only valid for binary conditional classes
-    such as `class=("button--full-width", full_width)` where the second element is a boolean condition.
+  - Leptos `class` attribute syntax: use exactly one deterministic pattern in generated brand scaffolds.
+    For fully static classes, emit `class="literal"`. For any dynamic, variant-based, or conditional
+    classes, precompute the complete class string in Rust locals before `view!`, then bind it with
     Do not mix plain `&str` strings and `(&str, bool)` tuples in a single `class=[...]` array—they
-    have incompatible types. Use one of these safe patterns instead:
-    - Pattern 1 (recommended): Use `class="base-name"` for static base classes, then use separate
-      `class:variant=boolean` directives for conditional classes.
-    - Pattern 2: Use the `classes!(...)` macro which accepts both plain strings and `(name, bool)` tuples.
-  - The `class:name` directive in Leptos is for boolean conditional classes only. Use `class:neutral=is_neutral`
-    where `is_neutral` is a boolean, NOT `class:neutral="true"` (which is invalid). For static/base class
-    names, use plain `class` attribute: `class="badge"` or build a class string in Rust. Never use
-    `class:name="string"` or `class:name=string_variable`; `class:` is strictly for boolean conditions.
+    plain `class=class_name`.
+  - Never emit `class=[...]`, `class:...`, `class=(...)`, or `classes!(...)` in generated brand scaffold
+    Rust. The brand scaffold target is Leptos 0.6.x, and this generator must standardize on plain
+    `class=...` bindings with precomputed strings for deterministic compatibility.
+  - When generating conditional classes, append modifier classes in Rust before rendering instead of
+    encoding class conditionals directly in `view!`. The markup should only receive `class="literal"` or
+    `class=precomputed_class_string`.
   - When generating Leptos `view!` code, avoid repeated `move ||` closures that each capture the same
-    owned `String` local. Instead, convert the string to `&str` once or precompute boolean flags such as
-    `let is_neutral = variant == "neutral";` and use `class:neutral=is_neutral`. This prevents Rust
-    move errors when the same `String` is used in multiple class bindings or conditional view expressions.
+    owned `String` local. Instead, compute derived strings and optional child fragments outside the
+    template so the markup stays simple and compatible.
   - Avoid inline `move ||` render closures that match or branch on owned `String`/`Option<String>` data
     inside `view!`. Precompute optional child fragments outside of the template, for example:
       let leading_icon = icon_leading.map(|icon| view! { <span class="icon">{icon}</span> }.into_view());
@@ -346,9 +348,10 @@ static_prompt: |
   - [ ] Any generated component rendered by `src/app.rs` or another component is imported into that file
   - [ ] `"/"` is present as the root route
   - [ ] Any component spec that enumerates `variant` values is implemented with a typed `{ComponentName}Variant` enum and enum-valued call sites in `src/app.rs`
+  - [ ] No generated Leptos component prop leaves `String` unannotated; required string props use `#[prop(into)]` and optional string props use `#[prop(optional, into)]`
   - [ ] No zero-argument stored callback is wired directly into `on:click`
   - [ ] All emitted `view!` macro attributes use valid Leptos syntax
-  - [ ] No emitted `class:` binding uses dashed or BEM-style class names; conditional classes use computed `class=...` strings instead
+  - [ ] No emitted brand-scaffold Rust uses `class=[...]`, `class:...`, `class=(...)`, or `classes!(...)`; class handling uses only `class="literal"` or `class=precomputed_class_string`
   - [ ] `style/app.css` exists and applies defined brand tokens as CSS custom properties where applicable
   - [ ] All emitted brand token references are defined in the specification
   - [ ] The scaffold is intended to run with `cargo leptos watch`

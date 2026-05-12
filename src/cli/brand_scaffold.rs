@@ -1927,6 +1927,7 @@ fn validate_app_rs_with_component_specs(
     }
 
     validate_for_component_syntax(context_name, content)?;
+    validate_forbidden_leptos_class_syntax(context_name, content, "src/app.rs")?;
     validate_component_spread_syntax(context_name, content)?;
     validate_component_name_collisions(context_name, content)?;
     validate_component_struct_literal_usage(context_name, content)?;
@@ -1950,6 +1951,32 @@ fn validate_for_component_syntax(context_name: &str, content: &str) -> Result<()
             context_name
         );
     }
+    Ok(())
+}
+
+fn validate_forbidden_leptos_class_syntax(
+    context_name: &str,
+    content: &str,
+    file_name: &str,
+) -> Result<()> {
+    let forbidden_markers = [
+        ("class=[", "`class=[...]`"),
+        ("class:", "`class:...`"),
+        ("classes!(", "`classes!(...)`"),
+        ("class=(", "`class=(...)`"),
+    ];
+
+    for (marker, label) in forbidden_markers {
+        if content.contains(marker) {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' uses forbidden Leptos class syntax in {}: {}. For the brand scaffold's Leptos 0.6 target, precompute class strings in Rust locals and bind them with plain `class=...`.",
+                context_name,
+                file_name,
+                label
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -3266,6 +3293,12 @@ fn validate_generated_brand_rust_patterns(
         .iter()
         .filter(|file| file.path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
     {
+        validate_forbidden_leptos_class_syntax(
+            context_name,
+            &file.content,
+            &file.path.display().to_string(),
+        )?;
+
         if component_tag_prop.is_match(&file.content) {
             anyhow::bail!(
                 "Generated brand implementation for '{}' contains a component tag or view fragment as a prop value in {}; use plain data props or nested children instead",
@@ -5015,6 +5048,115 @@ fn ThemeToggle(#[prop(default = "light")] selected: String) -> impl IntoView {
 
         let err = validate_app_rs("demo", app).expect_err("expected string default failure");
         assert!(err.to_string().contains("bare string-literal default"));
+    }
+
+    #[test]
+    fn app_rs_rejects_forbidden_leptos_class_array_syntax() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    let variant_class = "badge--neutral";
+    view! { <span class=["badge", variant_class]>"Neutral"</span> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected class array failure");
+        assert!(err.to_string().contains("forbidden Leptos class syntax"));
+        assert!(err.to_string().contains("`class=[...]`"));
+    }
+
+    #[test]
+    fn app_rs_rejects_forbidden_leptos_class_directive_syntax() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    let is_active = true;
+    view! { <button class:active=is_active>"Active"</button> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected class directive failure");
+        assert!(err.to_string().contains("`class:...`"));
+    }
+
+    #[test]
+    fn generated_brand_rust_patterns_reject_forbidden_classes_macro_syntax() {
+        let files = vec![GeneratedOutputFile {
+            path: PathBuf::from("src/components/button.rs"),
+            content: r#"use leptos::*;
+
+#[component]
+fn Button() -> impl IntoView {
+    view! { <button class=classes!("button", ("button--full-width", true))></button> }
+}
+"#
+            .to_string(),
+        }];
+
+        let err = validate_generated_brand_rust_patterns("demo", &files)
+            .expect_err("expected classes macro failure");
+        assert!(err.to_string().contains("src/components/button.rs"));
+        assert!(err.to_string().contains("`classes!(...)`"));
+    }
+
+    #[test]
+    fn app_rs_accepts_precomputed_class_string_bindings() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    let variant_class = "button--primary";
+    let mut button_class = format!("button {}", variant_class);
+    let full_width = true;
+    if full_width {
+        button_class.push_str(" button--full-width");
+    }
+    view! { <button class=button_class>"Primary"</button> }
+}
+"#;
+
+        validate_app_rs("demo", app).expect("precomputed class strings should be accepted");
     }
 
     #[test]
