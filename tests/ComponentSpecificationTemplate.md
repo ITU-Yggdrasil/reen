@@ -110,6 +110,108 @@ Optional additional properties:
 
 ---
 
+## Implementation Contract
+
+[Capture the implementation-driving contract in a compact, machine-readable form.]
+
+### Props
+
+[List every configurable prop using this exact bullet pattern.]
+
+```md
+- `prop_name`: required=`true|false`; shape=`scalar|enum|object|list`; type=`TypeName`
+```
+
+[Additional attributes:]
+
+- add `; item_contract=\`Name\`` for `shape=list` when items are structured values
+- add `; object_contract=\`Name\`` for `shape=object`
+- add `; allowed=\`value-a|value-b|value-c\`` for `shape=enum`
+- the bullet itself must be the contract line; do not wrap the whole bullet in extra backticks
+- no valid contract line may begin with the literal prefix `- \`- \``
+
+Valid example:
+
+```md
+- `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem`
+```
+
+Invalid example:
+
+```md
+- `- `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem``
+```
+
+### Object Contracts
+
+[For every structured object-like prop or repeated item, define its fields.]
+
+#### `ContractName`
+
+- `field_name`: required=`true|false`; shape=`scalar|enum|object|list`; type=`TypeName`
+
+[If none are needed, write exactly `_None._`.]
+
+### Collection Contracts
+
+[For every collection prop, define how repeated items are shaped.]
+
+- `prop_name`: item_contract=`Name`; behavior=`repeated-item`
+
+[Every prop with `shape=list` should appear here. If none are needed, write exactly `_None._`.]
+
+### Interaction Contracts
+
+[For every implementation-relevant interaction, define the interaction kind.]
+
+- `target`: kind=`navigational|callback-driven|stateful`
+
+[Use exact prop or repeated-item targets such as `brand_href`, `items[*]`, `utility_actions[*]`, `legal_links[*]`, or `theme_toggle.options[*]`.]
+[Do not list plain display/configuration props such as `label`, `title`, or `size` as interactions unless the source explicitly defines them as interactive state controls.]
+[Prefer exact prop or repeated-item targets over the component name itself whenever possible.]
+[Do not use the component name itself as the interaction target when a more exact prop, event prop, href prop, action prop, or repeated-item target exists.]
+[Do not append stray punctuation to the target; use `items[*]`, not `items[*])`.]
+[If none are needed, write exactly `_None._`.]
+
+### Composition Contracts
+
+[List composed components that are required for the implementation shape.]
+
+- `ComponentName`: usage=`required|optional|slot-provided|reused-subcomponent`
+
+[If none are needed, write exactly `_None._`.]
+
+### Brand Constraints
+
+[Optional. Include only when active brand identity or visual specifications materially shape implementation choices.]
+
+- `topic`: [Concrete brand-informed implementation guidance for hierarchy, spacing, typography, motion, iconography, or token usage.]
+
+[The guidance text itself must explicitly name the implementation dimension it controls, such as `typography`, `spacing`, `color`, `hierarchy`, or `contrast`.]
+[Prefer starting each brand-constraint sentence with the topic name itself, such as `Typography must ...`, `Color must ...`, `Hierarchy must ...`, or `Spacing must ...`.]
+[For the common topics `typography`, `spacing`, `color`, and `hierarchy`, the guidance sentence should begin with the capitalized topic word itself.]
+[Do not place nested bullets under a brand-constraint bullet; each constraint must remain one flat bullet line.]
+[If multiple token rules are needed, express them in one sentence or use multiple flat `- `topic`: ...` bullets.]
+
+[Valid examples:]
+- `typography`: Typography must use `testcompany.typography.family.primary` for visible text in this component.
+- `color`: Color must use `testcompany.colors.primary.red` for the primary emphasis treatment in this component.
+- `hierarchy`: Hierarchy must keep the summary region visually dominant over secondary content.
+- `spacing`: Spacing must preserve generous whitespace between repeated items to support the brand's low-clutter hierarchy.
+
+[Invalid examples:]
+- `**Typography**`: Use `testcompany.typography.family.primary` for visible text in this component.
+- `Typography`: Use `testcompany.typography.family.primary` for visible text in this component.
+- `typography`: Use `testcompany.typography.family.primary` for visible text in this component.
+- `color`: The negative-balance variant must use `testcompany.colors.primary.red` for emphasis.
+- `hierarchy`: The summary region must visually dominate the page.
+- `color`: Use the following tokens:
+  - Primary: `testcompany.colors.primary.red`
+
+[If none are needed, write exactly `_None._`.]
+
+---
+
 ## Accessibility Notes
 
 [Document accessibility expectations relevant to this component.]
@@ -155,3 +257,4 @@ Consider:
 - This document defines **one component specification** and should stay focused on that component only
 - Keep guidance implementation-agnostic unless framework-specific behavior is explicitly required
 - Prioritize consistency across variants, states, and accessibility behavior
+- Finalized specifications should be implementation-driving: prop shapes, repeated-item schemas, object fields, and interaction kinds must not be left to downstream inference

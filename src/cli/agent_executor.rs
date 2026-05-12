@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use tokio::task::block_in_place;
 
 use reen::execution::{
     build_agent_input, execute_native_request_with_metadata, output_contains_questions,
@@ -97,10 +98,11 @@ impl AgentExecutor {
             println!("Executing agent: {}", self.agent_name);
         }
 
-        let result = self
-            .runner(input, additional_context)
-            .run_with_control(execution_control)
-            .map_err(Self::map_runner_error)?;
+        let result = block_in_place(|| {
+            self.runner(input, additional_context)
+                .run_with_control(execution_control)
+        })
+        .map_err(Self::map_runner_error)?;
 
         if output_contains_questions(&result.output) {
             Ok(AgentResponse::Questions(result.output))

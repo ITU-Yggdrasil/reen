@@ -42,6 +42,7 @@ static_prompt: |
   - Components must be reusable library components, not ad-hoc UI fragments.
   - Each component must have a unique identity.
   - Variants and states must be explicit.
+  - Finalized component specifications must be implementation-driving: downstream code generation should not need to guess prop shapes, repeated-item schemas, interaction models, or nested object fields.
   - Styling guidance must come from existing specification definitions when present.
   - When brand identity specifications are provided, every component must be checked against them so the resulting specification upholds the active project's brand standards.
   - Brand influence must be integrated into existing sections such as Visual Structure, Variants, States, Properties, and Accessibility Notes instead of creating a separate brand section.
@@ -59,10 +60,17 @@ static_prompt: |
   - the component identity is ambiguous
   - the component clearly requires variants or states but they are not sufficiently defined
   - properties are implied by the template behavior but not defined clearly enough for a usable specification
+  - a configurable property does not clearly state whether it is required or optional
+  - a configurable property does not clearly state whether it is a scalar, list, enum, or object-like value
+  - a collection property does not define its repeated item shape well enough for implementation
+  - an object-like property does not define the fields needed to use it
+  - a component exposes interactions but their implementation-driving kind is unclear (for example navigational, callback-driven, or stateful)
+  - the component presents variants in prose but does not enumerate the allowed variant values
   - source conflicts cannot be resolved by the priority rules above
   - the provided context indicates a duplicate component identity
   - a named subcomponent does not exist in either `drafts/components/` or `component_drafts/`
   - a named subcomponent does not match an exact name in `draft_component_names` before checking `component_library_names`
+  - the draft clearly depends on brand-defined styling behavior but the active brand material is too vague to produce implementation-driving guidance safely
 
   When blocking questions are needed:
   - do not output a finalized component specification
@@ -85,13 +93,17 @@ static_prompt: |
   - rephrase to remove ambiguity
   - organize content into the required section structure
   - convert prose into structured lists
-  - use the active brand identity specifications for this run as a contract extension for component feeling, style, motion, iconography, typography, spacing intent, and token usage
+  - use the active brand identity specifications for this run as a contract extension and inspiration source for component feeling, style, motion, iconography, typography, spacing intent, hierarchy, and token usage
   - reference existing specification definitions when they are relevant to the component
 
   You MUST:
   - stay strictly within the source material and authoritative specification context
   - inspect the provided active brand identity specifications for every component when they are available
   - apply the supplied brand specification set for this run even when it differs between users or projects
+  - let active brand identity specifications sharpen the component's presentation guidance when they are concrete enough to do so safely
+  - reference only brand tokens that are explicitly defined in the active brand identity specifications for this run
+  - preserve the exact authored token names from the active brand identity specifications when citing tokens
+  - prefer a defined non-semantic token over inventing a more convenient semantic token name
   - treat fallback component-library files as reference only
   - treat designer-authored component drafts in `drafts/components/` as the preferred library for missing subcomponents
 
@@ -181,6 +193,7 @@ static_prompt: |
   You MUST NOT:
   - add new variants, states, properties, slots, or accessibility behavior
   - invent brand rules, tokens, or stylistic requirements that do not appear in the provided runtime brand identity specifications or higher-priority component sources
+  - rename defined brand tokens to a different namespace or family such as converting `brand.colors.primary.red` into `brand.colors.semantic.red`
   - add implementation/framework details
   - add independent styling systems when relevant design definitions already exist in specification context
   - assume any default brand identity when no brand identity specification is provided
@@ -212,6 +225,115 @@ static_prompt: |
   `## Properties`
   - configurable inputs only
 
+  `## Implementation Contract`
+  `### Props`
+  - one bullet per configurable prop using exact authored prop names
+  - every bullet MUST use this machine-readable pattern as a raw markdown line:
+    - `prop_name`: required=`true|false`; shape=`scalar|enum|object|list`; type=`TypeName`
+  - add ``; item_contract=`Name``` for `shape=list` when items are structured values
+  - add ``; object_contract=`Name``` for `shape=object`
+  - add ``; allowed=`value-a|value-b|value-c``` for `shape=enum`
+  - the bullet itself MUST be the contract line; do NOT wrap the whole bullet in extra backticks
+  - valid example:
+    - `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem`
+  - invalid example:
+    - `- `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem``
+  - invalid example:
+    - ``- `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem` ``
+  - do NOT nest a bullet inside another bullet
+  - do NOT surround contract bullets with code fences or doubled backticks
+  - no valid contract line may begin with the literal prefix `- \`- \``
+
+  `### Object Contracts`
+  - include one `#### \`ContractName\`` block per structured object-like value used by a prop or collection item
+  - under each block, list fields using the same machine-readable bullet pattern as `### Props`
+  - if no object contracts are needed, write exactly `_None._`
+
+  `### Collection Contracts`
+  - include one bullet per collection prop using this pattern:
+    - `prop_name`: item_contract=`Name`; behavior=`repeated-item`
+  - every prop with `shape=list` MUST appear here
+  - if a list contains structured repeated items, its `item_contract` MUST match a defined object contract
+  - if no collection contracts are needed, write exactly `_None._`
+
+  `### Interaction Contracts`
+  - include one bullet per implementation-relevant interaction using this pattern:
+    - `target`: kind=`navigational|callback-driven|stateful`
+  - use exact prop or repeated-item targets such as ``brand_href``, ``items[*]``, ``utility_actions[*]``, ``legal_links[*]``, or ``theme_toggle.options[*]``
+  - only include actual interaction surfaces or state transitions here
+  - do NOT mark plain display/configuration props like `label`, `title`, `size`, `variant`, or `type` as interactions unless the source explicitly defines them as interactive state controls
+  - use `navigational` for links, linked cards, and destination-bearing repeated items
+  - use `callback-driven` for buttons, action triggers, submit actions, or explicit event hooks
+  - use `stateful` only for controlled selection/toggle/expanded/current-state behavior
+  - prefer exact prop or repeated-item targets over the component name itself whenever possible
+  - do NOT use the component name itself as the interaction target when a more exact prop, event prop, href prop, action prop, or repeated-item target exists
+  - do NOT append stray punctuation to the target; valid targets include ``items[*]`` and ``theme_toggle.options[*]``, not ``items[*])`` or ``theme_toggle.options[*])``
+  - if no interaction contracts are needed, write exactly `_None._`
+
+  `### Composition Contracts`
+  - include one bullet per required composed component using this pattern:
+    - `ComponentName`: usage=`required|optional|slot-provided|reused-subcomponent`
+  - if no composition contracts are needed, write exactly `_None._`
+
+  `### Brand Constraints` *(optional; include only when active brand identity specifications materially shape implementation choices)*
+  - include one bullet per concrete brand-informed implementation constraint using this pattern:
+    - `topic`: guidance text tied to active brand specifications
+  - keep guidance concrete enough to influence implementation shape, hierarchy, spacing, typography, motion, iconography, or token usage
+  - the guidance text itself MUST explicitly name the implementation dimension it controls, such as `typography`, `spacing`, `color`, `hierarchy`, `contrast`, `border`, or `radius`
+  - prefer starting each brand-constraint sentence with the topic name itself, such as `Typography must ...`, `Color must ...`, `Hierarchy must ...`, or `Spacing must ...`
+  - for the common topics `typography`, `spacing`, `color`, and `hierarchy`, the guidance sentence MUST begin with the capitalized topic word itself followed by an action phrase, such as `Typography must ...` or `Hierarchy must ...`
+  - do NOT switch to `- **Topic**:` formatting in this section
+  - do NOT place nested bullets under a brand-constraint bullet; each constraint MUST be a single flat bullet line
+  - if multiple token rules are needed, express them in one sentence or use multiple flat `- `topic`: ...` bullets
+  - valid examples:
+    - `typography`: Typography must use `testcompany.typography.family.primary` for visible text in this component.
+    - `color`: Color must use `testcompany.colors.primary.red` for the primary emphasis treatment in this component.
+    - `hierarchy`: Hierarchy must keep the summary region visually dominant over secondary content.
+    - `spacing`: Spacing must preserve generous whitespace between repeated items to support the brand's low-clutter hierarchy.
+  - invalid examples:
+    - **Typography**: Use `testcompany.typography.family.primary` for visible text in this component.
+    - `Typography`: Use `testcompany.typography.family.primary` for visible text in this component.
+    - `typography`: Use `testcompany.typography.family.primary` for visible text in this component.
+    - `color`: The negative-balance variant must use `testcompany.colors.primary.red` for emphasis.
+    - `hierarchy`: The summary region must visually dominate the page.
+    - `color`: Use the following tokens:
+      - Primary: `testcompany.colors.primary.red`
+  - if no brand constraints are needed, write exactly `_None._`
+
+  ## Precision Rules For Implementation Contracts
+
+  - Prefer concrete domain item types over generic placeholders such as `Array` or `Object` when the structured item or object contract is known.
+  - For repeated component payloads, define the repeated data shape as a contract object rather than pointing directly at a rendered component name unless the source truly defines the payload as that component's API.
+  - If a prop is optional in `## Properties`, it MUST be `required=`false`` in `## Implementation Contract`.
+  - If a prop is required in `## Properties`, it MUST be `required=`true`` in `## Implementation Contract`.
+  - If `variant` values are enumerated in `## Variants` or `## Properties`, the `variant` contract line MUST use `shape=`enum`` and include an exact `allowed=`...`` list.
+  - If a component can be interactive only under a condition, state that condition in normal prose immediately after the contract bullet, not by changing the bullet syntax.
+    Example:
+    - `AccountCard`: kind=`navigational`
+    Applies when `interactive` is `true`.
+  - When a component exposes repeated interactive items, target the repeated item path instead of the component name.
+    Example:
+    - `legal_links[*]`: kind=`navigational`
+  - When a component exposes a nested repeated control set, use the dotted repeated-item path exactly.
+    Example:
+    - `theme_toggle.options[*]`: kind=`stateful`
+  - When a component exposes a concrete action prop or destination prop, target that prop directly.
+    Example:
+    - `brand_href`: kind=`navigational`
+    - `sign_out_action.action`: kind=`callback-driven`
+
+  ## Brand Token Precision Rules
+
+  - When citing brand tokens in any section, use only exact token names that appear in the active brand identity specifications.
+  - When the active visual spec defines project-specific tokens such as `testcompany.colors.*`, you MUST use those exact project-specific token names and MUST NOT fall back to generic namespaces such as `brand.colors.*`.
+  - Do NOT derive alternate token names from color meaning, component purpose, or variant labels.
+  - If the component would benefit from a token that is not explicitly defined in the active brand identity specifications, either:
+    - use a clearly relevant token that is explicitly defined, or
+    - ask a blocking clarification question if no defined token can safely support the requirement.
+  - If the active brand identity specification defines `testcompany.colors.primary.red` and does NOT define `testcompany.colors.semantic.red`, you MUST use `testcompany.colors.primary.red` when that is the referenced red token.
+  - Do NOT infer missing semantic tokens such as `testcompany.colors.semantic.red`, `testcompany.colors.semantic.warning`, or `testcompany.colors.semantic.destructive` unless those exact token names are present in the active brand identity specifications.
+  - Do NOT rename project-specific tokens into a generic `brand.*` namespace.
+
   `## Accessibility Notes`
   - keyboard expectations
   - ARIA or accessibility considerations if relevant
@@ -234,6 +356,25 @@ static_prompt: |
   - [ ] Existing specification artifacts were used when relevant
   - [ ] Fallback/reference material did not override higher-priority sources
   - [ ] Missing essential information is surfaced as blocking clarification questions
+  - [ ] Every implementation-contract entry is a real markdown bullet, not a quoted bullet or code-fenced line
+  - [ ] No implementation-contract line begins with the malformed prefix `- \`- \``
+  - [ ] Every prop in `## Implementation Contract` states `required`, `shape`, and `type`
+  - [ ] Every collection prop in `## Implementation Contract` has a repeated-item contract when needed
+  - [ ] Every object-like prop in `## Implementation Contract` has a matching object contract
+  - [ ] Empty implementation-contract subsections use `_None._` exactly
+  - [ ] `### Interaction Contracts` contains only actual interaction surfaces or state transitions
+  - [ ] Every interaction target uses an exact prop or repeated-item path rather than a whole component name unless the source truly defines only component-level behavior
+  - [ ] No interaction target ends with stray punctuation such as `)`
+  - [ ] Every enumerated visual variant is reflected consistently between `## Variants`, `## Properties`, and `## Implementation Contract`
+  - [ ] Brand-inspired guidance only sharpens documented presentation and does not invent new API surface
+  - [ ] Every `### Brand Constraints` bullet uses the exact `- `topic`: guidance` shape
+  - [ ] No `### Brand Constraints` line begins with `- **`
+  - [ ] `### Brand Constraints` contains only flat bullets and no nested bullets
+  - [ ] Every brand-constraint guidance sentence explicitly names its implementation dimension, such as `typography`, `spacing`, `color`, or `hierarchy`
+  - [ ] `typography`, `spacing`, `color`, and `hierarchy` guidance sentences start with `Typography`, `Spacing`, `Color`, or `Hierarchy` respectively
+  - [ ] Every referenced brand token exists exactly in the active brand identity specification set
+  - [ ] No brand token name was renamed or inferred into a different family such as `semantic.*` when only `primary.*` was defined
+  - [ ] No project-specific brand token was rewritten into a generic `brand.*` namespace
   - [ ] Every final statement is traceable to the component template or supporting specification context
 variable_prompt: |
   ## Input

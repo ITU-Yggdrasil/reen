@@ -142,6 +142,13 @@ static_prompt: |
 
   The CLI provides the default scaffold baseline through `input.brand_scaffold_contract`.
   Treat that contract as authoritative unless the specification forces a compatible variation.
+  When present, `input.brand_variant_contract` is also authoritative. Do not invent alternate
+  enum names, keep spec-enumerated variants as `String`, or emit raw string variant call sites
+  when that contract provides exact enum/type/call-site requirements.
+  When present, `input.component_implementation_contracts` is also authoritative. Use it for
+  exact prop shapes, nested object fields, repeated-item schemas, interaction kinds, composition
+  usage, and concrete brand-informed implementation constraints extracted from component specs.
+  Do not invent alternate data payload shapes when this contract is present.
 
   ## Brand Token Rules
 
@@ -161,20 +168,57 @@ static_prompt: |
     properties (`--brand-colors-primary-black` and `--brand-colors-primary-white`) in the `:root` block.
   - If only component specifications are provided, generate a coherent scaffold implementing and
     demonstrating those components without inventing absent brand token values.
+  - Visual execution quality matters. When the specification leaves room for composition choices,
+    prefer sharp hierarchy, clear contrast, deliberate spacing, and a distinct point of view over
+    safe or generic layout decisions.
+  - Avoid timid “placeholder dashboard” aesthetics. Use the provided tokens and component guidance
+    to create a page that feels intentional, polished, and presentation-ready.
+  - When typography, spacing, and motion are specified directionally rather than numerically,
+    choose crisp, restrained implementations that strengthen readability and visual rhythm.
 
   ## Component Rules
 
   - Implement reusable Leptos components when component specifications are provided.
+  - If component specifications are provided in the run, the corresponding reusable Leptos
+    components must actually be defined in `src/app.rs` and used where the specifications require
+    them. Do not ignore selected component specifications.
   - Component specifications from `specifications/components/**/*.md` define component-level API,
     states, layout, accessibility, and styling requirements.
+  - Leptos components are Rust functions, not Rust structs. Do not create a data struct with the
+    same Rust identifier as a `#[component]` function such as `Badge`, `Button`, `Card`,
+    `AccountCard`, or similar names.
+  - Do not manually define `{ComponentName}Props` structs for Leptos components. The `#[component]`
+    macro generates props types automatically, so a manual `ThemeToggleProps`, `BadgeProps`,
+    `AccountCardProps`, or similar type will conflict at compile time.
   - For every generated Leptos component prop whose Rust type is `String`, add `#[prop(into)]`
     directly on that parameter. This includes common props such as `label`, `title`,
-    `description`, `variant`, and `size`; no plain required `String` props are allowed.
+    `description` and `size`; no plain required `String` props are allowed.
+  - This rule also applies to page-shell and composed components such as `AccountsDashboard`,
+    `BalanceSummary`, `TopNav`, `Footer`, `ThemeToggle`, and similar generated components. Do not
+    leave any required `String` prop unannotated.
+  - When a component specification explicitly enumerates allowed values for a `variant` prop, do
+    not generate `variant: String`. Generate a typed enum named `{ComponentName}Variant` in
+    `src/app.rs`, derive at least `Clone` and `Copy`, and use that enum as the prop type.
+  - If `input.brand_variant_contract` supplies the exact enum name or enum members for a component,
+    use that contract verbatim rather than inferring your own variant representation.
+  - For enum-backed variants, convert specification values into Rust enum variants using PascalCase.
+    For example, `default` becomes `Default` and `positive-balance` becomes `PositiveBalance`.
+  - For enum-backed variants, generated call sites must pass enum values such as
+    `variant=BalanceSummaryVariant::Default`, never raw string literals such as `variant="default"`.
+  - Only use `variant: String` when the specification does not enumerate allowed variant values.
+  - If helper data forwards a spec-enumerated variant into a component, that helper field must use
+    the enum type from `input.brand_variant_contract`, not `String`.
   - For every generated Leptos component prop whose Rust type is `Option<T>`, add
     `#[prop(optional)]` or an explicit `#[prop(default = ...)]` directly on that parameter.
     Optional props must not become required typed-builder fields.
   - For optional string-like props, combine the annotations, for example
     `#[prop(optional, into)] icon_leading: Option<String>`.
+  - Preserve optionality end-to-end. If a specification property is optional, the generated Rust
+    prop type must remain `Option<T>`, and call sites may pass `None`, `Some(value)`, or omit the
+    prop when appropriate. Never silently collapse an optional prop into a required `String` or
+    required helper struct.
+  - Do not represent optional booleans as unannotated `Option<bool>` props. Use `#[prop(optional)]`
+    or `#[prop(default = false)]` explicitly so typed-builder does not treat them as required.
   - Call sites may use string literals such as `label="Primary"` and may omit optional props;
     generated component signatures must compile with those call sites.
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
@@ -301,6 +345,10 @@ static_prompt: |
   - [ ] If generated components exist, `src/lib.rs` declares `pub mod components;`
   - [ ] Any generated component rendered by `src/app.rs` or another component is imported into that file
   - [ ] `"/"` is present as the root route
+  - [ ] Any component spec that enumerates `variant` values is implemented with a typed `{ComponentName}Variant` enum and enum-valued call sites in `src/app.rs`
+  - [ ] No zero-argument stored callback is wired directly into `on:click`
+  - [ ] All emitted `view!` macro attributes use valid Leptos syntax
+  - [ ] No emitted `class:` binding uses dashed or BEM-style class names; conditional classes use computed `class=...` strings instead
   - [ ] `style/app.css` exists and applies defined brand tokens as CSS custom properties where applicable
   - [ ] All emitted brand token references are defined in the specification
   - [ ] The scaffold is intended to run with `cargo leptos watch`
@@ -326,5 +374,11 @@ variable_prompt: |
 
   CLI-owned scaffold contract (authoritative baseline):
   {{input.brand_scaffold_contract}}
+
+  CLI-owned deterministic variant contract (authoritative when present):
+  {{input.brand_variant_contract?}}
+
+  CLI-owned extracted component implementation contracts (authoritative when present):
+  {{input.component_implementation_contracts?}}
 
   Please complete the task described above. Return only the ===FILE: ...=== blocks.

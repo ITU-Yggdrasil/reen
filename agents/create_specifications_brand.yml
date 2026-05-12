@@ -150,6 +150,35 @@ static_prompt: |
   `## Semantic`, `## Surface`, or `## Text and Foreground/Background` as top-level sections.
   They must appear exactly under `## Color Tokens` using `###` headings.
 
+  ## Heading-Level Guardrail (Critical)
+
+  The validator is strict about heading levels.
+
+  You MUST keep this exact hierarchy:
+  - `# Brand Identity Specification`
+  - `## Color Tokens`
+  - `### Primary`
+  - `### Secondary`
+  - `### Semantic`
+  - `### Surface`
+  - `### Text and Foreground/Background`
+
+  Never promote any required subsection to a top-level `##` section.
+  In particular, these headings are FORBIDDEN as top-level sections:
+  - `## Primary`
+  - `## Secondary`
+  - `## Semantic`
+  - `## Surface`
+  - `## Text and Foreground/Background`
+
+  If you mention semantic colors, they MUST appear only inside:
+  - `## Color Tokens`
+  - `### Semantic`
+
+  If you are unsure where color-token information belongs, place it under `## Color Tokens`
+  using the required `###` subsection headings rather than inventing a new section or changing
+  heading depth.
+
   Under `## Typography`:
   - `### Families`
   - `### Scales`
@@ -249,8 +278,8 @@ static_prompt: |
   - [ ] The title is exactly `# Brand Identity Specification`
   - [ ] All required sections exist in the required order
   - [ ] All required subsections exist
-  - [ ] `Semantic`, `Surface`, and `Text and Foreground/Background` are `###` headings under `## Color Tokens`
-  - [ ] `### Semantic`, `### Surface`, and `### Text and Foreground/Background` all appear before `## Typography`
+  - [ ] `Semantic`, `Primary`, `Secondary`, `Surface`, and `Text and Foreground/Background` appear only as `###` subsections under `## Color Tokens`
+  - [ ] No required color-token subsection was emitted as a top-level `##` section
   - [ ] Optional identity sections are structured as lists/tables, not prose paragraphs
   - [ ] Every token or rule is traceable to the draft
   - [ ] Missing primitive values are marked as `Unspecified from draft.` without inventing precision
