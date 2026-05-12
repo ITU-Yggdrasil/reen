@@ -2,259 +2,173 @@
 
 ## Component Metadata
 
-### Name
-
-[Provide the unique identifier for this component.]
-
-### Description
-
-[Write 1-3 sentences describing the components purpose and when it should be used.]
+- **Name:** [Exact component name]
+- **Description:** [1-3 sentences describing what this component is for and when to use it]
 
 ---
 
 ## Visual Structure
 
-[Describe the component's visual and structural composition.]
+- **Layout structure:** [Inline, stacked, horizontal, vertical, centered, etc.]
+- **Content areas or slots:** [List the visible regions or say `_None._`]
+- **Alignment and spacing rules:** [Short rules for spacing, alignment, and visual balance]
 
-### Layout Structure
-
-[Describe the base layout pattern (e.g., horizontal, vertical, stacked, inline).]
-
-### Subcomponents
-[List the named design library components that this component is composed of, if any. Omit this section for atomic components like Button or Badge.]
-
-- [Subcomponent name]: [its role within this component]
-- [Subcomponent name]: [its role within this component]
-
-### Content Areas or Slots 
-
-[List and describe available content regions or slots.]
-
-Include:
-
-- [Slot/area 1 and what belongs there]
-- [Slot/area 2]
-- [Optional slot/area 3]
-
-### Alignment and Spacing Rules
-
-[Define alignment behavior and spacing intent.]
-
-Include:
-
-- [Internal spacing rules]
-- [Spacing between child elements]
-- [Alignment rules for text/icons/actions]
+Optional if this component is composed of other library components:
+- **Subcomponents:**
+  - [ComponentName]: [Role in this component]
+  - [ComponentName]: [Role in this component]
 
 ---
 
 ## Variants
 
-[Describe supported visual variations for this component.]
+List only the variants that actually exist.
 
-Examples:
+- **[Variant name]:** [What it is and when to use it]
+- **[Variant name]:** [What changes visually or behaviorally]
 
-- [Variant 1 e.g., Primary]
-- [Variant 2 e.g., Secondary]
-- [Variant 3 e.g., Outlined]
-- [Optional variant 4]
-
-For each variant, clarify:
-
-- [When to use it]
-- [How it differs visually from other variants]
+If there are no variants, write exactly `_None._`.
 
 ---
 
 ## States
 
-[Describe how the component appears and behaves in each state.]
+List only the states that actually exist.
 
-### Default
+- **Default:** [Baseline appearance/behavior]
+- **Hover:** [Only include if defined]
+- **Active:** [Only include if defined]
+- **Disabled:** [Only include if defined]
+- **Loading:** [Only include if defined]
+- **[Custom state]:** [Description]
 
-[Baseline appearance and behavior.]
-
-### Hover
-
-[Visual and interaction changes on pointer hover.]
-
-### Active
-
-[Visual and interaction changes when pressed/selected.]
-
-### Disabled
-
-[How it appears when unavailable and what interactions are blocked.]
-
-### Loading (if applicable)
-
-[How loading is communicated and whether interactions are temporarily disabled.]
+If there are no distinct states beyond default, keep only `Default`.
 
 ---
 
 ## Properties
 
-[List configurable inputs and accepted value types/options.]
+List every configurable input in plain language first.
 
-Include common properties such as:
+- `prop_name`: [What it controls, whether it is required, and what kind of value it accepts]
+- `prop_name`: [Allowed values if limited, or object/list summary if structured]
 
-- `label`: [Text content, optional/required]
-- `icon`: [Supported icon positions or icon-only usage]
-- `size`: [Available sizes e.g., small, medium, large]
-- `variant`: [Maps to visual style variants]
-
-Optional additional properties:
-
-- [Property name]: [Purpose and valid values]
-- [Property name]: [Purpose and valid values]
+If the component has no configurable props, write exactly `_None._`.
 
 ---
 
 ## Implementation Contract
 
-[Capture the implementation-driving contract in a compact, machine-readable form.]
+This section is required because the system depends on it.
 
 ### Props
 
-[List every configurable prop using this exact bullet pattern.]
+Write one bullet per configurable prop using this exact pattern:
 
 ```md
 - `prop_name`: required=`true|false`; shape=`scalar|enum|object|list`; type=`TypeName`
 ```
 
-[Additional attributes:]
+Use these add-ons only when needed:
 
-- add `; item_contract=\`Name\`` for `shape=list` when items are structured values
-- add `; object_contract=\`Name\`` for `shape=object`
-- add `; allowed=\`value-a|value-b|value-c\`` for `shape=enum`
-- the bullet itself must be the contract line; do not wrap the whole bullet in extra backticks
-- no valid contract line may begin with the literal prefix `- \`- \``
+- `; allowed=\`value-a|value-b|value-c\`` for `shape=enum`
+- `; object_contract=\`Name\`` for `shape=object`
+- `; item_contract=\`Name\`` for `shape=list`
 
-Valid example:
+Example:
 
 ```md
+- `label`: required=`true`; shape=`scalar`; type=`String`
+- `variant`: required=`true`; shape=`enum`; type=`String`; allowed=`neutral|success|warning|destructive`
 - `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem`
-```
-
-Invalid example:
-
-```md
-- `- `items`: required=`false`; shape=`list`; type=`NavItem`; item_contract=`NavItem``
 ```
 
 ### Object Contracts
 
-[For every structured object-like prop or repeated item, define its fields.]
+Use this only for structured object values.
 
+```md
 #### `ContractName`
-
 - `field_name`: required=`true|false`; shape=`scalar|enum|object|list`; type=`TypeName`
+```
 
-[If none are needed, write exactly `_None._`.]
+If none are needed, write exactly `_None._`.
 
 ### Collection Contracts
 
-[For every collection prop, define how repeated items are shaped.]
+Every prop with `shape=list` must appear here.
 
+```md
 - `prop_name`: item_contract=`Name`; behavior=`repeated-item`
+```
 
-[Every prop with `shape=list` should appear here. If none are needed, write exactly `_None._`.]
+If none are needed, write exactly `_None._`.
 
 ### Interaction Contracts
 
-[For every implementation-relevant interaction, define the interaction kind.]
+List only implementation-relevant interactions.
 
+```md
 - `target`: kind=`navigational|callback-driven|stateful`
+```
 
-[Use exact prop or repeated-item targets such as `brand_href`, `items[*]`, `utility_actions[*]`, `legal_links[*]`, or `theme_toggle.options[*]`.]
-[Do not list plain display/configuration props such as `label`, `title`, or `size` as interactions unless the source explicitly defines them as interactive state controls.]
-[Prefer exact prop or repeated-item targets over the component name itself whenever possible.]
-[Do not use the component name itself as the interaction target when a more exact prop, event prop, href prop, action prop, or repeated-item target exists.]
-[Do not append stray punctuation to the target; use `items[*]`, not `items[*])`.]
-[If none are needed, write exactly `_None._`.]
+Use exact targets such as `href`, `on_click`, `items[*]`, or `theme_toggle.options[*]`.
+
+If none are needed, write exactly `_None._`.
 
 ### Composition Contracts
 
-[List composed components that are required for the implementation shape.]
+Use this when the component depends on other named components.
 
+```md
 - `ComponentName`: usage=`required|optional|slot-provided|reused-subcomponent`
+```
 
-[If none are needed, write exactly `_None._`.]
+If none are needed, write exactly `_None._`.
 
 ### Brand Constraints
 
-[Optional. Include only when active brand identity or visual specifications materially shape implementation choices.]
+Include only when the active brand or visual spec materially affects implementation.
 
-- `topic`: [Concrete brand-informed implementation guidance for hierarchy, spacing, typography, motion, iconography, or token usage.]
+```md
+- `topic`: Typography must use `brand.typography...`
+- `topic`: Color must use `brand.colors...`
+```
 
-[The guidance text itself must explicitly name the implementation dimension it controls, such as `typography`, `spacing`, `color`, `hierarchy`, or `contrast`.]
-[Prefer starting each brand-constraint sentence with the topic name itself, such as `Typography must ...`, `Color must ...`, `Hierarchy must ...`, or `Spacing must ...`.]
-[For the common topics `typography`, `spacing`, `color`, and `hierarchy`, the guidance sentence should begin with the capitalized topic word itself.]
-[Do not place nested bullets under a brand-constraint bullet; each constraint must remain one flat bullet line.]
-[If multiple token rules are needed, express them in one sentence or use multiple flat `- `topic`: ...` bullets.]
+Rules:
 
-[Valid examples:]
-- `typography`: Typography must use `testcompany.typography.family.primary` for visible text in this component.
-- `color`: Color must use `testcompany.colors.primary.red` for the primary emphasis treatment in this component.
-- `hierarchy`: Hierarchy must keep the summary region visually dominant over secondary content.
-- `spacing`: Spacing must preserve generous whitespace between repeated items to support the brand's low-clutter hierarchy.
+- Keep each item to one flat bullet
+- Use only tokens that actually exist in the active brand specs
+- Start common topics with `Typography must ...`, `Color must ...`, `Spacing must ...`, or `Hierarchy must ...`
 
-[Invalid examples:]
-- `**Typography**`: Use `testcompany.typography.family.primary` for visible text in this component.
-- `Typography`: Use `testcompany.typography.family.primary` for visible text in this component.
-- `typography`: Use `testcompany.typography.family.primary` for visible text in this component.
-- `color`: The negative-balance variant must use `testcompany.colors.primary.red` for emphasis.
-- `hierarchy`: The summary region must visually dominate the page.
-- `color`: Use the following tokens:
-  - Primary: `testcompany.colors.primary.red`
-
-[If none are needed, write exactly `_None._`.]
+If none are needed, write exactly `_None._`.
 
 ---
 
 ## Accessibility Notes
 
-[Document accessibility expectations relevant to this component.]
-
-### Keyboard Interaction Expectations
-
-[Describe focus behavior and keyboard controls (e.g., Tab, Enter, Space, Arrow keys where relevant).]
-
-### ARIA Roles and Accessibility Considerations
-
-[Define role/ARIA usage and semantic requirements if relevant.]
-
-Consider:
-
-- [Required role or semantic element]
-- [Accessible name/label requirements]
-- [State announcements (e.g., disabled, expanded, loading)]
+- **Keyboard interaction expectations:** [Tab, Enter, Space, Arrow keys, or `_None._`]
+- **ARIA roles and accessibility considerations:** [Semantic element, role, labels, announcements, or `_None._`]
 
 ---
 
 ## Optional: Usage Guidelines and Examples
 
-[Explain practical usage guidance and implementation intent.]
-
 ### Do
 
-- [Best practice 1]
-- [Best practice 2]
-- [Best practice 3]
+- [Best practice]
+- [Best practice]
 
 ### Dont
 
-- [Common mistake 1]
-- [Common mistake 2]
-- [Common mistake 3]
-
-[Optional: Include concise examples of correct vs. incorrect usage contexts.]
+- [Common mistake]
+- [Common mistake]
 
 ---
 
 ## Notes
 
-- This document defines **one component specification** and should stay focused on that component only
-- Keep guidance implementation-agnostic unless framework-specific behavior is explicitly required
-- Prioritize consistency across variants, states, and accessibility behavior
-- Finalized specifications should be implementation-driving: prop shapes, repeated-item schemas, object fields, and interaction kinds must not be left to downstream inference
+- Keep this document focused on one reusable component only
+- Do not invent variants, states, props, tokens, or accessibility behavior
+- Use exact authored names for component names, prop names, variant names, and token names
+- If structured props or repeated items exist, define them clearly enough that implementation does not need to guess

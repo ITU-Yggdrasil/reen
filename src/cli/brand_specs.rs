@@ -621,6 +621,7 @@ fn collect_defined_tokens(sections: &BTreeMap<String, Section>) -> BTreeSet<Stri
         "Motion",
         "Composition Principles",
         "Layout Principles",
+        "Token Reference Rules",
     ] {
         if let Some(section) = sections.get(section_name) {
             collect_tokens_from_lines(&section.body, &token_pattern, &mut defined_tokens);
@@ -1107,5 +1108,89 @@ Ok.
         assert_eq!(unresolved, vec!["brand.layout.breakpoints.xl".to_string()]);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn token_reference_rules_can_define_runtime_brand_tokens() {
+        let spec = r#"# Brand Identity Specification
+
+## Description
+- Runtime visual identity.
+
+## Brand Metadata
+- Brand name: TestCompany
+
+## Color Tokens
+### Primary
+- Red is used for emphasis.
+
+### Secondary
+- Unspecified from draft.
+
+### Semantic
+- Green and blue are used sparingly for status and information.
+
+### Surface
+- White is the foundational surface color.
+
+### Text and Foreground/Background
+- Ensure strong contrast on white backgrounds.
+
+## Typography
+### Families
+- Inter is the primary family.
+
+### Scales
+- Unspecified from draft.
+
+### Weights
+- Bold headings and regular body copy.
+
+### Line Heights
+- Unspecified from draft.
+
+### Named Text Styles
+- Unspecified from draft.
+
+## Iconography
+### Style
+- Unspecified from draft.
+
+### Size Set
+- Unspecified from draft.
+
+### Usage Constraints
+- Unspecified from draft.
+
+## Motion
+### Durations
+- Unspecified from draft.
+
+### Easing
+- Unspecified from draft.
+
+### Usage Principles
+- Use motion sparingly.
+
+## Token Reference Rules
+- `brand.colors.primary.red`: `#FF0000`
+- `brand.colors.primary.white`: `#FFFFFF`
+- `brand.colors.semantic.green`: `#008000`
+- `brand.colors.semantic.blue`: `#0000FF`
+- `brand.typography.family.primary`: `Inter`"#;
+
+        let validation =
+            validate_brand_spec_content(spec).expect("token reference rules should be parsed");
+        assert!(validation.defined_tokens.contains("brand.colors.primary.red"));
+        assert!(validation.defined_tokens.contains("brand.colors.primary.white"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.colors.semantic.green"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.colors.semantic.blue"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.typography.family.primary"));
     }
 }
