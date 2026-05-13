@@ -398,7 +398,8 @@ impl BrandScaffoldValidator {
             .ok_or_else(|| {
                 anyhow::anyhow!("Generated brand implementation is missing style/app.css")
             })?;
-        let repaired_css = repair_brand_app_css(context_name, &normalized_files[app_css_idx].content)?;
+        let repaired_css =
+            repair_brand_app_css(context_name, &normalized_files[app_css_idx].content)?;
         normalized_files[app_css_idx].content = repaired_css;
 
         let app_css = find_file(&normalized_files, "style/app.css")?;
@@ -2175,9 +2176,17 @@ pub(crate) fn load_component_spec_contracts_from_paths(
             continue;
         };
 
-        let variant_values = extract_variant_values_from_spec(&content);
+        let variant_declarations = extract_variant_declarations_from_spec(&content);
         let implementation_contract =
-            parse_component_implementation_contract(&name, &content, &variant_values)?;
+            parse_component_implementation_contract(&name, &content, &variant_declarations)?;
+        let variant_values = variant_declarations.canonical_values(
+            implementation_contract
+                .props
+                .iter()
+                .find(|prop| prop.name == "variant")
+                .map(|prop| prop.allowed.as_slice())
+                .unwrap_or(&[]),
+        );
         if seen.insert(name.clone()) {
             contracts.push(build_component_spec_contract(
                 name,
@@ -2273,8 +2282,61 @@ fn to_pascal_case(raw: &str) -> String {
     out
 }
 
-fn extract_variant_values_from_spec(content: &str) -> Vec<String> {
-    for line in content.lines() {
+#[derive(Clone, Debug, Default)]
+struct ComponentVariantDeclarations {
+    visual_values: Vec<String>,
+    property_values: Vec<String>,
+}
+
+impl ComponentVariantDeclarations {
+    fn canonical_values(&self, contract_values: &[String]) -> Vec<String> {
+        if !self.property_values.is_empty() {
+            return self.property_values.clone();
+        }
+        if !self.visual_values.is_empty() {
+            return self.visual_values.clone();
+        }
+        contract_values.to_vec()
+    }
+
+    fn has_declared_variants(&self) -> bool {
+        !self.visual_values.is_empty() || !self.property_values.is_empty()
+    }
+}
+
+fn extract_variant_declarations_from_spec(content: &str) -> ComponentVariantDeclarations {
+    ComponentVariantDeclarations {
+        visual_values: extract_visual_variant_values_from_spec(content),
+        property_values: extract_property_variant_values_from_spec(content),
+    }
+}
+
+fn extract_visual_variant_values_from_spec(content: &str) -> Vec<String> {
+    let Some(section) = extract_markdown_section(content, "Variants") else {
+        return Vec::new();
+    };
+
+    section
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("- ") {
+                return None;
+            }
+            extract_first_backtick_value(trimmed)
+                .or_else(|| extract_first_bold_label(trimmed))
+                .map(|value| normalize_variant_value(&value))
+                .filter(|value| !value.is_empty() && value != "none-documented")
+        })
+        .collect()
+}
+
+fn extract_property_variant_values_from_spec(content: &str) -> Vec<String> {
+    let Some(section) = extract_markdown_section(content, "Properties") else {
+        return Vec::new();
+    };
+
+    for line in section.lines() {
         let trimmed = line.trim();
         if !(trimmed.starts_with("- `variant`:") || trimmed.starts_with("- **variant**:")) {
             continue;
@@ -2290,6 +2352,26 @@ fn extract_variant_values_from_spec(content: &str) -> Vec<String> {
     Vec::new()
 }
 
+fn extract_first_backtick_value(raw: &str) -> Option<String> {
+    extract_backtick_values(raw).into_iter().next()
+}
+
+fn extract_first_bold_label(raw: &str) -> Option<String> {
+    let re = Regex::new(r#"\*\*(?P<label>[^*]+)\*\*"#).expect("valid regex");
+    re.captures(raw)
+        .and_then(|caps| caps.name("label").map(|label| label.as_str().to_string()))
+}
+
+fn normalize_variant_value(raw: &str) -> String {
+    raw.trim()
+        .trim_end_matches(':')
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
 #[derive(Debug, Default)]
 struct ParsedImplementationContract {
     props: Vec<ComponentContractField>,
@@ -2303,7 +2385,7 @@ struct ParsedImplementationContract {
 fn parse_component_implementation_contract(
     component_name: &str,
     content: &str,
-    variant_values: &[String],
+    variant_declarations: &ComponentVariantDeclarations,
 ) -> Result<ParsedImplementationContract> {
     let section =
         extract_markdown_section(content, "Implementation Contract").ok_or_else(|| {
@@ -2371,7 +2453,7 @@ fn parse_component_implementation_contract(
 
     validate_component_implementation_contract(
         component_name,
-        variant_values,
+        variant_declarations,
         &props,
         &object_contracts,
         &collection_contracts,
@@ -2745,7 +2827,7 @@ fn parse_h4_backtick_name(line: &str) -> Option<String> {
 
 fn validate_component_implementation_contract(
     component_name: &str,
-    variant_values: &[String],
+    variant_declarations: &ComponentVariantDeclarations,
     props: &[ComponentContractField],
     object_contracts: &[ComponentObjectContract],
     collection_contracts: &[ComponentCollectionContract],
@@ -2840,26 +2922,44 @@ fn validate_component_implementation_contract(
         }
     }
 
-    if !variant_values.is_empty() {
+    if variant_declarations.has_declared_variants() {
         let variant_prop = props.iter().find(|prop| prop.name == "variant").ok_or_else(|| {
             anyhow::anyhow!(
-                "Component specification '{}' enumerates variants but does not define a `variant` prop in '## Implementation Contract'",
+                "Component specification '{}' declares variants but does not define a `variant` prop in '## Implementation Contract'",
                 component_name
             )
         })?;
         if variant_prop.shape != "enum" {
             anyhow::bail!(
-                "Component specification '{}' enumerates variants but its `variant` prop is not marked as shape=`enum`",
-                component_name
+                "Component specification '{}' declares variants but its `variant` prop in '## Implementation Contract' is shape=`{}` instead of shape=`enum`",
+                component_name,
+                variant_prop.shape
             );
         }
-        if variant_prop.allowed != variant_values {
-            anyhow::bail!(
-                "Component specification '{}' has mismatched variant values between `## Variants` and `## Implementation Contract`: expected {:?}, found {:?}",
+        if !variant_declarations.visual_values.is_empty() {
+            validate_variant_value_set(
                 component_name,
-                variant_values,
-                variant_prop.allowed
-            );
+                "## Variants",
+                &variant_declarations.visual_values,
+                "## Properties",
+                &variant_declarations.property_values,
+            )?;
+            validate_variant_value_set(
+                component_name,
+                "## Variants",
+                &variant_declarations.visual_values,
+                "## Implementation Contract",
+                &variant_prop.allowed,
+            )?;
+        }
+        if !variant_declarations.property_values.is_empty() {
+            validate_variant_value_set(
+                component_name,
+                "## Properties",
+                &variant_declarations.property_values,
+                "## Implementation Contract",
+                &variant_prop.allowed,
+            )?;
         }
     }
 
@@ -2881,6 +2981,42 @@ fn validate_component_implementation_contract(
     }
 
     Ok(())
+}
+
+fn validate_variant_value_set(
+    component_name: &str,
+    expected_source: &str,
+    expected_values: &[String],
+    found_source: &str,
+    found_values: &[String],
+) -> Result<()> {
+    let expected_set = expected_values.iter().collect::<HashSet<_>>();
+    let found_set = found_values.iter().collect::<HashSet<_>>();
+    let missing = expected_values
+        .iter()
+        .filter(|value| !found_set.contains(value))
+        .cloned()
+        .collect::<Vec<_>>();
+    let extra = found_values
+        .iter()
+        .filter(|value| !expected_set.contains(value))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() && extra.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Component specification '{}' has inconsistent variant values between {} and {}: missing from {} {:?}; extra in {} {:?}",
+        component_name,
+        expected_source,
+        found_source,
+        found_source,
+        missing,
+        found_source,
+        extra
+    );
 }
 
 fn requires_structured_item_contract(ty: &str) -> bool {
@@ -3363,8 +3499,8 @@ fn repair_brand_app_css(context_name: &str, content: &str) -> Result<String> {
             let var = caps.name("var").map(|m| m.as_str()).unwrap_or("");
             let value = caps.name("value").map(|m| m.as_str()).unwrap_or("").trim();
 
-            let normalized_value = normalize_color_value(value)
-                .unwrap_or_else(|| value.to_string());
+            let normalized_value =
+                normalize_color_value(value).unwrap_or_else(|| value.to_string());
 
             format!("{indent}{var}: {normalized_value};")
         })
@@ -3406,7 +3542,10 @@ fn repair_brand_app_css(context_name: &str, content: &str) -> Result<String> {
 
     // If unknown unresolved vars remain, keep the strict behavior (the subsequent validator will bail).
     // But attach a hint so failures are easier to diagnose.
-    if unresolved.iter().any(|var| brand_var_fallback(var).is_none()) {
+    if unresolved
+        .iter()
+        .any(|var| brand_var_fallback(var).is_none())
+    {
         // Don't bail here; keep behavior centralized in `validate_brand_css_variables`.
         // Just ensure the output remains deterministic.
         return Ok(repaired);
@@ -3481,7 +3620,7 @@ fn brand_var_fallback(var_name: &str) -> Option<&'static str> {
     match normalized {
         "--brand-colors-primary-black" => Some("#000000"), // black
         "--brand-colors-primary-white" => Some("#ffffff"), // white
-        "--brand-colors-text-primary" => Some("#111111"), // near-black text
+        "--brand-colors-text-primary" => Some("#111111"),  // near-black text
         "--brand-colors-text-secondary" => Some("#444444"), // secondary text gray
         "--brand-colors-surface-default" => Some("#ffffff"), // surface white
         "--brand-colors-surface-raised" => Some("#f7f7f7"), // raised surface (light gray)
@@ -3560,7 +3699,15 @@ fn inject_root_definitions(content: &str, definitions: &[(String, String)]) -> S
 }
 
 fn validate_gitignore(context_name: &str, content: &str) -> Result<()> {
-    let required_entries = ["target/", ".cargo-leptos/", ".leptos/", ".reen/", "/style", "Leptos.toml", "/public"];
+    let required_entries = [
+        "target/",
+        ".cargo-leptos/",
+        ".leptos/",
+        ".reen/",
+        "/style",
+        "Leptos.toml",
+        "/public",
+    ];
     for entry in required_entries {
         if !content.lines().any(|line| line.trim() == entry) {
             anyhow::bail!(
@@ -3759,15 +3906,16 @@ fn extract_dependency_spec(content: &str, dependency: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_component_spec_contract, extract_component_name_from_spec, extract_dep_feature_refs,
-        component_module_specs, extract_dependency_spec, extract_toml_value,
-        normalize_generated_app_rs, normalize_generated_brand_files, pascal_case_identifier,
-        render_brand_scaffold_contract, render_brand_variant_contract,
-        render_component_implementation_contract, repair_brand_app_css, validate_app_rs,
-        validate_app_rs_with_component_specs, validate_brand_css_variables,
-        validate_dependency_render_feature_mode, validate_generated_brand_rust_patterns,
-        validate_lib_target_name, validate_matching_leptos_config,
-        validate_optional_dep_feature_wiring, GeneratedOutputFile, ParsedImplementationContract,
+        build_component_spec_contract, component_module_specs, extract_component_name_from_spec,
+        extract_dep_feature_refs, extract_dependency_spec, extract_toml_value,
+        extract_variant_declarations_from_spec, normalize_generated_app_rs,
+        normalize_generated_brand_files, pascal_case_identifier, render_brand_scaffold_contract,
+        render_brand_variant_contract, render_component_implementation_contract,
+        repair_brand_app_css, validate_app_rs, validate_app_rs_with_component_specs,
+        validate_brand_css_variables, validate_dependency_render_feature_mode,
+        validate_generated_brand_rust_patterns, validate_lib_target_name,
+        validate_matching_leptos_config, validate_optional_dep_feature_wiring,
+        ComponentVariantDeclarations, GeneratedOutputFile, ParsedImplementationContract,
     };
     use std::path::PathBuf;
 
@@ -3842,12 +3990,11 @@ mod tests {
 
     #[test]
     fn rendered_component_implementation_contract_includes_structured_shapes() {
-        let contract = super::parse_component_implementation_contract(
-            "TopNav",
-            &implementation_contract_spec("TopNav"),
-            &["default".to_string(), "minimal".to_string()],
-        )
-        .expect("parse implementation contract");
+        let spec = implementation_contract_spec("TopNav");
+        let variant_declarations = extract_variant_declarations_from_spec(&spec);
+        let contract =
+            super::parse_component_implementation_contract("TopNav", &spec, &variant_declarations)
+                .expect("parse implementation contract");
         let rendered = render_component_implementation_contract(&[build_component_spec_contract(
             "TopNav".to_string(),
             vec!["default".to_string(), "minimal".to_string()],
@@ -3865,8 +4012,12 @@ mod tests {
     #[test]
     fn component_contract_parser_rejects_missing_collection_item_shape() {
         let spec = "# NavBar\n\n## Component Metadata\n- **Name**: NavBar\n\n## Properties\n- `items`: list\n\n## Implementation Contract\n### Props\n- `items`: required=`true`; shape=`list`; type=`NavItem`\n";
-        let err = super::parse_component_implementation_contract("NavBar", spec, &[])
-            .expect_err("expected missing collection contract failure");
+        let err = super::parse_component_implementation_contract(
+            "NavBar",
+            spec,
+            &ComponentVariantDeclarations::default(),
+        )
+        .expect_err("expected missing collection contract failure");
         assert!(err
             .to_string()
             .contains("without a matching collection contract"));
@@ -3875,30 +4026,92 @@ mod tests {
     #[test]
     fn component_contract_parser_rejects_object_prop_without_fields() {
         let spec = "# Dashboard\n\n## Component Metadata\n- **Name**: Dashboard\n\n## Properties\n- `summary`: object\n\n## Implementation Contract\n### Props\n- `summary`: required=`false`; shape=`object`; type=`SummaryBlock`; object_contract=`SummaryBlock`\n\n### Object Contracts\n#### `SummaryBlock`\n";
-        let err = super::parse_component_implementation_contract("Dashboard", spec, &[])
-            .expect_err("expected missing object field failure");
+        let err = super::parse_component_implementation_contract(
+            "Dashboard",
+            spec,
+            &ComponentVariantDeclarations::default(),
+        )
+        .expect_err("expected missing object field failure");
         assert!(err.to_string().contains("without any fields"));
     }
 
     #[test]
     fn component_contract_parser_rejects_variant_mismatch() {
         let spec = "# Badge\n\n## Component Metadata\n- **Name**: Badge\n\n## Variants\n- `default`\n- `success`\n\n## Properties\n- `variant`: `default` | `success`\n\n## Implementation Contract\n### Props\n- `variant`: required=`false`; shape=`enum`; type=`BadgeVariant`; allowed=`default|neutral`\n";
-        let err = super::parse_component_implementation_contract(
-            "Badge",
-            spec,
-            &["default".to_string(), "success".to_string()],
-        )
-        .expect_err("expected variant mismatch");
+        let variant_declarations = extract_variant_declarations_from_spec(spec);
+        let err =
+            super::parse_component_implementation_contract("Badge", spec, &variant_declarations)
+                .expect_err("expected variant mismatch");
         assert!(err.to_string().contains(
-            "mismatched variant values between `## Variants` and `## Implementation Contract`"
+            "inconsistent variant values between ## Variants and ## Implementation Contract"
         ));
+    }
+
+    #[test]
+    fn component_contract_parser_accepts_reordered_variant_contract_values() {
+        let spec = "# Badge\n\n## Component Metadata\n- **Name**: Badge\n\n## Variants\n- `default`\n- `success`\n\n## Properties\n- `variant`: `default` | `success`\n\n## Implementation Contract\n### Props\n- `variant`: required=`false`; shape=`enum`; type=`BadgeVariant`; allowed=`success|default`\n";
+        let variant_declarations = extract_variant_declarations_from_spec(spec);
+        super::parse_component_implementation_contract("Badge", spec, &variant_declarations)
+            .expect("matching variant sets should validate regardless of order");
+    }
+
+    #[test]
+    fn component_contract_parser_rejects_variant_missing_from_contract() {
+        let spec = "# Badge\n\n## Component Metadata\n- **Name**: Badge\n\n## Variants\n- `default`\n- `success`\n\n## Properties\n- `variant`: `default` | `success`\n\n## Implementation Contract\n### Props\n- `variant`: required=`false`; shape=`enum`; type=`BadgeVariant`; allowed=`default`\n";
+        let variant_declarations = extract_variant_declarations_from_spec(spec);
+        let err =
+            super::parse_component_implementation_contract("Badge", spec, &variant_declarations)
+                .expect_err("expected missing contract variant failure");
+        let message = err.to_string();
+        assert!(message.contains("missing from ## Implementation Contract [\"success\"]"));
+    }
+
+    #[test]
+    fn component_contract_parser_rejects_undocumented_contract_variant() {
+        let spec = "# Badge\n\n## Component Metadata\n- **Name**: Badge\n\n## Variants\n- `default`\n- `success`\n\n## Properties\n- `variant`: `default` | `success`\n\n## Implementation Contract\n### Props\n- `variant`: required=`false`; shape=`enum`; type=`BadgeVariant`; allowed=`default|success|neutral`\n";
+        let variant_declarations = extract_variant_declarations_from_spec(spec);
+        let err =
+            super::parse_component_implementation_contract("Badge", spec, &variant_declarations)
+                .expect_err("expected extra contract variant failure");
+        let message = err.to_string();
+        assert!(message.contains("extra in ## Implementation Contract [\"neutral\"]"));
+    }
+
+    #[test]
+    fn component_contract_parser_accepts_current_card_variant_ordering() {
+        let spec = "# Card\n\n## Component Metadata\n- **Name**: Card\n\n## Variants\n- **Informational**: Used for summaries.\n- **Interactive**: Used when clickable.\n- **Feature**: Used for highlighted content.\n- **Compact**: Used in dense lists.\n- **Status**: Used for workflow state.\n\n## Properties\n- `variant`: `informational` | `feature` | `compact` | `status` | `interactive`.\n\n## Implementation Contract\n### Props\n- `variant`: required=`false`; shape=`enum`; type=`CardVariant`; allowed=`informational|interactive|feature|compact|status`\n";
+        let variant_declarations = extract_variant_declarations_from_spec(spec);
+        let contract =
+            super::parse_component_implementation_contract("Card", spec, &variant_declarations)
+                .expect("Card variant sets should validate regardless of order");
+        assert_eq!(
+            variant_declarations.canonical_values(
+                contract
+                    .props
+                    .iter()
+                    .find(|prop| prop.name == "variant")
+                    .map(|prop| prop.allowed.as_slice())
+                    .unwrap_or(&[])
+            ),
+            vec![
+                "informational".to_string(),
+                "feature".to_string(),
+                "compact".to_string(),
+                "status".to_string(),
+                "interactive".to_string()
+            ]
+        );
     }
 
     #[test]
     fn component_contract_parser_rejects_missing_interaction_contracts_for_navigation_shapes() {
         let spec = "# Footer\n\n## Component Metadata\n- **Name**: Footer\n\n## Properties\n- `legal_links`: list\n\n## Implementation Contract\n### Props\n- `legal_links`: required=`false`; shape=`list`; type=`LegalLink`; item_contract=`LegalLink`\n\n### Object Contracts\n#### `LegalLink`\n- `label`: required=`true`; shape=`scalar`; type=`String`\n- `href`: required=`true`; shape=`scalar`; type=`String`\n\n### Collection Contracts\n- `legal_links`: item_contract=`LegalLink`; behavior=`repeated-item`\n";
-        let err = super::parse_component_implementation_contract("Footer", spec, &[])
-            .expect_err("expected interaction contract failure");
+        let err = super::parse_component_implementation_contract(
+            "Footer",
+            spec,
+            &ComponentVariantDeclarations::default(),
+        )
+        .expect_err("expected interaction contract failure");
         assert!(err
             .to_string()
             .contains("does not define any '### Interaction Contracts'"));
@@ -3907,8 +4120,12 @@ mod tests {
     #[test]
     fn component_contract_parser_rejects_vague_brand_constraints() {
         let spec = "# Button\n\n## Component Metadata\n- **Name**: Button\n\n## Properties\n- `label`: text\n\n## Implementation Contract\n### Props\n- `label`: required=`true`; shape=`scalar`; type=`String`\n\n### Brand Constraints\n- `tone`: premium\n";
-        let err = super::parse_component_implementation_contract("Button", spec, &[])
-            .expect_err("expected vague brand failure");
+        let err = super::parse_component_implementation_contract(
+            "Button",
+            spec,
+            &ComponentVariantDeclarations::default(),
+        )
+        .expect_err("expected vague brand failure");
         assert!(err
             .to_string()
             .contains("brand constraints in '## Implementation Contract' must be concrete enough"));
@@ -4130,7 +4347,9 @@ body {
         let repaired = repair_brand_app_css("demo", css).expect("repair should not fail");
         let err = validate_brand_css_variables("demo", &repaired)
             .expect_err("unknown variable should still fail strict validation");
-        assert!(err.to_string().contains("--brand-colors-primary-unknowncustom"));
+        assert!(err
+            .to_string()
+            .contains("--brand-colors-primary-unknowncustom"));
     }
 
     #[test]

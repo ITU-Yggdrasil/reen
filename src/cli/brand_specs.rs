@@ -652,6 +652,8 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
                 || normalized.contains("circle diameter")
                 || normalized.contains("icon proportions")
                 || normalized.contains("minimum sizing")
+                || normalized.contains("minimum or maximum")
+                || normalized.contains("maximum logo sizing")
                 || normalized.contains("clear space")
                 || normalized.contains("numeric values")))
         || (normalized.contains("secondary colors")
@@ -663,10 +665,19 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
                 || normalized.contains("semantic context"))
             && (normalized.contains("exact usage constraints")
                 || normalized.contains("usage constraints"))
-            && (normalized.contains("unspecified")
-                || normalized.contains("not specified")))
+            && (normalized.contains("unspecified") || normalized.contains("not specified")))
         || (normalized.contains("typography scale")
             && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not defined")
+                || normalized.contains("does not define")))
+        || (normalized.contains("typography")
+            && normalized.contains("exact")
+            && (normalized.contains("scale")
+                || normalized.contains("line heights")
+                || normalized.contains("named text styles"))
+            && (normalized.contains("does not define")
+                || normalized.contains("does not specify")
                 || normalized.contains("unspecified")
                 || normalized.contains("not defined")))
         || (normalized.contains("typography")
@@ -679,15 +690,21 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
             && normalized.contains("durations")
             && normalized.contains("easing")
             && (normalized.contains("no ")
+                || normalized.contains("exact")
+                || normalized.contains("does not specify")
                 || normalized.contains("unspecified")
                 || normalized.contains("not specified")))
         || (normalized.contains("iconography")
             && normalized.contains("size set")
             && (normalized.contains("no ")
+                || normalized.contains("detailed")
+                || normalized.contains("does not define")
                 || normalized.contains("unspecified")
                 || normalized.contains("not specified")))
         || (normalized.contains("iconography style")
             && (normalized.contains("no ")
+                || normalized.contains("detailed")
+                || normalized.contains("does not define")
                 || normalized.contains("unspecified")
                 || normalized.contains("not specified")))
 }
@@ -1087,6 +1104,17 @@ Ok.
     }
 
     #[test]
+    fn ignores_current_visual_spec_precision_only_blockers() {
+        let spec = valid_brand_spec().replace(
+            "## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+            "## Blocking Ambiguities\n- The draft does not specify minimum or maximum logo sizing constraints.\n- The draft does not define exact typography scale values, line heights, or named text styles.\n- The draft does not specify exact motion durations or easing functions.\n- The draft does not define a detailed iconography style or size set.\n\n## Implementation Choices Left Open\n- Non-blocking: The final design-system package format is left to implementation.",
+        );
+        let validation = validate_brand_spec_content(&spec)
+            .expect("valid brand spec with current ignored precision-only blockers");
+        assert!(validation.blocking_ambiguities.is_empty());
+    }
+
+    #[test]
     fn accepts_identity_first_optional_sections_in_canonical_order() {
         let validation = validate_brand_spec_content(valid_brand_spec()).expect("valid brand spec");
         assert!(validation
@@ -1292,8 +1320,12 @@ Ok.
 
         let validation =
             validate_brand_spec_content(spec).expect("token reference rules should be parsed");
-        assert!(validation.defined_tokens.contains("brand.colors.primary.red"));
-        assert!(validation.defined_tokens.contains("brand.colors.primary.white"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.colors.primary.red"));
+        assert!(validation
+            .defined_tokens
+            .contains("brand.colors.primary.white"));
         assert!(validation
             .defined_tokens
             .contains("brand.colors.semantic.green"));

@@ -310,6 +310,7 @@ static_prompt: |
   - If a prop is optional in `## Properties`, it MUST be `required=`false`` in `## Implementation Contract`.
   - If a prop is required in `## Properties`, it MUST be `required=`true`` in `## Implementation Contract`.
   - If `variant` values are enumerated in `## Variants` or `## Properties`, the `variant` contract line MUST use `shape=`enum`` and include an exact `allowed=`...`` list.
+  - Keep enumerated variant values in the same order across `## Variants`, `## Properties`, and the `allowed=`...`` list in `## Implementation Contract` whenever possible; validation compares membership, but stable ordering keeps generated enums deterministic and reviews easier.
   - If a component can be interactive only under a condition, state that condition in normal prose immediately after the contract bullet, not by changing the bullet syntax.
     Example:
     - `AccountCard`: kind=`navigational`

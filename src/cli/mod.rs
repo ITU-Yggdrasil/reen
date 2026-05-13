@@ -2611,6 +2611,8 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
                 || normalized.contains("circle diameter")
                 || normalized.contains("icon proportions")
                 || normalized.contains("minimum sizing")
+                || normalized.contains("minimum or maximum")
+                || normalized.contains("maximum logo sizing")
                 || normalized.contains("clear space")
                 || normalized.contains("numeric values")))
         || (normalized.contains("secondary colors")
@@ -2622,10 +2624,19 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
                 || normalized.contains("semantic context"))
             && (normalized.contains("exact usage constraints")
                 || normalized.contains("usage constraints"))
-            && (normalized.contains("unspecified")
-                || normalized.contains("not specified")))
+            && (normalized.contains("unspecified") || normalized.contains("not specified")))
         || (normalized.contains("typography scale")
             && (normalized.contains("no ")
+                || normalized.contains("unspecified")
+                || normalized.contains("not defined")
+                || normalized.contains("does not define")))
+        || (normalized.contains("typography")
+            && normalized.contains("exact")
+            && (normalized.contains("scale")
+                || normalized.contains("line heights")
+                || normalized.contains("named text styles"))
+            && (normalized.contains("does not define")
+                || normalized.contains("does not specify")
                 || normalized.contains("unspecified")
                 || normalized.contains("not defined")))
         || (normalized.contains("typography")
@@ -2638,15 +2649,21 @@ fn is_precision_only_brand_blocker(text: &str) -> bool {
             && normalized.contains("durations")
             && normalized.contains("easing")
             && (normalized.contains("no ")
+                || normalized.contains("exact")
+                || normalized.contains("does not specify")
                 || normalized.contains("unspecified")
                 || normalized.contains("not specified")))
         || (normalized.contains("iconography")
             && normalized.contains("size set")
             && (normalized.contains("no ")
+                || normalized.contains("detailed")
+                || normalized.contains("does not define")
                 || normalized.contains("unspecified")
                 || normalized.contains("not specified")))
         || (normalized.contains("iconography style")
             && (normalized.contains("no ")
+                || normalized.contains("detailed")
+                || normalized.contains("does not define")
                 || normalized.contains("unspecified")
                 || normalized.contains("not specified")))
 }
@@ -4869,11 +4886,11 @@ mod tests {
         augment_brand_site_implementation_context, augment_implementation_generation_context,
         build_dependency_context, build_dependency_drafts_from_context, build_dependency_manifest,
         build_implementation_execution_plan, build_implemented_dependency_manifest,
-        build_specification_context, build_specification_execution_plan, check_specification,
-        clear_cache, create_implementation, determine_bdd_test_paths, determine_draft_input_path,
+        build_specification_context, build_specification_execution_plan,
+        check_brand_references_in_spec_content, check_specification, clear_cache,
+        create_implementation, determine_bdd_test_paths, determine_draft_input_path,
         determine_implementation_output_path, determine_specification_agent,
         determine_specification_output_path, ensure_dev_dependency_entry,
-        check_brand_references_in_spec_content,
         extract_actionable_blocking_bullets, extract_actionable_specification_blockers,
         extract_compile_error_message, finalize_specification_output, fit_context_to_token_limit,
         generated_project_structure_paths, has_unfinished_specification, implementation_agent_name,
@@ -4887,8 +4904,7 @@ mod tests {
     use crate::cli::brand_scaffold::{
         load_component_spec_contracts_from_paths, render_brand_scaffold_contract,
         render_brand_variant_contract, render_component_implementation_contract,
-        BrandEnvelopeParser, BrandScaffoldValidator,
-        GeneratedOutputFile,
+        BrandEnvelopeParser, BrandScaffoldValidator, GeneratedOutputFile,
     };
     use crate::cli::dependency_graph::{DependencyArtifact, DependencySource};
     use crate::cli::project_structure::ProjectInfo;
@@ -5949,7 +5965,10 @@ site-addr = "127.0.0.1:3000"
 reload-port = 3001
 "#,
             ),
-            generated_brand_file(".gitignore", "target/\n.cargo-leptos/\n.leptos/\n.reen/\n/style\nLeptos.toml\n/public\n"),
+            generated_brand_file(
+                ".gitignore",
+                "target/\n.cargo-leptos/\n.leptos/\n.reen/\n/style\nLeptos.toml\n/public\n",
+            ),
             generated_brand_file(
                 "src/main.rs",
                 r#"#[tokio::main]
@@ -7750,6 +7769,18 @@ Card groups related content and actions into a single unit.
 - No numeric values or scales are provided for typography (e.g., font sizes, line heights).
 - No motion durations or easing curves are specified.
 - No iconography style or size set is specified.
+"#;
+        let actionable = extract_actionable_blocking_bullets(section);
+        assert!(actionable.is_empty());
+    }
+
+    #[test]
+    fn ignores_current_visual_spec_precision_only_blockers() {
+        let section = r#"
+- The draft does not specify minimum or maximum logo sizing constraints.
+- The draft does not define exact typography scale values, line heights, or named text styles.
+- The draft does not specify exact motion durations or easing functions.
+- The draft does not define a detailed iconography style or size set.
 "#;
         let actionable = extract_actionable_blocking_bullets(section);
         assert!(actionable.is_empty());

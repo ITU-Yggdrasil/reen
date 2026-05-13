@@ -263,6 +263,7 @@ static_prompt: |
   - Omit the section entirely when there are no blocking ambiguities
   - Do NOT add blocking items for missing numeric precision alone when the draft still establishes the intended primitive family or usage rule
   - Do NOT add blocking items for representation precision only (for example named color vs hex), optional fallback stacks, unspecified geometric implementation numbers, missing exact typography sizes, or missing exact motion timings unless the draft explicitly requires that precision
+  - Do NOT add blocking items for missing minimum/maximum logo sizing, exact typography scale values, line heights, named text styles, exact motion durations/easing, or detailed iconography style/size sets when the draft still gives clear brand direction
   - Do NOT add blocking items merely because a draft names a common color without a hex code
   - Do NOT add blocking items merely because a spacing instruction uses `normal` as its relative baseline
 
@@ -273,7 +274,7 @@ static_prompt: |
   - Keep each item explicitly non-blocking
   - Omit the section entirely when there are no such choices
   - Prefer placing precision-level or rendering-level details here when required behavior is still clear
-  - Typical examples include exact color encoding format, fallback font stack choice, exact typography size values, exact motion timings/easing, and exact geometric measurements when the draft gives only direction-level guidance
+  - Typical examples include exact color encoding format, fallback font stack choice, exact typography size values, line heights, named text styles, exact motion timings/easing, detailed iconography style/size sets, and exact geometric measurements when the draft gives only direction-level guidance
 
   ## Validation Checklist
 
