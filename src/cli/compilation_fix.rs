@@ -409,9 +409,8 @@ fn apply_generated_ui_compile_fixes(project_root: &Path, stderr: &str) -> Result
         .replace_all(&updated, "©")
         .to_string();
 
-    if updated.contains("fn(MouseEvent)") && !updated.contains("use leptos::ev::MouseEvent;") {
-        updated = format!("use leptos::ev::MouseEvent;\n{}", updated);
-    }
+    updated = synthesize_generated_leptos_imports(&updated);
+    updated = normalize_callback_prop_call_sites(&updated);
 
     if updated == original {
         return Ok(false);
@@ -420,6 +419,124 @@ fn apply_generated_ui_compile_fixes(project_root: &Path, stderr: &str) -> Result
     fs::write(&app_path, updated)
         .with_context(|| format!("Failed to write {}", app_path.display()))?;
     Ok(true)
+}
+
+fn synthesize_generated_leptos_imports(content: &str) -> String {
+    let needs_mouse_event_import = generated_app_uses_unqualified_mouse_event(content)
+        && !content.contains("use leptos::ev::MouseEvent;");
+    let needs_log_import = generated_app_uses_unqualified_log_macro(content)
+        && !content.contains("use leptos::logging::log;");
+
+    if !needs_mouse_event_import && !needs_log_import {
+        return content.to_string();
+    }
+
+    let mut prefix = String::new();
+    if needs_mouse_event_import {
+        prefix.push_str("use leptos::ev::MouseEvent;\n");
+    }
+    if needs_log_import {
+        prefix.push_str("use leptos::logging::log;\n");
+    }
+    prefix.push_str(content);
+    prefix
+}
+
+fn generated_app_uses_unqualified_mouse_event(content: &str) -> bool {
+    content.contains("fn(MouseEvent)")
+        || content.contains("Callback<MouseEvent>")
+        || content.contains("Callback< MouseEvent >")
+}
+
+fn generated_app_uses_unqualified_log_macro(content: &str) -> bool {
+    unqualified_log_macro_re().is_match(content)
+}
+
+fn normalize_callback_prop_call_sites(content: &str) -> String {
+    let callback_props = extract_component_callback_props(content);
+    if callback_props.is_empty() {
+        return content.to_string();
+    }
+
+    let component_tag_re =
+        Regex::new(r#"(?s)<(?P<name>[A-Z][A-Za-z0-9_]*)\b(?P<attrs>.*?)(?P<close>/?>)"#)
+            .expect("valid regex");
+    let callback_value_re = Regex::new(
+        r#"(?m)(?P<prefix>\b(?P<prop>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*)(?P<value>(?:move\s*)?\|[^|]*\|[^\n\r>]*)"#,
+    )
+    .expect("valid regex");
+
+    component_tag_re
+        .replace_all(content, |caps: &regex::Captures| {
+            let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+            let Some(props) = callback_props.get(name) else {
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            };
+
+            let attrs = caps.name("attrs").map(|m| m.as_str()).unwrap_or_default();
+            let rewritten_attrs = callback_value_re
+                .replace_all(attrs, |value_caps: &regex::Captures| {
+                    let prop = value_caps
+                        .name("prop")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default();
+                    let value = value_caps
+                        .name("value")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default()
+                        .trim();
+                    if !props.contains(prop) || value.starts_with("Callback::new(") {
+                        return value_caps
+                            .get(0)
+                            .map(|m| m.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                    }
+                    let prefix = value_caps
+                        .name("prefix")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default();
+                    format!("{prefix}Callback::new({value})")
+                })
+                .to_string();
+
+            format!(
+                "<{}{}{}",
+                name,
+                rewritten_attrs,
+                caps.name("close").map(|m| m.as_str()).unwrap_or_default()
+            )
+        })
+        .to_string()
+}
+
+fn extract_component_callback_props(content: &str) -> HashMap<String, HashSet<String>> {
+    let component_re = Regex::new(
+        r#"(?s)#\[component\]\s*(?:pub\s+)?fn\s+(?P<name>[A-Z][A-Za-z0-9_]*)\s*\((?P<params>.*?)\)\s*->"#,
+    )
+    .expect("valid regex");
+    let callback_prop_re = Regex::new(
+        r#"(?m)^\s*(?:#\[[^\]]+\]\s*)*(?P<prop>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:Option<\s*)?Callback<[^>]+>(?:\s*>)?\s*,"#,
+    )
+    .expect("valid regex");
+
+    let mut components = HashMap::new();
+    for caps in component_re.captures_iter(content) {
+        let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+        let params = caps.name("params").map(|m| m.as_str()).unwrap_or_default();
+        let props = callback_prop_re
+            .captures_iter(params)
+            .filter_map(|prop_caps| prop_caps.name("prop").map(|m| m.as_str().to_string()))
+            .collect::<HashSet<_>>();
+        if !props.is_empty() {
+            components.insert(name.to_string(), props);
+        }
+    }
+    components
 }
 
 fn write_attempt_compile_output(attempt_dir: &Path, output: &CompilationOutput) -> Result<()> {
@@ -1699,6 +1816,11 @@ fn cloned_click_handler_re() -> &'static Regex {
     })
 }
 
+fn unqualified_log_macro_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(^|[^:A-Za-z0-9_])log!\("#).expect("valid regex"))
+}
+
 fn forwarded_option_string_prop_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -2074,6 +2196,145 @@ struct AccountCardData {
         assert!(updated.contains("action: |_| {},"));
         assert!(updated.contains("on:click=action.action"));
         assert!(updated.contains("\"©\""));
+        assert_eq!(updated.matches("use leptos::ev::MouseEvent;").count(), 1);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn generated_ui_compile_fixes_add_mouse_event_and_log_imports_for_callback_props() {
+        let root = make_temp_test_dir("compile_fix_generated_ui_imports");
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src dir");
+        let app = src.join("app.rs");
+        fs::write(
+            &app,
+            r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Button
+            label="Primary"
+            on_click=|_| log!("Primary button clicked")
+        />
+    }
+}
+"#,
+        )
+        .expect("write app");
+
+        let changed = apply_generated_ui_compile_fixes(
+            &root,
+            "error[E0425]:\n  --> src/app.rs:1:1\nerror[E0425]:\n  --> src/app.rs:2:2\n",
+        )
+        .expect("apply generated ui fixes");
+        assert!(changed);
+
+        let updated = fs::read_to_string(&app).expect("read app");
+        assert!(updated.contains("use leptos::ev::MouseEvent;"));
+        assert!(updated.contains("use leptos::logging::log;"));
+        assert!(updated.contains("on_click=Callback::new(|_| log!(\"Primary button clicked\"))"));
+        assert_eq!(updated.matches("use leptos::ev::MouseEvent;").count(), 1);
+        assert_eq!(updated.matches("use leptos::logging::log;").count(), 1);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn generated_ui_compile_fixes_do_not_add_imports_for_fully_qualified_symbols() {
+        let root = make_temp_test_dir("compile_fix_generated_ui_qualified");
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src dir");
+        let app = src.join("app.rs");
+        fs::write(
+            &app,
+            r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<leptos::ev::MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Button
+            label="Primary"
+            on_click=|_| leptos::logging::log!("Primary button clicked")
+        />
+    }
+}
+"#,
+        )
+        .expect("write app");
+
+        let changed =
+            apply_generated_ui_compile_fixes(&root, "error[E0425]:\n  --> src/app.rs:1:1\n")
+                .expect("apply generated ui fixes");
+        assert!(!changed);
+
+        let updated = fs::read_to_string(&app).expect("read app");
+        assert!(!updated.contains("use leptos::ev::MouseEvent;"));
+        assert!(!updated.contains("use leptos::logging::log;"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn generated_ui_compile_fixes_wrap_raw_callback_prop_closures() {
+        let root = make_temp_test_dir("compile_fix_generated_ui_callback_wrap");
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src dir");
+        let app = src.join("app.rs");
+        fs::write(
+            &app,
+            r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+fn Card(
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <article/> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Card on_click=move |_| leptos::logging::log!("Card clicked") />
+        <button on:click=move |_| leptos::logging::log!("DOM clicked")>
+            "Click"
+        </button>
+    }
+}
+"#,
+        )
+        .expect("write app");
+
+        let changed =
+            apply_generated_ui_compile_fixes(&root, "error[E0308]:\n  --> src/app.rs:1:1\n")
+                .expect("apply generated ui fixes");
+        assert!(changed);
+
+        let updated = fs::read_to_string(&app).expect("read app");
+        assert!(updated
+            .contains("on_click=Callback::new(move |_| leptos::logging::log!(\"Card clicked\"))"));
+        assert!(updated.contains("on:click=move |_| leptos::logging::log!(\"DOM clicked\")"));
+        assert!(!updated.contains("on:click=Callback::new("));
 
         fs::remove_dir_all(&root).ok();
     }

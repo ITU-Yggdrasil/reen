@@ -223,6 +223,16 @@ static_prompt: |
     required helper struct.
   - Do not represent optional booleans as unannotated `Option<bool>` props. Use `#[prop(optional)]`
     or `#[prop(default = false)]` explicitly so typed-builder does not treat them as required.
+  - When generated event props or handlers use `MouseEvent`, prefer the fully qualified path
+    `leptos::ev::MouseEvent` instead of relying on an additional import.
+  - When generated debug click handlers use the `log!` macro, prefer `leptos::logging::log!`
+    instead of relying on a macro import.
+  - When a generated component prop is typed as `Callback<...>` or `Option<Callback<...>>`,
+    generated component call sites must pass `Callback::new(move |_| ...)` rather than a raw
+    closure value.
+  - Use raw closures such as `move |_| ...` directly only for DOM event handlers like
+    `on:click=...`, not for component props like `on_click=...` when those props are typed as
+    `Callback<...>`.
   - Call sites may use string literals such as `label="Primary"` and may omit optional props;
     generated component signatures must compile with those call sites.
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
@@ -350,6 +360,9 @@ static_prompt: |
   - [ ] Any component spec that enumerates `variant` values is implemented with a typed `{ComponentName}Variant` enum and enum-valued call sites in `src/app.rs`
   - [ ] No generated Leptos component prop leaves `String` unannotated; required string props use `#[prop(into)]` and optional string props use `#[prop(optional, into)]`
   - [ ] No zero-argument stored callback is wired directly into `on:click`
+  - [ ] Any generated `MouseEvent` usage is either fully qualified as `leptos::ev::MouseEvent` or paired with an explicit `use leptos::ev::MouseEvent;`
+  - [ ] Any generated `log!` usage is either fully qualified as `leptos::logging::log!` or paired with an explicit `use leptos::logging::log;`
+  - [ ] Any generated call site that passes a value into a `Callback<...>` component prop uses `Callback::new(...)` rather than a raw closure
   - [ ] All emitted `view!` macro attributes use valid Leptos syntax
   - [ ] No emitted brand-scaffold Rust uses `class=[...]`, `class:...`, `class=(...)`, or `classes!(...)`; class handling uses only `class="literal"` or `class=precomputed_class_string`
   - [ ] `style/app.css` exists and applies defined brand tokens as CSS custom properties where applicable

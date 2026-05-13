@@ -568,9 +568,8 @@ fn normalize_generated_app_rs(content: &str, component_specs: &[ComponentSpecCon
         .replace_all(&updated, "on:click=$handler")
         .to_string();
 
-    if updated.contains("fn(MouseEvent)") && !updated.contains("use leptos::ev::MouseEvent;") {
-        updated = format!("use leptos::ev::MouseEvent;\n{}", updated);
-    }
+    updated = synthesize_generated_leptos_imports(&updated);
+    updated = normalize_callback_prop_call_sites(&updated);
 
     updated = normalize_leptos_view_erasure(&updated);
     updated = normalize_string_prop_defaults(&updated);
@@ -600,6 +599,124 @@ fn dedupe_consecutive_derive_clone(content: &str) -> String {
     }
 
     output.join("\n")
+}
+
+fn synthesize_generated_leptos_imports(content: &str) -> String {
+    let needs_mouse_event_import = generated_app_uses_unqualified_mouse_event(content)
+        && !content.contains("use leptos::ev::MouseEvent;");
+    let needs_log_import = generated_app_uses_unqualified_log_macro(content)
+        && !content.contains("use leptos::logging::log;");
+
+    if !needs_mouse_event_import && !needs_log_import {
+        return content.to_string();
+    }
+
+    let mut prefix = String::new();
+    if needs_mouse_event_import {
+        prefix.push_str("use leptos::ev::MouseEvent;\n");
+    }
+    if needs_log_import {
+        prefix.push_str("use leptos::logging::log;\n");
+    }
+    prefix.push_str(content);
+    prefix
+}
+
+fn generated_app_uses_unqualified_mouse_event(content: &str) -> bool {
+    content.contains("fn(MouseEvent)")
+        || content.contains("Callback<MouseEvent>")
+        || content.contains("Callback< MouseEvent >")
+}
+
+fn generated_app_uses_unqualified_log_macro(content: &str) -> bool {
+    unqualified_log_macro_re().is_match(content)
+}
+
+fn normalize_callback_prop_call_sites(content: &str) -> String {
+    let callback_props = extract_component_callback_props(content);
+    if callback_props.is_empty() {
+        return content.to_string();
+    }
+
+    let component_tag_re =
+        Regex::new(r#"(?s)<(?P<name>[A-Z][A-Za-z0-9_]*)\b(?P<attrs>.*?)(?P<close>/?>)"#)
+            .expect("valid regex");
+    let callback_value_re = Regex::new(
+        r#"(?m)(?P<prefix>\b(?P<prop>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*)(?P<value>(?:move\s*)?\|[^|]*\|[^\n\r>]*)"#,
+    )
+    .expect("valid regex");
+
+    component_tag_re
+        .replace_all(content, |caps: &regex::Captures| {
+            let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+            let Some(props) = callback_props.get(name) else {
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            };
+
+            let attrs = caps.name("attrs").map(|m| m.as_str()).unwrap_or_default();
+            let rewritten_attrs = callback_value_re
+                .replace_all(attrs, |value_caps: &regex::Captures| {
+                    let prop = value_caps
+                        .name("prop")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default();
+                    let value = value_caps
+                        .name("value")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default()
+                        .trim();
+                    if !props.contains(prop) || value.starts_with("Callback::new(") {
+                        return value_caps
+                            .get(0)
+                            .map(|m| m.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                    }
+                    let prefix = value_caps
+                        .name("prefix")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default();
+                    format!("{prefix}Callback::new({value})")
+                })
+                .to_string();
+
+            format!(
+                "<{}{}{}",
+                name,
+                rewritten_attrs,
+                caps.name("close").map(|m| m.as_str()).unwrap_or_default()
+            )
+        })
+        .to_string()
+}
+
+fn extract_component_callback_props(content: &str) -> HashMap<String, HashSet<String>> {
+    let component_re = Regex::new(
+        r#"(?s)#\[component\]\s*(?:pub\s+)?fn\s+(?P<name>[A-Z][A-Za-z0-9_]*)\s*\((?P<params>.*?)\)\s*->"#,
+    )
+    .expect("valid regex");
+    let callback_prop_re = Regex::new(
+        r#"(?m)^\s*(?:#\[[^\]]+\]\s*)*(?P<prop>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:Option<\s*)?Callback<[^>]+>(?:\s*>)?\s*,"#,
+    )
+    .expect("valid regex");
+
+    let mut components = HashMap::new();
+    for caps in component_re.captures_iter(content) {
+        let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+        let params = caps.name("params").map(|m| m.as_str()).unwrap_or_default();
+        let props = callback_prop_re
+            .captures_iter(params)
+            .filter_map(|prop_caps| prop_caps.name("prop").map(|m| m.as_str().to_string()))
+            .collect::<HashSet<_>>();
+        if !props.is_empty() {
+            components.insert(name.to_string(), props);
+        }
+    }
+    components
 }
 
 fn normalize_leptos_view_erasure(content: &str) -> String {
@@ -1933,6 +2050,8 @@ fn validate_app_rs_with_component_specs(
     validate_component_name_collisions(context_name, content)?;
     validate_component_struct_literal_usage(context_name, content)?;
     validate_non_cloneable_callback_patterns(context_name, content)?;
+    validate_callback_prop_call_sites(context_name, content)?;
+    validate_generated_event_symbol_imports(context_name, content)?;
     validate_leptos_view_erasure_patterns(context_name, content)?;
     validate_component_prop_annotations(context_name, content)?;
     validate_string_prop_default_literals(context_name, content)?;
@@ -2110,6 +2229,77 @@ fn validate_non_cloneable_callback_patterns(context_name: &str, content: &str) -
     }
 
     Ok(())
+}
+
+fn validate_generated_event_symbol_imports(context_name: &str, content: &str) -> Result<()> {
+    if generated_app_uses_unqualified_mouse_event(content)
+        && !content.contains("use leptos::ev::MouseEvent;")
+    {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' uses `MouseEvent` in src/app.rs without importing `leptos::ev::MouseEvent`; add the import or use `leptos::ev::MouseEvent` explicitly",
+            context_name
+        );
+    }
+
+    if generated_app_uses_unqualified_log_macro(content)
+        && !content.contains("use leptos::logging::log;")
+    {
+        anyhow::bail!(
+            "Generated brand implementation for '{}' uses `log!` in src/app.rs without importing `leptos::logging::log`; add the import or use `leptos::logging::log!` explicitly",
+            context_name
+        );
+    }
+
+    Ok(())
+}
+
+fn validate_callback_prop_call_sites(context_name: &str, content: &str) -> Result<()> {
+    let callback_props = extract_component_callback_props(content);
+    if callback_props.is_empty() {
+        return Ok(());
+    }
+
+    let component_tag_re =
+        Regex::new(r#"(?s)<(?P<name>[A-Z][A-Za-z0-9_]*)\b(?P<attrs>.*?)(?P<close>/?>)"#)
+            .expect("valid regex");
+    let callback_value_re = Regex::new(
+        r#"(?m)\b(?P<prop>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>(?:move\s*)?\|[^|]*\|[^\n\r>]*)"#,
+    )
+    .expect("valid regex");
+
+    for caps in component_tag_re.captures_iter(content) {
+        let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+        let Some(props) = callback_props.get(name) else {
+            continue;
+        };
+        let attrs = caps.name("attrs").map(|m| m.as_str()).unwrap_or_default();
+        for value_caps in callback_value_re.captures_iter(attrs) {
+            let prop = value_caps
+                .name("prop")
+                .map(|m| m.as_str())
+                .unwrap_or_default();
+            let value = value_caps
+                .name("value")
+                .map(|m| m.as_str())
+                .unwrap_or_default()
+                .trim();
+            if props.contains(prop) && !value.starts_with("Callback::new(") {
+                anyhow::bail!(
+                    "Generated brand implementation for '{}' passes a raw closure into callback prop '{}.{}' in src/app.rs; callback-valued component props must use `Callback::new(...)`",
+                    context_name,
+                    name,
+                    prop
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn unqualified_log_macro_re() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"(^|[^:A-Za-z0-9_])log!\("#).expect("valid regex"))
 }
 
 fn validate_requested_component_implementations(context_name: &str, content: &str) -> Result<()> {
@@ -2710,7 +2900,7 @@ fn parse_brand_constraints(
 ) -> Result<Vec<ComponentBrandConstraint>> {
     lines
         .iter()
-        .filter(|line| line.starts_with("- "))
+        .filter(|line| line.starts_with("- `"))
         .map(|line| {
             let (topic, guidance) =
                 parse_named_text_line(line, component_name, "Brand Constraints")?;
@@ -3909,13 +4099,14 @@ mod tests {
         build_component_spec_contract, component_module_specs, extract_component_name_from_spec,
         extract_dep_feature_refs, extract_dependency_spec, extract_toml_value,
         extract_variant_declarations_from_spec, normalize_generated_app_rs,
-        normalize_generated_brand_files, pascal_case_identifier, render_brand_scaffold_contract,
-        render_brand_variant_contract, render_component_implementation_contract,
-        repair_brand_app_css, validate_app_rs, validate_app_rs_with_component_specs,
-        validate_brand_css_variables, validate_dependency_render_feature_mode,
-        validate_generated_brand_rust_patterns, validate_lib_target_name,
-        validate_matching_leptos_config, validate_optional_dep_feature_wiring,
-        ComponentVariantDeclarations, GeneratedOutputFile, ParsedImplementationContract,
+        normalize_generated_brand_files, parse_brand_constraints, pascal_case_identifier,
+        render_brand_scaffold_contract, render_brand_variant_contract,
+        render_component_implementation_contract, repair_brand_app_css, validate_app_rs,
+        validate_app_rs_with_component_specs, validate_brand_css_variables,
+        validate_dependency_render_feature_mode, validate_generated_brand_rust_patterns,
+        validate_lib_target_name, validate_matching_leptos_config,
+        validate_optional_dep_feature_wiring, ComponentVariantDeclarations, GeneratedOutputFile,
+        ParsedImplementationContract,
     };
     use std::path::PathBuf;
 
@@ -4917,6 +5108,81 @@ fn noop() {}
     }
 
     #[test]
+    fn app_rs_rejects_missing_mouse_event_import_for_callback_props() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! { <Button label="Primary" on_click=|_| {} /> }
+}
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected missing MouseEvent import");
+        assert!(err
+            .to_string()
+            .contains("without importing `leptos::ev::MouseEvent`"));
+    }
+
+    #[test]
+    fn app_rs_rejects_missing_log_macro_import() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! { <Button label="Primary" on_click=|_| log!("clicked") /> }
+}
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected missing log import");
+        assert!(err
+            .to_string()
+            .contains("without importing `leptos::logging::log`"));
+    }
+
+    #[test]
     fn app_rs_rejects_mojibake_sequences() {
         let app = r#"use leptos::*;
 use leptos_router::*;
@@ -5155,6 +5421,186 @@ fn AccountCard(
         assert!(!normalized.contains("Box<dyn Fn()>"));
         assert!(!normalized.contains("Â©"));
         assert_eq!(normalized.matches("#[derive(Clone)]").count(), 1);
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_synthesizes_mouse_event_and_log_imports() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Button
+            label="Primary"
+            on_click=|_| log!("Primary button clicked")
+        />
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("use leptos::ev::MouseEvent;"));
+        assert!(normalized.contains("use leptos::logging::log;"));
+        assert!(normalized.contains("on_click=Callback::new(|_| log!(\"Primary button clicked\"))"));
+        assert_eq!(normalized.matches("use leptos::ev::MouseEvent;").count(), 1);
+        assert_eq!(normalized.matches("use leptos::logging::log;").count(), 1);
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_does_not_duplicate_existing_fully_qualified_event_symbols() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<leptos::ev::MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Button
+            label="Primary"
+            on_click=|_| leptos::logging::log!("Primary button clicked")
+        />
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(!normalized.contains("use leptos::ev::MouseEvent;"));
+        assert!(!normalized.contains("use leptos::logging::log;"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_wraps_raw_callback_prop_closures() {
+        let app = r#"use leptos::*;
+use leptos_router::*;
+
+#[component]
+fn Card(
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <article/> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Card on_click=move |_| leptos::logging::log!("Card clicked") />
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized
+            .contains("on_click=Callback::new(move |_| leptos::logging::log!(\"Card clicked\"))"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_does_not_rewrite_direct_dom_handlers() {
+        let app = r#"use leptos::*;
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <button on:click=move |_| leptos::logging::log!("Clicked")>
+            "Click"
+        </button>
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("on:click=move |_| leptos::logging::log!(\"Clicked\")"));
+        assert!(!normalized.contains("on:click=Callback::new("));
+    }
+
+    #[test]
+    fn app_rs_rejects_raw_closure_values_for_callback_props() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn Card(
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <article/> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Card on_click=move |_| leptos::logging::log!("Card clicked") />
+    }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected raw callback closure failure");
+        assert!(err
+            .to_string()
+            .contains("callback-valued component props must use `Callback::new(...)`"));
+    }
+
+    #[test]
+    fn app_rs_accepts_callback_new_values_for_callback_props() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn Card(
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <article/> }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Card on_click=Callback::new(move |_| leptos::logging::log!("Card clicked")) />
+    }
+}
+"#;
+
+        validate_app_rs("demo", app).expect("Callback::new call sites should validate");
     }
 
     #[test]
@@ -5707,5 +6153,25 @@ fn HomePage() -> impl IntoView {
         assert!(normalized.contains("BadgeVariant::Success =>"));
         assert!(normalized.contains(r#"variant=BadgeVariant::Neutral"#));
         assert!(normalized.contains("variant: BadgeVariant::Success,"));
+    }
+
+    #[test]
+    fn parse_brand_constraints_ignores_clarification_warning_bullets() {
+        let constraints = parse_brand_constraints(
+            "Badge",
+            vec![
+                "- `color`: Color must use `brand.colors.secondary.green` for the **Success** variant."
+                    .to_string(),
+                "- ⚠️ **Clarification Required**: The exact token value for `brand.colors.secondary.green` is unspecified in the active brand identity specification."
+                    .to_string(),
+            ],
+        )
+        .expect("brand constraints should parse");
+
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].topic, "color");
+        assert!(constraints[0]
+            .guidance
+            .contains("brand.colors.secondary.green"));
     }
 }

@@ -287,6 +287,7 @@ static_prompt: |
   - for the common topics `typography`, `spacing`, `color`, and `hierarchy`, the guidance sentence MUST begin with the capitalized topic word itself followed by an action phrase, such as `Typography must ...` or `Hierarchy must ...`
   - do NOT switch to `- **Topic**:` formatting in this section
   - do NOT place nested bullets under a brand-constraint bullet; each constraint MUST be a single flat bullet line
+  - do NOT emit inline clarification/warning bullets such as `Clarification Required` inside `### Brand Constraints`; if clarification is required, use `## Clarification Questions (Blocking)` instead of finalizing the spec
   - if multiple token rules are needed, express them in one sentence or use multiple flat `- `topic`: ...` bullets
   - valid examples:
     - `typography`: Typography must use `testcompany.typography.family.primary` for visible text in this component.
