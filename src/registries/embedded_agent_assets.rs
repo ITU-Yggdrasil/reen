@@ -23,6 +23,9 @@ pub fn embedded_agent_spec(filename: &str) -> Option<&'static str> {
         "create_specifications_brand.yml" => {
             Some(include_str!("../../agents/create_specifications_brand.yml"))
         }
+        "create_specifications_layout.yml" => Some(include_str!(
+            "../../agents/create_specifications_layout.yml"
+        )),
         "create_specification_components.yml" => Some(include_str!(
             "../../agents/create_specification_components.yml"
         )),
@@ -47,6 +50,7 @@ pub fn embedded_expected_agent_names() -> &'static [&'static str] {
         "create_specifications_main",
         "create_specifications_external_api",
         "create_specifications_brand",
+        "create_specifications_layout",
         "create_specification_components",
         "create_implementation",
         "create_implementation_brand",
@@ -100,5 +104,14 @@ mod tests {
         assert!(content.contains("brand_identity_specifications"));
         assert!(content.contains("provided for this run"));
         assert!(content.contains("never assume a built-in default brand"));
+    }
+
+    #[test]
+    fn layout_spec_agent_uses_component_and_brand_context() {
+        let content = embedded_agent_spec("create_specifications_layout.yml")
+            .expect("embedded layout spec agent");
+        assert!(content.contains("brand_identity_specifications"));
+        assert!(content.contains("draft_component_names"));
+        assert!(content.contains("# Page Layout Specification"));
     }
 }

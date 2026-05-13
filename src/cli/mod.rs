@@ -16,6 +16,7 @@ mod brand_specs;
 mod cargo_commands;
 mod compilation_fix;
 mod dependency_graph;
+mod layout_specs;
 mod openapi_fetcher;
 mod patch_service;
 mod pipeline_context;
@@ -36,6 +37,11 @@ use brand_specs::{
 };
 use dependency_graph::{
     build_execution_plan, expand_with_transitive_dependencies, DependencyArtifact, ExecutionNode,
+};
+use layout_specs::{
+    canonicalize_layout_component_names, collect_layout_component_references,
+    is_layout_draft_path, is_layout_spec_path, missing_required_layout_spec_parts,
+    validate_layout_spec_content,
 };
 use patch_service::apply_draft_patches;
 use pipeline_context::{build_specification_context, fit_context_to_token_limit};
@@ -93,6 +99,7 @@ pub struct CategoryFilter {
     pub data: bool,
     pub brands: bool,
     pub visuals: bool,
+    pub layouts: bool,
     pub components: bool,
 }
 
@@ -103,12 +110,18 @@ impl CategoryFilter {
             data: false,
             brands: false,
             visuals: false,
+            layouts: false,
             components: false,
         }
     }
 
     fn is_active(&self) -> bool {
-        self.contexts || self.data || self.brands || self.visuals || self.components
+        self.contexts
+            || self.data
+            || self.brands
+            || self.visuals
+            || self.layouts
+            || self.components
     }
 
     fn include_data(&self) -> bool {
@@ -125,6 +138,10 @@ impl CategoryFilter {
 
     fn include_visuals(&self) -> bool {
         !self.is_active() || self.visuals
+    }
+
+    fn include_layouts(&self) -> bool {
+        !self.is_active() || self.layouts
     }
 
     fn include_components(&self) -> bool {
@@ -150,6 +167,7 @@ impl CategoryFilter {
                     "contexts" | "external_apis" => self.include_contexts(),
                     "brands" => self.include_brands(),
                     "visuals" => self.include_visuals(),
+                    "layouts" => self.include_layouts(),
                     "components" => self.include_components(),
                     _ => self.include_root(),
                 };
@@ -161,6 +179,12 @@ impl CategoryFilter {
 
 fn implementation_category_filter(filter: &CategoryFilter) -> CategoryFilter {
     if filter.visuals {
+        CategoryFilter {
+            layouts: true,
+            components: true,
+            ..*filter
+        }
+    } else if filter.layouts {
         CategoryFilter {
             components: true,
             ..*filter
@@ -207,6 +231,7 @@ fn is_visual_spec_path(path: &Path, specifications_dir: &str) -> bool {
 
 fn is_brand_site_implementation_spec_path(path: &Path, specifications_dir: &str) -> bool {
     is_visual_spec_path(path, specifications_dir)
+        || is_layout_spec_path(path, specifications_dir)
         || is_component_spec_path(path, specifications_dir)
 }
 
@@ -731,6 +756,55 @@ pub async fn check_specification(names: Vec<String>, _config: &Config) -> Result
             }
         }
 
+        if is_layout_spec_path(&spec_path, SPECIFICATIONS_DIR)
+            || is_layout_draft_path(&draft_file, DRAFTS_DIR)
+        {
+            let actionable = extract_actionable_blocking_bullets_from_section(
+                extract_blocking_ambiguities_section(&spec_content),
+            );
+            if !actionable.is_empty() {
+                issues += 1;
+                print_blocking_items(
+                    &draft_file,
+                    "spec:blocking",
+                    &format!(
+                        "Blocking ambiguities detected in specification for '{}'.",
+                        draft_name
+                    ),
+                    &actionable,
+                );
+                continue;
+            }
+
+            match validate_layout_spec_content(&spec_content) {
+                Ok(validation) => {
+                    if !validation.blocking_ambiguities.is_empty() {
+                        issues += 1;
+                        print_blocking_items(
+                            &draft_file,
+                            "spec:blocking",
+                            &format!(
+                                "Blocking ambiguities detected in specification for '{}'.",
+                                draft_name
+                            ),
+                            &validation.blocking_ambiguities,
+                        );
+                    }
+                }
+                Err(err) => {
+                    issues += 1;
+                    eprintln!("error[spec:invalid-layout]:");
+                    eprintln!("\u{001b}[31m{}\u{001b}[0m", draft_file.display());
+                    eprintln!(
+                        "  Invalid layout specification for '{}': {}",
+                        draft_name, err
+                    );
+                    eprintln!();
+                }
+            }
+            continue;
+        }
+
         if is_brand_spec_path(&spec_path, SPECIFICATIONS_DIR)
             || is_brand_draft_path(&draft_file, DRAFTS_DIR)
         {
@@ -869,6 +943,37 @@ fn finalize_specification_output(
                 })?;
             actionable = validation.blocking_ambiguities;
         }
+        has_blocking_ambiguities = !actionable.is_empty();
+        if has_blocking_ambiguities {
+            normalized_spec_content =
+                render_blocking_section_only("Blocking Ambiguities", &actionable);
+            print_blocking_items(
+                draft_file,
+                "spec:blocking",
+                &format!(
+                    "Blocking ambiguities detected in generated specification for '{}'.",
+                    draft_name
+                ),
+                &actionable,
+            );
+        }
+    } else if is_layout_draft_path(draft_file, DRAFTS_DIR) {
+        normalized_spec_content =
+            canonicalize_layout_component_names(&normalized_spec_content, &canonical_component_name_map(&additional_context));
+        let validation = validate_layout_spec_content(&normalized_spec_content).map_err(|err| {
+            anyhow::anyhow!(
+                "generated layout specification for '{}' is invalid: {}",
+                draft_name,
+                err
+            )
+        })?;
+        actionable = validation.blocking_ambiguities;
+        actionable.extend(unresolved_layout_component_reference_issues(
+            &normalized_spec_content,
+            &additional_context,
+        ));
+        actionable.sort();
+        actionable.dedup();
         has_blocking_ambiguities = !actionable.is_empty();
         if has_blocking_ambiguities {
             normalized_spec_content =
@@ -1800,7 +1905,7 @@ async fn create_brand_site_implementation_run(
         context_files.len()
     );
 
-    let mut brand_missing_requirements = std::collections::BTreeMap::new();
+    let mut site_missing_requirements = std::collections::BTreeMap::new();
     let mut had_unspecified = false;
     for context_file in &context_files {
         let context_name = context_file
@@ -1812,7 +1917,14 @@ async fn create_brand_site_implementation_run(
             let context_content = fs::read_to_string(context_file).unwrap_or_default();
             let missing = missing_required_brand_spec_parts(&context_content);
             if !missing.is_empty() {
-                brand_missing_requirements.insert(context_file.clone(), missing);
+                site_missing_requirements.insert(context_file.clone(), missing);
+                missing_required_parts = true;
+            }
+        } else if is_layout_spec_path(context_file, SPECIFICATIONS_DIR) {
+            let context_content = fs::read_to_string(context_file).unwrap_or_default();
+            let missing = missing_required_layout_spec_parts(&context_content);
+            if !missing.is_empty() {
+                site_missing_requirements.insert(context_file.clone(), missing);
                 missing_required_parts = true;
             }
         }
@@ -1823,11 +1935,11 @@ async fn create_brand_site_implementation_run(
         }
     }
 
-    if !brand_missing_requirements.is_empty() {
+    if !site_missing_requirements.is_empty() {
         let mut msg = String::from(
-            "Missing required brand specification data. Brand implementation was skipped for:\n",
+            "Missing required site specification data. Brand-site implementation was skipped for:\n",
         );
-        for (path, missing) in &brand_missing_requirements {
+        for (path, missing) in &site_missing_requirements {
             msg.push_str(&format!("\n- {}\n", path.display()));
             for item in missing {
                 msg.push_str(&format!("  - {}\n", item));
@@ -1866,6 +1978,11 @@ async fn create_brand_site_implementation_run(
     let context_file = context_files
         .iter()
         .find(|path| is_visual_spec_path(path, SPECIFICATIONS_DIR))
+        .or_else(|| {
+            context_files
+                .iter()
+                .find(|path| is_layout_spec_path(path, SPECIFICATIONS_DIR))
+        })
         .or_else(|| context_files.first())
         .cloned()
         .context("brand-site implementation run requires at least one specification")?;
@@ -2080,6 +2197,15 @@ fn augment_brand_site_implementation_context(
         additional_context.insert("brand_identity_specifications".to_string(), json!(rendered));
     }
 
+    let layout_specs = context_files
+        .iter()
+        .filter(|path| is_layout_spec_path(path, SPECIFICATIONS_DIR))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(rendered) = render_selected_specifications("LAYOUT_SPEC", &layout_specs)? {
+        additional_context.insert("layout_specifications".to_string(), json!(rendered));
+    }
+
     let selected_component_specs = context_files
         .iter()
         .filter(|path| is_component_spec_path(path, SPECIFICATIONS_DIR))
@@ -2087,7 +2213,7 @@ fn augment_brand_site_implementation_context(
         .collect::<Vec<_>>();
     let component_specs = if !selected_component_specs.is_empty() {
         selected_component_specs
-    } else if !visual_specs.is_empty() {
+    } else if !visual_specs.is_empty() || !layout_specs.is_empty() {
         collect_md_files_recursive(&Path::new(SPECIFICATIONS_DIR).join("components"), "md")?
     } else {
         Vec::new()
@@ -2132,14 +2258,21 @@ fn brand_site_context_name(context_files: &[PathBuf]) -> String {
     let has_visuals = context_files
         .iter()
         .any(|path| is_visual_spec_path(path, SPECIFICATIONS_DIR));
+    let has_layouts = context_files
+        .iter()
+        .any(|path| is_layout_spec_path(path, SPECIFICATIONS_DIR));
     let has_components = context_files
         .iter()
         .any(|path| is_component_spec_path(path, SPECIFICATIONS_DIR));
-    match (has_visuals, has_components) {
-        (true, true) => "brand_site_visuals_components".to_string(),
-        (true, false) => "brand_site_visuals".to_string(),
-        (false, true) => "brand_site_components".to_string(),
-        (false, false) => "brand_site".to_string(),
+    match (has_visuals, has_layouts, has_components) {
+        (true, true, true) => "brand_site_visuals_layouts_components".to_string(),
+        (true, true, false) => "brand_site_visuals_layouts".to_string(),
+        (true, false, true) => "brand_site_visuals_components".to_string(),
+        (true, false, false) => "brand_site_visuals".to_string(),
+        (false, true, true) => "brand_site_layouts_components".to_string(),
+        (false, true, false) => "brand_site_layouts".to_string(),
+        (false, false, true) => "brand_site_components".to_string(),
+        (false, false, false) => "brand_site".to_string(),
     }
 }
 
@@ -2447,6 +2580,48 @@ fn collect_known_component_names(context: &HashMap<String, serde_json::Value>) -
     names
 }
 
+fn canonical_component_name_map(
+    context: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    for key in ["draft_component_names", "component_library_names"] {
+        if let Some(values) = context.get(key).and_then(|value| value.as_array()) {
+            for value in values {
+                if let Some(name) = value.as_str() {
+                    names
+                        .entry(normalize_component_reference_name(name))
+                        .or_insert_with(|| name.to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn ambiguous_component_reference_names(
+    context: &HashMap<String, serde_json::Value>,
+) -> HashSet<String> {
+    let mut first_seen: HashMap<String, String> = HashMap::new();
+    let mut ambiguous = HashSet::new();
+    for key in ["draft_component_names", "component_library_names"] {
+        if let Some(values) = context.get(key).and_then(|value| value.as_array()) {
+            for value in values {
+                if let Some(name) = value.as_str() {
+                    let normalized = normalize_component_reference_name(name);
+                    if let Some(existing) = first_seen.get(&normalized) {
+                        if !existing.eq(name) {
+                            ambiguous.insert(normalized);
+                        }
+                    } else {
+                        first_seen.insert(normalized, name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ambiguous
+}
+
 fn unresolved_component_references(
     content: &str,
     context: &HashMap<String, serde_json::Value>,
@@ -2462,6 +2637,41 @@ fn unresolved_component_references(
     unresolved.sort_by_key(|name| name.to_ascii_lowercase());
     unresolved.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
     unresolved
+}
+
+fn unresolved_layout_component_reference_issues(
+    content: &str,
+    context: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let known_names = canonical_component_name_map(context);
+    let ambiguous_names = ambiguous_component_reference_names(context);
+    let mut issues = Vec::new();
+
+    for name in collect_layout_component_references(content) {
+        let normalized = normalize_component_reference_name(&name);
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if ambiguous_names.contains(&normalized) {
+            issues.push(format!(
+                "The component reference `{}` is ambiguous because multiple known components differ only by casing.",
+                name
+            ));
+            continue;
+        }
+
+        if !known_names.contains_key(&normalized) {
+            issues.push(format!(
+                "The component reference `{}` does not match any known component from `drafts/components` or `component_drafts`.",
+                name
+            ));
+        }
+    }
+
+    issues.sort();
+    issues.dedup();
+    issues
 }
 
 fn extract_actionable_blocking_bullets_from_section(section: Option<String>) -> Vec<String> {
@@ -3085,6 +3295,7 @@ fn clear_stage_agent_cache_dirs(stage: Stage, config: &Config) -> Result<usize> 
             "create_specifications_context",
             "create_specifications_external_api",
             "create_specifications_brand",
+            "create_specifications_layout",
             "create_specification_components",
             "create_specifications_main",
         ],
@@ -4065,8 +4276,9 @@ fn resolve_named_input_in_category(
 /// 1. data/ folder (simple data types)
 /// 2. contexts/ folder (use cases with role players)
 /// 3. brands/ and visuals/ folders (design foundations)
-/// 4. components/ folder (component templates)
-/// 5. Root files (like app.md)
+/// 4. layouts/ folder (page blueprints)
+/// 5. components/ folder (component templates)
+/// 6. Root files (like app.md)
 ///
 /// The `filter` controls which categories are included. When no filter is
 /// active (all flags false), all categories are scanned.
@@ -4105,6 +4317,11 @@ fn resolve_input_files(
         if filter.include_visuals() {
             let visuals_dir = dir_path.join("visuals");
             files.extend(collect_md_files_recursive(&visuals_dir, extension)?);
+        }
+
+        if filter.include_layouts() {
+            let layouts_dir = dir_path.join("layouts");
+            files.extend(collect_md_files_recursive(&layouts_dir, extension)?);
         }
 
         if filter.include_components() {
@@ -4186,6 +4403,15 @@ fn resolve_input_files(
                 }
             }
 
+            if !found && filter.include_layouts() {
+                let layout_matches =
+                    resolve_named_input_in_category(&dir_path.join("layouts"), &name, extension)?;
+                if !layout_matches.is_empty() {
+                    files.extend(layout_matches);
+                    found = true;
+                }
+            }
+
             if !found && filter.include_components() {
                 let component_matches = resolve_named_input_in_category(
                     &dir_path.join("components"),
@@ -4220,6 +4446,9 @@ fn resolve_input_files(
                     }
                     if filter.include_visuals() {
                         parts.push("visuals/");
+                    }
+                    if filter.include_layouts() {
+                        parts.push("layouts/");
                     }
                     if filter.include_components() {
                         parts.push("components/");
@@ -4446,6 +4675,7 @@ fn determine_draft_input_path(
 /// - "create_specifications_context" for files in contexts/ folder
 /// - "create_specifications_external_api" for files in external_apis/ folder
 /// - "create_specifications_brand" for files in brands/ and visuals/ folders
+/// - "create_specifications_layout" for files in layouts/ folder
 /// - "create_specifications_main" for files in root folder
 fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'static str {
     let draft_path = draft_file.to_path_buf();
@@ -4463,6 +4693,7 @@ fn determine_specification_agent(draft_file: &Path, drafts_dir: &str) -> &'stati
             "external_apis" => "create_specifications_external_api",
             "brands" => "create_specifications_brand",
             "visuals" => "create_specifications_brand",
+            "layouts" => "create_specifications_layout",
             "components" => "create_specification_components",
             _ => "create_specifications_main",
         }
@@ -5186,6 +5417,14 @@ Problem:
     }
 
     #[test]
+    fn determine_specification_agent_routes_layouts_to_layout_agent() {
+        assert_eq!(
+            determine_specification_agent(Path::new("drafts/layouts/home_page.md"), "drafts"),
+            "create_specifications_layout"
+        );
+    }
+
+    #[test]
     fn determine_specification_agent_routes_components_to_component_agent() {
         assert_eq!(
             determine_specification_agent(Path::new("drafts/components/button.md"), "drafts"),
@@ -5234,6 +5473,16 @@ Problem:
     }
 
     #[test]
+    fn determine_implementation_output_path_maps_layout_specs_to_scaffold_tracking_file() {
+        let path = determine_implementation_output_path(
+            Path::new("specifications/layouts/home_page.md"),
+            "specifications",
+        )
+        .expect("implementation path");
+        assert_eq!(path, Path::new("Cargo.toml"));
+    }
+
+    #[test]
     fn implementation_agent_name_routes_brand_site_specs_to_brand_agent() {
         assert_eq!(
             implementation_agent_name(Path::new("specifications/visuals/acme.md")),
@@ -5241,6 +5490,10 @@ Problem:
         );
         assert_eq!(
             implementation_agent_name(Path::new("specifications/components/button.md")),
+            "create_implementation_brand"
+        );
+        assert_eq!(
+            implementation_agent_name(Path::new("specifications/layouts/home_page.md")),
             "create_implementation_brand"
         );
         assert_eq!(
@@ -5272,6 +5525,10 @@ Problem:
         ));
         assert!(is_brand_site_implementation_spec_path(
             Path::new("specifications/components/button.md"),
+            "specifications"
+        ));
+        assert!(is_brand_site_implementation_spec_path(
+            Path::new("specifications/layouts/home_page.md"),
             "specifications"
         ));
         assert!(!is_brand_site_implementation_spec_path(
@@ -5339,6 +5596,7 @@ Problem:
                 data: false,
                 brands: false,
                 visuals: false,
+                layouts: false,
                 components: false,
             },
         )
@@ -5355,6 +5613,7 @@ Problem:
                 data: true,
                 brands: false,
                 visuals: false,
+                layouts: false,
                 components: false,
             },
         )
@@ -5371,6 +5630,7 @@ Problem:
                 data: false,
                 brands: true,
                 visuals: false,
+                layouts: false,
                 components: false,
             },
         )
@@ -5419,6 +5679,7 @@ Problem:
                 data: false,
                 brands: false,
                 visuals: false,
+                layouts: false,
                 components: true,
             },
         )
@@ -5466,6 +5727,7 @@ Problem:
                 data: false,
                 brands: false,
                 visuals: false,
+                layouts: false,
                 components: true,
             },
         )
@@ -5478,10 +5740,11 @@ Problem:
     }
 
     #[test]
-    fn implementation_visuals_filter_includes_components() {
+    fn implementation_visuals_filter_includes_layouts_and_components() {
         let root = temp_root("implementation_visuals_filter");
         let specifications = root.join("specifications");
         fs::create_dir_all(specifications.join("visuals")).expect("mkdir visuals");
+        fs::create_dir_all(specifications.join("layouts")).expect("mkdir layouts");
         fs::create_dir_all(specifications.join("components")).expect("mkdir components");
         fs::create_dir_all(specifications.join("contexts")).expect("mkdir contexts");
         fs::write(
@@ -5489,6 +5752,11 @@ Problem:
             "# Snake Visuals",
         )
         .expect("write visuals");
+        fs::write(
+            specifications.join("layouts/home_page.md"),
+            "# Page Layout Specification",
+        )
+        .expect("write layout");
         fs::write(specifications.join("components/button.md"), "# Button")
             .expect("write component");
         fs::write(specifications.join("contexts/game_loop.md"), "# Game Loop")
@@ -5499,6 +5767,7 @@ Problem:
             data: false,
             brands: false,
             visuals: true,
+            layouts: false,
             components: false,
         });
         let files = resolve_input_files(
@@ -5509,16 +5778,69 @@ Problem:
         )
         .expect("implementation visuals lookup");
 
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 3);
         assert!(files
             .iter()
             .any(|path| path.ends_with("visuals/snake_visuals.md")));
+        assert!(files
+            .iter()
+            .any(|path| path.ends_with("layouts/home_page.md")));
         assert!(files
             .iter()
             .any(|path| path.ends_with("components/button.md")));
         assert!(!files
             .iter()
             .any(|path| path.ends_with("contexts/game_loop.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn implementation_layouts_filter_includes_components() {
+        let root = temp_root("implementation_layouts_filter");
+        let specifications = root.join("specifications");
+        fs::create_dir_all(specifications.join("layouts")).expect("mkdir layouts");
+        fs::create_dir_all(specifications.join("components")).expect("mkdir components");
+        fs::create_dir_all(specifications.join("visuals")).expect("mkdir visuals");
+        fs::write(
+            specifications.join("layouts/home_page.md"),
+            "# Page Layout Specification",
+        )
+        .expect("write layout");
+        fs::write(specifications.join("components/button.md"), "# Button")
+            .expect("write component");
+        fs::write(
+            specifications.join("visuals/snake_visuals.md"),
+            "# Snake Visuals",
+        )
+        .expect("write visuals");
+
+        let filter = implementation_category_filter(&CategoryFilter {
+            contexts: false,
+            data: false,
+            brands: false,
+            visuals: false,
+            layouts: true,
+            components: false,
+        });
+        let files = resolve_input_files(
+            specifications.to_str().expect("specifications path"),
+            Vec::new(),
+            "md",
+            &filter,
+        )
+        .expect("implementation layouts lookup");
+
+        assert_eq!(files.len(), 2);
+        assert!(files
+            .iter()
+            .any(|path| path.ends_with("layouts/home_page.md")));
+        assert!(files
+            .iter()
+            .any(|path| path.ends_with("components/button.md")));
+        assert!(!files
+            .iter()
+            .any(|path| path.ends_with("visuals/snake_visuals.md")));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -5542,6 +5864,7 @@ Problem:
             data: false,
             brands: false,
             visuals: false,
+            layouts: false,
             components: true,
         });
         let files = resolve_input_files(

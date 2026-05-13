@@ -20,6 +20,15 @@ fn is_component_draft_path(draft_file: &Path, drafts_dir: &str) -> bool {
         == Some("components")
 }
 
+fn is_layout_draft_path(draft_file: &Path, drafts_dir: &str) -> bool {
+    draft_file
+        .strip_prefix(drafts_dir)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .and_then(|component| component.as_os_str().to_str())
+        == Some("layouts")
+}
+
 fn draft_category(draft_file: &Path, drafts_dir: &str) -> Option<String> {
     draft_file
         .strip_prefix(drafts_dir)
@@ -411,7 +420,9 @@ pub(super) fn build_specification_context(
         context.insert("draft_category".to_string(), json!(category));
     }
 
-    if is_component_draft_path(draft_file, DRAFTS_DIR) {
+    if is_component_draft_path(draft_file, DRAFTS_DIR)
+        || is_layout_draft_path(draft_file, DRAFTS_DIR)
+    {
         add_component_context(draft_file, &mut context)?;
     }
 

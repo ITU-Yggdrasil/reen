@@ -97,7 +97,7 @@ The system automatically selects the appropriate agent based on the file's locat
 
 ### 4. Brand Identity Agent (`create_specifications_brand`)
 
-**Used for**: `drafts/brands/*.md`
+**Used for**: `drafts/brands/*.md`, `drafts/visuals/*.md`
 
 **Purpose**: Creates canonical markdown brand identity specifications from designer drafts.
 
@@ -127,6 +127,36 @@ The system automatically selects the appropriate agent based on the file's locat
 - Framework-specific code
 - Arbitrary section structure outside the canonical contract
 
+### 5. Layout Specification Agent (`create_specifications_layout`)
+
+**Used for**: `drafts/layouts/*.md`
+
+**Purpose**: Creates deterministic page layout specifications from page-blueprint drafts.
+
+**Characteristics**:
+- Outputs a structured page-level composition contract
+- Defines section order, section purpose, visual priority, and content mode
+- Declares which components appear in each section and how many there are
+- Is implementation-independent and distinct from reusable component APIs
+- Uses strict component-name matching against known component context
+
+**Output includes**:
+- `# Page Layout Specification`
+- `## Description`
+- `## Page Metadata`
+- `## Visual Intent`
+- `## Section Order`
+- `## Sections`
+- `## Component Placement Summary`
+- `## Blocking Ambiguities` when applicable
+- `## Implementation Choices Left Open` when applicable
+
+**Does NOT include**:
+- Reusable component prop APIs
+- Framework-specific code
+- Brand-token definitions
+- Arbitrary page sections not justified by the draft
+
 ## Processing Order
 
 Files are processed in this order to ensure dependencies are available:
@@ -137,10 +167,13 @@ Files are processed in this order to ensure dependencies are available:
 2. **Contexts second** (`contexts/` folder)
    - May depend on data types
 
-3. **Brands as foundational design artifacts** (`brands/` folder)
-   - May be referenced by downstream visual work
+3. **Brands / visuals as foundational design artifacts** (`brands/`, `visuals/` folders)
+   - May be referenced by downstream site work
 
-4. **Main files last** (root folder)
+4. **Layouts as page blueprints** (`layouts/` folder)
+   - May depend on existing brand/visual and component context
+
+5. **Main files last** (root folder)
    - May depend on both data types and contexts
 
 ## File Structure Mapping
@@ -153,6 +186,10 @@ drafts/
 |  `- Y.md -> create_specifications_context -> specifications/contexts/Y.md
 |- brands/
 |  `- Z.md -> create_specifications_brand -> specifications/brands/Z.md
+|- visuals/
+|  `- V.md -> create_specifications_brand -> specifications/visuals/V.md
+|- layouts/
+|  `- L.md -> create_specifications_layout -> specifications/layouts/L.md
 `- app.md -> create_specifications_main -> specifications/app.md
 ```
 
@@ -175,6 +212,17 @@ When implementing specifications, the same folder-based selection applies:
   - CLI argument parsing
   - Module organization
   - Application flow
+
+- **Layout specs** -> Page composition inputs for site implementation
+  - Section order
+  - Component placement
+  - Repeated-item counts
+  - Action ownership
+
+- **Visual specs** + **layout specs** + **component specs** -> Brand-site implementation scaffold
+  - Visual specs define identity and styling direction
+  - Layout specs define the page blueprint
+  - Component specs define reusable building blocks
 
 The implementation agent (`create_implementation`) enforces immutability for data types:
 - Validates that mutability is explicitly justified if present

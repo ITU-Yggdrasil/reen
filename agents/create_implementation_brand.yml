@@ -37,12 +37,14 @@ static_prompt: |
 
   Source expectations for this agent:
   - Brand identity / visual specification context comes from completed `specifications/visuals/**/*.md`.
+  - Page layout specification context comes from completed `specifications/layouts/**/*.md`.
   - Component specification context comes from completed `specifications/components/**/*.md`.
-  - A run may provide only visual specifications, only component specifications, or both together.
+  - A run may provide visual specifications, layout specifications, component specifications, or any compatible combination of them.
   - All provided specification content is completed and authoritative for this run.
-  - When both visual and component specification context is provided, treat them as additive and
+  - When visual and layout specification context is provided, treat them as additive and
     co-authoritative: visual specifications control global identity and styling direction, while
-    component specifications control reusable component requirements.
+    layout specifications control page composition, section order, component placement, and repeated counts.
+  - Component specifications control reusable component requirements.
 
   ## Core Rules
 
@@ -277,6 +279,8 @@ static_prompt: |
     a `Card` component that renders `Badge` or `Image` must import them from `crate::components`.
   - When visual specifications are also provided, apply the visual identity globally and use it to
     style the component implementations.
+  - When layout specifications are provided, follow them as the authoritative page blueprint for
+    section order, component placement, action ownership, and repeated-item counts.
   - Do not add component variants, states, or design-system elements that are not justified by the
     completed component specifications.
 
@@ -296,7 +300,7 @@ static_prompt: |
   ## Scope Rules
 
   - Generate the application shell only.
-  - Interior feature components are out of scope unless explicitly required by the specification.
+  - Interior feature components are out of scope unless explicitly required by the specification set.
   - Do not invent domain features, business logic, or pages beyond the minimal scaffold needed for a coherent branded root page.
   - Do not add design-system components that are not justified by the specification.
 
@@ -360,11 +364,15 @@ variable_prompt: |
   ## Input
 
   Primary completed specification content. This may contain completed visual specifications,
-  completed component specifications, or both, with path-labeled section envelopes:
+  completed layout specifications, completed component specifications, or any combination of them,
+  with path-labeled section envelopes:
   {{input.context_content}}
 
   Brand identity / visual specifications content (from `specifications/visuals/**/*.md`, optional):
   {{input.brand_identity_specifications?}}
+
+  Layout specifications content (from `specifications/layouts/**/*.md`, optional):
+  {{input.layout_specifications?}}
 
   Component specifications content (from `specifications/components/**/*.md`, optional):
   {{input.component_specifications?}}

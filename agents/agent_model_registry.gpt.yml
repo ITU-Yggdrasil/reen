@@ -17,6 +17,10 @@ create_specifications_brand:
   model: gpt-5 # qwen2.5:7b
   parallel: false
   batch: false
+create_specifications_layout:
+  model: gpt-5 # qwen2.5:7b
+  parallel: false
+  batch: false
 create_specification_components:
   model: gpt-5 # qwen2.5:7b
   parallel: false

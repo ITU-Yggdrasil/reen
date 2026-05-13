@@ -60,6 +60,9 @@ reen create specification
 # Process only component drafts
 reen create specification --components
 
+# Process only page layout drafts
+reen create specification --layouts
+
 # Process specific drafts
 reen create specification app agent_runner
 
@@ -79,6 +82,9 @@ Generate implementation code from specifications:
 ```bash
 # Implement all contexts
 reen create implementation
+
+# Build site implementation inputs from visuals plus related layouts
+reen create implementation --visuals
 
 # Implement specific contexts
 reen create implementation app file_cache
@@ -136,6 +142,12 @@ Agents are defined in YAML files in the `agents/` directory. Each agent specific
 - `name`: Agent identifier
 - `description`: What the agent does
 - `system_prompt`: Instructions for the agent (supports templating)
+
+For site-generation flows, the design inputs are intentionally split:
+
+- `drafts/brands` and `drafts/visuals`: global brand identity and visual direction
+- `drafts/layouts`: page-level blueprints that define section order, component placement, and counts
+- `drafts/components`: reusable component contracts
 
 ### Templating
 
