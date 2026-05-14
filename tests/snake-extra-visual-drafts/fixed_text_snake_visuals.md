@@ -39,7 +39,7 @@ The visual identity is built on a minimal, high-contrast palette.
 
 Red white and blue form the foundation, creating clarity and strong visual structure. 
 
-Additional colors such as green and grey may be used sparingly to support communication (for example, to indicate different states or highlight information), but should never dominate the overall expression.
+Additional colors such as green and grey may be used sparingly to support communication (for example, to indicate different states or highlight information), but should never dominate the overall expression. Remember green is not a creative color.
 
 Color usage should always prioritize legibility and balance, with generous use of white space.
 
