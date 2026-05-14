@@ -230,9 +230,15 @@ static_prompt: |
   - When a generated component prop is typed as `Callback<...>` or `Option<Callback<...>>`,
     generated component call sites must pass `Callback::new(move |_| ...)` rather than a raw
     closure value.
+  - If a generated component prop is typed as `Option<Callback<...>>`, annotate that prop with
+    `#[prop(optional)]` or an explicit default just like any other optional prop.
   - Use raw closures such as `move |_| ...` directly only for DOM event handlers like
     `on:click=...`, not for component props like `on_click=...` when those props are typed as
     `Callback<...>`.
+  - Never bind an `Option<Callback<...>>`-derived value directly into a DOM handler such as
+    `on:click=on_click`. If a callback prop is optional, generate a concrete handler closure like
+    `move |ev| { if let Some(cb) = on_click.as_ref() { cb.call(ev); } }`, preserving any disabled
+    or loading guards inside that closure.
   - Call sites may use string literals such as `label="Primary"` and may omit optional props;
     generated component signatures must compile with those call sites.
   - Never use Leptos component function names such as `Badge`, `Button`, or `Card` as Rust prop
@@ -363,6 +369,7 @@ static_prompt: |
   - [ ] Any generated `MouseEvent` usage is either fully qualified as `leptos::ev::MouseEvent` or paired with an explicit `use leptos::ev::MouseEvent;`
   - [ ] Any generated `log!` usage is either fully qualified as `leptos::logging::log!` or paired with an explicit `use leptos::logging::log;`
   - [ ] Any generated call site that passes a value into a `Callback<...>` component prop uses `Callback::new(...)` rather than a raw closure
+  - [ ] No generated `Option<Callback<...>>` local produced via `.map(...)` is wired directly into `on:click`; optional callback props are converted into concrete DOM handler closures first
   - [ ] All emitted `view!` macro attributes use valid Leptos syntax
   - [ ] No emitted brand-scaffold Rust uses `class=[...]`, `class:...`, `class=(...)`, or `classes!(...)`; class handling uses only `class="literal"` or `class=precomputed_class_string`
   - [ ] `style/app.css` exists and applies defined brand tokens as CSS custom properties where applicable

@@ -570,6 +570,7 @@ fn normalize_generated_app_rs(content: &str, component_specs: &[ComponentSpecCon
 
     updated = synthesize_generated_leptos_imports(&updated);
     updated = normalize_callback_prop_call_sites(&updated);
+    updated = normalize_optional_callback_dom_handlers(&updated);
 
     updated = normalize_leptos_view_erasure(&updated);
     updated = normalize_string_prop_defaults(&updated);
@@ -692,6 +693,54 @@ fn normalize_callback_prop_call_sites(content: &str) -> String {
             )
         })
         .to_string()
+}
+
+fn normalize_optional_callback_dom_handlers(content: &str) -> String {
+    let binding_re = Regex::new(
+        r#"(?ms)^(?P<indent>\s*)let\s+(?P<local>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<source>[A-Za-z_][A-Za-z0-9_]*)\.map\(\|(?P<cb>[A-Za-z_][A-Za-z0-9_]*)\|\s*move\s*\|(?P<ev>[A-Za-z_][A-Za-z0-9_]*)\|\s*\{\s*(?P<body>.*?)\s*\}\s*\);\s*$"#,
+    )
+    .expect("valid regex");
+
+    binding_re
+        .replace_all(content, |caps: &regex::Captures| {
+            let local = caps.name("local").map(|m| m.as_str()).unwrap_or_default();
+            let source = caps.name("source").map(|m| m.as_str()).unwrap_or_default();
+            if local.is_empty()
+                || source.is_empty()
+                || !content.contains(&format!("on:click={local}"))
+            {
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            }
+
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or_default();
+            let cb = caps.name("cb").map(|m| m.as_str()).unwrap_or("cb");
+            let ev = caps.name("ev").map(|m| m.as_str()).unwrap_or("ev");
+            let body = indent_block(
+                caps.name("body")
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .trim(),
+                &format!("{indent}        "),
+            );
+
+            format!(
+                "{indent}let {local} = move |{ev}| {{\n{indent}    if let Some({cb}) = {source}.as_ref() {{\n{body}\n{indent}    }}\n{indent}}};"
+            )
+        })
+        .to_string()
+}
+
+fn indent_block(body: &str, indent: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn extract_component_callback_props(content: &str) -> HashMap<String, HashSet<String>> {
@@ -2050,8 +2099,9 @@ fn validate_app_rs_with_component_specs(
     validate_component_name_collisions(context_name, content)?;
     validate_component_struct_literal_usage(context_name, content)?;
     validate_non_cloneable_callback_patterns(context_name, content)?;
-    validate_callback_prop_call_sites(context_name, content)?;
     validate_generated_event_symbol_imports(context_name, content)?;
+    validate_callback_prop_call_sites(context_name, content)?;
+    validate_optional_callback_dom_handler_patterns(context_name, content)?;
     validate_leptos_view_erasure_patterns(context_name, content)?;
     validate_component_prop_annotations(context_name, content)?;
     validate_string_prop_default_literals(context_name, content)?;
@@ -2292,6 +2342,35 @@ fn validate_callback_prop_call_sites(context_name: &str, content: &str) -> Resul
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_optional_callback_dom_handler_patterns(context_name: &str, content: &str) -> Result<()> {
+    let optional_handler_re = Regex::new(
+        r#"(?s)let\s+(?P<local>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<source>[A-Za-z_][A-Za-z0-9_]*)\.map\(\|(?P<cb>[A-Za-z_][A-Za-z0-9_]*)\|\s*move\s*\|(?P<ev>[A-Za-z_][A-Za-z0-9_]*)\|\s*\{.*?\}\s*\);"#,
+    )
+    .expect("valid regex");
+
+    for captures in optional_handler_re.captures_iter(content) {
+        let local = captures
+            .name("local")
+            .map(|m| m.as_str())
+            .unwrap_or("handler");
+        let source = captures
+            .name("source")
+            .map(|m| m.as_str())
+            .unwrap_or("on_click");
+        if !content.contains(&format!("on:click={local}")) {
+            continue;
+        }
+        anyhow::bail!(
+            "Generated brand implementation for '{}' wires optional callback local '{}' directly into on:click in src/app.rs; convert optional callback prop '{}' into a concrete `move |ev| ...` DOM handler that checks `Some(cb)` before calling it",
+            context_name,
+            local,
+            source
+        );
     }
 
     Ok(())
@@ -5510,6 +5589,54 @@ fn HomePage() -> impl IntoView {
     }
 
     #[test]
+    fn normalize_generated_app_rs_rewrites_optional_callback_locals_into_concrete_dom_handlers() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] disabled: bool,
+    #[prop(optional)] loading: bool,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    let on_click = on_click.map(|cb| move |ev| {
+        if !disabled && !loading {
+            cb.call(ev);
+        }
+    });
+
+    view! {
+        <button
+            class="button"
+            disabled=disabled || loading
+            on:click=on_click
+        >
+            {label}
+        </button>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Button
+            label="Primary Action"
+            on_click=Callback::new(move |_| leptos::logging::log!("Primary Action clicked"))
+        />
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("let on_click = move |ev| {"));
+        assert!(normalized.contains("if let Some(cb) = on_click.as_ref() {"));
+        assert!(normalized.contains("if !disabled && !loading {"));
+        assert!(normalized.contains("on:click=on_click"));
+        assert!(!normalized.contains("let on_click = on_click.map("));
+    }
+
+    #[test]
     fn normalize_generated_app_rs_does_not_rewrite_direct_dom_handlers() {
         let app = r#"use leptos::*;
 
@@ -5565,6 +5692,98 @@ fn HomePage() -> impl IntoView {
         assert!(err
             .to_string()
             .contains("callback-valued component props must use `Callback::new(...)`"));
+    }
+
+    #[test]
+    fn app_rs_rejects_optional_callback_locals_wired_directly_to_on_click() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] disabled: bool,
+    #[prop(optional)] loading: bool,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    let on_click = on_click.map(|cb| move |ev| {
+        if !disabled && !loading {
+            cb.call(ev);
+        }
+    });
+
+    view! { <button on:click=on_click>{label}</button> }
+}
+"#;
+
+        let err = validate_app_rs("demo", app).expect_err("expected optional callback DOM handler failure");
+        assert!(err
+            .to_string()
+            .contains("wires optional callback local 'on_click' directly into on:click"));
+    }
+
+    #[test]
+    fn app_rs_accepts_optional_callback_props_gated_inside_concrete_dom_handlers() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+use leptos_router::*;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <style>{include_str!("../style/app.css")}</style>
+        <Router>
+            <Routes>
+                <Route path="/" view=HomePage/>
+            </Routes>
+        </Router>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Button
+            label="Primary"
+            on_click=Callback::new(move |_| leptos::logging::log!("Primary button clicked"))
+        />
+    }
+}
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] disabled: bool,
+    #[prop(optional)] loading: bool,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    let on_click = move |ev| {
+        if let Some(cb) = on_click.as_ref() {
+            if !disabled && !loading {
+                cb.call(ev);
+            }
+        }
+    };
+
+    view! { <button on:click=on_click>{label}</button> }
+}
+"#;
+
+        validate_app_rs("demo", app)
+            .expect("optional callback props gated inside concrete handlers should validate");
     }
 
     #[test]

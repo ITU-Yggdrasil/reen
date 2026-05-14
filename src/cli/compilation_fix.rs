@@ -411,6 +411,7 @@ fn apply_generated_ui_compile_fixes(project_root: &Path, stderr: &str) -> Result
 
     updated = synthesize_generated_leptos_imports(&updated);
     updated = normalize_callback_prop_call_sites(&updated);
+    updated = normalize_optional_callback_dom_handlers(&updated);
 
     if updated == original {
         return Ok(false);
@@ -512,6 +513,54 @@ fn normalize_callback_prop_call_sites(content: &str) -> String {
             )
         })
         .to_string()
+}
+
+fn normalize_optional_callback_dom_handlers(content: &str) -> String {
+    let binding_re = Regex::new(
+        r#"(?ms)^(?P<indent>\s*)let\s+(?P<local>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<source>[A-Za-z_][A-Za-z0-9_]*)\.map\(\|(?P<cb>[A-Za-z_][A-Za-z0-9_]*)\|\s*move\s*\|(?P<ev>[A-Za-z_][A-Za-z0-9_]*)\|\s*\{\s*(?P<body>.*?)\s*\}\s*\);\s*$"#,
+    )
+    .expect("valid regex");
+
+    binding_re
+        .replace_all(content, |caps: &regex::Captures| {
+            let local = caps.name("local").map(|m| m.as_str()).unwrap_or_default();
+            let source = caps.name("source").map(|m| m.as_str()).unwrap_or_default();
+            if local.is_empty()
+                || source.is_empty()
+                || !content.contains(&format!("on:click={local}"))
+            {
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            }
+
+            let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or_default();
+            let cb = caps.name("cb").map(|m| m.as_str()).unwrap_or("cb");
+            let ev = caps.name("ev").map(|m| m.as_str()).unwrap_or("ev");
+            let body = indent_block(
+                caps.name("body")
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .trim(),
+                &format!("{indent}        "),
+            );
+
+            format!(
+                "{indent}let {local} = move |{ev}| {{\n{indent}    if let Some({cb}) = {source}.as_ref() {{\n{body}\n{indent}    }}\n{indent}}};"
+            )
+        })
+        .to_string()
+}
+
+fn indent_block(body: &str, indent: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("{indent}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn extract_component_callback_props(content: &str) -> HashMap<String, HashSet<String>> {
@@ -2335,6 +2384,69 @@ fn HomePage() -> impl IntoView {
             .contains("on_click=Callback::new(move |_| leptos::logging::log!(\"Card clicked\"))"));
         assert!(updated.contains("on:click=move |_| leptos::logging::log!(\"DOM clicked\")"));
         assert!(!updated.contains("on:click=Callback::new("));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn generated_ui_compile_fixes_rewrite_optional_callback_dom_handlers() {
+        let root = make_temp_test_dir("compile_fix_generated_ui_optional_callback_handler");
+        let src = root.join("src");
+        fs::create_dir_all(&src).expect("create src dir");
+        let app = src.join("app.rs");
+        fs::write(
+            &app,
+            r#"use leptos::*;
+use leptos::ev::MouseEvent;
+
+#[component]
+fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] disabled: bool,
+    #[prop(optional)] loading: bool,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    let on_click = on_click.map(|cb| move |ev| {
+        if !disabled && !loading {
+            cb.call(ev);
+        }
+    });
+
+    view! {
+        <button
+            class="button"
+            disabled=disabled || loading
+            on:click=on_click
+        >
+            {label}
+        </button>
+    }
+}
+
+#[component]
+fn HomePage() -> impl IntoView {
+    view! {
+        <Button
+            label="Primary Action"
+            on_click=Callback::new(move |_| leptos::logging::log!("Primary Action clicked"))
+        />
+    }
+}
+"#,
+        )
+        .expect("write app");
+
+        let changed =
+            apply_generated_ui_compile_fixes(&root, "error[E0277]:\n  --> src/app.rs:1:1\n")
+                .expect("apply generated ui fixes");
+        assert!(changed);
+
+        let updated = fs::read_to_string(&app).expect("read app");
+        assert!(updated.contains("let on_click = move |ev| {"));
+        assert!(updated.contains("if let Some(cb) = on_click.as_ref() {"));
+        assert!(updated.contains("if !disabled && !loading {"));
+        assert!(updated.contains("on:click=on_click"));
+        assert!(!updated.contains("let on_click = on_click.map("));
 
         fs::remove_dir_all(&root).ok();
     }
