@@ -1792,7 +1792,16 @@ async fn create_brand_site_implementation_run(
     token_limit: Option<f64>,
     config: &Config,
 ) -> Result<()> {
-    context_files.sort();
+    context_files.sort_by(|a, b| {
+        match (
+            is_page_component_spec_path(a),
+            is_page_component_spec_path(b),
+        ) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.cmp(b),
+        }
+    });
     context_files.dedup();
 
     println!(
@@ -2030,13 +2039,34 @@ fn augment_implementation_generation_context(
 
 fn render_component_specifications() -> Result<Option<String>> {
     let components_dir = Path::new(SPECIFICATIONS_DIR).join("components");
-    let spec_paths = collect_md_files_recursive(&components_dir, "md").with_context(|| {
+    let mut spec_paths = collect_md_files_recursive(&components_dir, "md").with_context(|| {
         format!(
             "Failed to read design component specification directory {}",
             components_dir.display()
         )
     })?;
+    sort_component_spec_paths_page_first(&mut spec_paths);
     render_selected_specifications("COMPONENT_SPEC", &spec_paths)
+}
+
+fn is_page_component_spec_path(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.eq_ignore_ascii_case("page"))
+        .unwrap_or(false)
+}
+
+fn sort_component_spec_paths_page_first(paths: &mut [PathBuf]) {
+    paths.sort_by(|a, b| {
+        match (
+            is_page_component_spec_path(a),
+            is_page_component_spec_path(b),
+        ) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.cmp(b),
+        }
+    });
 }
 
 fn render_specification_bundle(label: &str, spec_paths: &[PathBuf]) -> Result<String> {
@@ -2085,13 +2115,14 @@ fn augment_brand_site_implementation_context(
         .filter(|path| is_component_spec_path(path, SPECIFICATIONS_DIR))
         .cloned()
         .collect::<Vec<_>>();
-    let component_specs = if !selected_component_specs.is_empty() {
+    let mut component_specs = if !selected_component_specs.is_empty() {
         selected_component_specs
     } else if !visual_specs.is_empty() {
         collect_md_files_recursive(&Path::new(SPECIFICATIONS_DIR).join("components"), "md")?
     } else {
         Vec::new()
     };
+    sort_component_spec_paths_page_first(&mut component_specs);
     if let Some(rendered) = render_selected_specifications("COMPONENT_SPEC", &component_specs)? {
         additional_context.insert("component_specifications".to_string(), json!(rendered));
     }
@@ -6650,6 +6681,57 @@ placeholder
             .expect("component implementation contract context");
         assert!(implementation_contracts.contains("Component `Button` implementation contract"));
         assert!(implementation_contracts.contains("Component `Input` implementation contract"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn brand_site_component_context_orders_page_before_leaf_components() {
+        let _cwd_guard = current_dir_lock().lock().expect("cwd lock");
+        let root = temp_root("brand_site_page_first");
+        fs::create_dir_all(root.join("specifications/visuals")).expect("mkdir visuals");
+        fs::create_dir_all(root.join("specifications/components")).expect("mkdir components");
+        fs::write(
+            root.join("specifications/visuals/snake.md"),
+            "# Snake Visuals\n\n## Description\nVisual identity.",
+        )
+        .expect("write visual spec");
+        fs::write(
+            root.join("specifications/components/button.md"),
+            sample_component_spec("Button", &[]),
+        )
+        .expect("write button spec");
+        fs::write(
+            root.join("specifications/components/page.md"),
+            sample_component_spec("Page", &[]),
+        )
+        .expect("write page spec");
+
+        let _dir_guard = CurrentDirGuard::enter(&root);
+        let selected = vec![PathBuf::from("specifications/visuals/snake.md")];
+        let mut context = HashMap::new();
+        augment_brand_site_implementation_context(&selected, &mut context)
+            .expect("augment visual-only brand-site context");
+
+        let components = context
+            .get("component_specifications")
+            .and_then(|value| value.as_str())
+            .expect("component specs context");
+        let page_pos = components.find("# Page").expect("page spec content");
+        let button_pos = components.find("# Button").expect("button spec content");
+        assert!(page_pos < button_pos);
+
+        let implementation_contracts = context
+            .get("component_implementation_contracts")
+            .and_then(|value| value.as_str())
+            .expect("component implementation contract context");
+        let page_contract_pos = implementation_contracts
+            .find("Component `Page` implementation contract")
+            .expect("page contract");
+        let button_contract_pos = implementation_contracts
+            .find("Component `Button` implementation contract")
+            .expect("button contract");
+        assert!(page_contract_pos < button_contract_pos);
 
         let _ = fs::remove_dir_all(&root);
     }

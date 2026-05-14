@@ -87,6 +87,29 @@ fn declared_component_name(content: &str, fallback: &str) -> String {
         .to_string()
 }
 
+fn is_page_component_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("page")
+}
+
+fn sort_component_artifacts_page_first(artifacts: &mut [serde_json::Value]) {
+    artifacts.sort_by(|a, b| {
+        let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+        match (
+            is_page_component_name(a_name),
+            is_page_component_name(b_name),
+        ) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => {
+                let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+                let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+                a_path.cmp(b_path)
+            }
+        }
+    });
+}
+
 fn collect_component_artifacts(root: &Path) -> Result<Vec<serde_json::Value>> {
     fn visit(dir: &Path, out: &mut Vec<serde_json::Value>) -> Result<()> {
         if !dir.exists() {
@@ -123,11 +146,7 @@ fn collect_component_artifacts(root: &Path) -> Result<Vec<serde_json::Value>> {
 
     let mut artifacts = Vec::new();
     visit(root, &mut artifacts)?;
-    artifacts.sort_by(|a, b| {
-        let a_path = a.get("path").and_then(|v| v.as_str()).unwrap_or_default();
-        let b_path = b.get("path").and_then(|v| v.as_str()).unwrap_or_default();
-        a_path.cmp(b_path)
-    });
+    sort_component_artifacts_page_first(&mut artifacts);
     Ok(artifacts)
 }
 

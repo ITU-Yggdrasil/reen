@@ -570,19 +570,408 @@ fn normalize_generated_app_rs(content: &str, component_specs: &[ComponentSpecCon
 
     updated = synthesize_generated_leptos_imports(&updated);
     updated = normalize_callback_prop_call_sites(&updated);
+    updated = normalize_reused_callback_move_fields(&updated);
+    updated = normalize_unsupported_button_children(&updated);
 
     updated = normalize_leptos_view_erasure(&updated);
     updated = normalize_string_prop_defaults(&updated);
     updated = normalize_string_signal_option_updates(&updated);
+    updated = normalize_optional_callback_props(&updated);
+    updated = normalize_component_string_props(&updated);
+    updated = normalize_component_option_props(&updated);
+    updated = normalize_incremental_string_conditionals(&updated);
+    updated = normalize_owned_string_prop_reuse(&updated);
     updated = normalize_moved_for_item_string_closures(&updated);
     updated = normalize_if_else_view_branches(&updated);
     updated = normalize_spec_defined_variants(&updated, component_specs);
     updated = normalize_component_props_helper_names(&updated);
     updated = normalize_component_data_literals(&updated);
+    updated = normalize_optional_into_string_option_bindings(&updated);
+    updated = normalize_optional_into_string_call_sites(&updated);
     updated = normalize_forwarded_option_props(&updated);
     updated = expand_component_spread_props(&updated);
+    updated = normalize_literal_special_text_nodes(&updated);
 
     updated.replace("Â©", "©")
+}
+
+fn normalize_optional_callback_props(content: &str) -> String {
+    let mut output = Vec::new();
+    let lines = content.lines().collect::<Vec<_>>();
+    let callback_re = Regex::new(
+        r#"^(?P<indent>\s*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*Callback<(?P<inner>[^>]+)>,\s*$"#,
+    )
+    .expect("valid regex");
+
+    let mut index = 0usize;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        if trimmed == "#[prop(optional)]" && index + 1 < lines.len() {
+            let next_line = lines[index + 1];
+            if let Some(caps) = callback_re.captures(next_line) {
+                let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or_default();
+                let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+                let inner = caps.name("inner").map(|m| m.as_str()).unwrap_or_default();
+                output.push(line.to_string());
+                output.push(format!("{indent}{name}: Option<Callback<{inner}>>,",));
+                index += 2;
+                continue;
+            }
+        }
+
+        output.push(line.to_string());
+        index += 1;
+    }
+
+    output.join("\n")
+}
+
+fn normalize_unsupported_button_children(content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let icon_binding_re = Regex::new(
+        r#"^\s*let (?P<local>[A-Za-z_][A-Za-z0-9_]*) = (?P<source>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\.map\(\|[A-Za-z_][A-Za-z0-9_]*\| view! \{ <span class="icon">\{[A-Za-z_][A-Za-z0-9_]*\}</span> \}\.into_view\(\)\);\s*$"#,
+    )
+    .expect("valid regex");
+    let child_expr_re =
+        Regex::new(r#"^\s*\{(?P<local>[A-Za-z_][A-Za-z0-9_]*)\}\s*$"#).expect("valid regex");
+
+    let mut output = Vec::new();
+    let mut recent_icon_sources: Vec<(String, String)> = Vec::new();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index];
+        if let Some(caps) = icon_binding_re.captures(line) {
+            let local = caps.name("local").map(|m| m.as_str()).unwrap_or_default();
+            let source = caps.name("source").map(|m| m.as_str()).unwrap_or_default();
+            recent_icon_sources.push((local.to_string(), source.to_string()));
+            output.push(line.to_string());
+            index += 1;
+            continue;
+        }
+
+        if line.trim_start().starts_with("<Button") {
+            let start = index;
+            let mut end = index;
+            while end < lines.len() && !lines[end].trim().ends_with("</Button>") {
+                end += 1;
+            }
+
+            if end < lines.len() && end >= start + 2 {
+                let child_line = lines[end - 1];
+                if let Some(child_caps) = child_expr_re.captures(child_line) {
+                    let local = child_caps
+                        .name("local")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default();
+                    if let Some((_, source)) = recent_icon_sources
+                        .iter()
+                        .rev()
+                        .find(|(binding, _)| binding == local)
+                    {
+                        let opening_end = if end >= start + 2 && lines[end - 2].trim() == ">" {
+                            end - 2
+                        } else {
+                            end - 1
+                        };
+                        for block_line in &lines[start..opening_end] {
+                            output.push(block_line.to_string());
+                        }
+                        let indent = child_line
+                            .chars()
+                            .take_while(|c| c.is_whitespace())
+                            .collect::<String>();
+                        output.push(format!("{indent}icon_leading={source}.clone()"));
+                        let closing_indent = lines[end]
+                            .chars()
+                            .take_while(|c| c.is_whitespace())
+                            .collect::<String>();
+                        output.push(format!("{closing_indent}/>"));
+                        index = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if line.trim().is_empty() {
+            recent_icon_sources.clear();
+        }
+
+        output.push(line.to_string());
+        index += 1;
+    }
+
+    output.join("\n")
+}
+
+fn normalize_literal_special_text_nodes(content: &str) -> String {
+    Regex::new(r#">(?P<text>\s*[©].*?)<"#)
+        .expect("valid regex")
+        .replace_all(content, |caps: &regex::Captures| {
+            let text = caps.name("text").map(|m| m.as_str()).unwrap_or_default();
+            format!(">{{\"{}\"}}<", text.trim())
+        })
+        .to_string()
+}
+
+fn normalize_component_option_props(content: &str) -> String {
+    let inline_prop_attr_re = Regex::new(r"#\[prop\([^\]]+\)\]\s*").expect("valid regex");
+    let mut output = Vec::new();
+    let mut previous_was_component_attr = false;
+    let mut in_signature = false;
+    let mut converted_bool_props = HashSet::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#[component]" {
+            previous_was_component_attr = true;
+            output.push(line.to_string());
+            continue;
+        }
+
+        if previous_was_component_attr {
+            if trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ") {
+                in_signature = true;
+                previous_was_component_attr = false;
+            } else {
+                output.push(line.to_string());
+                if trimmed.is_empty() {
+                    continue;
+                }
+                previous_was_component_attr = false;
+                continue;
+            }
+        }
+
+        if !in_signature {
+            output.push(line.to_string());
+            continue;
+        }
+
+        if trimmed.starts_with("#[prop(") || trimmed.contains("#[prop(") {
+            output.push(line.to_string());
+            if trimmed.contains(')') && !trimmed.starts_with("#[prop(") {
+                in_signature = false;
+            }
+            continue;
+        }
+
+        let Some((name, ty)) = parse_option_prop_candidate(trimmed, &inline_prop_attr_re) else {
+            output.push(line.to_string());
+            if trimmed.contains(')') {
+                in_signature = false;
+            }
+            continue;
+        };
+
+        if prop_receives_explicit_option_value(content, &name) {
+            output.push(line.to_string());
+            if trimmed.contains(')') {
+                in_signature = false;
+            }
+            continue;
+        }
+
+        let indent = line
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect::<String>();
+        if ty.eq_ignore_ascii_case("Option<bool>") || ty.eq_ignore_ascii_case("Option<Boolean>") {
+            output.push(format!("{indent}#[prop(default = false)]"));
+            output.push(line.replacen(&format!("{name}: {ty}"), &format!("{name}: bool"), 1));
+            converted_bool_props.insert(name);
+        } else if ty.eq_ignore_ascii_case("Option<String>") {
+            output.push(format!("{indent}#[prop(optional, into)]"));
+            output.push(line.to_string());
+        } else {
+            output.push(format!("{indent}#[prop(optional)]"));
+            output.push(line.to_string());
+        }
+
+        if trimmed.contains(')') {
+            in_signature = false;
+        }
+    }
+
+    let mut updated = output.join("\n");
+    for name in converted_bool_props {
+        let unwrap_re = Regex::new(&format!(
+            r#"(?m)^\s*let\s+{name}\s*=\s*{name}\.unwrap_or\(false\);\s*\n?"#,
+            name = regex::escape(&name)
+        ))
+        .expect("valid regex");
+        updated = unwrap_re.replace_all(&updated, "").to_string();
+    }
+
+    updated
+}
+
+fn normalize_component_string_props(content: &str) -> String {
+    let inline_prop_attr_re = Regex::new(r"#\[prop\([^\]]+\)\]\s*").expect("valid regex");
+    let mut output = Vec::new();
+    let mut previous_was_component_attr = false;
+    let mut in_signature = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#[component]" {
+            previous_was_component_attr = true;
+            output.push(line.to_string());
+            continue;
+        }
+
+        if previous_was_component_attr {
+            if trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ") {
+                in_signature = true;
+                previous_was_component_attr = false;
+            } else {
+                output.push(line.to_string());
+                if trimmed.is_empty() {
+                    continue;
+                }
+                previous_was_component_attr = false;
+                continue;
+            }
+        }
+
+        if !in_signature {
+            output.push(line.to_string());
+            continue;
+        }
+
+        if trimmed.starts_with("#[prop(") || trimmed.contains("#[prop(") {
+            output.push(line.to_string());
+            if trimmed.contains(')') && !trimmed.starts_with("#[prop(") {
+                in_signature = false;
+            }
+            continue;
+        }
+
+        let sanitized = inline_prop_attr_re.replace_all(trimmed, "");
+        let mut candidate = sanitized.as_ref().trim();
+        if trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ") {
+            if let Some((_, rhs)) = candidate.split_once('(') {
+                candidate = rhs.trim();
+            }
+        }
+        if let Some((lhs, _)) = candidate.split_once(')') {
+            candidate = lhs.trim();
+        }
+
+        let mut inserted = false;
+        if let Some((name, ty)) = candidate.split_once(':') {
+            let name = name.trim();
+            let ty = ty.trim().trim_end_matches(',');
+            if !name.is_empty() && ty == "String" {
+                let indent = line
+                    .chars()
+                    .take_while(|c| c.is_whitespace())
+                    .collect::<String>();
+                output.push(format!("{indent}#[prop(into)]"));
+                output.push(line.to_string());
+                inserted = true;
+            }
+        }
+
+        if !inserted {
+            output.push(line.to_string());
+        }
+
+        if trimmed.contains(')') {
+            in_signature = false;
+        }
+    }
+
+    output.join("\n")
+}
+
+fn normalize_incremental_string_conditionals(content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let conditional_re =
+        Regex::new(r#"^(?P<indent>\s*)let (?P<name>[A-Za-z_][A-Za-z0-9_]*) = if .*\{\s*$"#)
+            .expect("valid regex");
+    let format_branch_re = Regex::new(r#"^\s*format!\("#).expect("valid regex");
+
+    let mut output = Vec::new();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index];
+        if index + 4 < lines.len() {
+            if let Some(caps) = conditional_re.captures(line) {
+                let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+                let else_value = lines[index + 3].trim().trim_end_matches(',');
+                if format_branch_re.is_match(lines[index + 1].trim())
+                    && lines[index + 2].trim() == "} else {"
+                    && else_value == name
+                    && lines[index + 4].trim() == "};"
+                {
+                    output.push(line.to_string());
+                    output.push(lines[index + 1].to_string());
+                    output.push(lines[index + 2].to_string());
+                    let else_indent = lines[index + 3]
+                        .chars()
+                        .take_while(|c| c.is_whitespace())
+                        .collect::<String>();
+                    output.push(format!("{else_indent}{name}.to_string()"));
+                    output.push(lines[index + 4].to_string());
+                    index += 5;
+                    continue;
+                }
+            }
+        }
+
+        output.push(line.to_string());
+        index += 1;
+    }
+
+    output.join("\n")
+}
+
+fn normalize_owned_string_prop_reuse(content: &str) -> String {
+    let component_props = parse_component_prop_specs(content);
+    let mut updated = content.to_string();
+    let mut string_like_props = HashSet::new();
+    let mut optional_string_props = HashSet::new();
+
+    for props in component_props.values() {
+        for prop in props {
+            if prop.ty == "String" {
+                string_like_props.insert(prop.name.clone());
+            } else if prop.ty == "Option<String>" {
+                optional_string_props.insert(prop.name.clone());
+            }
+        }
+    }
+
+    for prop_name in string_like_props {
+        let bare_prop_re = Regex::new(&format!(r#"\{{\s*{}\s*\}}"#, regex::escape(&prop_name)))
+            .expect("valid regex");
+        updated = bare_prop_re
+            .replace_all(&updated, format!("{{{}.clone()}}", prop_name))
+            .to_string();
+    }
+
+    for prop_name in optional_string_props {
+        let bare_prop_re = Regex::new(&format!(r#"\{{\s*{}\s*\}}"#, regex::escape(&prop_name)))
+            .expect("valid regex");
+        updated = bare_prop_re
+            .replace_all(&updated, format!("{{{}.clone()}}", prop_name))
+            .to_string();
+
+        let option_method_re = Regex::new(&format!(
+            r#"\b{}\.(?P<method>map|and_then|filter|or_else|unwrap_or_else)\("#,
+            regex::escape(&prop_name)
+        ))
+        .expect("valid regex");
+        updated = option_method_re
+            .replace_all(&updated, format!("{}.clone().$method(", prop_name))
+            .to_string();
+    }
+
+    updated
 }
 
 fn dedupe_consecutive_derive_clone(content: &str) -> String {
@@ -681,6 +1070,63 @@ fn normalize_callback_prop_call_sites(content: &str) -> String {
                         .map(|m| m.as_str())
                         .unwrap_or_default();
                     format!("{prefix}Callback::new({value})")
+                })
+                .to_string();
+
+            format!(
+                "<{}{}{}",
+                name,
+                rewritten_attrs,
+                caps.name("close").map(|m| m.as_str()).unwrap_or_default()
+            )
+        })
+        .to_string()
+}
+
+fn normalize_reused_callback_move_fields(content: &str) -> String {
+    let component_tag_re =
+        Regex::new(r#"(?s)<(?P<name>[A-Z][A-Za-z0-9_]*)\b(?P<attrs>.*?)(?P<close>/?>)"#)
+            .expect("valid regex");
+    let dotted_attr_re = Regex::new(
+        r#"(?P<prefix>\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*)(?P<expr>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)(?P<suffix>\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*=|/?>))"#,
+    )
+    .expect("valid regex");
+
+    component_tag_re
+        .replace_all(content, |caps: &regex::Captures| {
+            let name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+            let attrs = caps.name("attrs").map(|m| m.as_str()).unwrap_or_default();
+            let Some(callback_offset) = attrs.find("Callback::new(") else {
+                return caps
+                    .get(0)
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+            };
+            let callback_tail = &attrs[callback_offset..];
+            let rewritten_attrs = dotted_attr_re
+                .replace_all(attrs, |attr_caps: &regex::Captures| {
+                    let expr = attr_caps
+                        .name("expr")
+                        .map(|m| m.as_str())
+                        .unwrap_or_default();
+                    if callback_tail.contains(expr) {
+                        let prefix = attr_caps
+                            .name("prefix")
+                            .map(|m| m.as_str())
+                            .unwrap_or_default();
+                        let suffix = attr_caps
+                            .name("suffix")
+                            .map(|m| m.as_str())
+                            .unwrap_or_default();
+                        format!("{prefix}{expr}.clone(){suffix}")
+                    } else {
+                        attr_caps
+                            .get(0)
+                            .map(|m| m.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    }
                 })
                 .to_string();
 
@@ -989,9 +1435,17 @@ fn rewrite_component_variant_signature(content: &str, spec: &ComponentSpecContra
             let prefix = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
             let suffix = caps.get(3).map(|m| m.as_str()).unwrap_or_default();
             let props = caps.name("props").map(|m| m.as_str()).unwrap_or_default();
-            let rewritten = rewrite_variant_props_block(props, spec);
+            let rewritten =
+                rewrite_variant_param_tokens(&rewrite_variant_props_block(props, spec), spec);
             format!("{prefix}{rewritten}{suffix}")
         })
+        .to_string()
+}
+
+fn rewrite_variant_param_tokens(props: &str, spec: &ComponentSpecContract) -> String {
+    Regex::new(r"\bvariant\s*:\s*(?:Option<\s*)?[Ss]tring(?:\s*>)?")
+        .expect("valid regex")
+        .replace_all(props, format!("variant: {}", spec.enum_name))
         .to_string()
 }
 
@@ -1573,6 +2027,174 @@ fn normalize_forwarded_option_props(content: &str) -> String {
     output.join("\n")
 }
 
+fn normalize_optional_into_string_call_sites(content: &str) -> String {
+    let optional_into_props = parse_optional_into_string_props(content);
+    if optional_into_props.is_empty() {
+        return content.to_string();
+    }
+
+    let component_open_re = Regex::new(r#"<(?P<name>[A-Z][A-Za-z0-9_]*)\b"#).expect("valid regex");
+    let prop_some_re = Regex::new(
+        r#"^(?P<indent>\s*)(?P<prop>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*Some\((?P<value>.+)\)\s*$"#,
+    )
+    .expect("valid regex");
+
+    let mut output = Vec::new();
+    let mut current_component: Option<String> = None;
+
+    for line in content.lines() {
+        if let Some(caps) = component_open_re.captures(line) {
+            let component_name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+            if optional_into_props.contains_key(component_name) {
+                current_component = Some(component_name.to_string());
+            }
+        }
+
+        let mut rewritten_line = line.to_string();
+        if let Some(component_name) = current_component.as_ref() {
+            if let Some(props) = optional_into_props.get(component_name) {
+                if let Some(caps) = prop_some_re.captures(line) {
+                    let prop_name = caps.name("prop").map(|m| m.as_str()).unwrap_or_default();
+                    if props.contains(prop_name) {
+                        let indent = caps.name("indent").map(|m| m.as_str()).unwrap_or_default();
+                        let value = caps.name("value").map(|m| m.as_str()).unwrap_or_default();
+                        rewritten_line = format!("{indent}{prop_name}={value}");
+                    }
+                }
+            }
+        }
+
+        output.push(rewritten_line);
+
+        if current_component.is_some() {
+            let trimmed = line.trim();
+            if trimmed.ends_with("/>") || trimmed == ">" {
+                current_component = None;
+            }
+        }
+    }
+
+    output.join("\n")
+}
+
+fn normalize_optional_into_string_option_bindings(content: &str) -> String {
+    let optional_into_props = parse_optional_into_string_props(content);
+    if optional_into_props.is_empty() {
+        return content.to_string();
+    }
+
+    let lines = content.lines().collect::<Vec<_>>();
+    let component_open_re =
+        Regex::new(r#"^(?P<indent>\s*)<(?P<name>[A-Z][A-Za-z0-9_]*)\b"#).expect("valid regex");
+    let prop_assignment_re = Regex::new(
+        r#"^(?P<indent>\s*)(?P<prop>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?P<value>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\(\))?)*)\s*$"#,
+    )
+    .expect("valid regex");
+
+    let mut output = Vec::new();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let Some(caps) = component_open_re.captures(line) else {
+            output.push(line.to_string());
+            index += 1;
+            continue;
+        };
+
+        let component_name = caps.name("name").map(|m| m.as_str()).unwrap_or_default();
+        let Some(props) = optional_into_props.get(component_name) else {
+            output.push(line.to_string());
+            index += 1;
+            continue;
+        };
+
+        let start = index;
+        let mut end = index;
+        while end < lines.len() && !lines[end].trim_end().ends_with("/>") {
+            end += 1;
+        }
+        if end >= lines.len() {
+            output.push(line.to_string());
+            index += 1;
+            continue;
+        }
+
+        let block = &lines[start..=end];
+        let mut target: Option<(usize, String, String, String)> = None;
+        for (offset, block_line) in block.iter().enumerate() {
+            if let Some(prop_caps) = prop_assignment_re.captures(block_line) {
+                let prop_name = prop_caps
+                    .name("prop")
+                    .map(|m| m.as_str())
+                    .unwrap_or_default();
+                if !props.contains(prop_name) {
+                    continue;
+                }
+
+                let value = prop_caps
+                    .name("value")
+                    .map(|m| m.as_str())
+                    .unwrap_or_default();
+                if value.starts_with("Some(")
+                    || value == "None"
+                    || value.starts_with('"')
+                    || value.parse::<bool>().is_ok()
+                {
+                    continue;
+                }
+
+                let indent = prop_caps
+                    .name("indent")
+                    .map(|m| m.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                target = Some((offset, prop_name.to_string(), value.to_string(), indent));
+                break;
+            }
+        }
+
+        let Some((target_offset, prop_name, value_expr, prop_indent)) = target else {
+            output.extend(block.iter().map(|line| line.to_string()));
+            index = end + 1;
+            continue;
+        };
+
+        let block_indent = caps
+            .name("indent")
+            .map(|m| m.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let binding_name = format!("__{}_value", prop_name);
+
+        output.push(format!(
+            "{}{{if let Some({}) = {} {{",
+            block_indent, binding_name, value_expr
+        ));
+        output.push(format!("{}    view! {{", block_indent));
+        for (offset, block_line) in block.iter().enumerate() {
+            if offset == target_offset {
+                output.push(format!("{prop_indent}{prop_name}={binding_name}"));
+            } else {
+                output.push((*block_line).to_string());
+            }
+        }
+        output.push(format!("{}    }}.into_view()", block_indent));
+        output.push(format!("{} }} else {{", block_indent));
+        output.push(format!("{}    view! {{", block_indent));
+        for (offset, block_line) in block.iter().enumerate() {
+            if offset != target_offset {
+                output.push((*block_line).to_string());
+            }
+        }
+        output.push(format!("{}    }}.into_view()", block_indent));
+        output.push(format!("{} }}", block_indent));
+        index = end + 1;
+    }
+
+    output.join("\n")
+}
+
 fn prop_receives_explicit_option_value(content: &str, prop_name: &str) -> bool {
     if prop_name.is_empty() {
         return false;
@@ -1583,7 +2205,7 @@ fn prop_receives_explicit_option_value(content: &str, prop_name: &str) -> bool {
         format!(r"\b{}\s*=\s*None\b", escaped),
         format!(r"\b{}\s*=\s*Some\(", escaped),
         format!(
-            r"\b{}\s*=\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\s*(?:\.clone\(\))?",
+            r"\b{}\s*=\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+\s*(?:\.clone\(\))?\s*(?:[,>/)]|\r?\n|$)",
             escaped
         ),
     ];
@@ -1591,6 +2213,89 @@ fn prop_receives_explicit_option_value(content: &str, prop_name: &str) -> bool {
     patterns
         .into_iter()
         .any(|pattern| Regex::new(&pattern).expect("valid regex").is_match(content))
+}
+
+fn parse_optional_into_string_props(content: &str) -> HashMap<String, HashSet<String>> {
+    let mut components = HashMap::new();
+    let mut previous_was_component_attr = false;
+    let mut in_signature = false;
+    let mut current_component = String::new();
+    let mut pending_optional_into_attr = false;
+    let inline_prop_attr_re = Regex::new(r"#\[prop\([^\]]+\)\]\s*").expect("valid regex");
+    let optional_into_attr_re =
+        Regex::new(r"#\[prop\((?:optional,\s*into|into,\s*optional)\)\]").expect("valid regex");
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "#[component]" {
+            previous_was_component_attr = true;
+            continue;
+        }
+
+        if previous_was_component_attr {
+            if trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ") {
+                previous_was_component_attr = false;
+                in_signature = true;
+                current_component = trimmed
+                    .strip_prefix("pub fn ")
+                    .or_else(|| trimmed.strip_prefix("fn "))
+                    .and_then(|rest| {
+                        rest.split_once('(')
+                            .map(|(name, _)| name.trim().to_string())
+                    })
+                    .unwrap_or_default();
+            } else if !trimmed.is_empty() {
+                previous_was_component_attr = false;
+            }
+        }
+
+        if !in_signature {
+            continue;
+        }
+
+        if optional_into_attr_re.is_match(trimmed) {
+            let sanitized = inline_prop_attr_re.replace_all(trimmed, "");
+            if sanitized.trim().is_empty() {
+                pending_optional_into_attr = true;
+                continue;
+            }
+        }
+
+        let has_inline_optional_into = optional_into_attr_re.is_match(trimmed);
+        let sanitized = inline_prop_attr_re.replace_all(trimmed, "");
+        let mut candidate = sanitized.as_ref().trim();
+        if trimmed.starts_with("pub fn ") || trimmed.starts_with("fn ") {
+            if let Some((_, rhs)) = candidate.split_once('(') {
+                candidate = rhs.trim();
+            }
+        }
+        if let Some((lhs, _)) = candidate.split_once(')') {
+            candidate = lhs.trim();
+        }
+
+        if let Some((name, ty)) = candidate.split_once(':') {
+            let name = name.trim();
+            let ty = ty.trim().trim_end_matches(',').trim();
+            if (pending_optional_into_attr || has_inline_optional_into)
+                && ty == "Option<String>"
+                && !name.is_empty()
+                && !current_component.is_empty()
+            {
+                components
+                    .entry(current_component.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(name.to_string());
+            }
+        }
+
+        pending_optional_into_attr = false;
+        if sanitized.contains(')') {
+            in_signature = false;
+            current_component.clear();
+        }
+    }
+
+    components
 }
 
 fn extract_prop_name(candidate: &str) -> &str {
@@ -2057,6 +2762,8 @@ fn validate_app_rs_with_component_specs(
     validate_string_prop_default_literals(context_name, content)?;
     validate_string_signal_option_updates(context_name, content)?;
     validate_optional_option_forwarding_patterns(context_name, content)?;
+    validate_reused_field_move_patterns(context_name, content)?;
+    validate_format_class_arity(context_name, content)?;
     validate_spec_defined_variant_contracts(context_name, content, component_specs)?;
     validate_generated_text_encoding(context_name, content)?;
 
@@ -2340,9 +3047,27 @@ fn load_component_spec_contracts() -> Result<Vec<ComponentSpecContract>> {
         .filter_map(|entry| entry.ok().map(|item| item.path()))
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("md"))
         .collect::<Vec<_>>();
-    paths.sort();
+    paths.sort_by(|a, b| compare_component_spec_paths(a, b));
 
     load_component_spec_contracts_from_paths(&paths)
+}
+
+fn is_page_component_spec_path(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.eq_ignore_ascii_case("page"))
+        .unwrap_or(false)
+}
+
+fn compare_component_spec_paths(a: &Path, b: &Path) -> std::cmp::Ordering {
+    match (
+        is_page_component_spec_path(a),
+        is_page_component_spec_path(b),
+    ) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.cmp(b),
+    }
 }
 
 pub(crate) fn load_component_spec_contracts_from_paths(
@@ -2386,7 +3111,11 @@ pub(crate) fn load_component_spec_contracts_from_paths(
         }
     }
 
-    contracts.sort_by(|a, b| a.name.cmp(&b.name));
+    contracts.sort_by(|a, b| match (a.name == "Page", b.name == "Page") {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
     Ok(contracts)
 }
 
@@ -3241,6 +3970,7 @@ fn is_vague_brand_guidance(guidance: &str) -> bool {
     let normalized = guidance.to_ascii_lowercase();
     let implementation_keywords = [
         "spacing",
+        "density",
         "typography",
         "motion",
         "icon",
@@ -3495,6 +4225,76 @@ fn validate_optional_option_forwarding_patterns(context_name: &str, content: &st
                 name,
                 name
             );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_format_class_arity(context_name: &str, content: &str) -> Result<()> {
+    let class_format_re = Regex::new(
+        r#"class\s*=\s*format!\(\s*"(?P<fmt>(?:\\.|[^"\\])*)"\s*,\s*(?P<args>[^\)]*)\)"#,
+    )
+    .expect("valid regex");
+
+    for caps in class_format_re.captures_iter(content) {
+        let fmt = caps.name("fmt").map(|m| m.as_str()).unwrap_or_default();
+        let args = caps.name("args").map(|m| m.as_str()).unwrap_or_default();
+        let placeholder_count = fmt.matches("{}").count();
+        let arg_count = args
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .count();
+
+        if placeholder_count != arg_count {
+            anyhow::bail!(
+                "Generated brand implementation for '{}' uses `format!` for a class attribute in src/app.rs with {} placeholders but {} arguments; precompute class strings with matching arity before rendering",
+                context_name,
+                placeholder_count,
+                arg_count
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_reused_field_move_patterns(context_name: &str, content: &str) -> Result<()> {
+    let component_tag_re =
+        Regex::new(r#"(?s)<(?P<component>[A-Z][A-Za-z0-9_]*)\b(?P<attrs>.*?)(?P<close>/?>)"#)
+            .expect("valid regex");
+    let dotted_value_re =
+        Regex::new(r#"\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?P<expr>[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)(?P<cloned>\.clone\(\))?"#)
+            .expect("valid regex");
+
+    for caps in component_tag_re.captures_iter(content) {
+        let component = caps
+            .name("component")
+            .map(|m| m.as_str())
+            .unwrap_or("component");
+        let attrs = caps.name("attrs").map(|m| m.as_str()).unwrap_or_default();
+        let Some(callback_offset) = attrs.find("Callback::new(") else {
+            continue;
+        };
+        let callback_tail = &attrs[callback_offset..];
+        for expr_caps in dotted_value_re.captures_iter(attrs) {
+            let expr = expr_caps
+                .name("expr")
+                .map(|m| m.as_str())
+                .unwrap_or_default();
+            let is_cloned = expr_caps.name("cloned").is_some();
+            if is_cloned {
+                continue;
+            }
+            if callback_tail.contains(expr) {
+                anyhow::bail!(
+                    "Generated brand implementation for '{}' reuses '{}' both as a moved prop value and inside a `Callback::new(move |_| ...)` closure for <{} /> in src/app.rs; clone repeated-item fields into separate locals before rendering",
+                    context_name,
+                    expr,
+                    component
+                );
+            }
         }
     }
 
@@ -4201,6 +5001,33 @@ mod tests {
     }
 
     #[test]
+    fn load_component_spec_contracts_prioritizes_page() {
+        let root = std::env::temp_dir().join("reen_brand_scaffold_page_first");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("specifications/components")).expect("mkdir");
+        std::fs::write(
+            root.join("specifications/components/button.md"),
+            implementation_contract_spec("Button"),
+        )
+        .expect("write button");
+        std::fs::write(
+            root.join("specifications/components/page.md"),
+            implementation_contract_spec("Page"),
+        )
+        .expect("write page");
+        let paths = vec![
+            root.join("specifications/components/button.md"),
+            root.join("specifications/components/page.md"),
+        ];
+
+        let contracts = super::load_component_spec_contracts_from_paths(&paths).expect("contracts");
+        assert_eq!(contracts[0].name, "Page");
+        assert_eq!(contracts[1].name, "Button");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn component_contract_parser_rejects_missing_collection_item_shape() {
         let spec = "# NavBar\n\n## Component Metadata\n- **Name**: NavBar\n\n## Properties\n- `items`: list\n\n## Implementation Contract\n### Props\n- `items`: required=`true`; shape=`list`; type=`NavItem`\n";
         let err = super::parse_component_implementation_contract(
@@ -4224,6 +5051,17 @@ mod tests {
         )
         .expect_err("expected missing object field failure");
         assert!(err.to_string().contains("without any fields"));
+    }
+
+    #[test]
+    fn component_contract_parser_accepts_density_brand_constraint() {
+        let spec = "# Page\n\n## Component Metadata\n- **Name**: Page\n\n## Properties\n- `title`: text\n\n## Implementation Contract\n### Props\n- `title`: required=`true`; shape=`scalar`; type=`String`\n\n### Brand Constraints\n- `density`: Density must avoid cluttered or crowded compositions while preserving readable section spacing.\n";
+        super::parse_component_implementation_contract(
+            "Page",
+            spec,
+            &ComponentVariantDeclarations::default(),
+        )
+        .expect("density brand guidance should be accepted");
     }
 
     #[test]
@@ -6077,6 +6915,380 @@ fn AccountCard(
         assert!(!normalized.contains("#[prop(optional)] badge: Option<BadgeData>,"));
         assert!(!normalized.contains("#[prop(optional, into)] label: Option<String>,"));
         assert!(!normalized.contains("#[prop(optional, into)] helper: Option<String>,"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_adds_missing_optional_annotations_and_bool_defaults() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Page(
+    title: String,
+    show_navbar: Option<bool>,
+    badge: Option<String>,
+    details: Option<Vec<String>>,
+) -> impl IntoView {
+    let show_navbar = show_navbar.unwrap_or(false);
+    view! { <div>{title}{badge}{details.is_some()}{show_navbar}</div> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("#[prop(default = false)]"));
+        assert!(normalized.contains("show_navbar: bool"));
+        assert!(normalized.contains("#[prop(optional, into)]"));
+        assert!(normalized.contains("badge: Option<String>"));
+        assert!(normalized.contains("#[prop(optional)]"));
+        assert!(normalized.contains("details: Option<Vec<String>>"));
+        assert!(!normalized.contains("show_navbar.unwrap_or(false)"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_adds_missing_required_string_into_annotations() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Button(
+    label: String,
+    description: String,
+) -> impl IntoView {
+    view! { <button>{label}{description}</button> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("#[prop(into)]"));
+        assert!(normalized.contains("label: String"));
+        assert!(normalized.contains("description: String"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_rewrites_variant_string_signatures_to_typed_enums() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Page(
+    #[prop(into)] title: String,
+    variant: String,
+) -> impl IntoView {
+    view! { <div>{title}</div> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(
+            app,
+            &[test_component_spec(
+                "Page",
+                &["landing", "dashboard", "content", "workflow"],
+            )],
+        );
+        assert!(normalized.contains("pub enum PageVariant"));
+        assert!(normalized.contains("variant: PageVariant"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_wraps_optional_callback_props_in_option() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+
+#[component]
+pub fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)]
+    on_click: Callback<MouseEvent>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("on_click: Option<Callback<MouseEvent>>"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_quotes_copyright_text_nodes() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Footer() -> impl IntoView {
+    view! { <footer><p>© 2023 TestCompany. All rights reserved.</p></footer> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains(r#"<p>{"© 2023 TestCompany. All rights reserved."}</p>"#));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_stabilizes_incremental_class_name_conditionals() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Card(interactive: bool) -> impl IntoView {
+    let class_name = match interactive {
+        true => "card",
+        false => "card-static",
+    };
+
+    let class_name = if interactive {
+        format!("{} card-interactive", class_name)
+    } else {
+        class_name
+    };
+
+    view! { <div class=class_name /> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("class_name.to_string()"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_rewrites_optional_into_string_some_callsites() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Page(
+    #[prop(optional, into)] status: Option<String>,
+) -> impl IntoView {
+    view! { <div>{status}</div> }
+}
+
+#[component]
+pub fn HomePage() -> impl IntoView {
+    view! {
+        <Page
+            status=Some("Beta".to_string())
+        />
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains(r#"status="Beta".to_string()"#));
+        assert!(!normalized.contains(r#"status=Some("Beta".to_string())"#));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_rewrites_optional_into_string_option_bindings() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional, into)] icon_leading: Option<String>,
+) -> impl IntoView {
+    view! { <button>{label}{icon_leading}</button> }
+}
+
+#[derive(Clone)]
+pub struct Item {
+    pub label: String,
+    pub icon: Option<String>,
+}
+
+#[component]
+pub fn Card(items: Vec<Item>) -> impl IntoView {
+    view! {
+        <div>
+            {items.into_iter().map(|item| {
+                let icon = item.icon.clone();
+                view! {
+                    <Button
+                        label=item.label
+                        icon_leading=icon
+                    />
+                }
+            }).collect_view()}
+        </div>
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("{if let Some(__icon_leading_value) = icon {"));
+        assert!(normalized.contains("icon_leading=__icon_leading_value"));
+        assert!(normalized.contains("<Button"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_rewrites_button_children_to_icon_props() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Button(
+    #[prop(into)] label: String,
+    variant: ButtonVariant,
+    #[prop(optional, into)] icon_leading: Option<String>,
+) -> impl IntoView {
+    view! { <button>{label}{variant as u8}{icon_leading}</button> }
+}
+
+#[derive(Clone, Copy)]
+pub enum ButtonVariant {
+    Primary,
+}
+
+#[derive(Clone)]
+pub struct ActionItem {
+    pub label: String,
+    pub icon: Option<String>,
+    pub disabled: bool,
+}
+
+#[component]
+pub fn Card(actions: Option<Vec<ActionItem>>) -> impl IntoView {
+    let action_buttons = actions.map(|items| {
+        items.into_iter().map(|item| {
+            let icon = item.icon.map(|icon| view! { <span class="icon">{icon}</span> }.into_view());
+            view! {
+                <Button
+                    label=item.label.clone()
+                    variant=ButtonVariant::Primary
+                    disabled=item.disabled
+                >
+                    {icon}
+                </Button>
+            }
+        }).collect_view()
+    });
+
+    view! { <div>{action_buttons}</div> }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("icon_leading=item.icon.clone()"));
+        assert!(!normalized.contains("</Button>"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_clones_reused_owned_string_props_in_views() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Page(
+    #[prop(into)] title: String,
+    #[prop(optional, into)] status: Option<String>,
+) -> impl IntoView {
+    let content = view! {
+        <section>
+            <h2>{title}</h2>
+            {status.map(|s| view! { <span>{s}</span> })}
+        </section>
+    }.into_view();
+
+    view! {
+        <div>
+            <h1>{title}</h1>
+            {status.map(|s| view! { <span>{s}</span> })}
+            {content}
+        </div>
+    }
+}
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("{title.clone()}"));
+        assert!(normalized.contains("status.clone().map(|s| view!"));
+    }
+
+    #[test]
+    fn app_rs_rejects_class_format_arity_mismatches() {
+        let app = r#"use leptos::*;
+
+#[component]
+pub fn Card() -> impl IntoView {
+    let a = "a";
+    let b = "b";
+    let c = "c";
+    view! { <div class=format!("{} {}", a, b, c) /> }
+}
+"#;
+
+        let err = super::validate_format_class_arity("demo", app)
+            .expect_err("expected class format mismatch");
+        assert!(err.to_string().contains("placeholders but 3 arguments"));
+    }
+
+    #[test]
+    fn app_rs_rejects_reused_item_field_moves_inside_callback_props() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+
+#[component]
+pub fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+
+#[component]
+pub fn Card(items: Vec<Item>) -> impl IntoView {
+    view! {
+        <div>
+            {items.into_iter().map(|item| {
+                view! {
+                    <Button
+                        label=item.label
+                        on_click=Callback::new(move |_| leptos::logging::log!("{}", item.label))
+                    />
+                }
+            }).collect_view()}
+        </div>
+    }
+}
+
+#[derive(Clone)]
+pub struct Item { pub label: String }
+"#;
+
+        let err = super::validate_reused_field_move_patterns("demo", app)
+            .expect_err("expected moved field failure");
+        assert!(err
+            .to_string()
+            .contains("clone repeated-item fields into separate locals"));
+    }
+
+    #[test]
+    fn normalize_generated_app_rs_clones_reused_field_move_callsites() {
+        let app = r#"use leptos::*;
+use leptos::ev::MouseEvent;
+
+#[component]
+pub fn Button(
+    #[prop(into)] label: String,
+    #[prop(optional)] on_click: Option<Callback<MouseEvent>>,
+) -> impl IntoView {
+    view! { <button>{label}</button> }
+}
+
+#[component]
+pub fn Card(items: Vec<Item>) -> impl IntoView {
+    view! {
+        <div>
+            {items.into_iter().map(|item| {
+                view! {
+                    <Button
+                        label=item.label
+                        on_click=Callback::new(move |_| leptos::logging::log!("{}", item.label))
+                    />
+                }
+            }).collect_view()}
+        </div>
+    }
+}
+
+#[derive(Clone)]
+pub struct Item { pub label: String }
+"#;
+
+        let normalized = normalize_generated_app_rs(app, &[]);
+        assert!(normalized.contains("label=item.label.clone()"));
+        assert!(normalized
+            .contains("Callback::new(move |_| leptos::logging::log!(\"{}\", item.label))"));
     }
 
     #[test]

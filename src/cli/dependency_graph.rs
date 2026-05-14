@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -307,6 +308,35 @@ fn dependency_allowed(from: ArtifactCategory, to: ArtifactCategory) -> bool {
     }
 }
 
+fn is_component_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "components")
+}
+
+fn is_page_component_path(path: &Path) -> bool {
+    is_component_path(path)
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| stem.eq_ignore_ascii_case("page"))
+            .unwrap_or(false)
+}
+
+fn compare_execution_paths(a: &Path, b: &Path) -> Ordering {
+    match (is_page_component_path(a), is_page_component_path(b)) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        _ => a.cmp(b),
+    }
+}
+
+fn should_delay_for_selected_dependency(input_path: &Path, dependency_path: &Path) -> bool {
+    if is_page_component_path(input_path) && is_component_path(dependency_path) {
+        return false;
+    }
+    true
+}
+
 pub fn build_execution_plan(
     selected_inputs: Vec<PathBuf>,
     primary_root: &str,
@@ -390,7 +420,9 @@ pub fn build_execution_plan(
                         fallback_path: fallback_candidates.first().map(|f| f.path.clone()),
                     });
 
-                    if selected_set.contains(&candidate.path) {
+                    if selected_set.contains(&candidate.path)
+                        && should_delay_for_selected_dependency(input_path, &candidate.path)
+                    {
                         if let Some(pos) = selected_position.get(&candidate.path) {
                             edge_targets.push(*pos);
                         }
@@ -489,7 +521,7 @@ fn levelize_with_cycles(
         nodes_by_component[node_component[idx]].push(node);
     }
     for group in &mut nodes_by_component {
-        group.sort_by(|a, b| a.input_path.cmp(&b.input_path));
+        group.sort_by(|a, b| compare_execution_paths(&a.input_path, &b.input_path));
     }
 
     let mut remaining: HashSet<usize> = (0..component_count).collect();
@@ -528,7 +560,7 @@ fn levelize_with_cycles(
             level_nodes.extend(nodes_by_component[*component].clone());
         }
 
-        level_nodes.sort_by(|a, b| a.input_path.cmp(&b.input_path));
+        level_nodes.sort_by(|a, b| compare_execution_paths(&a.input_path, &b.input_path));
         levels.push(level_nodes);
     }
 
@@ -927,6 +959,32 @@ mod tests {
 
         assert!(!paths.iter().any(|p| p.ends_with("contexts/game_loop.md")));
         assert!(!paths.iter().any(|p| p.ends_with("app.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn page_component_is_scheduled_before_other_component_dependencies() {
+        let root = temp_root("page_first");
+        let drafts = root.join("drafts");
+        fs::create_dir_all(drafts.join("components")).expect("mkdir");
+
+        let page = drafts.join("components").join("page.md");
+        let button = drafts.join("components").join("button.md");
+        fs::write(&page, "# Page\n\n## Subcomponents\n- Button").expect("write");
+        fs::write(&button, "# Button").expect("write");
+
+        let levels = build_execution_plan(
+            vec![page.clone(), button.clone()],
+            drafts.to_str().unwrap_or("drafts"),
+            None,
+        )
+        .expect("plan");
+
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0].len(), 2);
+        assert_eq!(levels[0][0].input_path, page);
+        assert_eq!(levels[0][1].input_path, button);
 
         let _ = fs::remove_dir_all(root);
     }

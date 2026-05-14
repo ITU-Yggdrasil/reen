@@ -221,6 +221,9 @@ static_prompt: |
     prop type must remain `Option<T>`, and call sites may pass `None`, `Some(value)`, or omit the
     prop when appropriate. Never silently collapse an optional prop into a required `String` or
     required helper struct.
+  - For optional boolean props that represent feature toggles or states, prefer
+    `#[prop(default = false)] prop_name: bool` over `Option<bool>` whenever explicit `Some(...)` /
+    `None` forwarding is not required by the implementation.
   - Do not represent optional booleans as unannotated `Option<bool>` props. Use `#[prop(optional)]`
     or `#[prop(default = false)]` explicitly so typed-builder does not treat them as required.
   - When generated event props or handlers use `MouseEvent`, prefer the fully qualified path
@@ -255,6 +258,8 @@ static_prompt: |
   - When generating conditional classes, append modifier classes in Rust before rendering instead of
     encoding class conditionals directly in `view!`. The markup should only receive `class="literal"` or
     `class=precomputed_class_string`.
+  - For dynamic class assembly, prefer a mutable `String` with `push_str(...)` or a joined vector
+    of class segments over `format!` chains with many conditional arguments.
   - When generating Leptos `view!` code, avoid repeated `move ||` closures that each capture the same
     owned `String` local. Instead, compute derived strings and optional child fragments outside the
     template so the markup stays simple and compatible.
@@ -271,6 +276,21 @@ static_prompt: |
     example, a generated `Card` should accept props like `media_src`, `media_alt`, `badge_label`,
     `badge_variant`, `action_label`, and `action_variant`, then render `<Image/>`, `<Badge/>`,
     and `<Button/>` internally.
+  - When a component implementation contract defines object or collection contracts, generated
+    helper structs must include every required field from those contracts with the exact authored
+    names. Do not omit required fields such as `action`, `href`, `label`, or `value`.
+  - When an interaction contract marks a field as `callback-driven`, surface a corresponding
+    callback-capable field in the generated helper data or component props and invoke it. Do not
+    substitute debug `log!` placeholders for required callback-driven fields.
+  - When rendering repeated item collections, if a field value is used both in visible markup and
+    inside a `move` callback closure, clone it into separate locals before the `view!` block so the
+    generated Rust does not move the same owned value twice.
+  - Do not invoke generated `Button` components with nested child content unless the component
+    signature explicitly includes a `children` prop. For leading/trailing icons, pass plain data
+    through `icon_leading` or `icon_trailing` props and let `Button` render the icon internally.
+  - If a component prop such as `title: String` or `status: Option<String>` is rendered in more
+    than one `view!` branch or both before and after an `.into_view()` boundary, clone or borrow it
+    before the second use. Do not move the same owned prop through multiple template branches.
   - Only use Leptos child/slot types such as `Children` or `ChildrenFn` when the component is
     intentionally invoked with nested children between an opening and closing tag. Do not use
     `AnyView` or `Option<AnyView>` in generated component props.
@@ -297,6 +317,10 @@ static_prompt: |
     An import is "used" only if the component name appears in markup like `<ComponentName ... />`.
   - Audit every `#[prop(...)] prop_name:` parameter and remove any that are never read or rendered
     in the component body. Every parameter must appear in markup, class logic, or conditional rendering.
+  - Audit every generated helper struct against the implementation contract and ensure all required
+    fields from object and collection contracts are present with matching names.
+  - Audit every callback-driven interaction target and ensure the generated implementation invokes a
+    real callback or action field instead of a hard-coded debug log placeholder.
   - When generating composed components (e.g., `Card` that renders `Badge`), prefer plain data props
     over `Option<View>` props. For example, emit `badge_label: String` and `badge_variant: String`
     instead of `badge: Option<View>`. This keeps components composable without forcing view-valued dependencies.
