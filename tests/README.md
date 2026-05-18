@@ -2,6 +2,9 @@
 
 This directory contains end-to-end tests for the `reen` workflow.
 
+The default checked-in model profile is Mistral-first. If you use the sample flows below, set
+`MISTRAL_API_KEY` unless you have intentionally switched the registry to another provider.
+
 ## Current BDD Flow
 
 `reen create tests` now generates reviewable BDD artifacts instead of unit-test-style Rust files.
@@ -70,6 +73,18 @@ cd "tests/money transfer"
 ../../target/release/reen create tests
 
 cargo test
+```
+
+## Snake Fixture Workflow
+
+Run the snake sample from inside its fixture directory so the built binary path resolves correctly:
+
+```bash
+cd tests/snake
+
+../../target/release/reen create specification
+../../target/release/reen create implementation
+../../target/release/reen create tests
 ```
 
 After generation, review:

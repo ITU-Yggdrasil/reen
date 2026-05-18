@@ -22,9 +22,29 @@ Add the WASM target:  <br>
 
 ## LLM Provider Setup
 
-### Ollama (Recommended - Local, No API Key Required)
+### Mistral (Recommended)
 
-Ollama is the default provider and runs models locally. No API key is needed!
+The checked-in `agents/agent_model_registry.yml` profile is Mistral-first. Set your Mistral API key:
+
+```bash
+export MISTRAL_API_KEY='your-api-key-here'
+```
+
+### Anthropic (Claude) - Optional
+Set your Anthropic API key:
+```bash
+export ANTHROPIC_API_KEY='your-api-key-here'
+```
+
+### OpenAI (GPT) - Optional
+Set your OpenAI API key:
+```bash
+export OPENAI_API_KEY='your-api-key-here'
+```
+
+### Ollama - Optional Local Provider
+
+Use Ollama when you want to run supported models locally instead of through a hosted API.
 
 1. **Install Ollama** (if not already installed):
 
@@ -42,7 +62,7 @@ Ollama is the default provider and runs models locally. No API key is needed!
    ollama serve
    ```
 
-3. **Pull a model** (e.g., for testing):
+3. **Pull a model** (for example):
    ```bash
    ollama pull qwen2.5:7b
    # or
@@ -53,24 +73,6 @@ Ollama is the default provider and runs models locally. No API key is needed!
    ```bash
    export OLLAMA_BASE_URL='http://your-ollama-server:11434'
    ```
-
-### Anthropic (Claude) - Optional
-Set your Anthropic API key:
-```bash
-export ANTHROPIC_API_KEY='your-api-key-here'
-```
-
-### OpenAI (GPT) - Optional
-Set your OpenAI API key:
-```bash
-export OPENAI_API_KEY='your-api-key-here'
-```
-
-### Mistral - Optional
-Set your Mistral API key:
-```bash
-export MISTRAL_API_KEY='your-api-key-here'
-```
 
 ### Set API key on Windows 
 ```bash
@@ -92,17 +94,20 @@ The binary will be available at `target/release/reen`.
 The system uses the `agents/agent_model_registry.yml` file to map agents to models:
 
 ```yaml
-create_specifications: gpt-4
+create_specifications_data: mistral/mistral-large-latest
 create_implementation: mistral/codestral-latest
-create_test: ollama/qwen2.5:7b
+create_test: mistral/codestral-latest
 ```
+
+This default registry is Mistral-first. Optional preset profiles are also available, including
+`agents/agent_model_registry.qwen.yml` for an Ollama-first local setup.
 
 ### Explicit provider prefix (recommended)
 
 Use the `provider/model` format to explicitly choose a provider:
 
-- `ollama/qwen2.5:7b` — local Ollama
 - `mistral/codestral-latest` — Mistral API
+- `ollama/qwen2.5:7b` — local Ollama
 - `openai/gpt-4` — OpenAI API
 - `anthropic/claude-3-5-sonnet-20241022` — Anthropic API
 
@@ -116,7 +121,8 @@ When no `provider/` prefix is given, the provider is inferred from the model nam
 - **Anthropic**: Names containing "claude" or "anthropic"
 - **OpenAI**: Names containing "gpt", "openai", "o1", or "o3"
 
-**Note** Unknown model names default to Ollama (local, no API key required).
+**Note** Unknown model names default to Ollama for provider detection, but the checked-in registry
+uses explicit Mistral-prefixed model names by default.
 
 **Note** Bare model names containing "mistral" (e.g. `mistral:7b`) are routed to Ollama for local execution. To use the Mistral API instead, use the explicit prefix: `mistral/codestral-latest`, `mistral/mistral-large-latest`, etc.
 

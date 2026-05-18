@@ -11,11 +11,12 @@ This guide will help you run the money transfer end-to-end test in 3 simple step
 
 2. **Set API key** (choose one):
    ```bash
-   # Option A: Anthropic (Claude)
-   export ANTHROPIC_API_KEY='your-key-here'
+   # Recommended: Mistral
+   export MISTRAL_API_KEY='your-key-here'
 
-   # Option B: OpenAI (GPT)
+   # Optional alternatives
    export OPENAI_API_KEY='your-key-here'
+   export ANTHROPIC_API_KEY='your-key-here'
    ```
 
 ## Running the Test
@@ -108,7 +109,7 @@ Final balance B: 600
 
 ### "Native runner failed"
 - Rebuild the binary: `cargo build --release`
-- Check that your API key is set: `echo $ANTHROPIC_API_KEY`
+- Check that your provider credentials are set, for example: `echo $MISTRAL_API_KEY`
 
 ### "Agent not found"
 - Run from the project root directory (where `Cargo.toml` is)
@@ -165,6 +166,15 @@ After a successful test:
 2. Add your own draft documents
 3. Use reen for your own projects
 4. Check out the main [README.md](../README.md) for more commands
+
+To try the snake fixture manually:
+
+```bash
+cd tests/snake
+../../target/release/reen create specification
+../../target/release/reen create implementation
+../../target/release/reen create tests
+```
 
 ## Getting Help
 

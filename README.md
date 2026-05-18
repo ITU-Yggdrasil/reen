@@ -31,11 +31,16 @@ reen/
 
 ### Quick Start
 
-1. Set your API key(s) for your chosen provider:
+1. Set your provider credentials.
+   Mistral is the recommended default because the checked-in `agents/agent_model_registry.yml`
+   is Mistral-first:
 ```bash
+export MISTRAL_API_KEY='your-api-key-here'
+
+# Optional alternatives
 export OPENAI_API_KEY='your-api-key-here'
 export ANTHROPIC_API_KEY='your-api-key-here'
-export MISTRAL_API_KEY='your-api-key-here'
+export OLLAMA_BASE_URL='http://localhost:11434'
 ```
 
 2. Build the project:
@@ -169,25 +174,35 @@ See [docs/TRACING_STANDARDS.md](docs/TRACING_STANDARDS.md) for details.
 ### Agent-Model Registry
 
 The `agents/agent_model_registry.yml` file maps agents to specific models.
-Use the `provider/model` format to choose a provider explicitly:
+The checked-in default profile is Mistral-first. Use the `provider/model` format to choose a
+provider explicitly:
 
 ```yaml
 create_specifications_data:
-  model: mistral/codestral-latest
+  model: mistral/mistral-large-latest
 create_implementation:
-  model: openai/gpt-5
+  model: mistral/codestral-latest
 create_test:
-  model: ollama/qwen2.5:7b
+  model: mistral/codestral-latest
 fix_draft_blockers:
   model: mistral/mistral-large-latest
 ```
 
 Supported providers: **OpenAI**, **Anthropic**, **Mistral**, and **Ollama** (local).
-Preset registry files are available for quick switching:
+Preset registry files are available for quick switching when you want a different provider mix:
 
 - `agents/agent_model_registry.gpt.yml` — OpenAI (GPT-5)
-- `agents/agent_model_registry.mistral.yml` — Mistral API (Codestral / Mistral Large)
+- `agents/agent_model_registry.yml` — Mistral-first defaults (Codestral / Mistral Large)
 - `agents/agent_model_registry.qwen.yml` — Ollama (Qwen 2.5)
+
+For sample projects under `tests/`, run the built binary from inside the fixture directory:
+
+```bash
+cd tests/snake
+../../target/release/reen create specification
+../../target/release/reen create implementation
+../../target/release/reen create tests
+```
 
 ## Specification Format
 

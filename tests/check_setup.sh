@@ -76,11 +76,12 @@ fi
 echo ""
 echo "Checking API keys..."
 
-# Ollama doesn't require an API key (local by default)
-if [ -n "$OLLAMA_BASE_URL" ]; then
-    echo -e "${GREEN}✓${NC} OLLAMA_BASE_URL is set: $OLLAMA_BASE_URL"
+# Recommended Mistral API key
+if [ -n "$MISTRAL_API_KEY" ]; then
+    echo -e "${GREEN}✓${NC} MISTRAL_API_KEY is set (recommended default profile)"
 else
-    echo -e "${GREEN}✓${NC} Using default Ollama URL (http://localhost:11434)"
+    echo -e "${YELLOW}⚠${NC} MISTRAL_API_KEY not set (recommended for the checked-in Mistral-first registry)"
+    WARNINGS=$((WARNINGS + 1))
 fi
 
 # Anthropic API key (optional)
@@ -95,6 +96,13 @@ if [ -n "$OPENAI_API_KEY" ]; then
     echo -e "${GREEN}✓${NC} OPENAI_API_KEY is set"
 else
     echo -e "${YELLOW}⚠${NC} OPENAI_API_KEY not set (optional, only needed for OpenAI models)"
+fi
+
+# Ollama remains optional for local model execution
+if [ -n "$OLLAMA_BASE_URL" ]; then
+    echo -e "${GREEN}✓${NC} OLLAMA_BASE_URL is set: $OLLAMA_BASE_URL"
+else
+    echo -e "${YELLOW}⚠${NC} OLLAMA_BASE_URL not set (optional, only needed for Ollama-based local runs)"
 fi
 
 # Check agent configurations
